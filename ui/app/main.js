@@ -127,6 +127,13 @@ async function boot() {
   store.on('change', () => { renderTopbar(); updateBadges(); });
   store.on('sync', () => renderTopbar());
   store.on('notify', onNotify);
+  // Safety net: an external http(s) link anywhere in the app opens in the browser, never inside this window.
+  document.addEventListener('click', event => {
+    const link = event.target instanceof Element ? event.target.closest('a[href]') : null;
+    if (!link || event.defaultPrevented) return;
+    const href = link.getAttribute('href') || '';
+    if (/^https?:\/\//i.test(href)) { event.preventDefault(); bridge.desktop.openExternal(href).catch(() => ui.copyText(href, 'Link copied')); }
+  });
   document.addEventListener('keydown', event => {
     if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
     const index = Number(event.key) - 1;

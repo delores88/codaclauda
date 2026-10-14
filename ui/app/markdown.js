@@ -75,18 +75,29 @@ function enhance(root) {
     if (!/^data:image\/(png|jpe?g|gif|webp);/i.test(img.getAttribute('src') || '')) img.replaceWith(h('span.md-image-blocked', `[image: ${img.alt || 'remote image not loaded'}]`));
   }
   for (const link of root.querySelectorAll('a')) {
-    const href = link.getAttribute('href') || '';
     link.removeAttribute('target');
-    link.title = href;
-    link.addEventListener('click', event => {
-      event.preventDefault();
-      if (/^https?:\/\//i.test(href)) desktop.openExternal?.(href).catch(() => copyText(href, 'Link copied'));
-      else copyText(href, 'Link copied');
-    });
+    link.title = link.getAttribute('href') || '';
   }
-  for (const table of root.querySelectorAll('table')) table.replaceWith(h('div.table-scroll', table.cloneNode(true)));
+  // One delegated handler on the root: no link (including ones inside tables or
+  // nodes moved later) can navigate the app window; http(s) opens externally.
+  root.addEventListener('click', event => {
+    const link = event.target instanceof Element ? event.target.closest('a') : null;
+    if (!link || !root.contains(link)) return;
+    event.preventDefault();
+    const href = link.getAttribute('href') || '';
+    if (/^https?:\/\//i.test(href)) desktop.openExternal?.(href).catch(() => copyText(href, 'Link copied'));
+    else if (href) copyText(href, 'Link copied');
+  });
+  // Wrap tables in place (no cloning) so they keep their nodes.
+  for (const table of root.querySelectorAll('table')) {
+    const wrap = h('div.table-scroll');
+    table.replaceWith(wrap);
+    wrap.append(table);
+  }
   for (const block of root.querySelectorAll('.code-block')) {
-    const code = block.querySelector('code');
+    // Only renderer-owned blocks have <pre><code>; raw HTML using the class is left as plain content.
+    const code = block.querySelector(':scope > pre > code');
+    if (!code) { block.classList.remove('code-block'); continue; }
     const lines = code.textContent.split('\n').length;
     block.prepend(h('div.code-head', h('span.code-lang', block.dataset.lang), h('button.code-copy', { type: 'button', title: 'Copy code', onclick: async event => {
       const btn = event.currentTarget;
