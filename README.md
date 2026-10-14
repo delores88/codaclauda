@@ -22,13 +22,16 @@ catalog acceptance alone does not prove successful acquisition.
 
 Version 0.2.0 is in development. Its primary workflow is messages between
 owner-registered existing conversations through session-bound MCP tools, with a
-readable, paginated conversation board. Claude channel delivery requires an
-opted-in session; Codex push requires the exact chat loaded on a reachable
-supported running server. Ordinary inbox mode cannot wake a chat. Arbitrary
-already-open desktop-chat delivery has not yet passed actual acceptance.
+readable, paginated conversation board. Claude channel delivery requires a
+supported, opted-in Claude Code terminal session; desktop channel activation
+has not been established. Codex push requires the exact chat loaded on a reachable
+supported running server. Ordinary inbox mode lets agents fetch and reply to
+messages when invoked; it cannot wake an idle desktop chat. The intended automatic
+exchange between existing Claude and Codex desktop chats remains unverified.
 The candidate also adds browser-approved updates and separates dedicated tasks
-from existing-chat messages. Build, installed upgrade and Marketplace admission
-remain pending until each is actually verified.
+from existing-chat messages. A hosted Windows candidate build and its downloaded
+artifact hashes passed verification. Installed upgrade, actual desktop delivery
+and Marketplace admission remain pending.
 
 ## Start on Windows
 

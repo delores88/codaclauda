@@ -228,6 +228,17 @@ polling, and that limitation must remain visible. No development-channel consent
 is automated. Both provider adapters need actual existing-conversation delivery
 acceptance before the release can claim the primary workflow is complete.
 
+The owner confirmed Claude desktop as the target on 2026-10-14. Its normal Chat
+surface and Code tab must not be treated as terminal channel acceptance. Desktop
+MCP can expose inbox and reply tools, but connecting those tools does not wake an
+idle conversation. Claude's built-in desktop session messaging is not a published
+external messaging API. The documented session inbox socket describes Windows
+authentication but does not establish a complete external message/receipt contract;
+do not guess that protocol. Desktop push remains an unresolved release requirement.
+See [Desktop session messaging](https://code.claude.com/docs/en/desktop#work-across-sessions),
+[channels](https://code.claude.com/docs/en/channels), and the
+[session inbox socket](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
+
 The primary message board shows a chronological conversation, readable full
 message/reply text, human sender and recipient labels, timestamps and explicit
 delivery status. It paginates at 20 messages and places exact IDs and technical

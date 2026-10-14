@@ -619,7 +619,7 @@ function renderMessages() {
 }
 
 function modeDescription(mode) {
-  return { inbox: 'Inbox only · recipient must poll MCP; no wakeup', 'claude-channel': 'Claude channel · interactive opt-in required; registration is not a connection', 'codex-queue': 'Codex queue · owning-server connection must be verified before delivery' }[mode] || 'Delivery mode unavailable';
+  return { inbox: 'Inbox · read and reply when MCP is invoked; idle desktop chats are not automatically woken', 'claude-channel': 'Claude Code terminal channel · interactive opt-in required; desktop push is unverified; registration is not a connection', 'codex-queue': 'Codex queue · owning-server connection must be verified before delivery' }[mode] || 'Delivery mode unavailable';
 }
 function renderSessionSetup() {
   const form = $('#session-conversation-form');
@@ -636,7 +636,7 @@ function renderSessionSetup() {
     list.dataset.signature = signature; list.replaceChildren();
     for (const item of slice.items) {
       const row = element('article', 'registered-chat');
-      row.append(element('h3', '', `${item.label} · ${names[item.provider] || item.provider}`), element('p', '', modeDescription(item.mode)), element('p', 'field-hint', `${item.active ? 'Registration valid' : item.revoked_at ? 'Revoked' : 'Expired'} · expires ${localTime(item.expires_at)}`));
+      row.append(element('h3', '', `${item.label} · ${item.provider === 'claude' ? 'Claude' : names[item.provider] || item.provider}`), element('p', '', modeDescription(item.mode)), element('p', 'field-hint', `${item.active ? 'Registration valid' : item.revoked_at ? 'Revoked' : 'Expired'} · expires ${localTime(item.expires_at)}`));
       const details = element('details', 'message-details'); details.append(element('summary', '', 'Exact chat and registration'), keyValues([['Chat ID', item.chat_id], ['Registration ID', item.id], ['Project', item.project], ['Identity', item.identity]])); row.append(details);
       if (!item.revoked_at) {
         row.append(button('Replace private MCP setup', 'button subtle small', () => rotateRegistration(item.id)));
@@ -783,7 +783,7 @@ for (const [direction, step] of [['previous', -1], ['next', 1]]) {
 const sessionRegisterForm = $('#session-register-form');
 function updateSessionMode() {
   const codex = sessionRegisterForm.elements.provider.value === 'codex';
-  selectOptions(sessionRegisterForm.elements.mode, [{ value: 'inbox', label: 'Inbox · recipient polls MCP' }, codex ? { value: 'codex-queue', label: 'Codex queue · existing owning server' } : { value: 'claude-channel', label: 'Claude channel · interactive opt-in required' }]);
+  selectOptions(sessionRegisterForm.elements.mode, [{ value: 'inbox', label: 'Inbox · recipient polls MCP' }, codex ? { value: 'codex-queue', label: 'Codex queue · existing owning server' } : { value: 'claude-channel', label: 'Claude Code channel · terminal opt-in' }]);
   const mode = sessionRegisterForm.elements.mode.value;
   $('#codex-queue-fields').hidden = mode !== 'codex-queue'; sessionRegisterForm.elements.codex_executable.required = mode === 'codex-queue';
   $('#session-mode-note').textContent = modeDescription(mode);
