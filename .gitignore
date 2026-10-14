@@ -1,0 +1,8 @@
+/target/
+/src-tauri/target/
+/dist/
+/local/
+*.log
+/node_modules/
+/evidence/private/
+/.mcp.json
