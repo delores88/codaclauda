@@ -266,6 +266,9 @@ pub fn call(
                     g.compute.contains(&permission),
                     "NEEDS_OWNER: this exact argv, placement and runtime were not authorized"
                 );
+                // Prepare local storage before recording a possibly submitted job.
+                // A fresh board has never needed scratch until its first run.
+                let scratch = store.spark_scratch()?;
                 let digest = hash(&a.to_string());
                 let previous=store.transaction(|s|{
                     let rr=s.requests.get_mut(request).unwrap();
@@ -291,7 +294,7 @@ pub fn call(
                     operation,
                     &provider_args,
                     workspace,
-                    &store.root.join("scratch"),
+                    &scratch,
                 );
                 let evidence = match &response {
                     Ok(v) => sanitized_spark(v),

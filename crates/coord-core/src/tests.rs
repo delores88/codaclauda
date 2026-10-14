@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn first_compute_creates_scratch_and_preserves_existing_data() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::new(Some(directory.path().join("state"))).unwrap();
+    assert!(!store.root.join("scratch").exists());
+    let scratch = store.spark_scratch().unwrap();
+    assert_eq!(scratch.parent(), Some(store.root.as_path()));
+    fs::write(scratch.join("existing-receipt.txt"), b"preserve").unwrap();
+    assert_eq!(store.spark_scratch().unwrap(), scratch);
+    assert_eq!(fs::read(scratch.join("existing-receipt.txt")).unwrap(), b"preserve");
+
+    let blocked = Store::new(Some(directory.path().join("blocked"))).unwrap();
+    fs::write(blocked.root.join("scratch"), b"not-a-directory").unwrap();
+    assert!(blocked.spark_scratch().is_err());
+    assert_eq!(fs::read(blocked.root.join("scratch")).unwrap(), b"not-a-directory");
+}
+
+#[test]
 fn secrets_are_redacted_in_json_and_pem() {
     let json_secret = r#"{"password":"example-secret","api_key":"example-api"}"#;
     let clean = redact(json_secret);

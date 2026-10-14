@@ -12,6 +12,38 @@ pub struct Store {
     pub root: PathBuf,
 }
 impl Store {
+    /// Create coordination-owned scratch on first compute use, outside projects.
+    pub(crate) fn spark_scratch(&self) -> Result<PathBuf> {
+        let path = self.root.join("scratch");
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error).context("Could not create private Spark scratch directory"),
+        }
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            bail!("Spark scratch must be a coordination-owned directory, not a file or link")
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                bail!("Spark scratch must not be a reparse point")
+            }
+        }
+        let canonical = fs::canonicalize(&path)?;
+        if canonical.parent() != Some(self.root.as_path()) {
+            bail!("Spark scratch resolved outside coordination state")
+        }
+        Ok(canonical)
+    }
+
     pub fn new(root: Option<PathBuf>) -> Result<Self> {
         let root = match root {
             Some(root) => root,
