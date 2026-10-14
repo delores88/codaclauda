@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/coord-core", "crates/coord-cli"]
+exclude = ["src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Ben Van Dorn / DeloresAI"]
+repository = "https://github.com/delores88/codaclauda"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = "debuginfo"
