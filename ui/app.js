@@ -7,6 +7,9 @@ const state = { endpoints: [], grants: [], requests: [], spark: null, paused: fa
 const terminal = new Set(['completed', 'failed', 'cancelled', 'needs-owner']);
 const names = { codex: 'Codex', claude: 'Claude Code' };
 const kindIcons = { question: 'message', review: 'check', delegate: 'branch' };
+const pageSize = 6;
+const requestPages = { inbox: 1, history: 1 };
+const connectionPages = { codex: 1, claude: 1 };
 let view = 'board';
 let filter = 'all';
 let selectedRequest = null;
@@ -38,7 +41,13 @@ function badge(value) {
 }
 function readable(value) { return String(value ?? 'Unavailable').replaceAll('_', ' ').replaceAll('-', ' '); }
 function endpoint(id) { return state.endpoints.find(item => item.id === id); }
-function labelFor(id) { const item = endpoint(id); return names[item?.agent] || id || 'Unknown endpoint'; }
+function endpointLabel(item) { return item?.label?.trim() || names[item?.agent] || item?.id || 'Unknown agent'; }
+function labelFor(id) {
+  if (id === 'owner') return 'You';
+  const item = endpoint(id); if (!item) return id || 'Unknown agent';
+  const label = endpointLabel(item); const provider = names[item.agent] || item.agent;
+  return label === provider ? label : `${label} · ${provider}`;
+}
 function compact(value, limit = 130) { const text = String(value ?? '').replace(/\s+/g, ' ').trim(); return text.length > limit ? `${text.slice(0, limit - 1)}…` : text; }
 function when(value) {
   if (!value) return 'Time unavailable';
@@ -72,8 +81,18 @@ function switchView(next) {
   render();
 }
 function renderConnections(container, settings = false) {
+  const providers = ['codex', 'claude'];
+  const pages = {};
+  for (const agent of providers) {
+    pages[agent] = pageSlice(state.endpoints.filter(item => item.agent === agent), connectionPages[agent]);
+    connectionPages[agent] = pages[agent].page;
+  }
+  const signature = JSON.stringify([state.endpoints, settings ? connectionPages : null]);
+  if (container.dataset.signature === signature) return;
+  const focused = container.contains(document.activeElement) ? document.activeElement.id : null;
+  container.dataset.signature = signature;
   container.replaceChildren();
-  for (const agent of ['codex', 'claude']) {
+  for (const agent of providers) {
     const endpoints = state.endpoints.filter(item => item.agent === agent);
     const card = element('article', `connection-card ${agent}`);
     const top = element('div', 'connection-top');
@@ -84,25 +103,49 @@ function renderConnections(container, settings = false) {
       card.append(element('p', 'connection-description', 'Connect your CLI and choose a workspace to get started.'));
       const footer = element('div', 'connection-footer'); footer.append(element('span', 'connection-mode', 'Dedicated sessions'), button(`Connect ${names[agent]}`, 'button secondary small', () => openConnect(agent), 'plus')); card.append(footer);
     } else {
-      for (const item of (settings ? endpoints : endpoints.slice(-1))) {
+      const workspaces = element('div', settings ? 'endpoint-list' : '');
+      if (settings) { workspaces.id = `${agent}-connection-list`; workspaces.tabIndex = 0; workspaces.setAttribute('role', 'region'); workspaces.setAttribute('aria-label', `${names[agent]} connections`); }
+      for (const item of (settings ? pages[agent].items : endpoints.slice(-1))) {
         const info = element('div', 'endpoint-info');
+        const identity = element('div', 'endpoint-identity'); identity.append(element('h3', '', labelFor(item.id)));
+        if (settings) identity.append(button('Rename', 'button subtle small', () => openLabelEditor(item)));
+        info.append(identity);
         const path = element('div', 'workspace-path'); path.title = item.workspace; path.append(icon('folder'), element('span', '', item.workspace));
         info.append(path, element('p', 'endpoint-meta', `${item.version || 'Version unavailable'} · Auth: ${readable(item.auth_status)}`));
-        if (settings) info.append(element('code', 'endpoint-executable', item.executable));
-        card.append(info);
+        if (settings) info.append(element('code', 'endpoint-id', `Agent ID: ${item.id}`), element('code', 'endpoint-executable', item.executable));
+        workspaces.append(info);
+      }
+      card.append(workspaces);
+      if (settings) {
+        const slice = pages[agent];
+        const pagination = element('nav', 'request-pagination connection-pagination'); pagination.setAttribute('aria-label', `${names[agent]} connection pages`);
+        const summary = element('span', 'page-summary', `${slice.first}–${slice.last} of ${slice.total} connection${slice.total === 1 ? '' : 's'}`); summary.setAttribute('aria-live', 'polite'); summary.setAttribute('aria-atomic', 'true');
+        const controls = element('div', 'page-controls');
+        for (const [direction, step] of [['Previous', -1], ['Next', 1]]) {
+          if (step === 1) controls.append(element('span', 'page-position', `Page ${slice.page} of ${slice.pages}`));
+          const control = button(direction, 'button secondary small', () => { connectionPages[agent] += step; renderConnections(container, true); });
+          control.id = `${agent}-connection-${direction.toLowerCase()}`; control.disabled = step === -1 ? slice.page === 1 : slice.page === slice.pages;
+          control.setAttribute('aria-label', `${direction} ${names[agent]} connections page`); control.setAttribute('aria-controls', workspaces.id); controls.append(control);
+        }
+        pagination.append(summary, controls); card.append(pagination);
       }
       const footer = element('div', 'connection-footer');
-      footer.append(element('span', 'connection-mode', `${endpoints.length} workspace${endpoints.length === 1 ? '' : 's'} · new-session-v1`), button(settings ? 'Add workspace' : 'Manage', 'button subtle small', () => settings ? openConnect(agent) : switchView('connections'), settings ? 'plus' : 'arrow')); card.append(footer);
+      footer.append(element('span', 'connection-mode', `${endpoints.length} connection${endpoints.length === 1 ? '' : 's'}`), button(settings ? 'Add connection' : 'Manage', 'button subtle small', () => settings ? openConnect(agent) : switchView('connections'), settings ? 'plus' : 'arrow')); card.append(footer);
     }
     container.append(card);
+  }
+  if (focused) {
+    const control = document.getElementById(focused);
+    (control?.disabled ? control.closest('.page-controls')?.querySelector('button:not(:disabled)') : control)?.focus({ preventScroll: true });
   }
 }
 function emptyState(container, history = false) {
   const panel = element('div', 'empty-state');
   const illustration = element('div', 'empty-illustration'); illustration.append(icon(history ? 'history' : 'message'), element('span', 'empty-orbit one'), element('span', 'empty-orbit two')); panel.append(illustration);
   const connected = state.endpoints.length > 0;
-  panel.append(element('h3', '', history ? 'Your history starts with a handoff.' : filter !== 'all' ? 'Nothing in this view.' : 'Good work starts with a clear question.'));
-  panel.append(element('p', '', history ? 'Completed, cancelled, and blocked requests stay here with their receipts.' : filter !== 'all' ? 'The board will update when a request matches this filter.' : connected ? 'Ask an agent, request a review, or delegate a bounded change. Every request gets a durable record.' : 'Connect an agent above, then give it a question, a review, or a small piece of work.'));
+  const searching = history && $('#history-search').value.trim();
+  panel.append(element('h3', '', searching ? 'No matching requests.' : history ? 'Your history starts with a handoff.' : filter !== 'all' ? 'Nothing in this view.' : 'Good work starts with a clear question.'));
+  panel.append(element('p', '', searching ? 'Try a different search or clear it to see all requests.' : history ? 'Completed, cancelled, and blocked requests stay here with their receipts.' : filter !== 'all' ? 'The board will update when a request matches this filter.' : connected ? 'Ask an agent, request a review, or delegate a bounded change. Every request gets a durable record.' : 'Connect an agent above, then give it a question, a review, or a small piece of work.'));
   if (!history && filter === 'all') panel.append(button(connected ? 'Create your first request' : 'Connect your first agent', 'button secondary', () => connected ? openComposer() : openConnect('codex'), 'plus'));
   container.append(panel);
 }
@@ -119,22 +162,41 @@ function renderRequests(container, requests, history = false) {
     body.append(meta); card.append(mark, body, icon('arrow')); container.append(card);
   }
 }
+function pageSlice(items, requestedPage) {
+  const pages = Math.max(1, Math.ceil(items.length / pageSize));
+  const page = Math.min(pages, Math.max(1, requestedPage));
+  const offset = (page - 1) * pageSize;
+  return { page, pages, total: items.length, first: items.length ? offset + 1 : 0, last: Math.min(offset + pageSize, items.length), items: items.slice(offset, offset + pageSize) };
+}
+function renderRequestPage(name, requests) {
+  const slice = pageSlice(requests, requestPages[name]);
+  requestPages[name] = slice.page;
+  renderRequests($(name === 'inbox' ? '#request-list' : '#history-list'), slice.items, name === 'history');
+  const summary = $(`#${name}-page-summary`);
+  const text = slice.total ? `${slice.first}–${slice.last} of ${slice.total} request${slice.total === 1 ? '' : 's'}` : '0 requests';
+  // The controls stay mounted so polling does not move keyboard focus.
+  if (summary.textContent !== text) summary.textContent = text;
+  $(`#${name}-page-position`).textContent = `Page ${slice.page} of ${slice.pages}`;
+  $(`#${name}-page-position`).hidden = !slice.total;
+  $(`#${name}-previous`).disabled = slice.page === 1;
+  $(`#${name}-next`).disabled = slice.page === slice.pages;
+}
 function render() {
   renderConnections($('#connection-cards')); renderConnections($('#connection-settings'), true);
   $('#sidebar-agents').replaceChildren();
   for (const agent of ['codex', 'claude']) {
     const count = state.endpoints.filter(item => item.agent === agent).length;
     const row = button('', 'sidebar-agent', () => count ? switchView('connections') : openConnect(agent));
-    row.append(element('span', `status-dot ${count ? '' : 'inactive'}`), element('span', '', names[agent]), element('small', '', count ? `${count} scope${count === 1 ? '' : 's'}` : 'Connect')); $('#sidebar-agents').append(row);
+    row.append(element('span', `status-dot ${count ? '' : 'inactive'}`), element('span', '', names[agent]), element('small', '', count ? `${count} connection${count === 1 ? '' : 's'}` : 'Connect')); $('#sidebar-agents').append(row);
   }
   const inboxRequests = state.requests.filter(item => !terminal.has(item.state) || item.state === 'needs-owner');
   $('#active-count').textContent = inboxRequests.length; $('#history-count').textContent = state.requests.length;
   $('#inbox-count').textContent = inboxRequests.length;
-  const sorted = [...state.requests].sort((left, right) => Number(right.created_at) - Number(left.created_at));
+  const sorted = [...state.requests].sort((left, right) => Number(right.created_at) - Number(left.created_at) || String(left.id).localeCompare(String(right.id)));
   const inbox = filter === 'active' ? sorted.filter(item => !terminal.has(item.state)) : filter === 'needs-owner' ? sorted.filter(item => item.state === 'needs-owner') : sorted.filter(item => !terminal.has(item.state) || item.state === 'needs-owner');
-  renderRequests($('#request-list'), inbox);
+  renderRequestPage('inbox', inbox);
   const query = $('#history-search').value.trim().toLowerCase();
-  renderRequests($('#history-list'), sorted.filter(item => !query || `${item.prompt} ${item.id} ${item.state}`.toLowerCase().includes(query)), true);
+  renderRequestPage('history', sorted.filter(item => !query || `${item.prompt} ${item.id} ${item.state}`.toLowerCase().includes(query)));
   $('#paused-banner').classList.toggle('hidden', !state.paused);
   $('#pause span').textContent = state.paused ? 'Resume dispatch' : 'Pause dispatch';
   $('#pause use').setAttribute('href', state.paused ? '#i-play' : '#i-pause');
@@ -174,6 +236,7 @@ function renderDiscovered(agent) {
 }
 function openConnect(agent) {
   const form = $('#connect-form'); form.reset(); form.elements.agent.value = agent;
+  form.elements.label.value = names[agent];
   $('#connect-title').textContent = `Connect ${names[agent]}`;
   form.elements.executable.placeholder = `C:\\path\\to\\${agent}.exe`;
   const existing = state.endpoints.find(item => item.agent === agent);
@@ -181,19 +244,36 @@ function openConnect(agent) {
   clearError($('#connect-error')); renderDiscovered(agent); $('#connect-dialog').showModal();
   if (!discovered.length) discoverAgents().then(() => { if (form.elements.agent.value === agent) renderDiscovered(agent); }).catch(error => showError($('#connect-error'), error));
 }
+function openLabelEditor(item) {
+  const form = $('#label-form'); form.reset(); form.elements.id.value = item.id; form.elements.label.value = endpointLabel(item);
+  clearError($('#label-error')); $('#label-dialog').showModal(); form.elements.label.focus(); form.elements.label.select();
+}
 function updateScopeNote() {
   const kind = $('#compose-form').elements.kind.value;
   $('#scope-note span').textContent = kind === 'delegate' ? 'Scoped delegation. Changes are made in an isolated Git worktree and returned for review. Nothing auto-merges.' : `Read-only ${kind}. The grant allows file reads within your scope.`;
+}
+function updatePeerTargets(useDefaults = false) {
+  const form = $('#compose-form');
+  const peers = state.endpoints.filter(item => item.id !== form.elements.target.value && sameWorkspace(item.workspace, form.elements.project.value.trim()));
+  ['peer_one', 'peer_two', 'peer_three'].forEach((name, index) => {
+    const select = form.elements[name]; const previous = select.value;
+    const none = element('option', '', 'None'); none.value = ''; select.replaceChildren(none);
+    for (const peer of peers) { const option = element('option', '', `${labelFor(peer.id)} · ${peer.id}`); option.value = peer.id; select.append(option); }
+    select.value = useDefaults ? (peers.length <= 3 ? peers[index]?.id || '' : '') : (peers.some(item => item.id === previous) ? previous : '');
+    select.disabled = peers.length === 0;
+  });
+  $('#peer-target-hint').textContent = peers.length > 3 ? `Choose up to three of ${peers.length} connections in this workspace. Only the selected peers may receive handoffs.` : peers.length ? 'Only the selected peers may receive handoffs. Choose None to remove a peer from this grant.' : 'No other connections are available in this workspace. This grant will authorize only the primary agent.';
 }
 function openComposer(targetId) {
   if (!state.endpoints.length) { openConnect('codex'); return; }
   const form = $('#compose-form'); form.reset(); pendingSubmission = null;
   const select = form.elements.target; select.replaceChildren();
   for (const item of state.endpoints) {
-    const option = element('option', '', `${names[item.agent] || item.agent} · ${item.workspace}`); option.value = item.id; select.append(option);
+    const option = element('option', '', `${labelFor(item.id)} · ${item.workspace} · ${item.id}`); option.value = item.id; select.append(option);
   }
   if (targetId) select.value = targetId;
   form.elements.project.value = endpoint(select.value)?.workspace || '';
+  updatePeerTargets(true);
   clearError($('#compose-error')); updateScopeNote(); $('#compose-dialog').showModal();
 }
 function section(title, content) { const node = element('section', 'detail-section'); node.append(element('h3', '', title), content); return node; }
@@ -206,7 +286,7 @@ function jsonBlock(value) { return element('pre', 'code-output', typeof value ==
 function renderDetail(request) {
   // Do not replace a focused control or a user-selected receipt during polling.
   const host = $('#detail-content');
-  const signature = JSON.stringify(request);
+  const signature = JSON.stringify([request, state.endpoints.map(item => [item.id, item.label, item.agent])]);
   if (host.dataset.signature === signature) return;
   const scroll = $('#detail-dialog').scrollTop;
   host.dataset.signature = signature; host.replaceChildren();
@@ -220,7 +300,7 @@ function renderDetail(request) {
   const grant = state.grants.find(item => item.id === request.grant_id);
   const details = element('details', 'receipt-details'); details.open = true; details.append(element('summary', '', 'Scope & limits'));
   details.append(keyValues([
-    ['Request ID', request.id], ['Owner grant', request.grant_id], ['Project', grant?.project || request.project], ['Isolated worktree', request.workspace],
+    ['Request ID', request.id], ['From', labelFor(request.origin)], ['Target agent', labelFor(request.target)], ['Target agent ID', request.target], ['Owner grant', request.grant_id], ['Project', grant?.project || request.project], ['Isolated worktree', request.workspace],
     ['Allowed paths', (grant?.allowed_paths || request.allowed_paths || []).join('\n') || 'See receipt'],
     ['Allowed targets', (grant?.targets || []).map(labelFor).join(', ') || 'See grant'],
     ['Limits', grant ? `${grant.max_requests} requests · ${grant.max_delegations} delegations · ${grant.max_hops} hops · ${grant.timeout_seconds}s/run` : 'Grant not in current snapshot'],
@@ -248,7 +328,7 @@ function renderDetail(request) {
   if (grant?.compute?.length) host.append(section('Owner-authorized external compute commands', jsonBlock(grant.compute)));
   if (request.spark_jobs?.length) host.append(section('Recorded Spark jobs', jsonBlock(request.spark_jobs)));
   const events = element('details', 'receipt-details'); events.append(element('summary', '', `Event timeline · ${(request.events || []).length} events`));
-  const timeline = element('ol', 'timeline');
+  const timeline = element('ol', 'timeline'); timeline.tabIndex = 0; timeline.setAttribute('aria-label', 'Request events');
   for (const event of request.events || []) {
     const item = element('li'); const title = element('div', 'timeline-title'); title.append(element('strong', '', readable(event.kind)), element('time', '', when(event.at)));
     item.append(title); if (event.data !== undefined) item.append(jsonBlock(event.data)); timeline.append(item);
@@ -290,11 +370,18 @@ $$('[data-close]').forEach(node => node.addEventListener('click', () => $(`#${no
 $('#detail-dialog').addEventListener('close', () => { selectedRequest = null; });
 $('#new-request').addEventListener('click', () => openComposer());
 $('#refresh').addEventListener('click', event => busy(event.currentTarget, () => refresh()));
-$('#history-search').addEventListener('input', render);
+$('#history-search').addEventListener('input', () => { requestPages.history = 1; render(); });
 $('#inbox-filters').addEventListener('click', event => {
   const control = event.target.closest('[data-filter]'); if (!control) return;
-  filter = control.dataset.filter; $$('#inbox-filters button').forEach(item => item.classList.toggle('selected', item === control)); render();
+  if (filter !== control.dataset.filter) requestPages.inbox = 1;
+  filter = control.dataset.filter;
+  $$('#inbox-filters button').forEach(item => { item.classList.toggle('selected', item === control); item.setAttribute('aria-pressed', String(item === control)); }); render();
 });
+for (const name of ['inbox', 'history']) {
+  for (const [direction, step] of [['previous', -1], ['next', 1]]) {
+    $(`#${name}-${direction}`).addEventListener('click', () => { requestPages[name] += step; render(); });
+  }
+}
 $('#pause').addEventListener('click', event => busy(event.currentTarget, async () => {
   try { await rpc('pause', { paused: !state.paused }); await refresh(); } catch (error) { showError($('#error-banner'), error); }
 }));
@@ -306,14 +393,25 @@ $('#connect-form').addEventListener('submit', async event => {
   await busy(control, async () => {
     try {
       const agent = form.elements.agent.value;
+      const label = form.elements.label.value.trim();
       const workspace = form.elements.workspace.value.trim();
-      const existing = state.endpoints.find(item => item.agent === agent && sameWorkspace(item.workspace, workspace));
-      await rpc('connect', { id: existing?.id || `${agent}-${crypto.randomUUID()}`, agent, executable: form.elements.executable.value.trim(), workspace, dedicated_session_consent: form.elements.consent.checked });
-      $('#connect-dialog').close(); toast(`${names[form.elements.agent.value]} connection recorded.`); await refresh();
+      const matches = state.endpoints.filter(item => item.agent === agent && sameWorkspace(item.workspace, workspace) && endpointLabel(item) === label);
+      if (matches.length > 1) throw new Error('Multiple connections share this label; choose a unique label for a new connection.');
+      const existing = matches[0];
+      await rpc('connect', { id: existing?.id || `${agent}-${crypto.randomUUID()}`, agent, label, executable: form.elements.executable.value.trim(), workspace, dedicated_session_consent: form.elements.consent.checked });
+      $('#connect-dialog').close(); toast(`${label} connection recorded.`); await refresh();
     } catch (error) { showError($('#connect-error'), error); }
   });
 });
-$('#compose-form').elements.target.addEventListener('change', event => { $('#compose-form').elements.project.value = endpoint(event.target.value)?.workspace || ''; });
+$('#label-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = event.currentTarget; clearError($('#label-error'));
+  await busy($('button[type=submit]', form), async () => {
+    try { await rpc('rename-agent', { id: form.elements.id.value, label: form.elements.label.value.trim() }); $('#label-dialog').close(); toast('Agent label saved.'); await refresh(); }
+    catch (error) { showError($('#label-error'), error); }
+  });
+});
+$('#compose-form').elements.target.addEventListener('change', event => { $('#compose-form').elements.project.value = endpoint(event.target.value)?.workspace || ''; updatePeerTargets(true); });
+$('#compose-form').elements.project.addEventListener('change', () => updatePeerTargets());
 $$('input[name=kind]').forEach(node => node.addEventListener('change', updateScopeNote));
 $('#compose-form').addEventListener('input', () => { if (pendingSubmission) pendingSubmission.dirty = true; });
 $('#compose-form').addEventListener('submit', async event => {
@@ -333,8 +431,8 @@ $('#compose-form').addEventListener('submit', async event => {
         }
       }
       if (compute.length && !form.elements.compute_consent.checked) throw new Error('Explicitly authorize external job execution for the listed commands.');
-      const targets = state.endpoints.filter(item => sameWorkspace(item.workspace, values.project.trim())).map(item => item.id);
-      if (!targets.includes(values.target)) throw new Error('The selected target must be connected to this workspace. Add a connection for this workspace first.');
+      const targets = [...new Set([values.target, values.peer_one, values.peer_two, values.peer_three].filter(Boolean))];
+      if (targets.some(id => !endpoint(id) || !sameWorkspace(endpoint(id).workspace, values.project.trim()))) throw new Error('Every selected agent must be connected to this workspace. Update the target and peer selections first.');
       const payload = { target: values.target, kind: values.kind, prompt: values.prompt.trim(), expected_result: values.expected_result.trim() };
       const fingerprint = JSON.stringify({ values, paths, targets });
       if (pendingSubmission && pendingSubmission.fingerprint !== fingerprint) throw new Error('The previous submission had an uncertain outcome. Close this form and inspect History before starting a changed request.');

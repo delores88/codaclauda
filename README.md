@@ -52,6 +52,14 @@ are “Ask Claude why this test fails” and “Have Codex review Claude's patch
 grant, actual provider session IDs, MCP calls, answer and diff are available in
 the request history. Reported tests remain distinct from real test receipts.
 
+Give connections readable labels such as “Claude implementer” and “Codex
+reviewer.” Both agents can look up the connections allowed for their request and
+their actual provider session IDs. Stable connection IDs route requests; labels
+can be renamed without changing permissions. The desktop keeps request lists
+and the connection directory to six entries per page.
+Each request selects a primary agent and up to three permitted peers in the same
+workspace; an agent's directory contains only those selected connections.
+
 ## How coordination stays bounded
 
 - The owner creates an immutable grant. An agent cannot expand it or impersonate

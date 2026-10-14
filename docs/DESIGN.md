@@ -58,6 +58,14 @@ timeout. MCP cannot create/expand grants, connect endpoints, publish, deploy or
 purchase. Each MCP process is bound to a request capability; an incoming message
 cannot supply a different origin/owner/grant. Handoffs are untrusted data.
 
+Endpoints have immutable routing IDs and optional owner-assigned display labels.
+Legacy records receive a readable provider/project label without rewriting state.
+Owner `rename-agent` changes only the label. MCP `get_context` exposes the granted
+endpoint directory and same-grant request/session mappings with effective labels;
+it does not index unrelated chats. Labels may repeat, are untrusted display data,
+and never replace endpoint IDs for routing or authorization. Inbox, history and
+the connection directory use bounded six-item pages with clamped page controls.
+
 Agent capabilities consist of ClaudaCoda file reads, bounded file writes for
 delegation, peer requests and receipt retrieval. Direct shell tools and other
 MCP servers are disabled. Questions/reviews have no file writes. File operations

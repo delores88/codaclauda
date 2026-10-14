@@ -13,5 +13,13 @@ Read-only design references: NVIDIALink at observed HEAD
 crates/sparkdev/src/mcp.rs, src-tauri/tauri.conf.json. Other inspected files
 were untracked active work; they are not attributed to that commit or reused.
 
+At the owner's request, the pagination and spacing work also references
+DGXBridge (formerly Spark Dev Bridge) at NVIDIALink commit
+cec817b7255cbfc922b214f2b55d7d4c1213db66: ui/app.js, ui/style.css and
+ui/index.html. The referenced patterns are six-item pages, page clamping,
+disabled boundary controls, wrapping action rows and responsive grid sizing.
+ClaudaCoda implements these patterns independently; no code or artwork from
+those files was copied. DGXBridge's repository remains unchanged.
+
 Dependencies retain their own licenses. Release preparation must generate
 the locked dependency inventory and notices for both CLI and GUI.
