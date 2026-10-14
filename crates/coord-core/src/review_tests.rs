@@ -2,6 +2,96 @@
 //! Fixtures never launch provider sessions and are not acceptance evidence.
 use super::*;
 
+#[cfg(windows)]
+#[test]
+fn git_windows_worktree_accepts_canonical_and_rejects_overlong_destination() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("source repo");
+    fs::create_dir(&repository).unwrap();
+    let repository = repository.canonicalize().unwrap();
+    git(&repository, &["init", "--quiet"]).unwrap();
+    fs::write(repository.join("baseline.txt"), "unchanged baseline").unwrap();
+    git(&repository, &["add", "baseline.txt"]).unwrap();
+    git(
+        &repository,
+        &[
+            "-c",
+            "user.name=ClaudaCoda Unit Test",
+            "-c",
+            "user.email=unit@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=",
+            "commit",
+            "--quiet",
+            "-m",
+            "Isolated worktree baseline",
+        ],
+    )
+    .unwrap();
+    let destination = temp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("canonical worktree");
+    assert!(destination.to_str().unwrap().starts_with(r"\\?\"));
+    add_worktree(&repository, &destination).unwrap();
+    assert_eq!(
+        fs::read_to_string(destination.join("baseline.txt")).unwrap(),
+        "unchanged baseline"
+    );
+    let parent = temp.path().canonicalize().unwrap();
+    let padding = 215 - paths::git_argument(&parent).unwrap().len() - "/b215".len() - 1;
+    let boundary_parent = parent.join("p".repeat(padding));
+    fs::create_dir(&boundary_parent).unwrap();
+    let boundary = boundary_parent.join("b215");
+    assert_eq!(paths::git_argument(&boundary).unwrap().len(), 215);
+    add_worktree(&repository, &boundary).unwrap();
+    let one_too_long = boundary_parent.join("b216x");
+    assert_eq!(paths::git_argument(&one_too_long).unwrap().len(), 216);
+    assert!(
+        add_worktree(&repository, &one_too_long)
+            .unwrap_err()
+            .to_string()
+            .contains("choose a shorter ClaudaCoda state directory")
+    );
+    assert!(!one_too_long.exists());
+    let mut long_parent = temp.path().canonicalize().unwrap();
+    for _ in 0..5 {
+        long_parent.push("long-worktree-parent-segment-0123456789abcdef");
+    }
+    fs::create_dir_all(&long_parent).unwrap();
+    let long_destination = long_parent.join("long destination");
+    assert!(long_destination.to_str().unwrap().len() > 260);
+    let error = add_worktree(&repository, &long_destination).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("choose a shorter ClaudaCoda state directory")
+    );
+    assert!(!long_destination.exists());
+    assert_eq!(git(&repository, &["status", "--porcelain"]).unwrap(), "");
+    git(
+        &repository,
+        &[
+            "worktree",
+            "remove",
+            &paths::git_argument(&boundary).unwrap(),
+        ],
+    )
+    .unwrap();
+    git(
+        &repository,
+        &[
+            "worktree",
+            "remove",
+            &paths::git_argument(&destination).unwrap(),
+        ],
+    )
+    .unwrap();
+}
+
 fn fixture() -> (tempfile::TempDir, Store, Grant) {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
@@ -192,7 +282,7 @@ fn delegation_from_repository_subdirectory_is_rejected_before_worktree_creation(
         &repository,
         &[
             "-c",
-            "user.name=CodaClauda Unit Test",
+            "user.name=ClaudaCoda Unit Test",
             "-c",
             "user.email=unit@example.invalid",
             "-c",

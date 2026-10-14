@@ -1,4 +1,4 @@
-"""Generate original CodaClauda raster artwork from first-party vector geometry.
+"""Generate original ClaudaCoda raster artwork from first-party vector geometry.
 
 Requires Pillow. Outputs icons and an illustrative Marketplace thumbnail, not a
 product screenshot. No third-party images, logos, or generative models are used.
@@ -66,7 +66,7 @@ def thumbnail():
     draw.rounded_rectangle((71, 65, 1529, 835), radius=35, outline="#2a3046", width=2)
     mark = icon(106)
     image.paste(mark, (126, 127), mark)
-    draw.text((253, 141), "CodaClauda", fill="#edf0fd", font=font(47, True))
+    draw.text((253, 141), "ClaudaCoda", fill="#edf0fd", font=font(47, True))
     draw.text((254, 205), "EXPLICIT SCOPE. EVERY HANDOFF RECORDED.", fill="#9aafff", font=font(14, True))
     draw.text((128, 323), "Two agents.", fill="#edf0fd", font=font(75, True))
     draw.text((128, 414), "Your direction.", fill="#9aafff", font=font(75, True))

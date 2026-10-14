@@ -38,7 +38,7 @@ impl Store {
             State::default()
         };
         if state.schema_version != 1 {
-            bail!("unsupported state schema; upgrade CodaClauda")
+            bail!("unsupported state schema; upgrade ClaudaCoda")
         }
         let result = operation(&mut state)?;
         let bytes = serde_json::to_vec_pretty(&state)?;
@@ -65,7 +65,7 @@ impl Store {
             State::default()
         };
         if state.schema_version != 1 {
-            bail!("unsupported state schema; upgrade CodaClauda")
+            bail!("unsupported state schema; upgrade ClaudaCoda")
         }
         Ok(state)
     }

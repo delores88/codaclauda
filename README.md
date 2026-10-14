@@ -1,11 +1,11 @@
-# CodaClauda
+# ClaudaCoda
 
 An owner-controlled Windows desktop utility for asking Claude Code and Codex to
 consult each other, review changes and perform bounded delegated work. Published
 by **DeloresAI**. First-party source is [MIT licensed](LICENSE), copyright
 Ben Van Dorn / DeloresAI. [Public source](https://github.com/delores88/codaclauda).
 
-CodaClauda combines a Rust/Tauri desktop app, a JSON CLI and a request-bound stdio
+ClaudaCoda combines a Rust/Tauri desktop app, a JSON CLI and a request-bound stdio
 MCP server. You choose the agent, project, allowed paths, request types and limits.
 Questions and reviews are read-only. Delegated edits use a separate Git worktree;
 the returned diff is never merged automatically. Requests and receipts remain on
@@ -31,17 +31,17 @@ utility is free: it does not require direct API credits or bundle a model.
 Claude/Codex subscriptions and optional Spark hardware are separate products
 with their own costs and terms.
 
-After a verified installer is available, launch CodaClauda, choose your repository
+After a verified installer is available, launch ClaudaCoda, choose your repository
 and connect the two discovered executable paths. Connection consent explicitly
 authorizes **new dedicated sessions**. Version 1 does not attach to, send input
 into or interrupt an existing desktop chat. Keep your ongoing work in those chats
-and use dedicated CodaClauda requests for coordination.
+and use dedicated ClaudaCoda requests for coordination.
 
 The CLI example path below is a packaging placeholder; verify the actual installed
 CLI path in the GUI settings before use:
 
 ```powershell
-$Coda = Join-Path $env:LOCALAPPDATA 'CodaClauda\bin\codaclauda-cli.exe'
+$Coda = Join-Path $env:LOCALAPPDATA 'ClaudaCoda\bin\claudacoda-cli.exe'
 & $Coda --json discover
 & $Coda --json status
 ```
@@ -65,12 +65,12 @@ the request history. Reported tests remain distinct from real test receipts.
 - Hop, request, delegation, deadline and output limits are enforced. Codex dollar
   cost and hard token caps are unavailable; Claude-reported cost is an estimate.
 
-Both agents receive a private MCP connection when CodaClauda launches their
+Both agents receive a private MCP connection when ClaudaCoda launches their
 request. No global `.mcp.json` or Codex configuration change is needed. A generic
 global inbox server and automatic wakeup of existing chats are not implemented.
 
 Spark Dev Bridge optionally runs authorized build/test commands and returns job
-receipts through its public CLI. CodaClauda does not replace its runner, require
+receipts through its public CLI. ClaudaCoda does not replace its runner, require
 Spark for ordinary questions or claim a shared test passed before both real
 callers and the job result have been verified. See [Spark integration](docs/SPARK.md).
 

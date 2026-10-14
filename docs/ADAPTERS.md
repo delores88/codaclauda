@@ -1,6 +1,6 @@
 # Provider adapters, contract 1
 
-CodaClauda starts dedicated new sessions through the provider's native executable.
+ClaudaCoda starts dedicated new sessions through the provider's native executable.
 It never resumes a session implicitly or uses `--last`, screen scraping, terminal
 automation, hidden IPC, credential copying, or API billing as a fallback.
 The owner chooses the executable and workspace. `discover` finds binary paths;
@@ -19,7 +19,7 @@ CRT argument convention and passed straight to `CreateProcessW`, with the exact
 executable supplied separately. Neither PowerShell nor cmd parses a request.
 No synthetic client name is used as evidence that another agent participated.
 
-The process starts suspended. Before its primary thread resumes, CodaClauda puts
+The process starts suspended. Before its primary thread resumes, ClaudaCoda puts
 it in a Windows Job Object with `KILL_ON_JOB_CLOSE`; inherited handles are limited
 to its stdin/stdout/stderr pipes. Failure to contain the suspended process aborts
 launch. Cancellation, deadline, output overflow, supervisor callback failure and
@@ -55,7 +55,7 @@ The adapter uses:
 ```
 
 `--tools ""` removes all built-in tools. The sole MCP server invokes the installed
-CodaClauda CLI with `--state-dir <state> mcp --request <id>` and the request-bound
+ClaudaCoda CLI with `--state-dir <state> mcp --request <id>` and the request-bound
 `CODACLAUDA_CAPABILITY` environment variable. Its JSON configuration is created
 exclusively inside the worker's private directory; the core must protect that
 directory with owner-only access and retain/delete it according to local policy.
@@ -89,7 +89,7 @@ The adapter uses `--no-daemon exec --ignore-user-config --strict-config --json
 Authentication remains owned by Codex and is restricted to `chatgpt`. The
 adapter marks this workspace untrusted for this invocation to skip project
 configuration, disables project instruction discovery, and configures only
-CodaClauda's required MCP server. No user configuration is rewritten.
+ClaudaCoda's required MCP server. No user configuration is rewritten.
 
 Provider approval is scoped to that server and an explicit list of its known
 tools. `approval_policy="never"` remains in force globally. The invocation sets
@@ -122,12 +122,12 @@ features.code_mode_host = { enabled = true, disable_in_process_fallback = true }
 
 The code-mode host carries MCP discovery and must stay enabled. Disabling it
 caused the first live Codex request to return a blocked answer without making a
-CodaClauda MCP call. The retired `tool_search` and
+ClaudaCoda MCP call. The retired `tool_search` and
 `tool_search_always_defer_mcp_tools` switches are not substitutes.
 
 The native `functions` namespace is excluded from the code-mode nested tool map;
 code-mode-only exposure hides those native tools from the direct model surface.
-CodaClauda's MCP namespace remains available through the code-mode wrapper.
+ClaudaCoda's MCP namespace remains available through the code-mode wrapper.
 This combination matters because `shell_tool=false` alone does not remove
 native `apply_patch`. Native writes are additionally denied by the read-only
 sandbox. The installed CLI accepted these structured settings during a
@@ -148,7 +148,7 @@ supply the answer; MCP items supply tool-call evidence; `turn.completed.usage`
 supplies observed token usage. The CLI does not provide this adapter with a
 reliable dollar cost or hard per-request turn/token ceiling. Those fields are
 unavailable. Owner grant limits still bound peer requests, hops, concurrency and
-wall time in the CodaClauda core.
+wall time in the ClaudaCoda core.
 
 Reference: [noninteractive mode](https://learn.chatgpt.com/docs/non-interactive-mode),
 [configuration](https://learn.chatgpt.com/docs/config-file/config-reference),
@@ -162,7 +162,7 @@ The official Claude `agents --json` interface can inventory existing sessions.
 The documented Codex app-server has supported thread inventory and turn controls.
 They are future adapter options; version 1 does not attach to an existing chat
 or claim that an MCP notification wakes it. An already connected external agent
-must call the CodaClauda tools and poll for a reply itself.
+must call the ClaudaCoda tools and poll for a reply itself.
 
 Tests of parsers, quoting and supervision do not establish provider acceptance.
 Release evidence must include real calls by both agents, provider session IDs,

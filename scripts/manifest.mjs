@@ -15,7 +15,7 @@ const repoName = 'delores88/codaclauda';
 const maxManifestBytes = 128_000;
 const maxImageBytes = 8 * 1024 * 1024;
 
-const help = `CodaClauda release-manifest preparation (never publishes)
+const help = `ClaudaCoda release-manifest preparation (never publishes)
 
 node scripts/manifest.mjs --input <actual-release.json> --output <deloresai.manifest.json>
   [--contracts <read-only-DeloresAI-checkout>]
@@ -27,7 +27,7 @@ install dependencies or modify that checkout. No IDs or requirements are inferre
 Input must be actual release data, not a template. Paths resolve against the input
 file's directory unless absolute. Required input structure:
 
-  appId: "codaclauda"; slug: "codaclauda"; publisherId: actual publisher ID
+  appId: "claudacoda"; slug: "claudacoda"; publisherId: actual publisher ID
   repository: {id: 1418202657, url: "https://github.com/delores88/codaclauda"}
   release: {id, tag, version, channel: "stable"|"beta", sourceCommit}
   installer: {assetId, filename, path, sha256, size, signingStatus: "signed"|"unsigned"}
@@ -181,10 +181,10 @@ async function verifyArt(input, base, commit, name, size) {
 
 function makeManifest(input) {
   return {
-    schemaVersion: 1, appId: input.appId, name: 'CodaClauda', slug: input.slug,
+    schemaVersion: 1, appId: input.appId, name: 'ClaudaCoda', slug: input.slug,
     publisherId: input.publisherId, repository, release: input.release,
     summary: 'Ask Claude Code and Codex to consult, review and delegate bounded work with owner-controlled scope and local receipts.',
-    description: 'CodaClauda is a Windows desktop utility, JSON CLI and request-bound stdio MCP server for coordination between independently installed Claude Code and Codex CLIs. The owner selects the provider, project, allowed paths and limits. Questions and reviews are read-only; delegated edits use isolated Git worktrees and return an unmerged diff. Each request records actual provider session evidence, history and receipts. New dedicated sessions are supported; arbitrary existing desktop chats are not attached or automatically awakened. Provider subscriptions and internet connectivity are required for the two-agent workflow. No models are bundled and no direct API credits are mandatory. Optional Spark Dev Bridge handles separately authorized build/test commands through its public CLI; its supported installed integration and shared-job acceptance remain pending. CodaClauda has no independent listening service, telemetry, elevation requirement or built-in executable downloader/updater. Install Microsoft Edge WebView2 and the provider CLIs separately before use. Reported agent answers are distinct from independently recorded test results.',
+    description: 'ClaudaCoda is a Windows desktop utility, JSON CLI and request-bound stdio MCP server for coordination between independently installed Claude Code and Codex CLIs. The owner selects the provider, project, allowed paths and limits. Questions and reviews are read-only; delegated edits use isolated Git worktrees and return an unmerged diff. Each request records actual provider session evidence, history and receipts. New dedicated sessions are supported; arbitrary existing desktop chats are not attached or automatically awakened. Provider subscriptions and internet connectivity are required for the two-agent workflow. No models are bundled and no direct API credits are mandatory. Optional Spark Dev Bridge handles separately authorized build/test commands through its public CLI; its supported installed integration and shared-job acceptance remain pending. ClaudaCoda has no independent listening service, telemetry, elevation requirement or built-in executable downloader/updater. Install Microsoft Edge WebView2 and the provider CLIs separately before use. Reported agent answers are distinct from independently recorded test results.',
     category: 'automation', sourceVisibility: 'public', license: 'MIT',
     distributionAuthorization: { freeUse: true, marketplaceDistribution: true },
     free: { price: 0, trial: false, paidUnlocks: false, mandatoryDeveloperCredits: false },
@@ -197,25 +197,25 @@ function makeManifest(input) {
     },
     execution: 'hybrid', offline: false,
     integrations: [
-      { name: 'Claude Code', required: true, purpose: 'Runs dedicated Claude sessions using the separately installed native CLI and its existing subscription sign-in.', costDisclosure: 'A separately obtained eligible Claude subscription is required for this adapter. CodaClauda does not provide the subscription or require direct API credits.', url: 'https://code.claude.com/docs/en/overview' },
-      { name: 'Codex', required: true, purpose: 'Runs dedicated Codex sessions using the separately installed native CLI and its existing ChatGPT sign-in.', costDisclosure: 'Separately obtained eligible ChatGPT/Codex access is required. CodaClauda does not provide the subscription or require direct API credits.', url: 'https://learn.chatgpt.com/docs/non-interactive-mode' },
+      { name: 'Claude Code', required: true, purpose: 'Runs dedicated Claude sessions using the separately installed native CLI and its existing subscription sign-in.', costDisclosure: 'A separately obtained eligible Claude subscription is required for this adapter. ClaudaCoda does not provide the subscription or require direct API credits.', url: 'https://code.claude.com/docs/en/overview' },
+      { name: 'Codex', required: true, purpose: 'Runs dedicated Codex sessions using the separately installed native CLI and its existing ChatGPT sign-in.', costDisclosure: 'Separately obtained eligible ChatGPT/Codex access is required. ClaudaCoda does not provide the subscription or require direct API credits.', url: 'https://learn.chatgpt.com/docs/non-interactive-mode' },
       { name: 'Git', required: true, purpose: 'Lists project files and creates isolated worktrees for delegated edits.', costDisclosure: 'Git is a separately installed free dependency; third-party licensing applies.', url: 'https://git-scm.com/' },
-      { name: 'Microsoft Edge WebView2', required: true, purpose: 'Hosts the Windows desktop interface. Must already be installed; this package does not download it.', costDisclosure: 'Separately installed Microsoft runtime; no CodaClauda developer credits or paid unlock is required.', url: 'https://developer.microsoft.com/microsoft-edge/webview2/' },
+      { name: 'Microsoft Edge WebView2', required: true, purpose: 'Hosts the Windows desktop interface. Must already be installed; this package does not download it.', costDisclosure: 'Separately installed Microsoft runtime; no ClaudaCoda developer credits or paid unlock is required.', url: 'https://developer.microsoft.com/microsoft-edge/webview2/' },
       { name: 'Spark Dev Bridge', required: false, purpose: 'Optional public-CLI integration for exact owner-authorized build/test jobs and shared result receipts. Supported installed integration acceptance is pending.', costDisclosure: 'Separate software, configuration and optional owner-provided Spark hardware are required for this optional workflow. Hardware, network and external service costs are separate.', url: 'https://github.com/delores88/nvidialink' },
     ],
     privacy: {
-      dataLeavesDevice: 'Authorized project text, request prompts, handoff context and result content are sent by the installed Claude Code/Codex CLIs to their provider services under the owner account. Optional Spark Dev Bridge may transfer authorized project/build data to its configured compute target. CodaClauda does not host a public coordination endpoint.',
-      retention: 'CodaClauda retains local request history, prompts, answers, events, receipts, configuration and delegated worktrees until the owner removes them. There is no automatic retention expiry or purge. Provider CLIs and optional Spark Dev Bridge keep their own independent histories and retention policies.',
-      telemetry: 'CodaClauda adds no independent telemetry or analytics. External provider CLIs, their services, WebView2 and optional Spark Dev Bridge follow their own settings and policies.',
+      dataLeavesDevice: 'Authorized project text, request prompts, handoff context and result content are sent by the installed Claude Code/Codex CLIs to their provider services under the owner account. Optional Spark Dev Bridge may transfer authorized project/build data to its configured compute target. ClaudaCoda does not host a public coordination endpoint.',
+      retention: 'ClaudaCoda retains local request history, prompts, answers, events, receipts, configuration and delegated worktrees until the owner removes them. There is no automatic retention expiry or purge. Provider CLIs and optional Spark Dev Bridge keep their own independent histories and retention policies.',
+      telemetry: 'ClaudaCoda adds no independent telemetry or analytics. External provider CLIs, their services, WebView2 and optional Spark Dev Bridge follow their own settings and policies.',
       policyUrl: `https://github.com/${repoName}/blob/${input.release.sourceCommit}/docs/PRIVACY.md`,
     },
     permissions: {
       filesystem: ['Owner-selected project paths for scoped UTF-8 reads and delegated edits.', 'LocalAppData/DeloresAI/CodaClauda for durable history, private configuration and isolated worktrees.', 'Read separately installed native provider and optional Spark Dev Bridge executables.'],
-      credentials: ['Provider CLIs use their own saved subscription authentication; CodaClauda does not read or copy provider tokens.', 'Private local request capabilities scope CodaClauda MCP tools; no public listener.'],
+      credentials: ['Provider CLIs use their own saved subscription authentication; ClaudaCoda does not read or copy provider tokens.', 'Private local request capabilities scope ClaudaCoda MCP tools; no public listener.'],
       domains: [], elevation: false, backgroundServices: false,
     },
     models: [], executableDownloads: [],
-    updater: { mode: 'marketplace-only', coordination: 'CodaClauda contains no self-updater or runtime executable downloader. Install approved release packages through the normal Marketplace workflow. Provider CLIs and optional Spark Dev Bridge update independently.' },
+    updater: { mode: 'marketplace-only', coordination: 'ClaudaCoda contains no self-updater or runtime executable downloader. Install approved release packages through the normal Marketplace workflow. Provider CLIs and optional Spark Dev Bridge update independently.' },
     rollback: { dataCompatible: false, backupRequired: true, notes: 'First schema-version-1 release. No compatibility with another release is claimed. Stop active requests and preserve the local state directory and delegated worktrees before replacement or rollback; never replay an ambiguous request automatically.' },
     artwork: { iconUrl: input.artwork.icon.url, thumbnailUrl: input.artwork.thumbnail.url },
     screenshots: input.artwork.screenshots.map(({ url, alt }) => ({ url, alt })),
@@ -242,9 +242,9 @@ async function main() {
   const inputBytes = await fs.readFile(inputPath);
   assert(inputBytes.length <= 2 * 1024 * 1024, 'Release input exceeds 2 MiB');
   const input = JSON.parse(inputBytes.toString('utf8'));
-  assert.equal(input.appId, 'codaclauda'); assert.equal(input.slug, 'codaclauda');
+  assert.equal(input.appId, 'claudacoda'); assert.equal(input.slug, 'claudacoda');
   requiredText(input.publisherId, 'publisherId', 128);
-  assert.deepEqual(input.repository, repository, 'Repository identity must be the independent CodaClauda repository');
+  assert.deepEqual(input.repository, repository, 'Repository identity must be the independent ClaudaCoda repository');
   assert(input.release && input.installer && input.artwork && input.requirements && input.evidence, 'Release identity, installer, artwork, requirements and evidence are all required');
   positive(input.release.id, 'release.id'); positive(input.installer.assetId, 'installer.assetId'); positive(input.installer.size, 'installer.size');
   const sourceCommit = sha(input.release.sourceCommit, 'release.sourceCommit', 40);

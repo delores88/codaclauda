@@ -1,4 +1,4 @@
-# CodaClauda CLI, contract version 1
+# ClaudaCoda CLI, contract version 1
 
 These examples describe the implemented interface, not completed release
 acceptance. They require Windows x64, native provider executables, independent
@@ -7,13 +7,13 @@ project path. The installed CLI path is a packaging placeholder: check the actua
 path in the GUI settings after installation.
 
 ```powershell
-$Coda = Join-Path $env:LOCALAPPDATA 'CodaClauda\bin\codaclauda-cli.exe'
+$Coda = Join-Path $env:LOCALAPPDATA 'ClaudaCoda\bin\claudacoda-cli.exe'
 $Project = (Resolve-Path 'C:\Projects\YourRepo').Path
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 ```
 
 `--state-dir <absolute-path>` selects a separate local board; supply the same value
-to every command that should share that board. Without it, CodaClauda uses the
+to every command that should share that board. Without it, ClaudaCoda uses the
 Windows LocalAppData KnownFolder, without package redirection, under
 `DeloresAI/CodaClauda`. `status` returns the resolved `state_dir`.
 
@@ -64,7 +64,7 @@ sanitized version/authentication observations. Use a native `.exe`, not a `.cmd`
 or PowerShell wrapper. Authentication is rechecked before a model launch.
 Connection stores `new-session-v1` consent; it does not attach to an existing
 Claude/Codex chat. An endpoint with active work must finish or be cancelled before
-its connection can be changed. Sign in using the provider's own CLI; CodaClauda
+its connection can be changed. Sign in using the provider's own CLI; ClaudaCoda
 does not copy tokens or replace subscription authentication with API billing.
 
 ## Create an owner grant
@@ -127,7 +127,7 @@ $Question = @{
     id = $QuestionId
     grant_id = $GrantId
     target = 'codex'
-    prompt = 'Read README.md. Use the CodaClauda ask tool to ask claude for one clarity improvement. Poll for its actual reply and report the reply and your assessment. Do not edit.'
+    prompt = 'Read README.md. Use the ClaudaCoda ask tool to ask claude for one clarity improvement. Poll for its actual reply and report the reply and your assessment. Do not edit.'
 }
 $Question | ConvertTo-Json -Depth 8 | & $Coda --json ask
 & $Coda --json wait $QuestionId --timeout 60
@@ -161,7 +161,7 @@ $ReviewId = [guid]::NewGuid().ToString()
     id = $ReviewId
     grant_id = $GrantId
     target = 'codex'
-    prompt = "Review the actual diff and receipt for request $EditId using CodaClauda messages. Assess correctness and any unsupported claims. Report actionable findings; do not edit or merge."
+    prompt = "Review the actual diff and receipt for request $EditId using ClaudaCoda messages. Assess correctness and any unsupported claims. Report actionable findings; do not edit or merge."
 } | ConvertTo-Json -Depth 8 | & $Coda --json review
 & $Coda --json wait $ReviewId --timeout 60
 ```
@@ -225,16 +225,16 @@ retrying this exact request:
 Windows cmd, after verifying the installed CLI path:
 
 ```bat
-"%LOCALAPPDATA%\CodaClauda\bin\codaclauda-cli.exe" --json ask < question.json
-"%LOCALAPPDATA%\CodaClauda\bin\codaclauda-cli.exe" --json wait owner-question-001 --timeout 60
+"%LOCALAPPDATA%\ClaudaCoda\bin\claudacoda-cli.exe" --json ask < question.json
+"%LOCALAPPDATA%\ClaudaCoda\bin\claudacoda-cli.exe" --json wait owner-question-001 --timeout 60
 ```
 
 Git Bash, using its `cygpath` utility:
 
 ```bash
-CODACLAUDA_CLI="$(cygpath -u "$LOCALAPPDATA")/CodaClauda/bin/codaclauda-cli.exe"
-"$CODACLAUDA_CLI" --json ask < question.json
-"$CODACLAUDA_CLI" --json wait owner-question-001 --timeout 60
+CLAUDACODA_CLI="$(cygpath -u "$LOCALAPPDATA")/ClaudaCoda/bin/claudacoda-cli.exe"
+"$CLAUDACODA_CLI" --json ask < question.json
+"$CLAUDACODA_CLI" --json wait owner-question-001 --timeout 60
 ```
 
 PowerShell can use the same file:
@@ -248,7 +248,7 @@ acceptance must still be recorded for the final installed executable.
 
 ## MCP registration for both agents
 
-Version 1 registers MCP **inside each CodaClauda-owned request**, not globally.
+Version 1 registers MCP **inside each ClaudaCoda-owned request**, not globally.
 The worker creates a private request capability and invokes the installed CLI as
 the sole stdio server with this argument vector:
 
@@ -259,7 +259,7 @@ the sole stdio server with this argument vector:
 `CODACLAUDA_CAPABILITY` is supplied privately to that server. Without the matching
 active request, the server rejects access. Do not paste its capability into a
 chat, source file or global configuration. There is no supported generic
-`codaclauda-cli mcp` server that an arbitrary existing chat can register.
+`claudacoda-cli mcp` server that an arbitrary existing chat can register.
 
 For Claude, the worker writes its private `mcpServers.codaclauda` JSON and passes
 `--strict-mcp-config --mcp-config <file>`. For Codex, it supplies
@@ -303,7 +303,7 @@ Placement is `auto`, `laptop` or `spark`; runtime is `rust`, `node` or `python`.
 The agent calls `spark_run` with `request_id`, `argv`, `where` and `runtime`, then
 uses `spark_wait`/`spark_logs` for the owned job. `spark_cancel` is restricted to
 the submitting request. A peer within the same grant can inspect the recorded
-job. CodaClauda passes the workload using an argv-JSON file, not a shell string.
+job. ClaudaCoda passes the workload using an argv-JSON file, not a shell string.
 Unknown submission outcomes retain their original IDs for reconciliation.
 See [SPARK.md](SPARK.md) for the external contract and current limitations.
 

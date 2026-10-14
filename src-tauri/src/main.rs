@@ -14,15 +14,15 @@ const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 
 fn cli_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let packaged = app.path().resource_dir().map_err(|e| e.to_string())?
-        .join("bin").join("codaclauda-cli.exe");
+        .join("bin").join("claudacoda-cli.exe");
     if packaged.is_file() { return Ok(packaged); }
     #[cfg(debug_assertions)]
     {
         let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../dist/bin/codaclauda-cli.exe");
+            .join("../dist/bin/claudacoda-cli.exe");
         if development.is_file() { return Ok(development); }
     }
-    Err(format!("The bundled coordination CLI is missing: {}. Reinstall CodaClauda.", packaged.display()))
+    Err(format!("The bundled coordination CLI is missing: {}. Reinstall ClaudaCoda.", packaged.display()))
 }
 
 fn error(code: &str, message: impl Into<String>) -> Value {
@@ -93,5 +93,5 @@ fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![rpc, preferences])
         .run(tauri::generate_context!())
-        .expect("CodaClauda could not start");
+        .expect("ClaudaCoda could not start");
 }

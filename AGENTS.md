@@ -1,4 +1,4 @@
-# CodaClauda
+# ClaudaCoda
 
 Read docs/DESIGN.md before implementation. This repository alone is writable.
 Do not modify PhaseForge or NVIDIALink, their services, sessions, releases, or caches.

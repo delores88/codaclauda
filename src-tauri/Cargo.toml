@@ -1,17 +1,17 @@
 [package]
-name = "codaclauda-desktop"
+name = "claudacoda-desktop"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "Explicit, bounded coordination between Codex and Claude Code"
 authors = ["DeloresAI"]
-default-run = "codaclauda"
+default-run = "claudacoda"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 
 [[bin]]
-name = "codaclauda"
+name = "claudacoda"
 path = "src/main.rs"
 
 [build-dependencies]

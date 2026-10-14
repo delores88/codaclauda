@@ -25,10 +25,12 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / "local/release-tools/notices"
 LICENSE_NAME = re.compile(r"^(?:licen[cs]e|copying|notice|copyright|unlicense)(?:$|[-_.])", re.I)
-FIRST_PARTY = {"codaclauda-cli", "codaclauda-desktop", "coord-core"}
+FIRST_PARTY = {"claudacoda-cli", "claudacoda-desktop", "coord-core"}
 NSIS_URL = "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.11/nsis-3.11.zip"
 NSIS_SHA256 = "c7d27f780ddb6cffb4730138cd1591e841f4b7edb155856901cdf5f214394fa1"
 PLUGIN_COMMIT = "13d9edd27b69310e108d6fbd49f90992f8a05390"
+MPL_URL = "https://www.mozilla.org/media/MPL/2.0/index.txt"
+MPL_SHA256 = "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
 
 
 def sha(data):
@@ -44,7 +46,7 @@ def fetch(url, expected=None, optional=False):
         data = cached.read_bytes()
     else:
         try:
-            request = urllib.request.Request(url, headers={"User-Agent": "CodaClauda-license-inventory/1"})
+            request = urllib.request.Request(url, headers={"User-Agent": "ClaudaCoda-license-inventory/1"})
             with urllib.request.urlopen(request, timeout=30) as response:
                 data = response.read(64 * 1024 * 1024 + 1)
                 if response.headers.get("Content-Encoding", "").lower() == "gzip":
@@ -109,6 +111,16 @@ class Inventory:
                 files.append(declared_path)
         if files:
             return [(str(file.relative_to(path)).replace("\\", "/"), file.read_bytes(), "registry package/" + str(file.relative_to(path)).replace("\\", "/")) for file in sorted(set(files))]
+        # Some Servo packages publish the MPL notice in each Rust source file
+        # instead of a standalone license. Require that actual source notice
+        # before using the canonical, checksum-pinned license it references.
+        if package.get("license") == "MPL-2.0":
+            for source in sorted(path.glob("*.rs")):
+                text = source.read_text(encoding="utf-8")
+                header = text.split("*/", 1)[0] + "*/\n"
+                if text.startswith("/*") and "Mozilla Public" in header and "https://mozilla.org/MPL/2.0/" in header:
+                    return [("LICENSE-MPL-2.0.txt", fetch(MPL_URL, MPL_SHA256), MPL_URL),
+                            ("NOTICE-source.txt", header.encode("utf-8"), "registry package/" + source.name)]
         # Crate archives occasionally omit a workspace-root license. Use only
         # the immutable upstream commit recorded in that exact published crate.
         vcs_path = path / ".cargo_vcs_info.json"
@@ -140,7 +152,7 @@ class Inventory:
     def crate(self, name, version, users):
         label = safe_part(name) + "-" + safe_part(version)
         if name in FIRST_PARTY:
-            record = {"name": name, "version": version, "license_expression": "MIT", "source": "CodaClauda first-party source", "executables": users,
+            record = {"name": name, "version": version, "license_expression": "MIT", "source": "ClaudaCoda first-party source", "executables": users,
                       "notices": [self.save(f"crates/{label}/LICENSE", (ROOT / "LICENSE").read_bytes(), "repository/LICENSE")]}
         else:
             path, package = self.registry_package(name, version)
@@ -157,6 +169,16 @@ class Inventory:
             vcs = path / ".cargo_vcs_info.json"
             if vcs.is_file():
                 record["registry_source_vcs"] = json.loads(vcs.read_text())
+            if "MPL-2.0" in (expression or ""):
+                # Retain the exact unmodified source archive alongside the
+                # executable notices so recipients need no external service.
+                archive = self.cargo_home / "registry/cache" / path.parent.name / (label + ".crate")
+                data = archive.read_bytes()
+                if sha(data) != record.get("registry_archive_checksum"):
+                    raise ValueError("MPL source archive differs from Cargo checksum: " + label)
+                source_url = f"https://static.crates.io/crates/{name}/{label}.crate"
+                record["source_archive"] = self.save("sources/" + label + ".crate", data, source_url)
+                record["source_notice"] = "Unmodified MPL source is included in this gzip-compressed tar archive; its existing license notices are retained."
         self.records.append(record)
 
     def webview_loader(self, name, version):
@@ -264,7 +286,7 @@ def generate(args):
 
 def verify(args):
     source = (ROOT / "dist/notices").resolve()
-    gui = list(args.extracted.rglob("codaclauda.exe"))
+    gui = list(args.extracted.rglob("claudacoda.exe"))
     if len(gui) != 1:
         raise ValueError("Expected one extracted GUI before verifying installed notices")
     installed = gui[0].parent / "notices"

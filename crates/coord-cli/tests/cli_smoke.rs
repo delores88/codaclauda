@@ -12,10 +12,10 @@ fn fresh_cli_reports_real_empty_state_in_json() {
         .unwrap()
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "codaclauda-cli-test-{}-{stamp}",
+        "claudacoda-cli-test-{}-{stamp}",
         std::process::id()
     ));
-    let output = Command::new(env!("CARGO_BIN_EXE_codaclauda-cli"))
+    let output = Command::new(env!("CARGO_BIN_EXE_claudacoda-cli"))
         .args(["--json", "--state-dir"])
         .arg(&root)
         .arg("status")

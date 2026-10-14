@@ -1,8 +1,8 @@
 //! Version 1 adapters. Only owned, newly created provider processes are controlled.
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -59,6 +59,33 @@ pub struct Outcome {
     pub estimated_cost_usd: Option<f64>,
     pub exit_code: Option<i32>,
     pub stop_reason: Option<String>,
+}
+
+/// Start an owner worker without inheriting the caller's capture pipes or a
+/// provider job. The capability is delivered only through its private stdin.
+pub fn spawn_worker(
+    executable: &Path,
+    args: &[OsString],
+    cwd: &Path,
+    capability: &str,
+) -> Result<()> {
+    native_executable(executable)?;
+    if !cwd.is_absolute() || !cwd.is_dir() || capability.is_empty() || capability.len() > 256 {
+        bail!("invalid worker directory or capability");
+    }
+    #[cfg(windows)]
+    return win::spawn_worker(
+        executable,
+        args,
+        cwd,
+        &subscription_environment(),
+        capability,
+    );
+    #[cfg(not(windows))]
+    {
+        let _ = args;
+        bail!("worker process handle isolation is supported on Windows only");
+    }
 }
 
 fn subscription_environment() -> BTreeMap<OsString, OsString> {
@@ -532,7 +559,7 @@ impl Parsed {
                     || servers[0]["status"] != "connected"
                 {
                     bail!(
-                        "Claude must connect exactly the owned CodaClauda MCP server; launch refused"
+                        "Claude must connect exactly the owned ClaudaCoda MCP server; launch refused"
                     );
                 }
                 self.claude_tools_verified = true;
@@ -945,12 +972,15 @@ mod win {
     use std::{
         ffi::c_void,
         mem::{size_of, size_of_val, zeroed},
-        os::windows::{ffi::OsStrExt, io::FromRawHandle},
+        os::windows::{
+            ffi::OsStrExt,
+            io::{AsRawHandle, FromRawHandle},
+        },
         ptr::{null, null_mut},
     };
     use windows_sys::Win32::{
         Foundation::{
-            CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
+            CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0,
             WAIT_TIMEOUT,
         },
         Security::SECURITY_ATTRIBUTES,
@@ -972,6 +1002,115 @@ mod win {
             let raw = self.0;
             self.0 = null_mut();
             unsafe { File::from_raw_handle(raw) }
+        }
+    }
+
+    pub(super) fn spawn_worker(
+        exe: &Path,
+        args: &[OsString],
+        cwd: &Path,
+        env: &BTreeMap<OsString, OsString>,
+        capability: &str,
+    ) -> Result<()> {
+        // A worker outlives the short owner CLI invocation. In particular it must
+        // not inherit any otherwise-inheritable stdout/stderr capture handles.
+        // It is intentionally not placed in the provider's kill-on-close job.
+        let output = fs::OpenOptions::new().write(true).open("NUL")?;
+        let error = fs::OpenOptions::new().write(true).open("NUL")?;
+        let (stdin_read, stdin_write) = pipe()?;
+        unsafe {
+            if SetHandleInformation(stdin_write.0, HANDLE_FLAG_INHERIT, 0) == 0 {
+                return Err(std::io::Error::last_os_error()).context("protect worker input handle");
+            }
+            let mut handles = [stdin_read.0, output.as_raw_handle(), error.as_raw_handle()];
+            for handle in handles {
+                if SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) == 0 {
+                    return Err(std::io::Error::last_os_error())
+                        .context("prepare worker standard handle");
+                }
+            }
+            let mut attribute_size = 0;
+            InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut attribute_size);
+            let mut storage = vec![0usize; attribute_size.div_ceil(size_of::<usize>())];
+            let attributes = storage.as_mut_ptr().cast();
+            if InitializeProcThreadAttributeList(attributes, 1, 0, &mut attribute_size) == 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("initialize worker handle list");
+            }
+            struct Attributes(LPPROC_THREAD_ATTRIBUTE_LIST);
+            impl Drop for Attributes {
+                fn drop(&mut self) {
+                    unsafe { DeleteProcThreadAttributeList(self.0) }
+                }
+            }
+            let attributes = Attributes(attributes);
+            if UpdateProcThreadAttribute(
+                attributes.0,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                handles.as_mut_ptr().cast(),
+                size_of_val(&handles),
+                null_mut(),
+                null(),
+            ) == 0
+            {
+                return Err(std::io::Error::last_os_error())
+                    .context("restrict worker inherited handles");
+            }
+            let mut startup: STARTUPINFOEXW = zeroed();
+            startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            startup.StartupInfo.hStdInput = handles[0];
+            startup.StartupInfo.hStdOutput = handles[1];
+            startup.StartupInfo.hStdError = handles[2];
+            startup.lpAttributeList = attributes.0;
+            let mut environment = Vec::<u16>::new();
+            let mut sorted: Vec<_> = env.iter().collect();
+            sorted.sort_by_key(|(key, _)| key.to_string_lossy().to_ascii_uppercase());
+            for (key, value) in sorted {
+                environment.extend(key.encode_wide());
+                environment.push(b'=' as u16);
+                environment.extend(value.encode_wide());
+                environment.push(0);
+            }
+            environment.push(0);
+            let application = wide(exe.as_os_str());
+            let directory = wide(cwd.as_os_str());
+            let mut argv = command_line(exe.as_os_str(), args)?;
+            let mut info: PROCESS_INFORMATION = zeroed();
+            if CreateProcessW(
+                application.as_ptr(),
+                argv.as_mut_ptr(),
+                null(),
+                null(),
+                1,
+                CREATE_SUSPENDED
+                    | CREATE_NO_WINDOW
+                    | CREATE_UNICODE_ENVIRONMENT
+                    | EXTENDED_STARTUPINFO_PRESENT,
+                environment.as_ptr().cast(),
+                directory.as_ptr(),
+                &startup.StartupInfo,
+                &mut info,
+            ) == 0
+            {
+                return Err(std::io::Error::last_os_error()).context("launch owner worker");
+            }
+            let process = Handle(info.hProcess);
+            let main_thread = Handle(info.hThread);
+            // The bounded capability fits the pipe before the worker resumes.
+            // Closing this writer provides EOF without waiting for worker exit.
+            let input_result = stdin_write.file().write_all(capability.as_bytes());
+            if let Err(error) = input_result {
+                TerminateProcess(process.0, 1);
+                return Err(error).context("deliver worker capability");
+            }
+            if ResumeThread(main_thread.0) == u32::MAX {
+                let error = std::io::Error::last_os_error();
+                TerminateProcess(process.0, 1);
+                return Err(error).context("resume owner worker");
+            }
+            Ok(())
         }
     }
 
@@ -1201,6 +1340,134 @@ mod win {
             assert_eq!(String::from_utf16(&output).unwrap(), "\"a b\\\\\\\"c\\\\\"");
             assert!(quote(std::ffi::OsStr::new("a\0b"), &mut Vec::new()).is_err());
         }
+
+        // These subprocess helpers do not run during ordinary cargo test. They
+        // keep a real worker alive after its real parent test process has exited.
+        #[test]
+        #[ignore]
+        fn worker_capture_leaf() {
+            let Ok(marker) = std::env::var("CODACLAUDA_EOF_TEST_MARKER") else {
+                return;
+            };
+            let marker = PathBuf::from(marker);
+            let mut token = String::new();
+            std::io::stdin().read_to_string(&mut token).unwrap();
+            assert_eq!(token, "test-capability");
+            fs::write(&marker, "running").unwrap();
+            let end = Instant::now() + Duration::from_secs(10);
+            while !marker.with_extension("stop").exists() && Instant::now() < end {
+                thread::sleep(Duration::from_millis(20));
+            }
+            fs::write(marker.with_extension("done"), "done").unwrap();
+        }
+
+        #[test]
+        #[ignore]
+        fn worker_capture_parent() {
+            let Ok(marker) = std::env::var("CODACLAUDA_EOF_TEST_MARKER") else {
+                return;
+            };
+            let marker = PathBuf::from(marker);
+            let args: Vec<OsString> = [
+                "--ignored",
+                "--exact",
+                "adapters::win::tests::worker_capture_leaf",
+                "--nocapture",
+            ]
+            .map(OsString::from)
+            .into();
+            crate::adapters::spawn_worker(
+                &std::env::current_exe().unwrap(),
+                &args,
+                marker.parent().unwrap(),
+                "test-capability",
+            )
+            .unwrap();
+            let end = Instant::now() + Duration::from_secs(3);
+            while !marker.exists() && Instant::now() < end {
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                marker.exists(),
+                "worker did not consume its private stdin and start"
+            );
+        }
+
+        #[test]
+        fn worker_capture_reaches_eof_after_parent_exit_while_worker_lives() {
+            use std::process::{Command, Stdio};
+            let directory = tempfile::tempdir().unwrap();
+            let marker = directory.path().join("worker-started");
+            struct StopLeaf(PathBuf);
+            impl Drop for StopLeaf {
+                fn drop(&mut self) {
+                    let _ = fs::write(self.0.with_extension("stop"), "stop");
+                    let end = Instant::now() + Duration::from_secs(2);
+                    while !self.0.with_extension("done").exists() && Instant::now() < end {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                }
+            }
+            let _cleanup = StopLeaf(marker.clone());
+            let mut parent = Command::new(std::env::current_exe().unwrap());
+            use std::os::windows::process::CommandExt;
+            parent.creation_flags(CREATE_NO_WINDOW);
+            let mut parent = parent
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "adapters::win::tests::worker_capture_parent",
+                    "--nocapture",
+                ])
+                .env("CODACLAUDA_EOF_TEST_MARKER", &marker)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut stdout = parent.stdout.take().unwrap();
+            let mut stderr = parent.stderr.take().unwrap();
+            let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+            let stderr_sender = sender.clone();
+            thread::spawn(move || {
+                let result = stdout.read_to_end(&mut Vec::new()).map(|_| ());
+                let _ = sender.send(result);
+            });
+            thread::spawn(move || {
+                let result = stderr.read_to_end(&mut Vec::new()).map(|_| ());
+                let _ = stderr_sender.send(result);
+            });
+            let end = Instant::now() + Duration::from_secs(5);
+            let exit = loop {
+                if let Some(exit) = parent.try_wait().unwrap() {
+                    break Some(exit);
+                }
+                if Instant::now() >= end {
+                    let _ = parent.kill();
+                    let _ = parent.wait();
+                    break None;
+                }
+                thread::sleep(Duration::from_millis(20));
+            };
+            assert!(
+                exit.is_some_and(|exit| exit.success()),
+                "owner parent did not exit promptly"
+            );
+            assert!(marker.exists(), "worker never started");
+            // The worker remains alive waiting for StopLeaf. EOF must be produced
+            // by the parent's exit, not by waiting for the long-lived worker.
+            let first = receiver.recv_timeout(Duration::from_secs(2));
+            let second = receiver.recv_timeout(Duration::from_secs(2));
+            assert!(
+                first.is_ok_and(|result| result.is_ok())
+                    && second.is_ok_and(|result| result.is_ok()),
+                "worker retained a parent capture handle after parent exit"
+            );
+            assert!(
+                !marker.with_extension("done").exists(),
+                "worker finished before EOF was verified"
+            );
+        }
     }
 }
 
@@ -1306,13 +1573,15 @@ mod tests {
             json!({"type":"collab_agent_tool_call","tool":"spawn_agent"}),
         ] {
             let mut parsed = Parsed::default();
-            assert!(parsed
-                .event(
-                    "codex",
-                    json!({"type":"item.started","item":item}),
-                    &mut |_| Ok(())
-                )
-                .is_err());
+            assert!(
+                parsed
+                    .event(
+                        "codex",
+                        json!({"type":"item.started","item":item}),
+                        &mut |_| Ok(())
+                    )
+                    .is_err()
+            );
         }
         let mut parsed = Parsed::default();
         assert!(parsed.event("codex", json!({"type":"item.started","item":{"type":"mcp_tool_call","server":"codaclauda","tool":"get_context"}}), &mut |_| Ok(())).is_ok());

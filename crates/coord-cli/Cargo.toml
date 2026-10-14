@@ -1,11 +1,11 @@
 [package]
-name = "codaclauda-cli"
+name = "claudacoda-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "CLI and stdio MCP for CodaClauda"
+description = "CLI and stdio MCP for ClaudaCoda"
 
 [dependencies]
 anyhow = "=1.0.104"

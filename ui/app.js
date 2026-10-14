@@ -1,4 +1,4 @@
-/* First-party CodaClauda desktop UI. No remote content, dependencies, or seeded data. */
+/* First-party ClaudaCoda desktop UI. No remote content, dependencies, or seeded data. */
 'use strict';
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -51,7 +51,7 @@ function clearError(target) { target.textContent = ''; target.classList.add('hid
 function toast(message) { clearTimeout(toastTimer); $('#toast').textContent = message; $('#toast').classList.remove('hidden'); toastTimer = setTimeout(() => $('#toast').classList.add('hidden'), 4800); }
 async function invoke(command, arguments_) {
   const api = window.__TAURI__?.core;
-  if (!api) throw new Error('Open the installed CodaClauda desktop application to connect to your local board. This browser preview has no coordination service.');
+  if (!api) throw new Error('Open the installed ClaudaCoda desktop application to connect to your local board. This browser preview has no coordination service.');
   const result = await api.invoke(command, arguments_);
   if (!result || result.ok !== true) {
     const error = new Error(result?.error?.message || 'The local operation failed.');

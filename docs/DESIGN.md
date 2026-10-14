@@ -1,7 +1,10 @@
-# CodaClauda design — contract version 1
+# ClaudaCoda design — contract version 1
 
 Owner-approved scope, 2026-10-13. Windows first, standalone MIT desktop/CLI/MCP
 coordination. Spark Dev Bridge remains an optional external compute provider.
+Owner renamed the product to ClaudaCoda before its first release. The existing
+GitHub repository, private MCP namespace and local state directory retain their
+original identifiers so recorded requests and permissions remain intact.
 No public listening service and no dependency on Spark for agent questions.
 
 ## Verified interfaces and reuse decision
@@ -37,9 +40,9 @@ Marketplace admission are separate evidence layers.
 ## Components and local authority
 
 Rust coord-core owns durable state, validation, allowed paths, grants, claims,
-adapter supervision and receipt normalization. coord-cli provides codaclauda-cli
+adapter supervision and receipt normalization. coord-cli provides claudacoda-cli
 with JSON commands and a newline-delimited stdio MCP server. Tauri's GUI binary
-is codaclauda.exe; it invokes only the bundled CLI using structured stdin/argv.
+is claudacoda.exe; it invokes only the bundled CLI using structured stdin/argv.
 The GUI has no remote content or unrestricted shell bridge.
 
 Default state uses the Windows LocalAppData KnownFolder with package redirection
@@ -55,7 +58,7 @@ timeout. MCP cannot create/expand grants, connect endpoints, publish, deploy or
 purchase. Each MCP process is bound to a request capability; an incoming message
 cannot supply a different origin/owner/grant. Handoffs are untrusted data.
 
-Agent capabilities consist of CodaClauda file reads, bounded file writes for
+Agent capabilities consist of ClaudaCoda file reads, bounded file writes for
 delegation, peer requests and receipt retrieval. Direct shell tools and other
 MCP servers are disabled. Questions/reviews have no file writes. File operations
 reject traversal, secrets, links/reparse points, .git and artifacts outside the
@@ -112,7 +115,7 @@ normal shortcuts/uninstall. Retain cargo-auditable dependency metadata in both
 executables and inspect extracted payload inventory before admission. All local
 Cargo commands use the unchanged shared buildlock, own C: target/cache.
 
-Marketplace appId/slug proposed codaclauda; publisher ID must be read from the
+Marketplace appId/slug proposed claudacoda; publisher ID must be read from the
 existing profile, with current GitHub App grant checked. Public MIT, free-use
 and distribution authorization, ordinary non-featured listing; PhaseForge stays
 featured. No placeholder publication. Complete real bidirectional requests,

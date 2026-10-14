@@ -34,7 +34,7 @@ function Invoke-ProjectCargo {
     param([Parameter(Mandatory)][string[]]$CargoArgs, [Parameter(Mandatory)][string]$Stage)
     $started = [DateTime]::UtcNow
     $log = Join-Path $output "$Stage.log"
-    Write-Host "CodaClauda: $Stage"
+    Write-Host "ClaudaCoda: $Stage"
     if ($HostedCI) {
         & cargo @CargoArgs 2>&1 | Tee-Object -FilePath $log | Out-Host
     } else {
@@ -100,7 +100,7 @@ try {
     Set-Location -LiteralPath $projectRoot
     foreach ($command in @('git', 'python', 'node', 'cargo', 'rustc')) { Get-Command $command -ErrorAction Stop | Out-Null }
     $gitRoot = (& git rev-parse --show-toplevel).Trim()
-    if (![IO.Path]::GetFullPath($gitRoot).Equals($projectRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'The script must run from the CodaClauda repository root.' }
+    if (![IO.Path]::GetFullPath($gitRoot).Equals($projectRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'The script must run from the ClaudaCoda repository root.' }
     $commit = (& git rev-parse HEAD).Trim()
     if ($commit -notmatch '^[0-9a-f]{40}$') { throw 'A full source commit is required.' }
     $dirty = @(& git status --porcelain=v1 --untracked-files=all)
@@ -109,7 +109,7 @@ try {
         if (!(Test-Path -LiteralPath $required -PathType Leaf) -or (Get-Item -LiteralPath $required).Length -eq 0) { throw "Required release source is missing or empty: $required" }
     }
     $config = Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
-    if ($config.productName -ne 'CodaClauda' -or $config.identifier -ne 'com.deloresai.codaclauda' -or $config.version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$' -or $config.version -eq '0.0.0') { throw 'Final product identity/version must be real; placeholders are forbidden.' }
+    if ($config.productName -ne 'ClaudaCoda' -or $config.identifier -ne 'com.deloresai.claudacoda' -or $config.version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$' -or $config.version -eq '0.0.0') { throw 'Final product identity/version must be real; placeholders are forbidden.' }
     if ($config.bundle.windows.nsis.installMode -ne 'currentUser' -or $config.bundle.windows.webviewInstallMode.type -ne 'skip') { throw 'Expected per-user NSIS and existing WebView2; re-review installer configuration.' }
     if ($config.build.PSObject.Properties.Name -contains 'beforeBundleCommand') { throw 'A beforeBundleCommand is not allowed in this bundle-only recipe; it could rebuild within the gate.' }
     $version = $config.version
@@ -125,7 +125,7 @@ try {
     $env:RUSTUP_TOOLCHAIN = $toolchain
     $rustVersion = (& rustc --version).Trim()
     if ($rustVersion -notmatch '^rustc 1\.98\.1\b') { throw "Expected installed Rust $toolchain, found $rustVersion. Install the exact toolchain explicitly first." }
-    $receipt = [ordered]@{schema_version=1; product='CodaClauda'; version=$version; source_commit=$commit; clean_source=($dirty.Count -eq 0); allow_dirty=[bool]$AllowDirty; flavor=$flavor; target=$targetTriple; rust=$rustVersion; mode=$(if ($HostedCI) {'github-hosted'} else {'local-shared-gate'}); started_at=[DateTime]::UtcNow.ToString('o'); result='building'; acceptance=[ordered]@{unit_and_fixture_tests='pending'; package_integrity='pending'; installed_native_workflow='not performed by this script'; model_provider_workflow='not performed by this script'; marketplace_admission='not performed by this script'; published=$false}; steps=$steps; tools=@()}
+    $receipt = [ordered]@{schema_version=1; product='ClaudaCoda'; version=$version; source_commit=$commit; clean_source=($dirty.Count -eq 0); allow_dirty=[bool]$AllowDirty; flavor=$flavor; target=$targetTriple; rust=$rustVersion; mode=$(if ($HostedCI) {'github-hosted'} else {'local-shared-gate'}); started_at=[DateTime]::UtcNow.ToString('o'); result='building'; acceptance=[ordered]@{unit_and_fixture_tests='pending'; package_integrity='pending'; installed_native_workflow='not performed by this script'; model_provider_workflow='not performed by this script'; marketplace_admission='not performed by this script'; published=$false}; steps=$steps; tools=@()}
     if (!$HostedCI) { $receipt.build_gate_sha256 = (Get-FileHash -LiteralPath $buildGate -Algorithm SHA256).Hash.ToLowerInvariant() }
     $receipt.tools += Install-PinnedTool -Name 'cargo-auditable' -Version '0.7.7' -Uri 'https://github.com/rust-secure-code/cargo-auditable/releases/download/v0.7.7/cargo-auditable-x86_64-pc-windows-msvc.zip' -Sha256 '717ba2d3ed7997c501e9987ee7c94bebf9d7219b18b185a03009420ec7029c7d' -Executable 'cargo-auditable.exe'
     $receipt.tools += Install-PinnedTool -Name 'cargo-tauri' -Version '2.10.1' -Uri 'https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v2.10.1/cargo-tauri-x86_64-pc-windows-msvc.zip' -Sha256 '50a3ed1c43f75ea3b6e7233a52d8a7c994cfffd98d8545ff397db8b464338d9c' -Executable 'cargo-tauri.exe'
@@ -221,29 +221,29 @@ else: raise ValueError('Unknown inspection operation')
     & node --check (Join-Path $projectRoot 'ui/app.js')
     Invoke-ProjectCargo -CargoArgs @('test', '--workspace', '--all-targets', '--locked', '--target', $targetTriple) -Stage 'unit-fixture-tests'
     $receipt.acceptance.unit_and_fixture_tests = 'passed'
-    Invoke-ProjectCargo -CargoArgs @('auditable', 'build', '--release', '--locked', '--target', $targetTriple, '-p', 'codaclauda-cli') -Stage 'build-cli'
+    Invoke-ProjectCargo -CargoArgs @('auditable', 'build', '--release', '--locked', '--target', $targetTriple, '-p', 'claudacoda-cli') -Stage 'build-cli'
     $release = Join-Path $target "$targetTriple/release"
-    $cli = Join-Path $release 'codaclauda-cli.exe'
+    $cli = Join-Path $release 'claudacoda-cli.exe'
     $resources = Join-Path $projectRoot 'dist/bin'
     New-Item -ItemType Directory -Path $resources -Force | Out-Null
-    $extras = @(Get-ChildItem -LiteralPath $resources -Force | Where-Object { $_.Name -ne 'codaclauda-cli.exe' -or $_.PSIsContainer })
+    $extras = @(Get-ChildItem -LiteralPath $resources -Force | Where-Object { $_.Name -ne 'claudacoda-cli.exe' -or $_.PSIsContainer })
     if ($extras.Count) { throw 'dist/bin contains unexpected resources. Review them before packaging; this recipe will not silently include or delete them.' }
-    Copy-Item -LiteralPath $cli -Destination (Join-Path $resources 'codaclauda-cli.exe') -Force
+    Copy-Item -LiteralPath $cli -Destination (Join-Path $resources 'claudacoda-cli.exe') -Force
     & python -I $inspector audit $cli $output
     $notices = Join-Path $projectRoot 'dist/notices'
     New-Item -ItemType Directory -Path $notices -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md') -Destination $notices -Force
     Invoke-ProjectCargo -CargoArgs @('auditable', 'build', '--manifest-path', 'src-tauri/Cargo.toml', '--release', '--locked', '--target', $targetTriple, '--features', 'custom-protocol') -Stage 'build-desktop'
-    $gui = Join-Path $release 'codaclauda.exe'
+    $gui = Join-Path $release 'claudacoda.exe'
     & python -I $inspector audit $gui $output
-    & python -I (Join-Path $projectRoot 'scripts/notices.py') generate --dependencies (Join-Path $output 'codaclauda-cli.dependencies.json') --dependencies (Join-Path $output 'codaclauda.dependencies.json') --cargo-home $env:CARGO_HOME --output $notices --rust-version $toolchain
+    & python -I (Join-Path $projectRoot 'scripts/notices.py') generate --dependencies (Join-Path $output 'claudacoda-cli.dependencies.json') --dependencies (Join-Path $output 'claudacoda.dependencies.json') --cargo-home $env:CARGO_HOME --output $notices --rust-version $toolchain
     Copy-Item -LiteralPath (Join-Path $notices 'inventory.json') -Destination (Join-Path $output 'notices-inventory.json')
     $bundleStarted = [DateTime]::UtcNow
     $bundleOverride = Join-Path $projectRoot 'local/release-tools/bundle-config.json'
     '{"bundle":{"useLocalToolsDir":true}}' | Set-Content -LiteralPath $bundleOverride -Encoding utf8NoBOM
     # `bundle` packages these binaries without invoking a second Cargo build.
     Invoke-ProjectCargo -CargoArgs @('tauri', 'bundle', '--bundles', 'nsis', '--target', $targetTriple, '--features', 'custom-protocol', '--config', $bundleOverride, '--ci') -Stage 'bundle-nsis'
-    $installer = Join-Path $release "bundle/nsis/CodaClauda_${version}_x64-setup.exe"
+    $installer = Join-Path $release "bundle/nsis/ClaudaCoda_${version}_x64-setup.exe"
     if (!(Test-Path -LiteralPath $installer -PathType Leaf) -or (Get-Item -LiteralPath $installer).LastWriteTimeUtc -lt $bundleStarted.AddSeconds(-2)) { throw 'Expected freshly generated x64 NSIS installer was not found.' }
     Copy-Item -LiteralPath $installer -Destination $output
     # The bundler may patch bundle type metadata; audit and hash final bytes.
@@ -252,7 +252,7 @@ else: raise ValueError('Unknown inspection operation')
     & $sevenZip x $installer "-o$extracted" -y | Out-File -LiteralPath (Join-Path $output 'extract-installer.log') -Encoding utf8
     $payloads = @()
     $extractedPaths = @{}
-    foreach ($binary in @(@{name='codaclauda.exe'; source=$gui}, @{name='codaclauda-cli.exe'; source=$cli})) {
+    foreach ($binary in @(@{name='claudacoda.exe'; source=$gui}, @{name='claudacoda-cli.exe'; source=$cli})) {
         $found = @(Get-ChildItem -LiteralPath $extracted -Recurse -File -Filter $binary.name)
         if ($found.Count -ne 1) { throw "Installer must contain exactly one $($binary.name); found $($found.Count)." }
         $expectedHash = (Get-FileHash -LiteralPath $binary.source -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -262,15 +262,15 @@ else: raise ValueError('Unknown inspection operation')
         & python -I $inspector audit $found[0].FullName $output
         $payloads += [ordered]@{file=$binary.name; sha256=$installedHash; bytes=$found[0].Length; extraction_matches_build=$true; auditable_metadata=$true}
     }
-    $expectedCliLocation = Join-Path (Split-Path -Parent $extractedPaths['codaclauda.exe']) 'bin/codaclauda-cli.exe'
-    if (![IO.Path]::GetFullPath($expectedCliLocation).Equals([IO.Path]::GetFullPath($extractedPaths['codaclauda-cli.exe']), [StringComparison]::OrdinalIgnoreCase)) { throw 'CLI resource must be in bin/codaclauda-cli.exe relative to the GUI; this installer would not connect.' }
+    $expectedCliLocation = Join-Path (Split-Path -Parent $extractedPaths['claudacoda.exe']) 'bin/claudacoda-cli.exe'
+    if (![IO.Path]::GetFullPath($expectedCliLocation).Equals([IO.Path]::GetFullPath($extractedPaths['claudacoda-cli.exe']), [StringComparison]::OrdinalIgnoreCase)) { throw 'CLI resource must be in bin/claudacoda-cli.exe relative to the GUI; this installer would not connect.' }
     & python -I (Join-Path $projectRoot 'scripts/notices.py') verify --extracted $extracted --report (Join-Path $output 'notices-verification.json')
     Compress-Archive -LiteralPath $notices -DestinationPath (Join-Path $output 'third-party-notices.zip')
     & python -I $inspector snapshot $projectRoot (Join-Path $output 'source-tree-after.json')
     if ((Get-FileHash -LiteralPath (Join-Path $output 'source-tree.json')).Hash -ne (Get-FileHash -LiteralPath (Join-Path $output 'source-tree-after.json')).Hash) { throw 'Git-visible source changed during the build. Rebuild a stable source candidate.' }
     if ((& git rev-parse HEAD).Trim() -ne $commit) { throw 'The source commit changed during the build.' }
     if (!$AllowDirty -and @(& git status --porcelain=v1 --untracked-files=all).Count -gt 0) { throw 'A clean build generated non-ignored source changes. Review and commit/ignore appropriate generated files before release.' }
-    & python -I $inspector source-zip $projectRoot (Join-Path $output 'source-tree.json') (Join-Path $output 'codaclauda-source.zip')
+    & python -I $inspector source-zip $projectRoot (Join-Path $output 'source-tree.json') (Join-Path $output 'claudacoda-source.zip')
     Copy-Item -LiteralPath 'Cargo.lock' -Destination (Join-Path $output 'core.Cargo.lock')
     Copy-Item -LiteralPath 'src-tauri/Cargo.lock' -Destination (Join-Path $output 'desktop.Cargo.lock')
     Copy-Item -LiteralPath 'LICENSE', 'PROVENANCE.md', 'THIRD_PARTY_NOTICES.md' -Destination $output

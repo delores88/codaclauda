@@ -198,7 +198,7 @@ fn arg_file(scratch: &Path, workload: &[String]) -> Result<ArgFile> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    // Windows inherits the owner's protected CodaClauda state-directory ACL.
+    // Windows inherits the owner's protected ClaudaCoda state-directory ACL.
     // The caller must not supply a shared or project-owned scratch directory.
     let mut file: File = options
         .open(&path)
@@ -340,7 +340,7 @@ pub fn invoke(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Spark owns its authentication. It has no need for the coordination
-    // capability or any other private CodaClauda runtime environment fields.
+    // capability or any other private ClaudaCoda runtime environment fields.
     for (name, _) in std::env::vars_os() {
         if name
             .to_string_lossy()

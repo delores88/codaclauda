@@ -10,7 +10,7 @@ use std::{
 #[derive(Parser)]
 #[command(
     version,
-    about = "CodaClauda: owner-scoped Claude Code and Codex coordination"
+    about = "ClaudaCoda: owner-scoped Claude Code and Codex coordination"
 )]
 struct Cli {
     #[arg(long, global = true)]
@@ -54,7 +54,7 @@ enum Action {
     Pause,
     Resume,
     Reconnect,
-    /// Request-bound stdio MCP; launched with a private capability by CodaClauda.
+    /// Request-bound stdio MCP; launched with a private capability by ClaudaCoda.
     Mcp {
         #[arg(long)]
         request: String,

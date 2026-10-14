@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window",
-  "description": "Only the packaged CodaClauda window may call the local application bridge.",
+  "description": "Only the packaged ClaudaCoda window may call the local application bridge.",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

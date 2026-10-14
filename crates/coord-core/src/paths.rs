@@ -1,6 +1,64 @@
 use anyhow::{Context, Result, bail};
 use std::path::{Component, Path, PathBuf};
 
+/// Git for Windows parses worktree destinations before Win32 path handling and
+/// rejects Rust's canonical `\\?\` spelling. Keep state paths canonical and
+/// convert only subprocess arguments; callers enable Git's long-path support.
+pub(crate) fn git_argument(path: &Path) -> Result<String> {
+    let value = path.to_str().context("Git path is not valid Unicode")?;
+    #[cfg(not(windows))]
+    return Ok(value.to_owned());
+    #[cfg(windows)]
+    {
+        if value.starts_with(r"\\?\") && value.contains('/') {
+            bail!("Canonical Windows Git paths cannot contain forward slashes")
+        }
+        let plain = if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+            format!("//{}", unc.replace('\\', "/"))
+        } else if let Some(disk) = value.strip_prefix(r"\\?\") {
+            if disk.as_bytes().get(1) != Some(&b':')
+                || disk.as_bytes().get(2) != Some(&b'\\')
+                || !disk.as_bytes()[0].is_ascii_alphabetic()
+            {
+                bail!("Git requires an ordinary absolute disk or UNC path")
+            }
+            disk.replace('\\', "/")
+        } else {
+            value.replace('\\', "/")
+        };
+        let components = if let Some(unc) = plain.strip_prefix("//") {
+            if unc.split('/').count() < 2 {
+                bail!("Git UNC path requires a server and share")
+            }
+            unc
+        } else if plain.as_bytes().get(1) == Some(&b':')
+            && plain.as_bytes().get(2) == Some(&b'/')
+            && plain.as_bytes()[0].is_ascii_alphabetic()
+        {
+            &plain[3..]
+        } else {
+            bail!("Git requires an ordinary absolute disk or UNC path")
+        };
+        // Removing verbatim syntax must not activate Win32 normalization or a
+        // reserved device name. A drive root is the sole empty-path exception.
+        if !components.is_empty()
+            && components.split('/').any(|part| {
+                part.is_empty()
+                    || part == "."
+                    || part == ".."
+                    || part.ends_with(['.', ' '])
+                    || part
+                        .chars()
+                        .any(|c| c.is_control() || ":<>\"|?*".contains(c))
+                    || windows_device(&part.to_lowercase())
+            })
+        {
+            bail!("Git path requires normalization-sensitive or reserved Windows names")
+        }
+        Ok(plain)
+    }
+}
+
 /// A single stable spelling prevents independent grants claiming file aliases.
 pub fn relative(value: &str) -> Result<PathBuf> {
     if value.is_empty()
@@ -142,6 +200,40 @@ pub fn authorized(root: &Path, value: &str, allowed: &[String], write: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn git_windows_arguments_preserve_disk_unc_and_long_paths_without_aliases() {
+        assert_eq!(
+            git_argument(Path::new(r"\\?\C:\owner folder\project")).unwrap(),
+            "C:/owner folder/project"
+        );
+        assert_eq!(
+            git_argument(Path::new(r"\\?\UNC\server\share\project")).unwrap(),
+            "//server/share/project"
+        );
+        assert_eq!(
+            git_argument(Path::new(r"\\server\share\project")).unwrap(),
+            "//server/share/project"
+        );
+        let long = format!(
+            r"\\?\C:\{}\project",
+            "nested\\".repeat(60).trim_end_matches('\\')
+        );
+        assert!(git_argument(Path::new(&long)).unwrap().len() > 260);
+        for invalid in [
+            r"\\?\C:\name.\project",
+            r"\\?\C:\name \project",
+            r"\\?\C:\..\project",
+            r"\\?\C:\NUL\project",
+            r"\\?\C:\file:stream",
+            r"\\?\Volume{123}\project",
+            r"\\.\C:\project",
+            r"C:relative",
+            r"\\server",
+        ] {
+            assert!(git_argument(Path::new(invalid)).is_err(), "{invalid}");
+        }
+    }
     #[test]
     fn rejects_traversal_and_secrets() {
         for p in [

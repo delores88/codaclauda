@@ -1,6 +1,6 @@
-# CodaClauda third-party notices
+# ClaudaCoda third-party notices
 
-CodaClauda's original application source and artwork are MIT licensed. Its
+ClaudaCoda's original application source and artwork are MIT licensed. Its
 dependencies retain their own licenses; this statement does not relicense them.
 
 Every distributable installer must contain `notices/inventory.json` and the
@@ -10,6 +10,12 @@ registry package manifests and license files. Missing text or an unresolved
 package stops packaging. The inventory records declared license expressions,
 source provenance, affected executables, and notice file hashes. An SPDX
 expression alone is not a replacement for the actual license text.
+
+For MPL 2.0 components, the exact unmodified registry source archives are also
+included under `notices/sources/` as `.crate` files (gzip-compressed tar archives).
+Their source remains governed by its original license. The inventory records
+each archive's source URL and Cargo-verified checksum. Source headers referring
+to Mozilla's canonical MPL 2.0 text are retained with that complete license.
 
 The generated notices also cover the Rust standard library/toolchain, the
 Microsoft WebView2 SDK loader code (separately from the MIT Rust bindings), and

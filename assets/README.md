@@ -1,7 +1,7 @@
-# Original CodaClauda artwork
+# Original ClaudaCoda artwork
 
 The two interlocking C/chat glyphs in `brand.svg` were drawn specifically for
-CodaClauda. `scripts/artwork.py` generates the PNG and Windows ICO variants with
+ClaudaCoda. `scripts/artwork.py` generates the PNG and Windows ICO variants with
 Pillow, along with an illustrative 1600 × 900 Marketplace thumbnail. These are
 first-party MIT artwork. They contain no copied provider logos or stock assets.
 
