@@ -1,0 +1,54 @@
+/* CodaClauda design tokens. Every feature stylesheet uses these variables.
+ * Fonts are Windows system fonts (Segoe UI Variable, Cascadia Code) — nothing downloaded. */
+:root {
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, "SFMono-Regular", monospace;
+
+  --radius-xs: 6px; --radius-sm: 9px; --radius: 13px; --radius-lg: 18px; --radius-xl: 26px; --radius-pill: 999px;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px; --space-7: 48px;
+  --rail-width: 76px; --topbar-height: 56px;
+  --ease: cubic-bezier(.2, .8, .2, 1); --fast: 140ms; --med: 240ms;
+
+  /* Brand: Claude coral meets Codex teal, joined by violet. */
+  --claude: #e07a55; --claude-soft: rgba(224, 122, 85, .16);
+  --codex: #12a883; --codex-soft: rgba(18, 168, 131, .16);
+  --violet: #8b7bff; --violet-soft: rgba(139, 123, 255, .16);
+  --brand-gradient: linear-gradient(120deg, #ff8a5c 0%, #b276ff 50%, #22c7a9 100%);
+
+  --success: #3ccf8e; --warning: #f5b544; --danger: #ff5d6c; --info: #5aa9ff;
+  --status-active: #3ccf8e; --status-idle: #f5b544; --status-offline: #7d8299;
+}
+:root, [data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0c0e16; --bg-elev: #11141f;
+  --surface: #151927; --surface-2: #1b2031; --surface-3: #232a3f; --surface-hover: #1f2537;
+  --border: rgba(255, 255, 255, .075); --border-strong: rgba(255, 255, 255, .14);
+  --text: #e9ebf4; --text-2: #b5bad0; --muted: #868ca6; --faint: #5d637c;
+  --accent: #8b7bff; --accent-2: #a597ff; --accent-contrast: #ffffff; --accent-soft: rgba(139, 123, 255, .18);
+  --owner-bubble: linear-gradient(135deg, #6c5cf0, #8b5cf0);
+  --owner-text: #ffffff;
+  --code-bg: #0a0c13; --code-border: rgba(255, 255, 255, .08);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .3);
+  --shadow: 0 8px 28px rgba(0, 0, 0, .35);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, .5);
+  --portrait-bg: #232a3f;
+  --scrim: rgba(5, 6, 12, .62);
+  --focus: 0 0 0 3px rgba(139, 123, 255, .45);
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f5fa; --bg-elev: #ffffff;
+  --surface: #ffffff; --surface-2: #f3f4f9; --surface-3: #e9ebf3; --surface-hover: #f0f1f7;
+  --border: rgba(20, 24, 40, .09); --border-strong: rgba(20, 24, 40, .18);
+  --text: #171a26; --text-2: #3d4257; --muted: #6a7088; --faint: #9aa0b5;
+  --accent: #6c5cf0; --accent-2: #5a4ae0; --accent-contrast: #ffffff; --accent-soft: rgba(108, 92, 240, .12);
+  --owner-bubble: linear-gradient(135deg, #6c5cf0, #8b5cf0);
+  --code-bg: #f6f7fb; --code-border: rgba(20, 24, 40, .1);
+  --shadow-sm: 0 1px 2px rgba(20, 24, 40, .08);
+  --shadow: 0 8px 26px rgba(20, 24, 40, .1);
+  --shadow-lg: 0 24px 60px rgba(20, 24, 40, .18);
+  --portrait-bg: #e9ebf3;
+  --scrim: rgba(20, 24, 40, .35);
+  --focus: 0 0 0 3px rgba(108, 92, 240, .35);
+}

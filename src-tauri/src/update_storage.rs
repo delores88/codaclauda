@@ -146,7 +146,7 @@ pub fn guard_board(board: &Path) -> Result<AdmissionGuard> {
             return Err("Session connection lease cannot be a reparse point.".into());
         }
     }
-    FileExt::try_lock_exclusive(&runtime).map_err(|_| "Disconnect the ClaudaCoda MCP server in connected agents before installing, then reconnect it afterward. Their conversations can stay open.")?;
+    FileExt::try_lock_exclusive(&runtime).map_err(|_| "Disconnect the CodaClauda MCP server in connected agents before installing, then reconnect it afterward. Their conversations can stay open.")?;
     let lock_path = board.join("state.lock");
     reject_links(&lock_path)?;
     let mut lock_options = OpenOptions::new();

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod board;
+mod desktop;
 mod update_helper;
 mod update_storage;
 mod update_verify;
@@ -96,12 +97,12 @@ fn cli_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         }
     }
     Err(format!(
-        "The bundled coordination CLI is missing: {}. Reinstall ClaudaCoda.",
+        "The bundled coordination CLI is missing: {}. Reinstall CodaClauda.",
         packaged.display()
     ))
 }
 
-fn error(code: &str, message: impl Into<String>) -> Value {
+pub(crate) fn error(code: &str, message: impl Into<String>) -> Value {
     json!({"ok": false, "error": {"code": code, "message": message.into()}})
 }
 
@@ -362,7 +363,7 @@ async fn run_cli(path: PathBuf, state_dir: Option<&Path>, op: &str, input: Vec<u
 async fn default_board(cli: PathBuf) -> Result<PathBuf, String> {
     let response = run_cli(cli, None, "status", b"{}".to_vec()).await;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err("The bundled CLI could not resolve a coordination board. ClaudaCoda did not create a board binding.".into());
+        return Err("The bundled CLI could not resolve a coordination board. CodaClauda did not create a board binding.".into());
     }
     response
         .pointer("/data/state_dir")
@@ -384,7 +385,7 @@ fn main() {
             "com.deloresai.claudacoda"
         ))
     }
-    .expect("Could not set ClaudaCoda's Windows application identity");
+    .expect("Could not set CodaClauda's Windows application identity");
 
     let result = tauri::Builder::default()
         .manage(updates::UpdateState::default())
@@ -405,7 +406,7 @@ fn main() {
                 let window = app.get_webview_window("main").ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::NotFound,
-                        "ClaudaCoda main window is missing",
+                        "CodaClauda main window is missing",
                     )
                 })?;
                 set_taskbar_icon(&window)?;
@@ -416,13 +417,27 @@ fn main() {
             rpc,
             preferences,
             pick_workspace,
-            update
+            update,
+            desktop::desktop_paths,
+            desktop::desktop_state_load,
+            desktop::desktop_state_save,
+            desktop::desktop_manifest_load,
+            desktop::project_scan,
+            desktop::desktop_discover_projects,
+            desktop::github_user,
+            desktop::github_repos,
+            desktop::github_create_repo,
+            desktop::github_clone_repo,
+            desktop::attachment_save,
+            desktop::dictation_start,
+            desktop::window_attention,
+            desktop::open_external
         ])
         .run(tauri::generate_context!());
     if let Err(error) = result {
         let detail: String = error.to_string().chars().take(1600).collect();
         let message = format!(
-            "ClaudaCoda could not start.\n\n{detail}\n\nYour coordination board was not reset. Preserve the existing board and repair the reported path or configuration before reopening."
+            "CodaClauda could not start.\n\n{detail}\n\nYour coordination board was not reset. Preserve the existing board and repair the reported path or configuration before reopening."
         );
         #[cfg(windows)]
         unsafe {
@@ -434,7 +449,7 @@ fn main() {
             MessageBoxW(
                 None,
                 PCWSTR(wide.as_ptr()),
-                w!("ClaudaCoda could not start"),
+                w!("CodaClauda could not start"),
                 MB_ICONERROR | MB_OK,
             );
         }

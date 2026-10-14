@@ -63,13 +63,13 @@ pub(crate) fn parse_selection(
         return Ok(None);
     };
     if flag != "--state-dir" {
-        return Err("Unsupported ClaudaCoda startup argument; use --state-dir PATH to select an existing board.".into());
+        return Err("Unsupported CodaClauda startup argument; use --state-dir PATH to select an existing board.".into());
     }
     let path = args
         .next()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
-            "ClaudaCoda --state-dir requires an existing absolute directory.".to_owned()
+            "CodaClauda --state-dir requires an existing absolute directory.".to_owned()
         })?;
     if args.next().is_some() {
         return Err("Only one --state-dir selection is permitted at startup.".into());

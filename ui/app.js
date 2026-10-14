@@ -1,4 +1,4 @@
-/* First-party ClaudaCoda desktop UI. No remote content, dependencies, or seeded data. */
+/* First-party CodaClauda desktop UI. No remote content, dependencies, or seeded data. */
 'use strict';
 import { activeStates, requestGroup, setupPrompt, updatePresentation, taskConversations, messagePage, messageDelivery } from './view-model.js';
 import { createMailbox } from './mailbox.js';
@@ -91,7 +91,7 @@ function clearError(target) { target.textContent = ''; target.classList.add('hid
 function toast(message) { clearTimeout(toastTimer); $('#toast').textContent = message; $('#toast').classList.remove('hidden'); toastTimer = setTimeout(() => $('#toast').classList.add('hidden'), 4800); }
 async function invoke(command, arguments_) {
   const api = window.__TAURI__?.core;
-  if (!api) throw new Error('Open the installed ClaudaCoda desktop application to connect to your local board. This browser preview has no coordination service.');
+  if (!api) throw new Error('Open the installed CodaClauda desktop application to connect to your local board. This browser preview has no coordination service.');
   const result = await api.invoke(command, arguments_);
   if (!result || result.ok !== true) {
     const error = new Error(result?.error?.message || 'The local operation failed.');
@@ -863,7 +863,7 @@ $('#prompt-recipient').addEventListener('click', event => {
 $('#copy-setup-prompt').addEventListener('click', () => copyText($('#setup-prompt').value, $('#setup-prompt')));
 $('#copy-update-code').addEventListener('click', () => copyText(updateState.approval_code || ''));
 $('#confirm-update-install').addEventListener('click', () => { $('#update-install-dialog').close(); if (updateState.actions.includes('install')) updateOperation('install'); });
-$('.brand').addEventListener('click', event => { event.preventDefault(); switchView('mailbox'); });
+/* The brand link returns to the main CodaClauda app. */
 $$('[data-close]').forEach(node => node.addEventListener('click', () => $(`#${node.dataset.close}`).close()));
 $('#detail-dialog').addEventListener('close', () => { selectedRequest = null; });
 $('#new-request').addEventListener('click', () => { $('#navigation-drawer').close(); openComposer(); });
