@@ -1,7 +1,7 @@
 /* City view: WebGL stage + HTML overlays (labels, tags, bubbles, HUD, toolbar, panels). */
 .view.view-city { overflow: hidden; }
-.city-root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); isolation: isolate; --spark-teal: #2de2c4; --spark-lime: #b6ff3a; --spark-ink: #13a58e; }
-[data-theme="light"] .city-root { --spark-ink: #0b7d6b; }
+.city-root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); isolation: isolate; --spark-teal: #2de2c4; --spark-lime: #b6ff3a; --spark-ink: #13a58e; --spark-green: #76b900; --spark-green-ink: #9bd92c; }
+[data-theme="light"] .city-root { --spark-ink: #0b7d6b; --spark-green-ink: #3d7400; }
 .city-stage { position: absolute; inset: 0; outline: none; cursor: grab; }
 .city-stage:active { cursor: grabbing; }
 .city-stage.is-pointing { cursor: pointer; }
@@ -59,17 +59,19 @@
 @keyframes city-pop { from { opacity: 0; scale: .9; } }
 .city-tag.on-person { margin-top: -34px; }
 .city-bubble.on-person { margin-top: -40px; }
-/* The Spark underside hangs downward: its tags and bubbles sit below the target. */
-.city-tag.is-under { margin-top: 10px; }
-.city-bubble.is-under { margin-top: 16px; }
-.city-bubble.is-under::after { top: -7px; bottom: auto; transform: translateX(-50%) rotate(225deg); }
-.city-label.is-runner { margin-top: 4px; border-color: color-mix(in srgb, var(--spark-teal) 55%, transparent); font-weight: 600; }
+/* Spark runners stand upright on the Spark face once it is up: their labels sit above their heads like everyone's. */
+.city-label.is-runner { border-color: color-mix(in srgb, var(--spark-green) 60%, transparent); font-weight: 600; }
 .city-label.is-runner .city-label-name { max-width: 210px; }
-.city-gem.spark { background: var(--spark-teal); box-shadow: 0 0 7px var(--spark-teal); }
+.city-gem.spark { background: var(--spark-green); box-shadow: 0 0 7px var(--spark-green); }
 
 /* HUD (top-left) */
 .city-hud { position: absolute; top: 14px; left: 14px; z-index: 3; display: grid; gap: 8px; max-width: min(430px, calc(100% - 28px)); padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); }
 .city-hud-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+/* Which face of the island is up */
+.city-side { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px 0 8px; border-radius: var(--radius-pill); font-size: 11.5px; font-weight: 700; white-space: nowrap; align-self: center; transition: background var(--fast), color var(--fast); }
+.city-side .icon { width: 14px; height: 14px; }
+.city-side.is-pc { background: var(--accent-soft); color: var(--accent-2); }
+.city-side.is-spark { background: color-mix(in srgb, var(--spark-green) 20%, transparent); color: var(--spark-green-ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--spark-green) 45%, transparent); }
 .city-hud-stats { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--text-2); font-size: 12.5px; }
 .city-hud-stats strong { color: var(--text); }
 .city-dot-sep { color: var(--faint); }
@@ -91,9 +93,13 @@
 .city-tool[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-2); }
 .city-toolbar-sep { width: 1px; height: 22px; margin: 0 3px; background: var(--border-strong); }
 .city-has-panel .city-toolbar { right: calc(min(360px, 100% - 28px) + 28px); }
-.city-flip { display: inline-flex; align-items: center; gap: 6px; height: 34px; margin-right: 2px; padding: 0 12px 0 9px; border: 0; border-radius: 10px; background: color-mix(in srgb, var(--spark-teal) 16%, transparent); color: var(--text); font-size: 12.5px; font-weight: 650; white-space: nowrap; cursor: pointer; transition: background var(--fast); }
-.city-flip:hover { background: color-mix(in srgb, var(--spark-teal) 28%, transparent); }
-.city-flip .icon { width: 16px; height: 16px; color: var(--spark-ink); }
+.city-flip { display: inline-flex; align-items: center; gap: 6px; height: 34px; margin-right: 2px; padding: 0 12px 0 9px; border: 0; border-radius: 10px; background: color-mix(in srgb, var(--spark-green) 18%, transparent); color: var(--text); font-size: 12.5px; font-weight: 650; white-space: nowrap; cursor: pointer; transition: background var(--fast); }
+.city-flip:hover { background: color-mix(in srgb, var(--spark-green) 30%, transparent); }
+.city-flip .icon { width: 16px; height: 16px; color: var(--spark-green-ink); }
+/* Spark side up: the button turns the island back to This PC (brand accent). */
+.city-flip.to-pc { background: var(--accent-soft); }
+.city-flip.to-pc:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+.city-flip.to-pc .icon { color: var(--accent-2); }
 
 /* Machine load (top-right): this PC vs the DGX Spark */
 .city-machines { position: absolute; top: 14px; right: 14px; z-index: 3; display: grid; gap: 10px; width: min(300px, calc(100% - 28px)); padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); font-size: 12px; }
@@ -219,8 +225,8 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .city-bubble, .city-help, .city-panel, .city-task-form, .city-cluster-pop { animation: none; }
-  .city-toolbar, .city-meter-fill, .city-flip, .city-cluster { transition: none; }
+  .city-toolbar, .city-meter-fill, .city-flip, .city-cluster, .city-side { transition: none; }
 }
 /* The app's own Reduce motion setting (toggled on the view root). */
 .city-view.reduce-motion .city-bubble, .city-view.reduce-motion .city-help, .city-view.reduce-motion .city-panel, .city-view.reduce-motion .city-task-form, .city-view.reduce-motion .city-cluster-pop { animation: none; }
-.city-view.reduce-motion .city-toolbar, .city-view.reduce-motion .city-meter-fill, .city-view.reduce-motion .city-flip, .city-view.reduce-motion .city-cluster { transition: none; }
+.city-view.reduce-motion .city-toolbar, .city-view.reduce-motion .city-meter-fill, .city-view.reduce-motion .city-flip, .city-view.reduce-motion .city-cluster, .city-view.reduce-motion .city-side { transition: none; }

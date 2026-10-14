@@ -82,39 +82,49 @@ export function setBuildingNight(night) {
   MATERIALS.shop.emissiveIntensity = 0.35 + night * 1.1;
 }
 
-/* ---------- Spark underside palette ----------
- * Mirrored buildings for the DGX Spark city reuse the same Building code with
- * { mirror: true }: same footprint and height, original "Spark" look (graphite and
- * indigo bodies, glowing teal / lime circuit trims, emissive windows), no props, and a
- * handful of shared materials so the whole underside costs few programs and textures. */
-export const SPARK = { body: '#262c4a', panel: '#363e6b', dark: '#161a2b', pad: '#1d2238', glow: 'spark:glow', lime: 'spark:lime' };
+/* ---------- Spark side palette ----------
+ * Buildings for the DGX Spark city reuse the same Building code with { mirror: true }:
+ * same footprint and height, built on the island's other face (they hang below while This PC
+ * is up and stand upright once the island is turned over). Original toybox "Spark" look that
+ * leans toward a bright green: mint / white / teal / lime bodies with green circuit trims,
+ * light green-grey board, windows that read lit by day and glow at night, no props, and a
+ * handful of shared materials so the whole side costs few programs and textures. */
+export const SPARK_GREEN = '#76b900';
+export const SPARK = { body: '#c3efd9', panel: '#eef6e7', dark: '#2f5a3c', pad: '#d4e6c8', glow: 'spark:glow', lime: 'spark:lime' };
 const SPARK_SET = new Set(Object.values(SPARK));
+const sparkToon = (color, emissive, intensity) => sharedMat(toonMaterial(color, { emissive, emissiveIntensity: intensity, cache: false }));
+/** Resting body tones (mint, white, teal, lime-cream); a building keeps its tone for its lifetime. */
+const SPARK_BODIES = ['#c3efd9', '#f3f8ee', '#a9e3d6', '#dcf2b2'].map(color => sparkToon(color, '#123d1a', 0.12));
 export const SPARK_MATERIALS = {
-  body: sharedMat(toonMaterial(SPARK.body, { emissive: '#161a3c', emissiveIntensity: 0.55, cache: false })),
-  bodyActive: sharedMat(toonMaterial('#2e3566', { emissive: '#3a3fb4', emissiveIntensity: 0.5, cache: false })),
-  bodyHover: sharedMat(toonMaterial('#3a4280', { emissive: '#5b4bd6', emissiveIntensity: 0.55, cache: false })),
-  panel: sharedMat(toonMaterial(SPARK.panel, { emissive: '#12163a', emissiveIntensity: 0.45, cache: false })),
-  dark: sharedMat(toonMaterial(SPARK.dark, { emissive: '#0a0c1c', emissiveIntensity: 0.4, cache: false })),
-  pad: sharedMat(toonMaterial(SPARK.pad, { emissive: '#0d1026', emissiveIntensity: 0.45, cache: false })),
-  glow: sharedMat(toonMaterial('#1d7f73', { emissive: '#22c9ad', emissiveIntensity: 0.35, cache: false })),
-  glowActive: sharedMat(toonMaterial('#3ff0d0', { emissive: '#2ef2cf', emissiveIntensity: 1.1, cache: false })),
-  lime: sharedMat(toonMaterial('#5d7a24', { emissive: '#8fd12e', emissiveIntensity: 0.3, cache: false })),
-  limeActive: sharedMat(toonMaterial('#c8ff63', { emissive: '#b6ff3a', emissiveIntensity: 1.1, cache: false })),
-  winLit: sharedMat(toonMaterial('#4fc9b8', { emissive: '#1fb39c', emissiveIntensity: 0.4, cache: false })),
-  winLitActive: sharedMat(toonMaterial('#d8ff8a', { emissive: '#a8f046', emissiveIntensity: 1.25, cache: false })),
-  winDark: sharedMat(toonMaterial('#1a1f38', { emissive: '#0c0f26', emissiveIntensity: 0.3, cache: false })),
+  body: SPARK_BODIES[0],
+  bodyActive: sparkToon('#dcffa4', SPARK_GREEN, 0.4),
+  bodyHover: sparkToon('#eaffd6', '#9be04a', 0.42),
+  panel: sparkToon(SPARK.panel, '#123d1a', 0.08),
+  dark: sparkToon(SPARK.dark, '#0b2410', 0.22),
+  pad: sparkToon(SPARK.pad, '#123d1a', 0.08),
+  board: sparkToon('#c2d8b4', '#16361a', 0.12),
+  plot: sparkToon('#e0edd6', '#16361a', 0.06),
+  glow: sparkToon(SPARK_GREEN, SPARK_GREEN, 0.2),
+  glowActive: sparkToon('#b8ff3e', '#8fe000', 1.0),
+  lime: sparkToon('#c8ef58', '#a6e22e', 0.14),
+  limeActive: sparkToon('#e8ff80', '#c8ff3a', 1.0),
+  winLit: sparkToon('#effed6', '#9be04a', 0.34),
+  winLitActive: sparkToon('#fbffc6', '#c6ff4a', 1.1),
+  winDark: sparkToon('#46705a', '#0e2a1c', 0.22),
 };
-export const SPARK_SPARKS = ['#2ef2cf', '#b6ff3a', '#e9fff7'];
-/** Breathing glow for busy Spark buildings (shared materials: one update per frame for the whole underside). */
+export const SPARK_SPARKS = ['#b6ff3a', SPARK_GREEN, '#f3ffe0'];
+/** Breathing glow for busy Spark buildings and the day/night glow of the Spark side (shared
+ * materials: one update per frame for the whole side). */
 export function pulseSpark(elapsed, { reducedMotion = false, night = 0 } = {}) {
   const k = reducedMotion ? 0.6 : 0.5 + 0.5 * Math.sin(elapsed * 2.6);
   const M = SPARK_MATERIALS;
-  M.bodyActive.emissiveIntensity = 0.3 + k * 0.45;
-  M.glowActive.emissiveIntensity = 0.75 + k * 0.7 + night * 0.3;
-  M.limeActive.emissiveIntensity = 0.75 + k * 0.6 + night * 0.3;
-  M.winLitActive.emissiveIntensity = 0.95 + k * 0.5 + night * 0.4;
-  M.glow.emissiveIntensity = 0.3 + night * 0.35;
-  M.winLit.emissiveIntensity = 0.32 + night * 0.4;
+  M.bodyActive.emissiveIntensity = 0.24 + k * 0.4 + night * 0.15;
+  M.glowActive.emissiveIntensity = 0.7 + k * 0.7 + night * 0.3;
+  M.limeActive.emissiveIntensity = 0.7 + k * 0.6 + night * 0.3;
+  M.winLitActive.emissiveIntensity = 0.9 + k * 0.5 + night * 0.4;
+  M.glow.emissiveIntensity = 0.18 + night * 0.6;
+  M.lime.emissiveIntensity = 0.12 + night * 0.4;
+  M.winLit.emissiveIntensity = 0.3 + night * 0.95;
 }
 /** Collapse any facade colour onto the few Spark tones (dark, panel, or lime for bright accents). */
 function sparkTone(color) {
@@ -169,12 +179,15 @@ const easeIn = t => t * t * t;
 /* ---------- one building ---------- */
 export class Building {
   /** env: { particles, reducedMotion(), animateIn, stagger(), mirror?, deckY? }. With mirror the
-   * building lives in the Spark underside group (scale.y = -1 at deckY) and hangs downward. */
+   * building lives in the Spark side group: that group is turned a half turn about x at deckY
+   * (island space y = deckY - local y, z = -local z), so it hangs below the island while This PC
+   * is up and stands upright when the island is turned over. Its particles are the group's own. */
   constructor(project, cell, env) {
     this.id = project.id;
     this.cell = cell;
     this.env = env;
     this.mirror = Boolean(env.mirror);
+    if (this.mirror) this.sparkBase = SPARK_BODIES[Math.floor(seeded(`${project.id}:spark`)() * SPARK_BODIES.length)];
     const c = cellCenter(cell.i, cell.j);
     this.origin = { x: c.x, z: c.z + CZ };
     this.group = new THREE.Group(); this.group.name = `building:${project.id}`;
@@ -229,7 +242,7 @@ export class Building {
     const top = PAD_TOP + H;
     this.bodyMaterial = mirror ? this.sparkBody() : toonMaterial(s.body, { cache: false });
     const body = new THREE.Mesh(placed(rbox(W, H, D, 0.22), { y: PAD_TOP + H / 2 }), this.bodyMaterial);
-    body.castShadow = !mirror; body.receiveShadow = !mirror; body.userData = { ...tag };
+    body.castShadow = true; body.receiveShadow = true; body.userData = { ...tag };
     addOutline(body, { thickness: 0.06 });
     this.tower.add(body);
     this.body = body;
@@ -340,7 +353,7 @@ export class Building {
       batch.add('#7d6a5a', placed(new THREE.BoxGeometry(0.08, 0.5, 0.08), { x: W / 2 - 0.55, y: top + 0.25, z: D / 2 - 0.15 }));
       this.tower.add(sign);
     }
-    const parts = batch.build(this.tower, mirror ? { tag, cast: false, receive: false, materialFor: tone => sparkMaterial(tone, this.active) } : { tag });
+    const parts = batch.build(this.tower, mirror ? { tag, materialFor: tone => sparkMaterial(tone, this.active) } : { tag });
     if (mirror) this.paintMeshes = parts;
     this.pickables.push(body, ...parts);
     this.roofTop = roofTop;
@@ -357,14 +370,14 @@ export class Building {
     this.buildWindows();
   }
 
-  /* Spark underside: shared materials swap with hover / busy state. */
-  sparkBody() { const M = SPARK_MATERIALS; return this.hover ? M.bodyHover : this.active ? M.bodyActive : M.body; }
+  /* Spark side: shared materials swap with hover / busy state. */
+  sparkBody() { const M = SPARK_MATERIALS; return this.hover ? M.bodyHover : this.active ? M.bodyActive : this.sparkBase || M.body; }
   paintSpark() {
     if (this.body) this.body.material = this.bodyMaterial = this.sparkBody();
     for (const mesh of this.paintMeshes || []) mesh.material = sparkMaterial(mesh.userData.paint, this.active);
     if (this.litWindows) this.litWindows.material = this.active ? SPARK_MATERIALS.winLitActive : SPARK_MATERIALS.winLit;
   }
-  /** A compact crane rig on the (downward-facing) roof of a busy Spark building. */
+  /** A compact crane rig on the roof of a busy Spark building. */
   buildRig() {
     if (this.scaffold) { this.tower.remove(this.scaffold); disposeObject(this.scaffold); }
     const { W, D, H } = this.size, M = SPARK_MATERIALS;
@@ -435,7 +448,7 @@ export class Building {
     for (const child of [...this.padGroup.children]) { this.padGroup.remove(child); disposeObject(child); }
     const { W, D } = this.size;
     const pad = new THREE.Mesh(placed(new RoundedBoxGeometry(W + 1.2, 0.14, D + 1.2, 1, 0.12), { y: GROUND_Y + 0.05 }), this.mirror ? SPARK_MATERIALS.pad : MATERIALS.pad);
-    pad.receiveShadow = !this.mirror; pad.userData = this.mirror ? { sparkBuildingId: this.id } : { buildingId: this.id };
+    pad.receiveShadow = true; pad.userData = this.mirror ? { sparkBuildingId: this.id } : { buildingId: this.id };
     addOutline(pad, { thickness: 0.03 });
     this.padGroup.add(pad);
     this.pad = pad;
@@ -493,11 +506,15 @@ export class Building {
     this.removing = true;
     if (this.env.reducedMotion()) { this.anim = { kind: 'sink', t: 1 }; return; }
     this.anim = { kind: 'sink', t: 0 };
-    if (!this.mirror) this.env.particles.emit('dust', this.worldPoint(0, PAD_TOP + 0.4, 0), 18, { spread: this.size.W });
+    if (!this.mirror) this.env.particles.emit('dust', this.localPoint(0, PAD_TOP + 0.4, 0), 18, { spread: this.size.W });
   }
 
-  /* World-space helpers for NPCs and overlays (mirror-aware: underside points hang below the deck). */
-  worldPoint(x, y, z) { return new THREE.Vector3(this.origin.x + x, this.mirror ? (this.env.deckY || 0) - y : y, this.origin.z + z); }
+  /* Points for NPCs, overlays and particles.
+   * localPoint: in the parent group (where this building's particles live).
+   * worldPoint: in island space (world.land); Spark points hang below the deck while This PC is up.
+   * The view turns island space into world space (world.toWorld) for the camera and HTML overlays. */
+  localPoint(x, y, z) { return new THREE.Vector3(this.origin.x + x, y, this.origin.z + z); }
+  worldPoint(x, y, z) { return this.mirror ? new THREE.Vector3(this.origin.x + x, (this.env.deckY || 0) - y, -(this.origin.z + z)) : this.localPoint(x, y, z); }
   topPoint() { return this.worldPoint(0, (this.roofTop || PAD_TOP + this.size.H) * this.tower.scale.y + 0.6, 0); }
   get center() { return { x: this.origin.x, z: this.origin.z }; }
   get door() { return { x: this.origin.x, z: this.origin.z + this.size.D / 2 + 0.3 }; }
@@ -517,7 +534,7 @@ export class Building {
       const a = this.anim;
       if (a.delay > 0) { a.delay -= dt; return true; }
       if (a.kind === 'rise') {
-        if (a.t === 0 && !this.mirror) env.particles.emit('dust', this.worldPoint(0, PAD_TOP + 0.3, 0), 22, { spread: this.size.W });
+        if (a.t === 0 && !this.mirror) env.particles.emit('dust', this.localPoint(0, PAD_TOP + 0.3, 0), 22, { spread: this.size.W });
         a.t = Math.min(1, a.t + dt / 1.1);
         this.tower.scale.y = Math.max(0.02, easeOutBack(a.t));
         this.padGroup.scale.setScalar(0.6 + 0.4 * Math.min(1, a.t * 2.5));
@@ -525,7 +542,7 @@ export class Building {
       } else if (a.kind === 'grow') {
         a.t += dt;
         this.tower.scale.y = 1 + (a.from - 1) * Math.exp(-4.5 * a.t) * Math.cos(10 * a.t);
-        if (a.up && !this.mirror && a.t < 0.6 && Math.random() < dt * 30) env.particles.emit('sparkle', this.topPoint(), 2, { spread: this.size.W });
+        if (a.up && !this.mirror && a.t < 0.6 && Math.random() < dt * 30) env.particles.emit('sparkle', this.localPoint(0, (this.roofTop || PAD_TOP + this.size.H) * this.tower.scale.y + 0.6, 0), 2, { spread: this.size.W });
         if (a.t > 1.4) { this.tower.scale.y = 1; this.anim = null; }
       } else if (a.kind === 'sink') {
         a.t = Math.min(1, a.t + dt / 0.9);
@@ -542,14 +559,15 @@ export class Building {
     if (this.jib) this.jib.rotation.y = Math.sin(elapsed * 0.35 + this.origin.x) * 1.2;
     if (env.particles.enabled && !this.removing) {
       this.elapsedEmit += dt;
-      if (this.chimneyTop && Math.random() < dt * 1.6) env.particles.emit('smoke', this.worldPoint(this.chimneyTop.x, this.chimneyTop.y * this.tower.scale.y, this.chimneyTop.z), 1, { spread: 0.25 });
-      // Busy Spark buildings shed a few teal / lime sparks from their rig; they fall away into the sky.
-      if (this.rigTip && Math.random() < dt * 2.4) env.particles.emit('spark', this.worldPoint(this.rigTip.x, this.rigTip.y * this.tower.scale.y, this.rigTip.z), 3, { spread: 0.3, colors: SPARK_SPARKS });
+      if (this.chimneyTop && Math.random() < dt * 1.6) env.particles.emit('smoke', this.localPoint(this.chimneyTop.x, this.chimneyTop.y * this.tower.scale.y, this.chimneyTop.z), 1, { spread: 0.25 });
+      // Busy Spark buildings shed a few green / lime sparks from their rig (into the Spark group's own particles,
+      // so they fall back toward the Spark deck whichever way the island is turned).
+      if (this.rigTip && Math.random() < dt * 2.4) env.particles.emit('spark', this.localPoint(this.rigTip.x, this.rigTip.y * this.tower.scale.y, this.rigTip.z), 3, { spread: 0.3, colors: SPARK_SPARKS });
       if (this.active && this.scaffoldFront && this.elapsedEmit > 0.28) {
         this.elapsedEmit = 0;
         const f = this.scaffoldFront;
         const y = f.y0 + 0.9 + Math.floor(Math.random() * Math.max(1, (f.top - f.y0) / (FH * 1.5))) * FH * 1.5;
-        env.particles.emit('spark', this.worldPoint((Math.random() - 0.5) * f.width * 0.8, y + 0.15, f.z), 6, { spread: 0.2 });
+        env.particles.emit('spark', this.localPoint((Math.random() - 0.5) * f.width * 0.8, y + 0.15, f.z), 6, { spread: 0.2 });
       }
     }
     return true;
