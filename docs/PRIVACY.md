@@ -1,9 +1,10 @@
 # CodaClauda privacy and local data
 
 CodaClauda is a DeloresAI desktop utility for owner-authorized coordination between
-Claude Code and Codex. This document describes the 0.2 release candidate. Its
-new update flow requires separate installed acceptance before release; source
-documentation alone does not establish publication or Marketplace admission.
+Claude Code and Codex. This document describes the 0.3 source implementation,
+including the preserved Classic tools. Source review does not establish native
+acceptance, publication or Marketplace admission; the candidate remains subject
+to installed checks and the owner's release approval.
 
 ## Data used for a request
 
@@ -35,6 +36,26 @@ offline or wholly on-device model workflow. Claude Code and Codex are separately
 installed products with their own accounts, subscriptions, policies and retention.
 CodaClauda bundles no model and does not require direct API credits as a fallback.
 
+In the new Chat view, Mailbox mode remains passive. The separate Live mode starts
+a fresh dedicated read-only request for every send, rather than attaching to an
+existing conversation or keeping one provider session alive. It includes up to
+12 recent UI messages, truncated to 4,000 characters each, plus bounded attachment
+text or saved local paths. The combined prompt is capped at 200,000 characters.
+Previously displayed conversation text can therefore be sent again as context.
+Polling a running request reads its receipts; it does not resume a provider.
+
+Files attached in Chat are copied locally before sending. Small text attachments
+may be included in the mailbox body or dedicated provider prompt; other files
+are referenced by saved path. Overlong mailbox text can also be saved as a file
+with a preview and local path in the message. A recipient agent may read those
+files under its own permissions and provider policies. The mailbox credential
+scan does not scan attachment bytes or desktop UI state: never attach secrets.
+
+Markdown, code and math rendering use bundled libraries rather than a CDN.
+Remote image previews are suppressed; following an HTTP(S) link opens the system
+browser and contacts the chosen site under that browser's settings. Rendering
+and sanitization do not change the rule that message content is untrusted.
+
 Optional DGXBridge can transfer authorized project/build data to the
 owner's configured compute target. It manages its own execution, networking,
 logs, caches and retention. Its supported installed integration and shared-job
@@ -62,16 +83,75 @@ The mailbox uses its own file and lock and does not migrate legacy request data.
 Its body limit is 32 KiB of UTF-8. Recognized credential patterns are refused
 before storage, but the scan cannot recognize every secret: never post credentials.
 
+The 0.3 desktop writes `<board>/desktop-ui/ui-state.json`, including UI chat
+copies, linked project metadata, agent display preferences, task overrides,
+avatar parameters, avatar-request references, City layout and preferences.
+It falls back to WebView localStorage if native UI-state access fails. State is
+limited to 8 MiB; the optional `desktop-ui/projects.manifest.json` is limited to
+2 MiB. The manifest can provide linked folders and a GitHub user for subsequent
+metadata discovery/refresh. Attachment copies, up to 25 MiB each, are stored
+under `desktop-ui/attachments/<date>/` with unique sanitized filenames.
+
+Desktop state, WebView localStorage and attachment copies have no automatic
+expiry. The mailbox's 30-day pruning does not purge those copies or the legacy
+request history. Deleting a Live chat from the UI removes that UI thread, not
+its underlying requests or saved attachments. A board backup can therefore
+include private text and files that no longer appear in a mailbox inbox.
+
 Before deleting local data, stop active requests and close CodaClauda, then
 preserve any unmerged worktrees or receipts you need. Remove the selected board
 directory using your normal filesystem tools when you intend to erase that
-board. Removing CodaClauda's data does not remove the independent histories or
-data retained by Claude Code, Codex, their services or DGXBridge. This
+board. WebView's separately stored UI-state fallback must also be removed when
+erasing all desktop history. Removing CodaClauda's data does not remove the
+independent histories or data retained by Claude Code, Codex, GitHub, speech
+services or DGXBridge. This
 version does not promise that uninstalling the app deletes the board.
 
 Do not publish local state, private receipts or provider transcripts as release
 evidence. Public screenshots and evidence need a separate review for personal
 information, private project content, tokens and pairing secrets.
+
+## Projects, GitHub, avatars and dictation
+
+Project discovery and scans run locally. Scans count filesystem metadata within
+file and time budgets. The fallback directory walk also has a depth limit and
+skips common generated directories and entries reported as symlinks; Git-tracked
+scans can count tracked generated files. Cloud-placeholder metadata is allowed.
+The file walk does not read source contents. Optional Git commands return
+tracked paths, branch/status/history and remote metadata.
+Displayed line counts are estimates derived from file sizes. Linked paths and
+scan results can be saved in desktop state; linking a folder does not itself
+grant a provider permission to edit it.
+
+GitHub lookup/refresh uses the installed `gh` CLI and its existing sign-in. When
+a public username is supplied and gh lookup fails, an anonymous request to
+`https://api.github.com` can list that user's public repositories. Signed-in gh
+may return private repository metadata accessible to the account. Explicit
+repository creation sends the chosen name, description and visibility to GitHub
+and clones the repository locally; cloning downloads files into a new child
+folder beneath the selected parent. These are real remote/local changes, not
+only UI entries. An ambiguous timeout or partial creation must be checked before
+retrying. CodaClauda does not import or copy gh credentials. Git/gh may use the
+owner's configured GitHub transport and have their own networking behavior.
+
+Avatar editing and local photo matching run on the device. Photo matching uses
+image analysis to suggest editable colors/features, not a bundled generative
+model or identity verification. The local suggestion does not upload the photo.
+Choosing to ask an agent for help saves a copy and posts its path and current
+avatar parameters to that address's mailbox; a reading agent follows its own
+provider policies. Applying a returned avatar remains an owner action.
+
+Dictation invokes Windows voice typing, with browser SpeechRecognition fallback
+where supported. Availability, microphone permissions, audio processing,
+network access and retention follow that operating-system/browser speech service.
+This is not a bundled offline speech model, and offline transcription is not
+guaranteed. Recognized text enters the composer and follows the selected chat
+mode's storage and delivery rules when sent.
+
+Local mailbox delivery, saved project views and avatar editing can work without
+a network. Provider work, GitHub operations, update acquisition and some speech
+services require network access. There is no guarantee that all app features or
+their external dependencies operate offline.
 
 ## Credentials and local transport
 
@@ -112,12 +192,14 @@ apply to the selected state directory and the owner's other local processes.
 ## Telemetry, dependencies and updates
 
 CodaClauda adds no independent analytics or telemetry. External provider CLIs,
-their services, Git, Microsoft Edge WebView2 and optional DGXBridge retain
+their services, Git/gh, GitHub, speech services, Microsoft Edge WebView2 and optional DGXBridge retain
 their own settings and policies. Provider account and usage statements should be
 checked with those services; a locally reported cost estimate is not an invoice.
 
-The Windows GUI requires Microsoft Edge WebView2 to be installed separately.
-The 0.2 updater contacts `deloresai.com` to discover accepted stable CodaClauda
+The Windows GUI requires Microsoft Edge WebView2 to be installed separately;
+its 3D City and avatar preview use WebGL graphics support. The bundled UI
+libraries do not download model weights. The updater in Classic tools contacts
+`deloresai.com` to discover accepted stable CodaClauda
 releases. Checking sends the app identifier and the normal network information
 needed for HTTPS; it sends no coordination prompts, project files or provider
 credentials. Download authorization opens the system browser for the owner's
@@ -131,7 +213,8 @@ the update workflow; an interrupted or ambiguous operation is not retried silent
 Expired authorization requires approval again. The updater does not fall back to
 unsigned metadata or a direct GitHub installer download.
 
-The installer preserves the selected coordination board, connections and history.
+The installer is designed to preserve the selected coordination board,
+connections and history; the 0.3 rename upgrade requires its own installed receipt.
 Provider CLIs and optional DGXBridge manage their own updates independently. Before
 replacement or rollback, stop active requests and preserve local state and
 unmerged work. Backward compatibility with an older release is not assumed.

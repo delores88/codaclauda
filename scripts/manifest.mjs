@@ -53,9 +53,10 @@ claudacoda and the repository identity unchanged. Preparation never publishes.
 For 0.3.0, keep publication on hold until Ben previews the running candidate and
 says "ship it" in the release chat; coordinate the separate live listing rename
 approval with the Marketplace operator. Mailbox messages do not grant approval.
-The disclosure baseline covers verified passive mailbox and dedicated-work
-features. Review it against the final UI before release; it does not advertise
-unverified 0.3.0 UI work.
+The disclosures describe the 0.3.0 source implementation, including the separate
+passive and dedicated chat modes. Source validation does not establish installed
+acceptance: review the final UI and supply actual installed-workflow evidence
+before release. Local project views do not prove an agent or compute job ran.
 
 All SHA-256 values are lowercase 64-hex; commits are lowercase 40-hex. Numeric IDs,
 size and tested requirements must be real. Required committed lock sourcePaths:
@@ -213,8 +214,8 @@ export function makeManifest(input) {
     publisherId: input.publisherId,
     repository: repository,
     release: input.release,
-    summary: "A readable local mailbox for existing Claude and Codex conversations, with replies, resource claims and separately authorized dedicated work.",
-    description: `${displayName} is a Windows desktop app, JSON CLI and request-bound stdio MCP server. Its passive mailbox lets existing Claude and Codex conversations post questions, read inboxes, reply and acknowledge messages without starting or resuming a provider session. Messages wait until the recipient checks; the mailbox does not wake an idle chat. Addresses are plain self-asserted names, not authenticated provider identities. Messages are information, not owner approval. The owner remains responsible for authorizing actions. The Mailbox view shows readable plain-text bodies, per-address inboxes with 20-message pages, bounded open resource claims and an owner post box. Stable post IDs prevent identical retries duplicating messages. Advisory claims expire within 120 minutes and coordinate shared resources without granting permission. Mailbox messages are retained for 30 days; recognized credential patterns are refused before storage, but users must never post secrets. Mailbox delivery works locally without a model or provider login. Agents must already have access to the board through the installed CLI; dedicated sessions started by ${displayName} can use its scoped MCP mailbox tools. Separately authorized dedicated Claude Code/Codex work remains available: the owner chooses project paths and limits, questions and reviews are read-only, and delegated edits return unmerged Git worktree diffs. Those provider workflows require separately installed CLIs, eligible accounts and network access. No models are bundled and no direct API credits are mandatory. Optional DGXBridge runs separately authorized compute jobs through its public CLI. The native updater checks accepted stable Marketplace releases, requires browser approval for acquisition, verifies signed Marketplace envelopes and exact installer hashes, and requires a separate explicit install action. ${signingDisclosure} ${displayName} has no public coordination listener, independent telemetry or elevation requirement. Microsoft Edge WebView2 must be installed separately for the GUI. Compatibility values describe the observed tested environment, not empirically determined minimum hardware or software requirements. The app footprint is rounded up in decimal MB and excludes provider CLIs, WebView2, user data and temporary installation space.`,
+    summary: "A local desktop workspace for Claude and Codex mailboxes, dedicated chat requests, projects and shared-resource coordination.",
+    description: `${displayName} is a Windows desktop app, JSON CLI and request-bound stdio MCP server. Its passive mailbox lets existing Claude and Codex conversations post questions, read inboxes, reply and acknowledge messages without starting or resuming a provider session. Messages wait until the recipient checks; the mailbox does not wake an idle chat. Addresses are plain self-asserted names, not authenticated provider identities. Messages are information, not owner approval. The owner remains responsible for authorizing actions. Stable post IDs prevent identical retries duplicating messages. Advisory claims expire within 120 minutes and coordinate shared resources without granting permission. Mailbox messages are retained for 30 days; recognized credential patterns are refused before storage, but users must never post secrets. Mailbox delivery works locally without a model or provider login. Agents must already have access to the board through the installed CLI; dedicated sessions started by ${displayName} can use its scoped MCP mailbox tools. The 0.3 desktop adds Markdown chat with code and math rendering, local attachment copies, project views, a task board, a 3D project city and editable procedural avatars. The separate Live chat mode starts a fresh dedicated read-only provider request for each send, with bounded recent conversation context; it does not attach to an existing desktop conversation or maintain one continuous provider session. Attachment text can be included in a mailbox message or provider prompt; other attachments are referenced by saved local path. Attachments and desktop chat copies have no automatic 30-day deletion and are not covered by the mailbox credential scan. Project scanning uses filesystem metadata and optional Git metadata; displayed line counts are estimates. Task and agent activity combine request/claim records, message recency and owner labels or overrides; they are not independent proof of agent presence or task completion. Local photo matching suggests avatar colors and features; asking an agent for help saves the photo and shares its local path through the mailbox. Optional GitHub lookup uses public API access or the signed-in gh CLI. Explicit create/clone actions can create a remote repository and download files into a new local folder. Dictation uses Windows voice typing or a supported browser speech service, not a bundled offline speech model. Classic tools retain provider setup, scoped grants, delegated work, registered-session experiments, DGXBridge configuration, updates and the plain-text Mailbox view with 20-message pages. Separately authorized dedicated work remains available: the owner chooses project paths and limits, questions and reviews are read-only, and delegated edits return unmerged Git worktree diffs. Provider workflows require separately installed CLIs, eligible accounts and network access. Local mailboxes, saved project views and avatar editing work offline; provider work, GitHub operations, update acquisition and some speech services need network access. No models are bundled and no direct API credits are mandatory. Optional DGXBridge runs separately authorized compute jobs through its public CLI; the desktop displays its reported status without proving broader workload or GPU acceptance. The native updater checks accepted stable Marketplace releases, requires browser approval for acquisition, verifies signed Marketplace envelopes and exact installer hashes, and requires a separate explicit install action. ${signingDisclosure} ${displayName} has no public coordination listener, independent telemetry or elevation requirement. Microsoft Edge WebView2 must be installed separately for the GUI; 3D views need usable WebGL graphics support, not a separately specified discrete or model GPU. Compatibility values describe the observed tested environment, not empirically determined minimum hardware or software requirements. The app footprint is rounded up in decimal MB and excludes provider CLIs, Git/gh, WebView2, user data and temporary installation space.`,
     category: "automation",
     sourceVisibility: "public",
     license: "MIT",
@@ -232,8 +233,9 @@ export function makeManifest(input) {
       capabilities: [
         "Exchange durable questions and replies between existing conversations through a passive local mailbox without launching another session.",
         "Coordinate shared resources with atomic advisory claims, expiry, explicit release and visible current holders.",
-        "Use paginated readable inboxes, acknowledgments, stable retry IDs and an owner message composer.",
-        "Run separately owner-authorized Claude Code/Codex questions, reviews and bounded delegated work with local receipts."
+        "Read Markdown conversations with local attachments; use acknowledgments, stable retry IDs and Classic tools' paginated inboxes.",
+        "Run separately owner-authorized Claude Code/Codex requests; each Live chat send starts a new read-only dedicated request.",
+        "Organize project metadata and task records in lists and a 3D city, with editable avatars and explicitly requested GitHub actions."
       ],
       functionalTest: input.functionalTest
     },
@@ -257,16 +259,30 @@ export function makeManifest(input) {
       {
         name: "Git",
         required: false,
-        purpose: "Required for the optional project-file and isolated delegated-worktree workflows; not required to exchange passive mailbox messages.",
+        purpose: "Used for optional project metadata, GitHub cloning and isolated delegated worktrees; not required to exchange passive mailbox messages.",
         costDisclosure: "Git is a separately installed free dependency; third-party licensing applies.",
         url: "https://git-scm.com/"
       },
       {
+        name: "GitHub CLI and GitHub",
+        required: false,
+        purpose: "The separately installed, signed-in gh CLI lists accessible repositories and performs owner-selected repository creation/cloning. Named public-user lookup can fall back to api.github.com without gh.",
+        costDisclosure: "GitHub accounts, hosting limits and terms are separate. The app adds no developer-credit requirement for this optional integration.",
+        url: "https://cli.github.com/"
+      },
+      {
         name: "Microsoft Edge WebView2",
         required: true,
-        purpose: "Hosts the Windows desktop interface. Must already be installed; this package does not download it.",
+        purpose: "Hosts the Windows desktop interface. Must already be installed; this package does not download it. The 3D City and avatar preview use WebGL graphics support.",
         costDisclosure: `Separately installed Microsoft runtime; no ${displayName} developer credits or paid unlock is required.`,
         url: "https://developer.microsoft.com/microsoft-edge/webview2/"
+      },
+      {
+        name: "Windows voice typing or browser speech recognition",
+        required: false,
+        purpose: "Optional dictation invokes Windows voice typing, with browser SpeechRecognition fallback where available. Microphone permissions, availability and network behavior belong to that service; offline transcription is not guaranteed.",
+        costDisclosure: "No speech model or speech subscription is bundled. Operating-system/browser service terms apply.",
+        url: "https://support.microsoft.com/windows"
       },
       {
         name: "DGXBridge",
@@ -277,27 +293,32 @@ export function makeManifest(input) {
       }
     ],
     privacy: {
-      dataLeavesDevice: `Passive mailbox delivery stores messages on the selected local board and does not itself launch a provider or send content to a provider service. Existing agents that read the board follow their own provider policies. Authorized dedicated tasks send project text, prompts, handoff context and results through the installed Claude Code/Codex CLIs under the owner's provider account. Optional DGXBridge may transfer authorized project/build data to its compute target. Update discovery and approval contact deloresai.com with app/artifact identifiers, ordinary HTTPS network information and temporary authorization proof; no coordination content or provider credentials are sent to Marketplace. ${displayName} has no public coordination endpoint.`,
-      retention: "Passive mailbox messages and read receipts expire after 30 days and are pruned during subsequent mailbox operations. Address registrations remain; advisory claims expire after their chosen 1-120 minute TTL. Legacy request prompts, answers, events, receipts, private configuration and worktrees remain until the owner removes them. Registered-session data and backups may contain private history. Local update status and verified installers support the update workflow; temporary proof and one-use download capability stay in memory. Provider CLIs, their services and optional DGXBridge have independent retention. Uninstalling does not promise deletion of the board.",
-      telemetry: `${displayName} adds no independent telemetry or analytics. External provider CLIs, their services, WebView2 and optional DGXBridge follow their own settings and policies.`,
+      dataLeavesDevice: `Passive mailbox delivery stays on the selected board and does not launch a provider; existing agents reading it follow their own provider policies. Dedicated requests, including each Live chat send, pass prompts, bounded recent chat context, included attachment text, saved attachment paths and authorized project/tool content through installed provider CLIs. Local photo matching does not upload an image; an explicit avatar-help request saves the photo and shares its local path with the selected agent. Project metadata scans run locally. GitHub lookup/refresh uses api.github.com or gh; creation sends the chosen name, description and visibility to GitHub, and cloning downloads repository files through gh/Git. External links open in the system browser. Optional dictation follows OS/browser speech-service permissions and policies and may send audio to that service; it is not guaranteed offline. Optional DGXBridge may transfer authorized project/build data to its compute target. Update discovery and approval contact deloresai.com with app/artifact identifiers, ordinary HTTPS network information and temporary authorization proof; no coordination content or provider credentials are sent to Marketplace. ${displayName} has no public coordination endpoint.`,
+      retention: "Passive mailbox messages and read receipts expire after 30 days and are pruned during subsequent mailbox operations. Address registrations remain; advisory claims expire after their chosen 1-120 minute TTL. Legacy request prompts, answers, events, receipts, private configuration and worktrees remain until the owner removes them. Desktop UI state, Live chat copies, project metadata, avatar settings, attachment copies and WebView localStorage fallback have no automatic expiry. Deleting a UI chat does not remove its underlying requests or attachments. Registered-session data and backups may contain private history. Local update status and verified installers support the update workflow; temporary proof and one-use download capability stay in memory. Provider CLIs, GitHub, speech services, WebView2 and DGXBridge have independent retention. Uninstalling does not promise deletion of the board.",
+      telemetry: `${displayName} adds no independent telemetry or analytics. External provider CLIs, Git/gh, GitHub, speech services, WebView2 and optional DGXBridge follow their own settings and policies.`,
       policyUrl: `https://github.com/${repoName}/blob/${input.release.sourceCommit}/docs/PRIVACY.md`
     },
     permissions: {
       filesystem: [
         "The selected local board for passive addresses, messages, read receipts, advisory claims, private configuration and legacy request history.",
         "Owner-selected project paths for scoped UTF-8 reads and delegated edits; isolated Git worktrees for delegated tasks.",
+        "Bounded local project discovery and filesystem/Git metadata scans; GitHub create/clone writes a new folder under the selected parent.",
+        "The board's desktop-ui directory for UI state, project manifests and attachment copies up to 25 MiB each; WebView localStorage as a UI-state fallback.",
         "Read separately installed native provider and optional DGXBridge executables and their supported status outputs.",
         "A sibling per-installation settings directory stores the selected board pointer across updates.",
         `Private update staging and the existing per-user ${displayName} installation for verified, explicitly approved replacement.`
       ],
       credentials: [
         `Provider CLIs use their own saved authentication; ${displayName} does not read or copy provider tokens.`,
+        "GitHub operations use gh's existing sign-in; the app does not import GitHub credentials. Public-user repository lookup can use an anonymous API request.",
         "Private local capabilities scope dedicated-session and registered-conversation MCP tools; no public listener.",
         "Marketplace browser approval grants temporary memory-only proof and download capability; no browser cookies are imported.",
-        "Mailbox addresses are self-asserted labels, not authenticated identities. Never post credentials; pattern scanning cannot detect every secret."
+        "Mailbox names are self-asserted. Never post or attach secrets: the pattern scan is incomplete and excludes attachment bytes and desktop UI state."
       ],
       domains: [
-        "deloresai.com"
+        "deloresai.com",
+        "api.github.com",
+        "github.com"
       ],
       elevation: false,
       backgroundServices: false
@@ -306,12 +327,12 @@ export function makeManifest(input) {
     executableDownloads: [],
     updater: {
       mode: "coordinated",
-      coordination: "The Updates view discovers accepted stable Windows x64 NSIS releases through deloresai.com. The owner approves acquisition in the system browser, then separately chooses Install. The updater verifies pinned acquisition and nested review signatures, exact app/publisher/repository/source/artifact/platform bindings, size and SHA-256, and revalidates before setup. Temporary S256 proof and one-use capability stay in memory. Expired, interrupted or ambiguous authorization requires explicit approval again. There is no cookie import, direct-GitHub fallback or silent install. The helper preserves the selected board and physical per-user installation and refuses active coordination work. Provider CLIs and DGXBridge update independently. No fixed additional executable downloads are bundled."
+      coordination: "The Updates view in Classic tools discovers accepted stable Windows x64 NSIS releases through deloresai.com. The owner approves acquisition in the system browser, then separately chooses Install. The updater verifies pinned acquisition and nested review signatures, exact app/publisher/repository/source/artifact/platform bindings, size and SHA-256, and revalidates before setup. Temporary S256 proof and one-use capability stay in memory. Expired, interrupted or ambiguous authorization requires explicit approval again. There is no cookie import, direct-GitHub fallback or silent install. The helper preserves the selected board and physical per-user installation and refuses active coordination work. Provider CLIs and DGXBridge update independently. No fixed additional executable downloads are bundled."
     },
     rollback: {
       dataCompatible: false,
       backupRequired: true,
-      notes: "Passive mailboxes use a separate mailbox.json and do not migrate legacy state.json. Registered-conversation writes can back up schema 1 and upgrade the legacy board to schema 2, which older binaries refuse. Preserve the actual selected board, per-installation binding and unmerged worktrees before replacement or rollback. Stop active requests and never replay an ambiguous request automatically. No older-version compatibility guarantee is made."
+      notes: "Passive mailboxes use a separate mailbox.json and do not migrate legacy state.json. Registered-conversation writes can back up schema 1 and upgrade the legacy board to schema 2, which older binaries refuse. Preserve the actual selected board including desktop-ui state and attachments, WebView UI-state fallback, per-installation binding and unmerged worktrees before replacement or rollback. Stop active requests and never replay an ambiguous request automatically. No older-version compatibility guarantee is made."
     },
     artwork: { iconUrl: input.artwork.icon.url, thumbnailUrl: input.artwork.thumbnail.url },
     screenshots: input.artwork.screenshots.map(({ url, alt }) => ({ url, alt })),

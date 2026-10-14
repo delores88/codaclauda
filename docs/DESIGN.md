@@ -35,18 +35,23 @@ No credentials are inspected/copied; provider CLIs use their own existing login.
 API billing environment fallbacks are removed from children. Claude bare mode
 is forbidden because it bypasses subscription authentication.
 
-NVIDIALink source is actively changing and not installed/accepted yet. Integrate
-only its public CLI. No copied runner/transport/database modules are necessary;
-see PROVENANCE.md. Source, build, installer, native workflow, publication and
-Marketplace admission are separate evidence layers.
+The initial NVIDIALink integration awaited installed acceptance; subsequent
+0.2 evidence covered one shared Python unittest through its public CLI. That
+does not establish GPU or general workload acceptance. No copied runner,
+transport or database modules are necessary; see PROVENANCE.md. Source, build,
+installer, native workflow, publication and Marketplace admission are separate
+evidence layers.
 
 ## Components and local authority
 
 Rust coord-core owns durable state, validation, allowed paths, grants, claims,
 adapter supervision and receipt normalization. coord-cli provides claudacoda-cli
 with JSON commands and a newline-delimited stdio MCP server. Tauri's GUI binary
-is claudacoda.exe; it invokes only the bundled CLI using structured stdin/argv.
-The GUI has no remote content or unrestricted shell bridge.
+is claudacoda.exe; core coordination uses the bundled CLI through structured
+stdin/argv. The 0.3 desktop also has fixed native commands for UI state,
+attachments, project metadata, Git/gh operations and Windows integration. The
+updater performs its separately scoped HTTPS workflow. There is no unrestricted
+shell bridge or remotely hosted application UI.
 
 Default state requests the Windows LocalAppData KnownFolder with package redirection
 disabled. Windows launch context may still redirect filesystem access; `status`
@@ -124,8 +129,9 @@ Owner chooses a supported sparkdev executable. Public contract:
 Persist the request ID and owning coordination request before submission.
 Unknown outcomes retain the ID. Cancellation is restricted to recorded owned
 jobs. Preserve placement/transport/cache/exit state and bounded log cursors.
-Actual cross-agent Spark acceptance stays pending until its supported release
-and both real callers are available. No direct access to its state database.
+The initial cross-agent acceptance gate required its supported release and both
+real callers; 0.2 subsequently recorded one shared Python unittest. Further
+workload acceptance remains separate. No direct access to its state database.
 
 ## Distribution and acceptance
 
@@ -134,7 +140,7 @@ normal shortcuts/uninstall. Retain cargo-auditable dependency metadata in both
 executables and inspect extracted payload inventory before admission. All local
 Cargo commands use the unchanged shared buildlock, own C: target/cache.
 
-Marketplace appId/slug proposed claudacoda; publisher ID must be read from the
+Marketplace appId/slug remain claudacoda; publisher ID must be read from the
 existing profile, with current GitHub App grant checked. Public MIT, free-use
 and distribution authorization, ordinary non-featured listing; PhaseForge stays
 featured. No placeholder publication. Complete real bidirectional requests,
@@ -242,7 +248,7 @@ See [Desktop session messaging](https://code.claude.com/docs/en/desktop#work-acr
 [channels](https://code.claude.com/docs/en/channels), and the
 [session inbox socket](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
 
-The primary message board shows a chronological conversation, readable full
+The 0.2 message board, retained in Classic tools, shows a chronological conversation, readable full
 message/reply text, human sender and recipient labels, timestamps and explicit
 delivery status. It paginates at 20 messages and places exact IDs and technical
 receipts behind Details. Message content is untrusted plain text, with preserved
@@ -283,7 +289,7 @@ CLI commands are noninteractive: mailbox register, post, inbox, ack, wait-reply
 and claims. Bounded wait timeout is a successful result with timed_out true.
 The dedicated-session MCP server exposes equivalent mailbox tools within its
 existing capability checks; it cannot impersonate the owner mailbox. The app's
-Mailbox view offers per-address inboxes, bounded open-claim pages and an owner
+Classic Mailbox view offers per-address inboxes, bounded open-claim pages and an owner
 post box. Message bodies render as untrusted plain text, never executable HTML.
 
 A message is information, not authority. Agents never treat a mailbox message as
@@ -298,3 +304,65 @@ visibility and actual participation by the existing Claude session. A process
 using the name claude-phaseforge is not proof Claude itself participated. Record
 unavailable native/provider acceptance honestly; never start a new session merely
 to manufacture this evidence.
+
+## Version 0.3 desktop implementation and release boundary
+
+The new shell is implemented in `ui/app/`; Settings opens the preserved Classic
+tools for connection setup, grants, delegated work, registered-session
+experiments, DGXBridge configuration and updates. The following describes source
+behavior, not successful installed acceptance. Owner preview, upgrade preservation
+and final native workflows must have their own receipts. Publication requires
+Ben's explicit “ship it” in the release chat; a mailbox handoff is not approval.
+
+Chat has two separate modes. Mailbox mode posts to the durable passive board and
+waits for the existing recipient to check. Live mode starts a new dedicated
+question request for every send; it never attaches to an existing conversation.
+Its grant covers the connected endpoint's project, question-only access, at most
+16 requests, no delegation or hops, a 600-second request timeout and one-hour
+expiry. A send includes at most 12 prior UI messages truncated to 4,000 characters
+each and bounded attachment text; the complete prompt is capped at 200,000
+characters. UI polling reads existing receipts and does not resume a provider.
+
+Markdown, code highlighting, math and HTML sanitization use bundled marked,
+highlight.js, KaTeX and DOMPurify; three.js powers the City and avatar preview.
+These dependencies are local, not CDN-loaded. Source sanitization is not a claim
+of completed security or native rendering acceptance. Remote image previews are
+suppressed; following an external HTTP(S) link opens the system browser.
+
+The native desktop stores UI state and attachment copies under the bound board's
+`desktop-ui` directory, with WebView localStorage as a state fallback. State is
+limited to 8 MiB, the optional projects manifest to 2 MiB and each attachment to
+25 MiB. Text attachments may be included in a mailbox body or dedicated prompt;
+other files are referenced by saved local path. The mailbox secret scan does not
+scan attachment bytes or UI state. These copies and desktop chat history have
+no automatic expiry; the mailbox's 30-day policy does not purge them.
+
+Project scans count filesystem metadata with 60,000-file and four-second
+budgets. The fallback directory walk also has a depth-14 limit and skips common
+generated directories and entries reported as symlinks. Git-tracked scans use
+the tracked-file list and can count tracked generated files; cloud-placeholder
+metadata is allowed. Git supplies optional status and history metadata; the
+file walk does not read source contents. Displayed LOC is a byte-based
+estimate. Desktop project discovery and an optional board-local
+`desktop-ui/projects.manifest.json` can populate linked projects. GitHub lookup
+uses signed-in `gh`, with an anonymous `api.github.com` fallback for a named
+public user. Explicit create/clone actions invoke fixed gh argv: creation changes
+the signed-in GitHub account and cloning writes a new folder beneath the selected
+parent. Timeout or partial success requires inspection before retrying.
+
+Tasks and City combine request/claim records, message-derived status, owner
+overrides and recency heuristics. Self-asserted agent labels and activity are not
+provider-verified presence or proof of completion. Spark panels display the
+configured public CLI's status, including reported job allocations; they do not
+establish new compute acceptance or measured utilization. Local avatar-photo
+matching uses image analysis to suggest editable parameters. An explicit agent
+help request saves the photo and sends its local path via mailbox. Dictation
+uses Windows voice typing or supported browser speech recognition, not a bundled
+offline model. Service permissions and network behavior remain external.
+
+Local mailbox delivery, saved project views and avatar editing can work offline;
+provider work, GitHub operations, update acquisition and some dictation services
+need network access. See PRIVACY.md for the resulting storage and disclosure
+boundaries. Visible tables must remain bounded under the owner's pagination
+requirement; source rendering and installed layout acceptance must be checked
+separately rather than inferred from the 0.2 Classic pages.

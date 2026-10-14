@@ -51,19 +51,27 @@ test('invalid display selections and changed routing identities fail closed', ()
   assert.throws(() => makeManifest(input({ slug: 'codaclauda' })), /existing Marketplace slug/);
 });
 
-test('disclosures describe passive polling, bounded retention and separate provider costs', () => {
+test('disclosures separate passive delivery, dedicated chat, local copies and external services', () => {
   const manifest = makeManifest(input());
   assert.match(manifest.description, /does not wake an idle chat/);
   assert.match(manifest.description, /self-asserted names, not authenticated provider identities/);
   assert.match(manifest.description, /Messages are information, not owner approval/);
   assert.match(manifest.privacy.retention, /30 days.*subsequent mailbox operations/);
   assert.match(manifest.privacy.retention, /Legacy request.*until the owner removes them/);
+  assert.match(manifest.privacy.retention, /attachment copies.*no automatic expiry/);
+  assert.match(manifest.description, /Live chat mode starts a fresh dedicated read-only provider request for each send/);
+  assert.match(manifest.description, /not independent proof of agent presence or task completion/);
+  assert.match(manifest.description, /Attachments and desktop chat copies.*not covered by the mailbox credential scan/);
+  assert.match(manifest.privacy.dataLeavesDevice, /creation sends the chosen name, description and visibility to GitHub/);
+  assert.match(manifest.privacy.dataLeavesDevice, /dictation.*may send audio.*not guaranteed offline/);
   assert.match(manifest.rollback.notes, /separate mailbox.json.*schema 2/);
   assert.equal(manifest.offline, true);
   assert.deepEqual(manifest.integrations.filter(({ required }) => required).map(({ name }) => name), ['Microsoft Edge WebView2']);
   assert.equal(manifest.updater.mode, 'coordinated');
-  assert.deepEqual(manifest.permissions.domains, ['deloresai.com']);
-  assert.doesNotMatch(manifest.description, /Claude push requires|Codex push requires|3D project city|photo-to-avatar/);
+  assert.deepEqual(manifest.permissions.domains, ['deloresai.com', 'api.github.com', 'github.com']);
+  assert.match(manifest.description, /3D project city/);
+  assert.match(manifest.privacy.dataLeavesDevice, /Local photo matching.*explicit avatar-help request saves the photo and shares its local path/);
+  assert.doesNotMatch(manifest.description, /Claude push requires|Codex push requires/);
 });
 
 test('signing disclosure follows the supplied release evidence status', () => {
