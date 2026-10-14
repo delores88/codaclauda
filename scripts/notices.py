@@ -75,6 +75,21 @@ class Inventory:
         self.cargo_home = cargo_home
         self.records = []
         self.package_dirs = {}
+        self.lock_inputs = []
+        self.registry_checksums = {}
+        for relative in ("Cargo.lock", "src-tauri/Cargo.lock"):
+            data = (ROOT / relative).read_bytes()
+            self.lock_inputs.append({"file": relative, "sha256": sha(data)})
+            for package in tomllib.loads(data.decode("utf-8"))["package"]:
+                if package.get("source") != "registry+https://github.com/rust-lang/crates.io-index":
+                    continue
+                key = (package["name"], package["version"])
+                checksum = package.get("checksum", "")
+                if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+                    raise ValueError("Missing exact registry checksum in " + relative)
+                if key in self.registry_checksums and self.registry_checksums[key] != checksum:
+                    raise ValueError("Conflicting registry checksums across lockfiles: " + str(key))
+                self.registry_checksums[key] = checksum
 
     def save(self, relative, data, source):
         path = self.destination / relative
@@ -163,9 +178,13 @@ class Inventory:
             record = {"name": name, "version": version, "license_expression": expression or "See declared license-file", "source": "downloaded registry package", "repository": package.get("repository"), "executables": users,
                       "notices": [self.save(f"crates/{label}/{relative}", data, source) for relative, data, source in texts]}
             record["manifest_sha256"] = sha((path / "Cargo.toml").read_bytes())
-            checksum = path / ".cargo-checksum.json"
-            if checksum.is_file():
-                record["registry_archive_checksum"] = json.loads(checksum.read_text()).get("package")
+            # Modern Cargo caches need not contain .cargo-checksum.json. The
+            # committed lockfiles are the authority for published archive bytes.
+            checksum = self.registry_checksums.get((name, version))
+            if checksum is None:
+                raise ValueError("Registry package is missing from committed lockfiles: " + label)
+            record["registry_archive_checksum"] = checksum
+            record["registry_archive_checksum_source"] = "input_lockfiles"
             vcs = path / ".cargo_vcs_info.json"
             if vcs.is_file():
                 record["registry_source_vcs"] = json.loads(vcs.read_text())
@@ -279,7 +298,7 @@ def generate(args):
         if (name, version) not in users:
             inventory.crate(name, version, ["NSIS nsis-tauri-utils.dll"])
     introduction = inventory.save("THIRD_PARTY_NOTICES.md", (ROOT / "THIRD_PARTY_NOTICES.md").read_bytes(), "repository/THIRD_PARTY_NOTICES.md")
-    record = {"schema_version": 1, "status": "complete", "input_dependencies": inputs, "linked_crates_reconciled": len(users), "component_count": len(inventory.records), "introduction": introduction, "components": inventory.records}
+    record = {"schema_version": 1, "status": "complete", "input_dependencies": inputs, "input_lockfiles": inventory.lock_inputs, "linked_crates_reconciled": len(users), "component_count": len(inventory.records), "introduction": introduction, "components": inventory.records}
     (destination / "inventory.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(f"Reconciled {len(users)} linked crates; preserved {len(inventory.records)} component notice records")
 

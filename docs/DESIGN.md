@@ -1,7 +1,7 @@
 # ClaudaCoda design — contract version 1
 
 Owner-approved scope, 2026-10-13. Windows first, standalone MIT desktop/CLI/MCP
-coordination. Spark Dev Bridge remains an optional external compute provider.
+coordination. DGXBridge remains an optional external compute provider.
 Owner renamed the product to ClaudaCoda before its first release. The existing
 GitHub repository, private MCP namespace and local state directory retain their
 original identifiers so recorded requests and permissions remain intact.

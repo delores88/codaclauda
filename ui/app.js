@@ -237,7 +237,7 @@ function renderDetail(request) {
     const changed = receipt.changed_files || receipt.files_changed;
     if (changed) host.append(section('Changed files', jsonBlock(changed)));
     if (receipt.diff) host.append(section('Proposed diff · not merged', jsonBlock(receipt.diff)));
-    const verification = receipt.externally_recorded_tests || receipt.external_tests;
+    const verification = receipt.tests_run?.length ? receipt.tests_run : receipt.externally_recorded_tests || receipt.external_tests;
     if (verification) host.append(section('Externally recorded verification', jsonBlock(verification)));
     const tests = receipt.tests_reported || receipt.agent_reported_tests || receipt.tests;
     if (tests) host.append(section('Agent-reported tests · not independent verification', jsonBlock(tests)));

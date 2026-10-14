@@ -21,7 +21,7 @@ offline or wholly on-device model workflow. Claude Code and Codex are separately
 installed products with their own accounts, subscriptions, policies and retention.
 ClaudaCoda bundles no model and does not require direct API credits as a fallback.
 
-Optional Spark Dev Bridge can transfer authorized project/build data to the
+Optional DGXBridge can transfer authorized project/build data to the
 owner's configured compute target. It manages its own execution, networking,
 logs, caches and retention. Its supported installed integration and shared-job
 acceptance must be verified separately; configuring its executable is not proof
@@ -45,7 +45,7 @@ Before deleting local data, stop active requests and close ClaudaCoda, then
 preserve any unmerged worktrees or receipts you need. Remove the selected board
 directory using your normal filesystem tools when you intend to erase that
 board. Removing ClaudaCoda's data does not remove the independent histories or
-data retained by Claude Code, Codex, their services or Spark Dev Bridge. This
+data retained by Claude Code, Codex, their services or DGXBridge. This
 version does not promise that uninstalling the app deletes the board.
 
 Do not publish local state, private receipts or provider transcripts as release
@@ -76,7 +76,7 @@ apply to the selected state directory and the owner's other local processes.
 ## Telemetry, dependencies and updates
 
 ClaudaCoda adds no independent analytics or telemetry. External provider CLIs,
-their services, Git, Microsoft Edge WebView2 and optional Spark Dev Bridge retain
+their services, Git, Microsoft Edge WebView2 and optional DGXBridge retain
 their own settings and policies. Provider account and usage statements should be
 checked with those services; a locally reported cost estimate is not an invoice.
 

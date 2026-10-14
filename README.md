@@ -17,7 +17,7 @@ This is a development candidate. Real bidirectional provider exchange, delegated
 edit/review, installed desktop acceptance, final installer verification and normal
 Marketplace admission remain release gates until their receipts are recorded.
 Source code, parser tests, a CLI log or a packaged GUI alone do not complete those
-gates. Optional Spark Dev Bridge acceptance is tracked separately.
+gates. Optional DGXBridge acceptance is tracked separately.
 
 The release is intended for the ordinary, non-featured Marketplace catalog. No
 Marketplace acceptance or available release download is implied by this README.
@@ -69,7 +69,7 @@ Both agents receive a private MCP connection when ClaudaCoda launches their
 request. No global `.mcp.json` or Codex configuration change is needed. A generic
 global inbox server and automatic wakeup of existing chats are not implemented.
 
-Spark Dev Bridge optionally runs authorized build/test commands and returns job
+DGXBridge optionally runs authorized build/test commands and returns job
 receipts through its public CLI. ClaudaCoda does not replace its runner, require
 Spark for ordinary questions or claim a shared test passed before both real
 callers and the job result have been verified. See [Spark integration](docs/SPARK.md).
@@ -86,7 +86,7 @@ Marketplace screenshots.
 See [design and state machine](docs/DESIGN.md), [provider boundaries](docs/ADAPTERS.md),
 [CLI operations](docs/CLI.md) and [source provenance](PROVENANCE.md). Third-party
 dependencies retain their own licenses; MIT does not relicense the provider CLIs
-or their services. The PhaseForge and Spark Dev Bridge repositories are separate.
+or their services. The PhaseForge and DGXBridge repositories are separate.
 
 Local Cargo work on the owner's laptop must use the unchanged shared build gate
 specified in [AGENTS.md](AGENTS.md), with this project's own target directory.

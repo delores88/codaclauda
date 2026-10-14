@@ -1,8 +1,8 @@
-# Optional Spark Dev Bridge integration
+# Optional DGXBridge integration
 
 ClaudaCoda coordinates agents without a Spark. The optional adapter invokes the
 owner-selected `sparkdev` native executable through its public JSON CLI. Configure
-Spark Dev Bridge separately using its own supported setup. ClaudaCoda does not
+DGXBridge separately using its own supported setup. ClaudaCoda does not
 read or copy its configuration, credentials, pairing records or job database.
 
 The core authorizes each operation against an owner grant before calling the
@@ -65,7 +65,7 @@ visible rather than being converted to success.
 Spark's current laptop runner obtains a shared lease from its authenticated Spark
 scheduler, so laptop placement currently depends on that connection. The adapter
 does not duplicate the runner or bypass the lease. Some nominally read-only
-Spark commands also flush cancellations already queued by Spark Dev Bridge.
+Spark commands also flush cancellations already queued by DGXBridge.
 
 ## Evidence and readiness
 
@@ -78,7 +78,7 @@ excluded actual Claude Code invocation and native desktop/hotspot acceptance.
 This historical inspection is not a current release or installation claim.
 
 The adapter's parameter-validation tests establish local behavior only. Real
-acceptance remains pending until a supported Spark Dev Bridge installation is
+acceptance remains pending until a supported DGXBridge installation is
 connected, an actual agent submits a bounded build/test, and the other actual
 agent retrieves and attributes that job's logs and result. Synthetic subprocesses,
 MCP clients and client labels cannot substitute for those receipts.
