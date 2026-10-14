@@ -53,6 +53,9 @@ jobs:
           path: |
             dist/bin/claudacoda-cli.exe
             dist/releases/**/*-setup.exe
+            dist/releases/**/claudacoda.unbundled.exe
+            dist/releases/**/claudacoda.restored.exe
+            dist/releases/**/*.payload-comparison.json
             dist/releases/**/SHA256SUMS.txt
             dist/releases/**/*.sbom.cdx.json
             dist/releases/**/*.dependencies.json

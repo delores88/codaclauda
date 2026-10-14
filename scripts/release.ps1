@@ -195,6 +195,51 @@ def audit(path, destination):
     (destination / (stem+'.sbom.cdx.json')).write_text(json.dumps(bom,indent=2)+'\n',encoding='utf-8')
     print(stem+': verified cargo-auditable metadata; '+str(len(packages))+' dependency records')
 
+def compare_payload(mode, built, restored, extracted, report_path):
+    built_data, restored_data, extracted_data = (Path(p).read_bytes() for p in (built, restored, extracted))
+    record = {'schema_version':1, 'mode':mode, 'build_file':Path(built).name,
+              'restored_file':Path(restored).name, 'extracted_file':Path(extracted).name,
+              'build_sha256':digest(built), 'restored_sha256':digest(restored),
+              'extracted_sha256':digest(extracted), 'build_bytes':len(built_data),
+              'restored_bytes':len(restored_data), 'extracted_bytes':len(extracted_data)}
+    errors = []
+    expected = None
+    if mode == 'tauri-nsis-v2.10.1':
+        # Pinned bundle.rs patches the first UNK marker for NSIS, packages it,
+        # then restores the original unsigned/unpatched executable. Require a
+        # single unambiguous marker and compare the complete transformed file.
+        # https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.10.1/crates/tauri-bundler/src/bundle.rs
+        old, new = b'__TAURI_BUNDLE_TYPE_VAR_UNK', b'__TAURI_BUNDLE_TYPE_VAR_NSS'
+        record['transformation'] = {'from':old.decode(), 'to':new.decode(),
+                                    'offset':built_data.find(old), 'build_unknown_markers':built_data.count(old),
+                                    'build_nsis_markers':built_data.count(new),
+                                    'extracted_unknown_markers':extracted_data.count(old),
+                                    'extracted_nsis_markers':extracted_data.count(new)}
+        if built_data.count(old) != 1 or built_data.count(new) != 0:
+            errors.append('Build GUI must contain exactly one UNK marker and no NSS marker')
+        else:
+            expected = built_data.replace(old, new, 1)
+        if extracted_data.count(old) != 0 or extracted_data.count(new) != 1:
+            errors.append('Extracted GUI must contain exactly one NSS marker and no UNK marker')
+    elif mode == 'exact':
+        expected = built_data
+    else:
+        errors.append('Unknown payload comparison mode')
+    record['restored_matches_build'] = restored_data == built_data
+    if not record['restored_matches_build']:
+        errors.append('Restored build bytes changed during packaging')
+    record['expected_sha256'] = hashlib.sha256(expected).hexdigest() if expected is not None else None
+    record['expected_bytes'] = len(expected) if expected is not None else None
+    record['extracted_matches_expected'] = expected is not None and extracted_data == expected
+    if not record['extracted_matches_expected']:
+        errors.append('Extracted payload differs from the complete expected bytes')
+    record['errors'] = errors
+    record['status'] = 'failed' if errors else 'passed'
+    # Retain all available hashes even when an assertion rejects this payload.
+    Path(report_path).write_text(json.dumps(record,indent=2)+'\n',encoding='utf-8')
+    if errors: raise ValueError('; '.join(errors))
+    print(Path(extracted).name+': verified complete payload bytes ('+mode+')')
+
 mode = sys.argv[1]
 if mode == 'snapshot':
     Path(sys.argv[3]).write_text(json.dumps(source(sys.argv[2]),indent=2)+'\n',encoding='utf-8')
@@ -204,6 +249,8 @@ elif mode == 'source-zip':
         for record in json.loads(manifest.read_text()): z.write(root/record['path'],record['path'])
 elif mode == 'audit':
     audit(sys.argv[2],sys.argv[3])
+elif mode == 'compare':
+    compare_payload(*sys.argv[2:])
 elif mode == 'versions':
     root=Path(sys.argv[2]); expected=sys.argv[3]
     for path, key in [('Cargo.toml',('workspace','package')),('src-tauri/Cargo.toml',('package',))]:
@@ -235,6 +282,8 @@ else: raise ValueError('Unknown inspection operation')
     Copy-Item -LiteralPath (Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md') -Destination $notices -Force
     Invoke-ProjectCargo -CargoArgs @('auditable', 'build', '--manifest-path', 'src-tauri/Cargo.toml', '--release', '--locked', '--target', $targetTriple, '--features', 'custom-protocol') -Stage 'build-desktop'
     $gui = Join-Path $release 'claudacoda.exe'
+    $builtGui = Join-Path $output 'claudacoda.unbundled.exe'
+    Copy-Item -LiteralPath $gui -Destination $builtGui
     & python -I $inspector audit $gui $output
     & python -I (Join-Path $projectRoot 'scripts/notices.py') generate --dependencies (Join-Path $output 'claudacoda-cli.dependencies.json') --dependencies (Join-Path $output 'claudacoda.dependencies.json') --cargo-home $env:CARGO_HOME --output $notices --rust-version $toolchain
     Copy-Item -LiteralPath (Join-Path $notices 'inventory.json') -Destination (Join-Path $output 'notices-inventory.json')
@@ -246,21 +295,26 @@ else: raise ValueError('Unknown inspection operation')
     $installer = Join-Path $release "bundle/nsis/ClaudaCoda_${version}_x64-setup.exe"
     if (!(Test-Path -LiteralPath $installer -PathType Leaf) -or (Get-Item -LiteralPath $installer).LastWriteTimeUtc -lt $bundleStarted.AddSeconds(-2)) { throw 'Expected freshly generated x64 NSIS installer was not found.' }
     Copy-Item -LiteralPath $installer -Destination $output
-    # The bundler may patch bundle type metadata; audit and hash final bytes.
+    # The pinned bundler restores its input after stamping the installer copy.
+    # Preserve both input and restored bytes before checking the exact transform.
+    $restoredGui = Join-Path $output 'claudacoda.restored.exe'
+    Copy-Item -LiteralPath $gui -Destination $restoredGui
     & python -I $inspector audit $gui $output
     $extracted = Join-Path $output 'extracted'
     & $sevenZip x $installer "-o$extracted" -y | Out-File -LiteralPath (Join-Path $output 'extract-installer.log') -Encoding utf8
     $payloads = @()
     $extractedPaths = @{}
-    foreach ($binary in @(@{name='claudacoda.exe'; source=$gui}, @{name='claudacoda-cli.exe'; source=$cli})) {
+    foreach ($binary in @(@{name='claudacoda.exe'; source=$builtGui; restored=$restoredGui; mode='tauri-nsis-v2.10.1'}, @{name='claudacoda-cli.exe'; source=$cli; restored=$cli; mode='exact'})) {
         $found = @(Get-ChildItem -LiteralPath $extracted -Recurse -File -Filter $binary.name)
         if ($found.Count -ne 1) { throw "Installer must contain exactly one $($binary.name); found $($found.Count)." }
-        $expectedHash = (Get-FileHash -LiteralPath $binary.source -Algorithm SHA256).Hash.ToLowerInvariant()
+        $comparisonFile = Join-Path $output "$([IO.Path]::GetFileNameWithoutExtension($binary.name)).payload-comparison.json"
+        & python -I $inspector compare $binary.mode $binary.source $binary.restored $found[0].FullName $comparisonFile
+        $comparison = Get-Content -LiteralPath $comparisonFile -Raw | ConvertFrom-Json
         $installedHash = (Get-FileHash -LiteralPath $found[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($expectedHash -ne $installedHash) { throw "Extracted installer bytes differ for $($binary.name)." }
         $extractedPaths[$binary.name] = $found[0].FullName
         & python -I $inspector audit $found[0].FullName $output
-        $payloads += [ordered]@{file=$binary.name; sha256=$installedHash; bytes=$found[0].Length; extraction_matches_build=$true; auditable_metadata=$true}
+        $payloads += [ordered]@{file=$binary.name; sha256=$installedHash; bytes=$found[0].Length; comparison_mode=$comparison.mode; comparison_file=[IO.Path]::GetFileName($comparisonFile); build_sha256=$comparison.build_sha256; restored_sha256=$comparison.restored_sha256; expected_payload_sha256=$comparison.expected_sha256; restored_matches_build=$comparison.restored_matches_build; extraction_matches_expected_payload=$comparison.extracted_matches_expected; auditable_metadata=$true}
+        $receipt.payloads = $payloads
     }
     $expectedCliLocation = Join-Path (Split-Path -Parent $extractedPaths['claudacoda.exe']) 'bin/claudacoda-cli.exe'
     if (![IO.Path]::GetFullPath($expectedCliLocation).Equals([IO.Path]::GetFullPath($extractedPaths['claudacoda-cli.exe']), [StringComparison]::OrdinalIgnoreCase)) { throw 'CLI resource must be in bin/claudacoda-cli.exe relative to the GUI; this installer would not connect.' }
