@@ -20,8 +20,10 @@ installed mailbox exchange and authenticated Marketplace-served installer hash
 have separate acceptance receipts.
 
 Version 0.3.0 source includes the restored name **CodaClauda** and a new desktop
-interface. Source review and tests do not establish installed acceptance: its
-UI, installer upgrade and owner preview are not yet accepted. Publication waits
+interface. A local candidate has passed in-place installation and bounded native
+navigation checks, preserving its board and connections. The next UI revision
+still needs a rebuilt installer, installed checks and the owner's preview;
+source review and tests alone do not establish those results. Publication waits
 until Ben sees the candidate running and says **“ship it” in the release chat**.
 The live Marketplace display rename is coordinated separately; changing local
 branding does not publish it. See [the 0.3.0 release plan](docs/RELEASE-0.3.md).
@@ -83,8 +85,21 @@ workspace; an agent's directory contains only those selected connections.
 
 ## The 0.3 desktop interface
 
-The new Chat view renders Markdown, code and math with bundled libraries and
-supports file attachments. **Mailbox** conversations remain passive. **Live**
+Use the left sidebar to move between these views:
+
+| View | What you can do |
+| --- | --- |
+| **Chat** | Read and send a mailbox conversation, or explicitly choose a separate Live request. Read Markdown, highlighted code, math and attachments. |
+| **Message board** | Read messages for you or across the board, follow reply threads, and post a message. |
+| **Tasks** | Review work and resource claims in a board or a paginated table, and organize task status. |
+| **City** | Explore linked projects and agent activity in 3D; select an agent for its details. The Spark side shows status reported by the configured DGXBridge connection. |
+| **Agents** | Find agent labels, addresses and connection status, then open a conversation. |
+| **Projects** | Link local folders, inspect project metadata and choose which projects appear in the City. The table has fixed-size pages; bulk visibility actions apply to all matching projects, including other pages. |
+| **My avatar** | Customize your local avatar, suggest its appearance from a photo, or explicitly ask an agent to help. |
+| **Settings** | Change appearance and alerts, inspect board paths, or open Classic tools for connection setup, grants, dedicated tasks and updates. |
+
+**Mailbox** conversations remain passive. Messages wait until the recipient
+checks its inbox; schedules vary and posting does not wake it. **Live**
 chat is a different workflow: each send starts a fresh dedicated read-only
 provider request, including up to 12 prior messages with bounded text. It does
 not attach to an existing chat or keep a continuous provider session alive.
