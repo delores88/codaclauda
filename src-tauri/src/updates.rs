@@ -51,7 +51,7 @@ impl Default for UpdateState {
                 downloaded: None,
             })),
             view: Arc::new(Mutex::new(
-                json!({"ok":true,"status":"idle","current_version":env!("CARGO_PKG_VERSION"),"available_version":null,"message":"Check for an approved ClaudaCoda update."}),
+                json!({"ok":true,"status":"idle","current_version":env!("CARGO_PKG_VERSION"),"available_version":null,"message":"Check for an approved CodaClauda update."}),
             )),
             busy: Arc::new(AtomicBool::new(false)),
         }
@@ -427,7 +427,7 @@ async fn perform(app: &tauri::AppHandle, state: &UpdateState, action: &str) -> R
                 .map_err(|_| "Verified download could not be finalized.")?;
             inner.downloaded = Some(target);
             inner.authorization = Some(auth);
-            state.set("ready","Installer verified. Install update opens ordinary Windows setup and closes ClaudaCoda after a safe handoff.",json!({}));
+            state.set("ready","Installer verified. Install update opens ordinary Windows setup and closes CodaClauda after a safe handoff.",json!({}));
         }
         "install" => {
             update_helper::normal_context()?;
@@ -458,7 +458,7 @@ async fn perform(app: &tauri::AppHandle, state: &UpdateState, action: &str) -> R
                 auth.expires,
             )
             .await?;
-            state.set("installing","ClaudaCoda is closing. Follow Windows setup; your coordination board and connections stay in place.",json!({}));
+            state.set("installing","CodaClauda is closing. Follow Windows setup; your coordination board and connections stay in place.",json!({}));
             inner.authorization = None;
             app.exit(0);
         }

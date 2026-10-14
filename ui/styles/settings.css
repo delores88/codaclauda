@@ -1,0 +1,10 @@
+.settings-page { max-width: 820px; }
+.settings-card { display: grid; gap: 14px; padding: 20px 22px; margin-bottom: 16px; }
+.settings-card .btn { justify-self: start; text-decoration: none; }
+.setting-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 6px 0; border-top: 1px solid var(--border); }
+.setting-row:first-of-type { border-top: 0; }
+.setting-text { display: grid; gap: 2px; }
+.info-grid { display: grid; grid-template-columns: 160px 1fr; gap: 8px 16px; margin: 0; }
+.info-row { display: contents; }
+.info-row dt { color: var(--muted); }
+.info-row dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

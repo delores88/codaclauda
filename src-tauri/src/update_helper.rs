@@ -185,7 +185,7 @@ pub fn normal_context() -> Result<()> {
         let mut length = 0u32;
         // 15700 = APPMODEL_ERROR_NO_PACKAGE. All other results fail closed.
         if unsafe { win::GetCurrentPackageFullName(&mut length, std::ptr::null_mut()) } != 15700 {
-            return Err("Windows setup cannot run from a packaged host such as Codex. Close ClaudaCoda and open its shortcut from ordinary Windows Explorer, then retry Install update.".into());
+            return Err("Windows setup cannot run from a packaged host such as Codex. Close CodaClauda and open its shortcut from ordinary Windows Explorer, then retry Install update.".into());
         }
         win::normal_user()?;
         let current =
@@ -195,7 +195,7 @@ pub fn normal_context() -> Result<()> {
             .to_ascii_lowercase()
             .replace('/', "\\");
         if name.contains("\\packages\\") && name.contains("\\localcache\\") {
-            return Err("This copy is inside a packaged host's private installation. Run the verified ClaudaCoda installer from ordinary Windows Explorer first.".into());
+            return Err("This copy is inside a packaged host's private installation. Run the verified CodaClauda installer from ordinary Windows Explorer first.".into());
         }
         Ok(())
     }
@@ -381,7 +381,7 @@ pub async fn start(
     command.creation_flags(0x08000000);
     let mut child = command
         .spawn()
-        .map_err(|_| "The update helper could not start. ClaudaCoda remains open.")?;
+        .map_err(|_| "The update helper could not start. CodaClauda remains open.")?;
     let result = async {
         let mut input = child
             .stdin
@@ -419,7 +419,7 @@ pub async fn start(
         _ => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            Err("Update helper could not confirm readiness. ClaudaCoda remains open; request a fresh update before retrying.".into())
+            Err("Update helper could not confirm readiness. CodaClauda remains open; request a fresh update before retrying.".into())
         }
     }
 }
@@ -929,7 +929,7 @@ mod win {
             )
         } != 0;
         if !okay || needed != 4 || elevated != 0 {
-            return Err("Run ClaudaCoda as your ordinary Windows user before updating; administrator setup is blocked.".into());
+            return Err("Run CodaClauda as your ordinary Windows user before updating; administrator setup is blocked.".into());
         }
         Ok(())
     }
@@ -974,7 +974,7 @@ mod win {
             || needed as usize >= ids.len() * 4
         {
             return Err(
-                "Setup ended. Open ClaudaCoda from its Windows shortcut to confirm the result."
+                "Setup ended. Open CodaClauda from its Windows shortcut to confirm the result."
                     .into(),
             );
         }
@@ -1027,13 +1027,13 @@ mod win {
     pub fn parent(pid: u32, expected: &Path) -> Result<Process> {
         let handle = unsafe { OpenProcess(0x100000 | 0x1000, 0, pid) };
         if handle.is_null() {
-            return Err("The original ClaudaCoda process is unavailable.".into());
+            return Err("The original CodaClauda process is unavailable.".into());
         }
         let process = Process(handle);
         let mut buffer = vec![0u16; 32768];
         let mut len = buffer.len() as u32;
         if unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut len) } == 0 {
-            return Err("Could not verify the original ClaudaCoda process.".into());
+            return Err("Could not verify the original CodaClauda process.".into());
         }
         let name = PathBuf::from(String::from_utf16_lossy(&buffer[..len as usize]));
         if plain(&name)? != plain(expected)? {
@@ -1043,7 +1043,7 @@ mod win {
     }
     pub fn wait_parent(parent: Process) -> Result<()> {
         if unsafe { WaitForSingleObject(parent.0, 90_000) } != 0 {
-            return Err("ClaudaCoda did not close. Nothing was installed.".into());
+            return Err("CodaClauda did not close. Nothing was installed.".into());
         }
         Ok(())
     }
@@ -1080,7 +1080,7 @@ mod win {
             process: ptr::null_mut(),
         };
         if unsafe { ShellExecuteExW(&mut info) } == 0 || info.process.is_null() {
-            return Err("Windows setup was cancelled or could not start. Open ClaudaCoda to try a fresh approval.".into());
+            return Err("Windows setup was cancelled or could not start. Open CodaClauda to try a fresh approval.".into());
         }
         let process = Process(info.process);
         if unsafe { WaitForSingleObject(process.0, u32::MAX) } != 0 {

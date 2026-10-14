@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "transformations": {
+    "three-relative-import-v1": {
+      "description": "Replace every occurrence of the exact text from 'three' with from '../three.module.min.js' (CSP forbids inline import maps). No other bytes change.",
+      "find": "from 'three'",
+      "replace": "from '../three.module.min.js'"
+    }
+  },
+  "packages": [
+    {
+      "name": "three",
+      "version": "0.170.0",
+      "license_expression": "MIT",
+      "source": {
+        "url": "https://registry.npmjs.org/three/-/three-0.170.0.tgz",
+        "sha256": "4a608a355dcaba72e0e5383cdc814303f5b6060b43c238cdf6932dceb699238d"
+      },
+      "files": [
+        {
+          "path": "three/three.module.min.js",
+          "source_path": "package/build/three.module.min.js",
+          "sha256": "08fd7545d13d2c7fb65ab691530a802dafefd638596501854f267d0fb13c39e7"
+        },
+        {
+          "path": "three/addons/OrbitControls.js",
+          "source_path": "package/examples/jsm/controls/OrbitControls.js",
+          "sha256": "405657e5dc5ca866a271ff7e1287cd9b7eacfd86940cb19cd783de796d6abbd1",
+          "transformation": "three-relative-import-v1"
+        },
+        {
+          "path": "three/addons/RoundedBoxGeometry.js",
+          "source_path": "package/examples/jsm/geometries/RoundedBoxGeometry.js",
+          "sha256": "8bd9cfdadc75759527caac3dce781bc3812b46591edaf8ccb59f0df172a6cd3d",
+          "transformation": "three-relative-import-v1"
+        },
+        {
+          "path": "three/addons/BufferGeometryUtils.js",
+          "source_path": "package/examples/jsm/utils/BufferGeometryUtils.js",
+          "sha256": "b51ca35ecf919b99791cbf8a0f70804da90c400bd36b1b0ec975d50d0ba5567f",
+          "transformation": "three-relative-import-v1"
+        },
+        {
+          "path": "three/LICENSE",
+          "source_path": "package/LICENSE",
+          "sha256": "4c40a1ef62450b857c3b2aaf294936304cd552d965fbcd9d32d4c5bcf4ba4454"
+        }
+      ],
+      "notices": [
+        "three/LICENSE"
+      ]
+    },
+    {
+      "name": "marked",
+      "version": "15.0.12",
+      "license_expression": "MIT",
+      "source": {
+        "url": "https://registry.npmjs.org/marked/-/marked-15.0.12.tgz",
+        "sha256": "39a847a896af15b2846f927da55d444619ea55a55c236e10333056474b793aaa"
+      },
+      "files": [
+        {
+          "path": "marked/marked.esm.js",
+          "source_path": "package/lib/marked.esm.js",
+          "sha256": "29e25cdf1a06075c90e9885af06ddd23fb22a5424ed23a61dda986c73a8af641"
+        },
+        {
+          "path": "marked/LICENSE.md",
+          "source_path": "package/LICENSE.md",
+          "sha256": "8e3a3f82f59a60958f56ca08f445647c32a4733dc7ca6c2c46f6eb898471ab9c"
+        }
+      ],
+      "notices": [
+        "marked/LICENSE.md"
+      ]
+    },
+    {
+      "name": "dompurify",
+      "version": "3.2.6",
+      "license_expression": "(MPL-2.0 OR Apache-2.0)",
+      "source": {
+        "url": "https://registry.npmjs.org/dompurify/-/dompurify-3.2.6.tgz",
+        "sha256": "fe734a97f5938a5ff7f99aedf348c53b8d47c897859fcc57ac4feaa70582c0b6"
+      },
+      "files": [
+        {
+          "path": "dompurify/purify.es.js",
+          "source_path": "package/dist/purify.es.mjs",
+          "sha256": "4b95c409255f7253ea09bc348e2467702224594adf021ba013295d829c1bd30f",
+          "note": "renamed from .mjs; bytes identical"
+        },
+        {
+          "path": "dompurify/LICENSE",
+          "source_path": "package/LICENSE",
+          "sha256": "1b02e03c3fb4f87d476c128f0eb9def1f5a1709d28b180465228bd41574623b7"
+        }
+      ],
+      "notices": [
+        "dompurify/LICENSE"
+      ]
+    },
+    {
+      "name": "katex",
+      "version": "0.16.22",
+      "license_expression": "MIT",
+      "source": {
+        "url": "https://registry.npmjs.org/katex/-/katex-0.16.22.tgz",
+        "sha256": "e9e0d167db3175481cbadaff38e8d90b130f6a3ddb451a47e43c577fd511f365"
+      },
+      "files": [
+        {
+          "path": "katex/katex.js",
+          "source_path": "package/dist/katex.mjs",
+          "sha256": "7af1aa5e484a4ae881e181ff97ddffdce2deabef42596d2679658b9fe4cd4615",
+          "note": "renamed from .mjs; bytes identical"
+        },
+        {
+          "path": "katex/LICENSE",
+          "source_path": "package/LICENSE",
+          "sha256": "766ccc1f306c885aa45542a9846bbd0a505b27a0374f146778171c2254ce18e3"
+        }
+      ],
+      "notices": [
+        "katex/LICENSE"
+      ]
+    },
+    {
+      "name": "@highlightjs/cdn-assets",
+      "version": "11.11.1",
+      "license_expression": "BSD-3-Clause",
+      "source": {
+        "url": "https://registry.npmjs.org/@highlightjs/cdn-assets/-/cdn-assets-11.11.1.tgz",
+        "sha256": "28a06bf6ebcc2218c6e842bdb4f1c8353508a8cada59e85110f91892f5726195"
+      },
+      "files": [
+        {
+          "path": "highlight/highlight.min.js",
+          "source_path": "package/es/highlight.min.js",
+          "sha256": "7865839949f0764d9e0a21e311a4e2c42633eeaee8ca5ec127b86438565731fe"
+        },
+        {
+          "path": "highlight/LICENSE",
+          "source_path": "package/LICENSE",
+          "sha256": "6c081431591d9df696c82dc598fe1423765b8a299b200ed00b281afd0f64c490"
+        }
+      ],
+      "notices": [
+        "highlight/LICENSE"
+      ]
+    }
+  ]
+}

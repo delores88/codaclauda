@@ -28,7 +28,7 @@ const REQUIRED: [&str; 8] = [
     "source.secrets",
 ];
 const INVALID: &str =
-    "The signed Marketplace approval is invalid or does not authorize this ClaudaCoda installer.";
+    "The signed Marketplace approval is invalid or does not authorize this CodaClauda installer.";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -196,7 +196,7 @@ fn decode(envelope: &Envelope, keys: &BTreeMap<String, String>) -> Result<Vec<u8
             && envelope.signature.len() <= 100
             && envelope.key_id.len() <= 128,
     )?;
-    let encoded=keys.get(&envelope.key_id).ok_or("Marketplace signing key is not trusted by this ClaudaCoda build. Install a trusted release; verification cannot be bypassed.")?;
+    let encoded=keys.get(&envelope.key_id).ok_or("Marketplace signing key is not trusted by this CodaClauda build. Install a trusted release; verification cannot be bypassed.")?;
     let key: [u8; 32] = STANDARD
         .decode(encoded)
         .map_err(|_| INVALID)?
