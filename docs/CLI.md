@@ -1,4 +1,4 @@
-# ClaudaCoda CLI, contract version 1
+# ClaudaCoda CLI
 
 These examples describe the implemented interface, not completed release
 acceptance. They require Windows x64, native provider executables, independent
@@ -28,6 +28,68 @@ Exit 0 means the command was handled. It does not mean a detached provider reque
 or test passed. Inspect the returned request state and receipt. A timed-out
 `wait` returns `ok:true` with `data.timed_out:true`; it does not cancel the request.
 Requests accept at most 1 MiB of JSON stdin; the prompt limit is 32,000 bytes.
+
+## Existing conversations (0.2 candidate)
+
+This path exchanges messages with explicitly registered conversations. It never
+starts, resumes or forks a provider session. Actual delivery into already-open
+provider chats remains a separate acceptance requirement from local MCP tests.
+
+The GUI's Conversation setup registers the exact provider chat ID, readable
+label, project and delivery mode, then creates a bounded conversation between
+one Claude and one Codex registration. Equivalent owner JSON operations are:
+
+| `api` operation | JSON fields |
+| --- | --- |
+| `session-register` | `id`, `provider` (`claude` or `codex`), `chat_id`, `label`, `project`, `mode`, `expires_seconds` |
+| `session-conversation` | `id`, `registrations` (exact pair), `max_messages`, `max_hops`, `expires_seconds` |
+| `session-list` | optional `conversation_id`, `after` (exclusive sequence), `limit` (1–20) |
+| `session-probe` | `registration_id` for an existing Codex queue registration; read-only |
+| `session-rotate` | `registration_id`, optional `expires_seconds`; invalidates its old capability |
+| `session-revoke` | exactly one of `registration_id` or `conversation_id`; preserves history |
+
+Delivery modes are `inbox`, `claude-channel` and `codex-queue`. Codex queue also
+requires the absolute native `codex_executable` and optionally `codex_socket`.
+The public running-server proxy must find the exact thread UUID loaded on that
+server and confirm its project. This version's queue protocol is experimental.
+An unreachable server never causes fallback to a fresh or resumed engine.
+
+Registration returns a private `capability` once. Supply it only through the
+private MCP process environment as `CLAUDACODA_SESSION_CAPABILITY`, with the
+actual installed executable and arguments:
+
+```text
+--state-dir <actual-board> session-mcp --registration <registration-id>
+```
+
+Claude channel registrations add `--claude-channel`. Claude also requires its
+documented interactive channel opt-in; the MCP configuration alone does not
+enable push. A global MCP server shared by multiple provider chats cannot prove
+the calling chat's identity. Use the intended chat's supported private setup
+and retain the interface's honest owner-registered identity indication. Do not
+commit the configuration or paste its capability into a chat or message.
+
+Connected session MCP tools are `context`, `send`, `inbox`, `ack`, `reply` and
+`wait`. Call `context` first to obtain exact authorized conversation and peer
+registration IDs. For example, within an already authorized conversation:
+
+```json
+{"name":"send","arguments":{"id":"question-01","conversation_id":"actual-conversation-id","body":"Please review the proposed change."}}
+{"name":"ack","arguments":{"id":"question-01"}}
+{"name":"reply","arguments":{"id":"answer-01","message_id":"question-01","body":"My review and remaining concerns..."}}
+{"name":"wait","arguments":{"id":"question-01","timeout":20}}
+```
+
+Only the recipient's bound server can acknowledge or reply. Retry identical
+content with the same ID; changed content needs a new ID. Count/hop limits apply
+to the conversation's lifetime, so a new root message cannot reset them.
+Queued means saved, submitted means transport accepted it, acknowledged means
+the recipient explicitly confirmed it, and replied identifies its actual reply.
+Unknown transport outcomes are never automatically resent. Inbox mode requires
+the recipient to poll; it does not wake an idle agent.
+
+The following sections describe the separate dedicated-task workflow retained
+from 0.1. Its pause/cancel controls do not revoke registered conversations.
 No owner command opens an interactive prompt.
 
 PowerShell examples build objects and use `ConvertTo-Json` so spaces, quotes,

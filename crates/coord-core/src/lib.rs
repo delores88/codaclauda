@@ -1,7 +1,12 @@
 pub mod adapters;
+pub mod mailbox;
 pub mod mcp;
 pub mod model;
 pub mod paths;
+pub mod session;
+pub mod session_mcp;
+pub mod session_transport;
+pub mod live_codex;
 #[cfg(test)]
 mod review_tests;
 pub mod spark;
@@ -227,6 +232,9 @@ fn public_endpoint(endpoint: &Endpoint) -> Value {
 
 pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value> {
     match op {
+        "mailbox-register" | "mailbox-directory" | "mailbox-post" | "mailbox-inbox" | "mailbox-ack" | "mailbox-wait-reply" | "mailbox-claims" => mailbox::api(store, op.strip_prefix("mailbox-").unwrap(), a),
+        "session-probe" => session_transport::probe(store, field(a, "registration_id")?),
+        "session-register" | "session-rotate" | "session-conversation" | "session-list" | "session-revoke" => session::owner_api(store, op, a),
         "discover" => Ok(adapters::discover()),
         "connect" => {
             ensure!(
@@ -292,7 +300,7 @@ pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value
             let mut requests: Vec<_> = s.requests.values().map(public_request).collect();
             requests.sort_by_key(|r| std::cmp::Reverse(r["created_at"].as_u64().unwrap_or(0)));
             Ok(
-                json!({"schema_version":1,"endpoints":s.endpoints.values().map(public_endpoint).collect::<Vec<_>>(),"grants":s.grants.values().collect::<Vec<_>>(),"requests":requests,"spark":{"executable":s.spark,"acceptance":"pending until actual shared job receipt"},"paused":s.paused,"state_dir":store.root,"limits":{"concurrent":2,"codex_cost":"unavailable","hard_token_cap":"unavailable"}}),
+                json!({"schema_version":s.schema_version,"endpoints":s.endpoints.values().map(public_endpoint).collect::<Vec<_>>(),"grants":s.grants.values().collect::<Vec<_>>(),"requests":requests,"spark":{"executable":s.spark,"acceptance":"pending until actual shared job receipt"},"paused":s.paused,"state_dir":store.root,"limits":{"concurrent":2,"codex_cost":"unavailable","hard_token_cap":"unavailable"}}),
             )
         }
         "grant" => create_grant(store, a),

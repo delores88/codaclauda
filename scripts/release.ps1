@@ -265,12 +265,20 @@ else: raise ValueError('Unknown inspection operation')
 '@ | Set-Content -LiteralPath $inspector -Encoding utf8NoBOM
     & python -I $inspector versions $projectRoot $version
     & python -I $inspector snapshot $projectRoot (Join-Path $output 'source-tree.json')
-    & node --check (Join-Path $projectRoot 'ui/app.js')
+    foreach ($script in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'ui') -File -Recurse | Where-Object { $_.Extension -in @('.js', '.mjs', '.cjs') }) {
+        & node --check $script.FullName
+    }
+    $uiTests = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'ui') -File -Recurse | Where-Object { $_.Name -match '\.test\.(?:js|mjs|cjs)$' })
+    if ($uiTests.Count -gt 0) {
+        & node --test @($uiTests.FullName) 2>&1 | Tee-Object -FilePath (Join-Path $output 'ui-tests.log') | Out-Host
+    }
     Invoke-ProjectCargo -CargoArgs @('test', '--workspace', '--all-targets', '--locked', '--target', $targetTriple) -Stage 'unit-fixture-tests'
     $receipt.acceptance.unit_and_fixture_tests = 'passed'
     Invoke-ProjectCargo -CargoArgs @('auditable', 'build', '--release', '--locked', '--target', $targetTriple, '-p', 'claudacoda-cli') -Stage 'build-cli'
     $release = Join-Path $target "$targetTriple/release"
     $cli = Join-Path $release 'claudacoda-cli.exe'
+    & python -I (Join-Path $projectRoot 'scripts/test-session-mcp.py') --cli $cli 2>&1 | Tee-Object -FilePath (Join-Path $output 'session-mcp-process-tests.log') | Out-Host
+    & python -I (Join-Path $projectRoot 'scripts/test-mailbox.py') --cli $cli --output (Join-Path $projectRoot 'local/mailbox-process-tests') 2>&1 | Tee-Object -FilePath (Join-Path $output 'mailbox-process-tests.log') | Out-Host
     $resources = Join-Path $projectRoot 'dist/bin'
     New-Item -ItemType Directory -Path $resources -Force | Out-Null
     $extras = @(Get-ChildItem -LiteralPath $resources -Force | Where-Object { $_.Name -ne 'claudacoda-cli.exe' -or $_.PSIsContainer })
@@ -280,6 +288,7 @@ else: raise ValueError('Unknown inspection operation')
     $notices = Join-Path $projectRoot 'dist/notices'
     New-Item -ItemType Directory -Path $notices -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md') -Destination $notices -Force
+    Invoke-ProjectCargo -CargoArgs @('test', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets', '--locked', '--target', $targetTriple, '--features', 'custom-protocol') -Stage 'desktop-unit-tests'
     Invoke-ProjectCargo -CargoArgs @('auditable', 'build', '--manifest-path', 'src-tauri/Cargo.toml', '--release', '--locked', '--target', $targetTriple, '--features', 'custom-protocol') -Stage 'build-desktop'
     $gui = Join-Path $release 'claudacoda.exe'
     $builtGui = Join-Path $output 'claudacoda.unbundled.exe'

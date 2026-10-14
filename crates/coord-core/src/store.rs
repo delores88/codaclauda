@@ -24,7 +24,9 @@ impl Store {
         match builder.create(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error).context("Could not create private Spark scratch directory"),
+            Err(error) => {
+                return Err(error).context("Could not create private Spark scratch directory");
+            }
         }
         let metadata = fs::symlink_metadata(&path)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -55,6 +57,23 @@ impl Store {
         })
     }
     pub fn transaction<T>(&self, operation: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
+        self.transaction_inner(false, operation)
+    }
+
+    /// Upgrade only when a successful registered-session mutation is committed.
+    /// Backup bytes are the exact previous file, never a reserialized substitute.
+    pub fn session_transaction<T>(
+        &self,
+        operation: impl FnOnce(&mut State) -> Result<T>,
+    ) -> Result<T> {
+        self.transaction_inner(true, operation)
+    }
+
+    fn transaction_inner<T>(
+        &self,
+        session: bool,
+        operation: impl FnOnce(&mut State) -> Result<T>,
+    ) -> Result<T> {
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -63,16 +82,49 @@ impl Store {
             .open(self.root.join("state.lock"))?;
         lock.lock_exclusive()?;
         let file = self.root.join("state.json");
-        let mut state: State = if file.exists() {
-            serde_json::from_slice(&fs::read(&file)?)
+        let original = if file.exists() {
+            Some(fs::read(&file)?)
+        } else {
+            None
+        };
+        let mut state: State = if let Some(ref original) = original {
+            serde_json::from_slice(original)
                 .context("State file is invalid; preserve it and restore a known backup")?
         } else {
             State::default()
         };
-        if state.schema_version != 1 {
+        if !matches!(state.schema_version, 1 | 2) {
             bail!("unsupported state schema; upgrade ClaudaCoda")
         }
+        if state.schema_version == 1
+            && (!state.registrations.is_empty()
+                || !state.conversations.is_empty()
+                || !state.session_messages.is_empty())
+        {
+            bail!("Registered-session data requires schema 2; preserve the inconsistent board")
+        }
         let result = operation(&mut state)?;
+        if session && state.schema_version == 1 {
+            if let Some(original) = original {
+                // Never overwrite a previous backup. A failed/ambiguous prior
+                // upgrade may leave one; it must match before we can proceed.
+                let backup = self.root.join("state.schema1.backup.json");
+                if backup.exists() {
+                    if fs::read(&backup)? != original {
+                        bail!("Schema 1 backup differs; preserve both files before migrating")
+                    }
+                } else {
+                    let mut saved = tempfile::NamedTempFile::new_in(&self.root)?;
+                    saved.write_all(&original)?;
+                    saved.as_file().sync_all()?;
+                    let saved = saved.persist_noclobber(&backup).map_err(|e| e.error)?;
+                    saved.sync_all()?;
+                    #[cfg(unix)]
+                    fs::File::open(&self.root)?.sync_all()?;
+                }
+            }
+            state.schema_version = 2;
+        }
         let bytes = serde_json::to_vec_pretty(&state)?;
         let mut temporary = tempfile::NamedTempFile::new_in(&self.root)?;
         temporary.write_all(&bytes)?;
@@ -96,8 +148,15 @@ impl Store {
         } else {
             State::default()
         };
-        if state.schema_version != 1 {
+        if !matches!(state.schema_version, 1 | 2) {
             bail!("unsupported state schema; upgrade ClaudaCoda")
+        }
+        if state.schema_version == 1
+            && (!state.registrations.is_empty()
+                || !state.conversations.is_empty()
+                || !state.session_messages.is_empty())
+        {
+            bail!("Registered-session data requires schema 2; preserve the inconsistent board")
         }
         Ok(state)
     }
