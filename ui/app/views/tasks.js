@@ -28,7 +28,7 @@ const MOVABLE = new Set(['task', 'question']);
 const LOCKED_TIP = "Status comes from the agent's real state";
 const REQUEST_STATE = { queued: 'Queued', delivered: 'Delivered', acknowledged: 'Acknowledged', running: 'Running', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled', 'needs-owner': 'Needs you' };
 const DONE_PAGE = 30;
-const TABLE_PAGE = 200;
+const TABLE_PAGE = 25;   // bounded pages: the table never grows past one page
 const MODE_KEY = 'codaclauda.tasks.mode';
 const HEADERS = [
   { key: 'title', label: 'Title' },
@@ -111,7 +111,7 @@ export function mount(root, ctx) {
     mode: readMode(),
     project: '', agent: '', type: '', search: '',
     sort: { key: 'updated', dir: -1 },
-    doneLimit: DONE_PAGE, tableLimit: TABLE_PAGE,
+    doneLimit: DONE_PAGE, tablePage: 0, tableSig: '',
     drawer: null,
   };
   let visible = false, frame = 0, fallback = 0, dirty = false, searchTimer = 0;
@@ -229,7 +229,10 @@ export function mount(root, ctx) {
 
   const headerCells = new Map();
   const tbody = h('tbody');
-  const tableMore = h('button.btn.ghost.small.tk-table-more', { type: 'button', hidden: true, onclick: () => { state.tableLimit += TABLE_PAGE; renderNow(); } }, 'Show more');
+  const pagePrev = h('button.btn.ghost.small', { type: 'button', 'aria-label': 'Previous page of tasks', onclick: () => { state.tablePage -= 1; renderNow(); } }, 'Previous');
+  const pageNext = h('button.btn.ghost.small', { type: 'button', 'aria-label': 'Next page of tasks', onclick: () => { state.tablePage += 1; renderNow(); } }, 'Next');
+  const pageRange = h('span.tk-pager-range', { 'aria-live': 'polite' });
+  const tableMore = h('nav.tk-pager', { 'aria-label': 'Task table pages', hidden: true }, pageRange, h('div.tk-pager-controls', pagePrev, pageNext));
   const tableCache = new Map();
   const tableWrap = h('div.tk-table-wrap', { hidden: true },
     h('table.tk-table', h('thead', h('tr', HEADERS.map(col => {
@@ -380,7 +383,13 @@ export function mount(root, ctx) {
     const { key, dir } = state.sort;
     const value = SORT_VALUE[key];
     const sorted = [...tasks].sort((a, b) => { const x = value(a), y = value(b); return (x < y ? -1 : x > y ? 1 : (b.updatedAt || 0) - (a.updatedAt || 0)) * (x === y ? 1 : dir); });
-    const shown = sorted.slice(0, state.tableLimit);
+    // Filter or sort changes return to the first page; data changes clamp to the last page.
+    const sig = JSON.stringify([state.project, state.agent, state.type, state.search, state.sort]);
+    if (sig !== state.tableSig) { state.tableSig = sig; state.tablePage = 0; }
+    const pages = Math.max(1, Math.ceil(sorted.length / TABLE_PAGE));
+    state.tablePage = Math.min(pages - 1, Math.max(0, state.tablePage));
+    const first = state.tablePage * TABLE_PAGE;
+    const shown = sorted.slice(first, first + TABLE_PAGE);
     for (const [col, th] of headerCells) {
       const on = col === key;
       th.setAttribute('aria-sort', on ? (dir > 0 ? 'ascending' : 'descending') : 'none');
@@ -389,8 +398,10 @@ export function mount(root, ctx) {
       if (holder.dataset.icon !== want) { holder.dataset.icon = want; holder.replaceChildren(icon(want)); }
     }
     stable(tableWrap, tbody, () => reconcile(tbody, tableCache, shown.map(t => ({ key: t.id, task: t, sig: cardSig(t, looks) })), ({ task }) => row(task)));
-    tableMore.hidden = sorted.length <= shown.length;
-    tableMore.textContent = `Show more · ${sorted.length - shown.length} left`;
+    tableMore.hidden = sorted.length === 0;
+    pageRange.textContent = `${sorted.length ? first + 1 : 0}–${first + shown.length} of ${sorted.length} · Page ${state.tablePage + 1} of ${pages}`;
+    pagePrev.disabled = state.tablePage === 0;
+    pageNext.disabled = state.tablePage >= pages - 1;
   }
 
   function render() {

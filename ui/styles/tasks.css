@@ -103,7 +103,8 @@
 .tk-row-title { overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .tk-cell-agent { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; }
 .tk-cell-agent > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tk-table-more { display: flex; margin: 12px auto; }
+.tk-pager { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 4px 4px; color: var(--muted); font-size: 12.5px; }
+.tk-pager-controls { display: flex; gap: 10px; }
 
 /* Card menu */
 .tk-menu { position: fixed; z-index: 60; min-width: 214px; max-width: 280px; padding: 6px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface-2); box-shadow: var(--shadow-lg); animation: tk-pop var(--fast) var(--ease); }
