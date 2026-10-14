@@ -1,8 +1,10 @@
 /target/
 /src-tauri/target/
+/src-tauri/gen/
 /dist/
 /local/
 *.log
 /node_modules/
 /evidence/private/
 /.mcp.json
+__pycache__/
