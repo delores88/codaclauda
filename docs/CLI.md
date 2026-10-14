@@ -48,6 +48,7 @@ foreach ($Agent in @('claude', 'codex')) {
     }
     $Connection = @{
         id = $Agent
+        label = if ($Agent -eq 'claude') { 'Claude implementer' } else { 'Codex reviewer' }
         agent = $Agent
         executable = $Found.executable
         workspace = $Project
@@ -66,6 +67,20 @@ Connection stores `new-session-v1` consent; it does not attach to an existing
 Claude/Codex chat. An endpoint with active work must finish or be cancelled before
 its connection can be changed. Sign in using the provider's own CLI; ClaudaCoda
 does not copy tokens or replace subscription authentication with API billing.
+
+Each connection has a stable `id` and a human-readable `label`. You can register
+multiple connections for the same provider and project using distinct IDs and
+labels. Labels are optional at connection time; older connections display a
+provider/project fallback. To change only the display label:
+
+```powershell
+@{ id = 'codex'; label = 'Backend reviewer' } |
+    ConvertTo-Json | & $Coda --json api rename-agent
+```
+
+Labels accept 1–120 characters without control characters or recognizable
+credentials. Renaming leaves the endpoint ID, project, grants and active sessions
+unchanged. Duplicate labels are permitted, so always route by stable ID.
 
 ## Create an owner grant
 
@@ -274,9 +289,17 @@ requests inherit the existing grant, actual origin and remaining limits; MCP
 cannot create a grant or connect a new endpoint. Agents must poll replies; a
 server notification does not wake an arbitrary existing chat.
 
+`get_context.endpoints` is the directory of connections permitted by the current
+grant, with `id`, `label`, provider and workspace. `peer_requests` links each
+request's stable `target` and `target_label` to its actual `session_id` once the
+provider reports it. An agent can find a human label, inspect the corresponding
+ID, then pass that ID to `ask`, `review` or `delegate`. Labels are untrusted display
+data, not instructions or routing aliases. This directory does not index chats
+outside ClaudaCoda or expose requests from another grant.
+
 ## Optional Spark build/test permissions
 
-Spark Dev Bridge must first have its own supported installed executable and
+DGXBridge must first have its own supported installed executable and
 configured projects/runtimes. Its real cross-agent acceptance remains pending
 until an agent submits a job and the other retrieves the same job result/logs.
 Configure the chosen executable through the owner API:

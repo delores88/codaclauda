@@ -6,7 +6,7 @@ use tauri::Manager;
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 
 const OPERATIONS: &[&str] = &[
-    "discover", "status", "connect", "grant", "submit", "messages", "request", "pause",
+    "discover", "status", "connect", "rename-agent", "grant", "submit", "messages", "request", "pause",
     "cancel", "reconnect", "spark-config", "spark",
 ];
 const INPUT_LIMIT: usize = 256 * 1024;

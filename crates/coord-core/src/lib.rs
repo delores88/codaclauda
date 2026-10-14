@@ -181,6 +181,50 @@ fn public_request(r: &Request) -> Value {
     v
 }
 
+fn validate_endpoint_label(label: &str) -> Result<String> {
+    ensure!(
+        !label.trim().is_empty()
+            && label.chars().count() <= 120
+            && !label.chars().any(char::is_control)
+            && redact(label) == label,
+        "Label must contain 1 to 120 characters without control characters or recognizable credentials"
+    );
+    Ok(label.trim().to_owned())
+}
+
+fn effective_endpoint_label(endpoint: &Endpoint) -> String {
+    if let Some(label) = endpoint
+        .label
+        .as_deref()
+        .and_then(|label| validate_endpoint_label(label).ok())
+    {
+        return label;
+    }
+    let provider = match endpoint.agent.as_str() {
+        "claude" => "Claude Code",
+        "codex" => "Codex",
+        _ => &endpoint.agent,
+    };
+    let basename = endpoint
+        .workspace
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty() && !name.ends_with(':') && *name != "." && *name != "..")
+        .unwrap_or(&endpoint.id);
+    redact(&format!("{provider} · {basename}"))
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(120)
+        .collect()
+}
+
+fn public_endpoint(endpoint: &Endpoint) -> Value {
+    let mut value = serde_json::to_value(endpoint).unwrap();
+    value["label"] = json!(effective_endpoint_label(endpoint));
+    value
+}
+
 pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value> {
     match op {
         "discover" => Ok(adapters::discover()),
@@ -189,6 +233,10 @@ pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value
                 a["dedicated_session_consent"] == true,
                 "Owner must explicitly authorize dedicated new sessions"
             );
+            let label = a
+                .get("label")
+                .map(|label| validate_endpoint_label(label.as_str().context("Label must be text")?))
+                .transpose()?;
             let agent = field(a, "agent")?;
             ensure!(["claude", "codex"].contains(&agent), "Unsupported agent");
             let exe = Path::new(field(a, "executable")?)
@@ -206,6 +254,7 @@ pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value
             let probe = adapters::probe(agent, &exe)?;
             let ep = Endpoint {
                 id: a["id"].as_str().unwrap_or(agent).to_owned(),
+                label,
                 agent: agent.into(),
                 executable: exe.to_string_lossy().into(),
                 workspace: workspace.to_string_lossy().into(),
@@ -224,14 +273,26 @@ pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value
                 s.endpoints.insert(ep.id.clone(), ep.clone());
                 Ok(())
             })?;
-            Ok(json!(ep))
+            Ok(public_endpoint(&ep))
+        }
+        "rename-agent" => {
+            let endpoint_id = field(a, "id")?;
+            let label = validate_endpoint_label(field(a, "label")?)?;
+            store.transaction(|s| {
+                let endpoint = s
+                    .endpoints
+                    .get_mut(endpoint_id)
+                    .context("Endpoint is not connected")?;
+                endpoint.label = Some(label);
+                Ok(public_endpoint(endpoint))
+            })
         }
         "status" => {
             let s = store.read()?;
             let mut requests: Vec<_> = s.requests.values().map(public_request).collect();
             requests.sort_by_key(|r| std::cmp::Reverse(r["created_at"].as_u64().unwrap_or(0)));
             Ok(
-                json!({"schema_version":1,"endpoints":s.endpoints.values().collect::<Vec<_>>(),"grants":s.grants.values().collect::<Vec<_>>(),"requests":requests,"spark":{"executable":s.spark,"acceptance":"pending until actual shared job receipt"},"paused":s.paused,"state_dir":store.root,"limits":{"concurrent":2,"codex_cost":"unavailable","hard_token_cap":"unavailable"}}),
+                json!({"schema_version":1,"endpoints":s.endpoints.values().map(public_endpoint).collect::<Vec<_>>(),"grants":s.grants.values().collect::<Vec<_>>(),"requests":requests,"spark":{"executable":s.spark,"acceptance":"pending until actual shared job receipt"},"paused":s.paused,"state_dir":store.root,"limits":{"concurrent":2,"codex_cost":"unavailable","hard_token_cap":"unavailable"}}),
             )
         }
         "grant" => create_grant(store, a),

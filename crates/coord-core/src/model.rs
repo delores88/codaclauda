@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Endpoint {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub agent: String,
     pub executable: String,
     pub workspace: String,

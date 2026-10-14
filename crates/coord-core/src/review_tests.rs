@@ -118,6 +118,7 @@ fn fixture() -> (tempfile::TempDir, Store, Grant) {
             for agent in ["codex", "claude"] {
                 let endpoint = Endpoint {
                     id: format!("{agent}-fixture"),
+                    label: None,
                     agent: agent.into(),
                     executable: "not-an-executable-test-fixture".into(),
                     workspace: grant.project.clone(),
@@ -482,5 +483,203 @@ fn scoped_context_read_is_recorded_only_after_authorized_context_generation() {
             .filter(|event| event.kind == "context-read")
             .count(),
         1
+    );
+}
+
+#[test]
+fn legacy_endpoint_labels_are_readable_without_rewriting_saved_authority() {
+    let (_temp, store, _) = fixture();
+    let state_file = store.root.join("state.json");
+    let before = fs::read(&state_file).unwrap();
+    let legacy: Value = serde_json::from_slice(&before).unwrap();
+    assert!(legacy["endpoints"]["codex-fixture"].get("label").is_none());
+    let decoded: Endpoint =
+        serde_json::from_value(legacy["endpoints"]["codex-fixture"].clone()).unwrap();
+    assert!(decoded.label.is_none());
+    let status = owner_api(&store, "status", &json!({}), Path::new("unused")).unwrap();
+    let endpoints = status["endpoints"].as_array().unwrap();
+    assert_eq!(
+        endpoints
+            .iter()
+            .find(|e| e["id"] == "codex-fixture")
+            .unwrap()["label"],
+        "Codex · project"
+    );
+    assert_eq!(
+        endpoints
+            .iter()
+            .find(|e| e["id"] == "claude-fixture")
+            .unwrap()["label"],
+        "Claude Code · project"
+    );
+    assert_eq!(fs::read(state_file).unwrap(), before);
+    let mut windows_legacy = decoded;
+    windows_legacy.workspace = r"\\?\C:\projects\Example App\".into();
+    assert_eq!(
+        effective_endpoint_label(&windows_legacy),
+        "Codex · Example App"
+    );
+    windows_legacy.workspace = "/".into();
+    assert_eq!(
+        effective_endpoint_label(&windows_legacy),
+        "Codex · codex-fixture"
+    );
+}
+
+#[test]
+fn endpoint_labels_validate_before_connect_probe_and_rename_preserves_authority() {
+    let (_temp, store, grant) = fixture();
+    submit(&store, &input("labeled-active", &grant), None).unwrap();
+    let cli = Path::new("must-never-be-launched.exe");
+    let before = serde_json::to_value(store.read().unwrap()).unwrap();
+    for label in [
+        "".to_owned(),
+        "   ".into(),
+        "a".repeat(121),
+        "Reviewer\nAdmin".into(),
+        "Reviewer\tRole".into(),
+        "Reviewer\u{0085}Role".into(),
+        "password=unit-fixture-secret".into(),
+        "sk-unit-fixture-only-value".into(),
+    ] {
+        let invalid = json!({"id":"codex-fixture","label":label,"dedicated_session_consent":true});
+        // Missing executable/agent is deliberate: labels must fail before probing.
+        let error = owner_api(&store, "connect", &invalid, cli)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Label"),
+            "unexpected connect validation: {error}"
+        );
+        assert!(owner_api(&store, "rename-agent", &invalid, cli).is_err());
+        assert_eq!(serde_json::to_value(store.read().unwrap()).unwrap(), before);
+    }
+    for label in [Value::Null, json!(5), json!(["Reviewer"])] {
+        let error = owner_api(
+            &store,
+            "connect",
+            &json!({"label":label,"dedicated_session_consent":true}),
+            cli,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Label must be text"));
+    }
+    let result = owner_api(
+        &store,
+        "rename-agent",
+        &json!({"id":"codex-fixture","label":"  Fixture reviewer  "}),
+        cli,
+    )
+    .unwrap();
+    assert_eq!(result["label"], "Fixture reviewer");
+    assert_eq!(result["id"], "codex-fixture");
+    let mut expected = before;
+    expected["endpoints"]["codex-fixture"]["label"] = json!("Fixture reviewer");
+    assert_eq!(
+        serde_json::to_value(store.read().unwrap()).unwrap(),
+        expected
+    );
+    assert_eq!(
+        validate_endpoint_label(&"界".repeat(120))
+            .unwrap()
+            .chars()
+            .count(),
+        120
+    );
+    assert!(
+        owner_api(
+            &store,
+            "rename-agent",
+            &json!({"id":"unknown","label":"Reviewer"}),
+            cli
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn scoped_label_directory_maps_real_session_fields_and_routes_only_by_id() {
+    let (_temp, store, grant) = fixture();
+    let parent = submit(&store, &input("directory-parent", &grant), None).unwrap();
+    let mut peer_input = input("directory-peer", &grant);
+    peer_input["target"] = json!("claude-fixture");
+    let peer = submit(&store, &peer_input, Some(&parent.id)).unwrap();
+    let capability = "unit-label-capability";
+    store
+        .transaction(|state| {
+            for endpoint in state.endpoints.values_mut() {
+                endpoint.label = Some("Reviewer".into());
+            }
+            let mut foreign_endpoint = state.endpoints["codex-fixture"].clone();
+            foreign_endpoint.id = "foreign-endpoint".into();
+            foreign_endpoint.label = Some("Private unrelated role".into());
+            state
+                .endpoints
+                .insert(foreign_endpoint.id.clone(), foreign_endpoint);
+            let mut foreign_grant = grant.clone();
+            foreign_grant.id = "foreign-grant".into();
+            foreign_grant.targets = vec!["foreign-endpoint".into()];
+            state.grants.insert(foreign_grant.id.clone(), foreign_grant);
+            let r = state.requests.get_mut(&parent.id).unwrap();
+            r.workspace = Some(grant.project.clone());
+            r.capability_hash = hash(capability);
+            r.session_id = Some("unit-actual-codex-session".into());
+            r.state = "running".into();
+            state.requests.get_mut(&peer.id).unwrap().session_id =
+                Some("unit-actual-claude-session".into());
+            Ok(())
+        })
+        .unwrap();
+    submit(&store, &json!({"id":"foreign-request","grant_id":"foreign-grant","target":"foreign-endpoint","kind":"question","prompt":"Unrelated owner work"}), None).unwrap();
+    let cli = Path::new("must-never-be-launched.exe");
+    let context = mcp::call(
+        &store,
+        &parent.id,
+        capability,
+        cli,
+        "get_context",
+        &json!({}),
+    )
+    .unwrap();
+    let directory = context["endpoints"].as_array().unwrap();
+    assert_eq!(directory.len(), 2);
+    assert!(directory.iter().all(|e| e["label"] == "Reviewer"));
+    assert!(directory.iter().all(|e| e["id"] != "foreign-endpoint"));
+    let peers = context["peer_requests"].as_array().unwrap();
+    assert_eq!(peers.len(), 2);
+    let linked = peers.iter().find(|p| p["id"] == peer.id).unwrap();
+    assert_eq!(linked["target"], "claude-fixture");
+    assert_eq!(linked["target_label"], "Reviewer");
+    assert_eq!(linked["session_id"], "unit-actual-claude-session");
+    assert!(!context.to_string().contains("Private unrelated role"));
+    assert!(!context.to_string().contains("foreign-request"));
+    let wrong = mcp::call(&store, &parent.id, capability, cli, "ask", &json!({"id":"label-routing-refused","target":"Reviewer","prompt":"Do not resolve a duplicate display label"})).unwrap_err();
+    assert!(wrong.to_string().contains("OWNER_SCOPE"));
+    assert!(
+        !store
+            .read()
+            .unwrap()
+            .requests
+            .contains_key("label-routing-refused")
+    );
+    let routed = mcp::call(&store, &parent.id, capability, cli, "ask", &json!({"id":"stable-id-routed","target":"claude-fixture","prompt":"Use the granted stable endpoint ID"})).unwrap();
+    assert_eq!(routed["target"], "claude-fixture");
+    assert_eq!(routed["origin_session"], "unit-actual-codex-session");
+    assert!(
+        mcp::call(
+            &store,
+            &parent.id,
+            capability,
+            cli,
+            "rename-agent",
+            &json!({"id":"claude-fixture","label":"Agent-changed role"})
+        )
+        .is_err()
+    );
+    assert_eq!(
+        store.read().unwrap().endpoints["claude-fixture"]
+            .label
+            .as_deref(),
+        Some("Reviewer")
     );
 }
