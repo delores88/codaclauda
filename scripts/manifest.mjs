@@ -15,7 +15,7 @@ const repoName = 'delores88/codaclauda';
 const maxManifestBytes = 128_000;
 const maxImageBytes = 8 * 1024 * 1024;
 
-const help = `ClaudaCoda release-manifest preparation (never publishes)
+const help = `CodaClauda release-manifest preparation (never publishes)
 
 node scripts/manifest.mjs --input <actual-release.json> --output <deloresai.manifest.json>
   [--contracts <read-only-DeloresAI-checkout>]
@@ -28,6 +28,7 @@ Input must be actual release data, not a template. Paths resolve against the inp
 file's directory unless absolute. Required input structure:
 
   appId: "claudacoda"; slug: "claudacoda"; publisherId: actual publisher ID
+  marketplaceDisplayName: optional "ClaudaCoda" (default) or "CodaClauda"
   repository: {id: 1418202657, url: "https://github.com/delores88/codaclauda"}
   release: {id, tag, version, channel: "stable"|"beta", sourceCommit}
   installer: {assetId, filename, path, sha256, size, signingStatus: "signed"|"unsigned"}
@@ -42,6 +43,19 @@ file's directory unless absolute. Required input structure:
     installedWorkflow:{path,sha256}, testedRequirements:{path,sha256},
     signing:{path,sha256}
   }
+
+The live Marketplace name remains ClaudaCoda by default, independent of local
+product branding. Accepted intake copies this name into the live listing. Select
+CodaClauda only after the owner-authorized listing rename is ready to publish;
+never upload a renamed manifest ahead of that approval, including to a discoverable
+GitHub release. The selector does not record or prove approval. Keep appId/slug
+claudacoda and the repository identity unchanged. Preparation never publishes.
+For 0.3.0, keep publication on hold until Ben previews the running candidate and
+says "ship it" in the release chat; coordinate the separate live listing rename
+approval with the Marketplace operator. Mailbox messages do not grant approval.
+The disclosure baseline covers verified passive mailbox and dedicated-work
+features. Review it against the final UI before release; it does not advertise
+unverified 0.3.0 UI work.
 
 All SHA-256 values are lowercase 64-hex; commits are lowercase 40-hex. Numeric IDs,
 size and tested requirements must be real. Required committed lock sourcePaths:
@@ -179,48 +193,129 @@ async function verifyArt(input, base, commit, name, size) {
   return { url: url.href, path: filename, sourcePath, sha256: digest(bytes), bytes: bytes.length, ...dimensions };
 }
 
-function makeManifest(input) {
+// Branding is an explicit release input because accepted intake can rename the live listing.
+// Preparing this object does not establish owner approval or authorize publication.
+export function makeManifest(input) {
+  const displayName = input.marketplaceDisplayName === undefined ? 'ClaudaCoda' : input.marketplaceDisplayName;
+  assert(['ClaudaCoda', 'CodaClauda'].includes(displayName), 'marketplaceDisplayName must be ClaudaCoda or CodaClauda');
+  assert.equal(input.appId, 'claudacoda', 'Keep the existing Marketplace appId for upgrades');
+  assert.equal(input.slug, 'claudacoda', 'Keep the existing Marketplace slug for upgrades');
+  assert(['signed', 'unsigned'].includes(input.installer.signingStatus), 'Declare the actual installer signing status');
+  const signingDisclosure = input.installer.signingStatus === 'signed'
+    ? 'The installer is signed; see the release signing receipt for its verification result.'
+    : 'The installer itself is unsigned.';
   return {
-    schemaVersion: 1, appId: input.appId, name: 'ClaudaCoda', slug: input.slug,
-    publisherId: input.publisherId, repository, release: input.release,
-    summary: 'A readable coordination board for owner-authorized Claude Code and Codex messages, reviews and bounded delegated work.',
-    description: 'ClaudaCoda is a Windows desktop utility, JSON CLI and request-bound stdio MCP server for coordination between independently installed Claude Code and Codex CLIs. The owner selects the provider, project, allowed paths and limits. Questions and reviews are read-only; delegated edits use isolated Git worktrees and return an unmerged diff. Each request records actual provider session evidence, history and receipts. Existing-chat conversations have readable messages, recipient acknowledgments, replies and pagination. Session-bound MCP supports owner-registered pairs; Claude push requires interactive channel opt-in and Codex push requires the exact chat loaded on a reachable supported server. Inbox-only mode cannot wake a chat. Arbitrary existing desktop chats are not attached automatically. Dedicated tasks remain separate, with bounded active/history lists. The drawer provides private agent setup and Marketplace update controls. Provider subscriptions and internet connectivity are required for the two-agent workflow. No models are bundled and no direct API credits are mandatory. Optional DGXBridge handles separately authorized build/test commands through its public CLI. ClaudaCoda has no independent listening service, telemetry or elevation requirement. Its updater requires Marketplace browser approval, signed artifact verification and a separate explicit install action. Install Microsoft Edge WebView2 and the provider CLIs separately before use. Reported agent answers are distinct from independently recorded test results.',
-    category: 'automation', sourceVisibility: 'public', license: 'MIT',
-    distributionAuthorization: { freeUse: true, marketplaceDistribution: true },
-    free: { price: 0, trial: false, paidUnlocks: false, mandatoryDeveloperCredits: false },
+    schemaVersion: 1,
+    appId: input.appId,
+    name: displayName,
+    slug: input.slug,
+    publisherId: input.publisherId,
+    repository: repository,
+    release: input.release,
+    summary: "A readable local mailbox for existing Claude and Codex conversations, with replies, resource claims and separately authorized dedicated work.",
+    description: `${displayName} is a Windows desktop app, JSON CLI and request-bound stdio MCP server. Its passive mailbox lets existing Claude and Codex conversations post questions, read inboxes, reply and acknowledge messages without starting or resuming a provider session. Messages wait until the recipient checks; the mailbox does not wake an idle chat. Addresses are plain self-asserted names, not authenticated provider identities. Messages are information, not owner approval. The owner remains responsible for authorizing actions. The Mailbox view shows readable plain-text bodies, per-address inboxes with 20-message pages, bounded open resource claims and an owner post box. Stable post IDs prevent identical retries duplicating messages. Advisory claims expire within 120 minutes and coordinate shared resources without granting permission. Mailbox messages are retained for 30 days; recognized credential patterns are refused before storage, but users must never post secrets. Mailbox delivery works locally without a model or provider login. Agents must already have access to the board through the installed CLI; dedicated sessions started by ${displayName} can use its scoped MCP mailbox tools. Separately authorized dedicated Claude Code/Codex work remains available: the owner chooses project paths and limits, questions and reviews are read-only, and delegated edits return unmerged Git worktree diffs. Those provider workflows require separately installed CLIs, eligible accounts and network access. No models are bundled and no direct API credits are mandatory. Optional DGXBridge runs separately authorized compute jobs through its public CLI. The native updater checks accepted stable Marketplace releases, requires browser approval for acquisition, verifies signed Marketplace envelopes and exact installer hashes, and requires a separate explicit install action. ${signingDisclosure} ${displayName} has no public coordination listener, independent telemetry or elevation requirement. Microsoft Edge WebView2 must be installed separately for the GUI. Compatibility values describe the observed tested environment, not empirically determined minimum hardware or software requirements. The app footprint is rounded up in decimal MB and excludes provider CLIs, WebView2, user data and temporary installation space.`,
+    category: "automation",
+    sourceVisibility: "public",
+    license: "MIT",
+    distributionAuthorization: {
+      freeUse: true,
+      marketplaceDistribution: true
+    },
+    free: {
+      price: 0,
+      trial: false,
+      paidUnlocks: false,
+      mandatoryDeveloperCredits: false
+    },
     intelligence: {
       capabilities: [
-        'Coordinate dedicated Claude Code and Codex sessions through bounded owner grants and request-bound MCP tools.',
-        'Exchange questions and reviews with actual session evidence, durable history and bounded polling.',
-        'Delegate scoped edits to isolated Git worktrees and return a diff without automatically merging it.',
-      ], functionalTest: input.functionalTest,
+        "Exchange durable questions and replies between existing conversations through a passive local mailbox without launching another session.",
+        "Coordinate shared resources with atomic advisory claims, expiry, explicit release and visible current holders.",
+        "Use paginated readable inboxes, acknowledgments, stable retry IDs and an owner message composer.",
+        "Run separately owner-authorized Claude Code/Codex questions, reviews and bounded delegated work with local receipts."
+      ],
+      functionalTest: input.functionalTest
     },
-    execution: 'hybrid', offline: false,
+    execution: "hybrid",
+    offline: true,
     integrations: [
-      { name: 'Claude Code', required: true, purpose: 'Runs dedicated Claude sessions using the separately installed native CLI and its existing subscription sign-in.', costDisclosure: 'A separately obtained eligible Claude subscription is required for this adapter. ClaudaCoda does not provide the subscription or require direct API credits.', url: 'https://code.claude.com/docs/en/overview' },
-      { name: 'Codex', required: true, purpose: 'Runs dedicated Codex sessions using the separately installed native CLI and its existing ChatGPT sign-in.', costDisclosure: 'Separately obtained eligible ChatGPT/Codex access is required. ClaudaCoda does not provide the subscription or require direct API credits.', url: 'https://learn.chatgpt.com/docs/non-interactive-mode' },
-      { name: 'Git', required: true, purpose: 'Lists project files and creates isolated worktrees for delegated edits.', costDisclosure: 'Git is a separately installed free dependency; third-party licensing applies.', url: 'https://git-scm.com/' },
-      { name: 'Microsoft Edge WebView2', required: true, purpose: 'Hosts the Windows desktop interface. Must already be installed; this package does not download it.', costDisclosure: 'Separately installed Microsoft runtime; no ClaudaCoda developer credits or paid unlock is required.', url: 'https://developer.microsoft.com/microsoft-edge/webview2/' },
-      { name: 'DGXBridge', required: false, purpose: 'Optional public-CLI integration for exact owner-authorized build/test jobs and shared result receipts. Supported installed integration acceptance is pending.', costDisclosure: 'Separate software, configuration and optional owner-provided Spark hardware are required for this optional workflow. Hardware, network and external service costs are separate.', url: 'https://github.com/delores88/nvidialink' },
+      {
+        name: "Claude Code",
+        required: false,
+        purpose: "Optional dedicated Claude sessions use the separately installed native CLI and its existing subscription sign-in. Passive mailbox delivery itself does not require a provider login.",
+        costDisclosure: `A separately obtained eligible Claude subscription is required for this adapter. ${displayName} does not provide the subscription or require direct API credits.`,
+        url: "https://code.claude.com/docs/en/overview"
+      },
+      {
+        name: "Codex",
+        required: false,
+        purpose: "Optional dedicated Codex sessions use the separately installed native CLI and its existing ChatGPT sign-in. Passive mailbox delivery itself does not require a provider login.",
+        costDisclosure: `Separately obtained eligible ChatGPT/Codex access is required. ${displayName} does not provide the subscription or require direct API credits.`,
+        url: "https://learn.chatgpt.com/docs/non-interactive-mode"
+      },
+      {
+        name: "Git",
+        required: false,
+        purpose: "Required for the optional project-file and isolated delegated-worktree workflows; not required to exchange passive mailbox messages.",
+        costDisclosure: "Git is a separately installed free dependency; third-party licensing applies.",
+        url: "https://git-scm.com/"
+      },
+      {
+        name: "Microsoft Edge WebView2",
+        required: true,
+        purpose: "Hosts the Windows desktop interface. Must already be installed; this package does not download it.",
+        costDisclosure: `Separately installed Microsoft runtime; no ${displayName} developer credits or paid unlock is required.`,
+        url: "https://developer.microsoft.com/microsoft-edge/webview2/"
+      },
+      {
+        name: "DGXBridge",
+        required: false,
+        purpose: "Optional public-CLI integration for exact owner-authorized build/test jobs and shared result receipts. Earlier installed acceptance covered one shared Python unittest; this release does not claim GPU or broader workload acceptance.",
+        costDisclosure: "Separate software, configuration and optional owner-provided Spark hardware are required for this optional workflow. Hardware, network and external service costs are separate.",
+        url: "https://github.com/delores88/nvidialink"
+      }
     ],
     privacy: {
-      dataLeavesDevice: 'Authorized project text, request prompts, handoff context and result content are sent by the installed Claude Code/Codex CLIs to their provider services under the owner account. Optional DGXBridge may transfer authorized project/build data to its configured compute target. Update discovery and approval contact deloresai.com with app/artifact identifiers, ordinary HTTPS network data and temporary authorization proof; no coordination content or provider credentials is sent to Marketplace. ClaudaCoda does not host a public coordination endpoint.',
-      retention: 'ClaudaCoda retains local request history, prompts, answers, events, receipts, configuration and delegated worktrees until the owner removes them. There is no automatic history expiry or purge. Local update status and verified installers support update recovery; temporary proof and download capabilities stay in memory. Provider CLIs and optional DGXBridge keep their own independent histories and retention policies.',
-      telemetry: 'ClaudaCoda adds no independent telemetry or analytics. External provider CLIs, their services, WebView2 and optional DGXBridge follow their own settings and policies.',
-      policyUrl: `https://github.com/${repoName}/blob/${input.release.sourceCommit}/docs/PRIVACY.md`,
+      dataLeavesDevice: `Passive mailbox delivery stores messages on the selected local board and does not itself launch a provider or send content to a provider service. Existing agents that read the board follow their own provider policies. Authorized dedicated tasks send project text, prompts, handoff context and results through the installed Claude Code/Codex CLIs under the owner's provider account. Optional DGXBridge may transfer authorized project/build data to its compute target. Update discovery and approval contact deloresai.com with app/artifact identifiers, ordinary HTTPS network information and temporary authorization proof; no coordination content or provider credentials are sent to Marketplace. ${displayName} has no public coordination endpoint.`,
+      retention: "Passive mailbox messages and read receipts expire after 30 days and are pruned during subsequent mailbox operations. Address registrations remain; advisory claims expire after their chosen 1-120 minute TTL. Legacy request prompts, answers, events, receipts, private configuration and worktrees remain until the owner removes them. Registered-session data and backups may contain private history. Local update status and verified installers support the update workflow; temporary proof and one-use download capability stay in memory. Provider CLIs, their services and optional DGXBridge have independent retention. Uninstalling does not promise deletion of the board.",
+      telemetry: `${displayName} adds no independent telemetry or analytics. External provider CLIs, their services, WebView2 and optional DGXBridge follow their own settings and policies.`,
+      policyUrl: `https://github.com/${repoName}/blob/${input.release.sourceCommit}/docs/PRIVACY.md`
     },
     permissions: {
-      filesystem: ['Owner-selected project paths for scoped UTF-8 reads and delegated edits.', 'The resolved coordination board for durable history, private configuration and isolated worktrees.', 'Read separately installed native provider and optional DGXBridge executables.', 'Private update staging and the existing per-user ClaudaCoda install directory for verified, explicitly approved updates.'],
-      credentials: ['Provider CLIs use their own saved subscription authentication; ClaudaCoda does not read or copy provider tokens.', 'Private local request capabilities scope ClaudaCoda MCP tools; no public listener.', 'Marketplace browser approval grants a temporary memory-only proof and download capability; no browser cookies are imported.'],
-      domains: ['deloresai.com'], elevation: false, backgroundServices: false,
+      filesystem: [
+        "The selected local board for passive addresses, messages, read receipts, advisory claims, private configuration and legacy request history.",
+        "Owner-selected project paths for scoped UTF-8 reads and delegated edits; isolated Git worktrees for delegated tasks.",
+        "Read separately installed native provider and optional DGXBridge executables and their supported status outputs.",
+        "A sibling per-installation settings directory stores the selected board pointer across updates.",
+        `Private update staging and the existing per-user ${displayName} installation for verified, explicitly approved replacement.`
+      ],
+      credentials: [
+        `Provider CLIs use their own saved authentication; ${displayName} does not read or copy provider tokens.`,
+        "Private local capabilities scope dedicated-session and registered-conversation MCP tools; no public listener.",
+        "Marketplace browser approval grants temporary memory-only proof and download capability; no browser cookies are imported.",
+        "Mailbox addresses are self-asserted labels, not authenticated identities. Never post credentials; pattern scanning cannot detect every secret."
+      ],
+      domains: [
+        "deloresai.com"
+      ],
+      elevation: false,
+      backgroundServices: false
     },
-    models: [], executableDownloads: [],
-    updater: { mode: 'coordinated', coordination: 'The ClaudaCoda drawer discovers accepted stable Windows x64 NSIS artifacts through deloresai.com. The owner approves acquisition in the system browser, then separately chooses Install. The native updater verifies pinned acquisition and nested review signatures, exact app/publisher/repository/source/artifact/platform bindings, size and SHA-256; it revalidates immediately before setup. One-use proof and capability remain in memory. No cookie transplant, direct-GitHub fallback or silent retry follows an expired, interrupted or ambiguous operation; fresh authorization requires explicit approval. The helper preserves the selected coordination board and existing physical per-user install. Provider CLIs and DGXBridge update independently. No fixed additional executable downloads are bundled into this release.' },
-    rollback: { dataCompatible: false, backupRequired: true, notes: 'The coordination board remains schema version 1. No backward-compatibility promise is made for an older application release. Stop active requests and preserve the actual resolved state directory and delegated worktrees before replacement or rollback; never replay an ambiguous request automatically.' },
+    models: [],
+    executableDownloads: [],
+    updater: {
+      mode: "coordinated",
+      coordination: "The Updates view discovers accepted stable Windows x64 NSIS releases through deloresai.com. The owner approves acquisition in the system browser, then separately chooses Install. The updater verifies pinned acquisition and nested review signatures, exact app/publisher/repository/source/artifact/platform bindings, size and SHA-256, and revalidates before setup. Temporary S256 proof and one-use capability stay in memory. Expired, interrupted or ambiguous authorization requires explicit approval again. There is no cookie import, direct-GitHub fallback or silent install. The helper preserves the selected board and physical per-user installation and refuses active coordination work. Provider CLIs and DGXBridge update independently. No fixed additional executable downloads are bundled."
+    },
+    rollback: {
+      dataCompatible: false,
+      backupRequired: true,
+      notes: "Passive mailboxes use a separate mailbox.json and do not migrate legacy state.json. Registered-conversation writes can back up schema 1 and upgrade the legacy board to schema 2, which older binaries refuse. Preserve the actual selected board, per-installation binding and unmerged worktrees before replacement or rollback. Stop active requests and never replay an ambiguous request automatically. No older-version compatibility guarantee is made."
+    },
     artwork: { iconUrl: input.artwork.icon.url, thumbnailUrl: input.artwork.thumbnail.url },
     screenshots: input.artwork.screenshots.map(({ url, alt }) => ({ url, alt })),
     artifacts: [{ os: 'windows', architectures: ['x64'], format: 'nsis', assetId: input.installer.assetId,
-      filename: input.installer.filename, installationAdapter: 'windows-nsis', preferred: true, requirements: input.requirements }],
+      filename: input.installer.filename, installationAdapter: 'windows-nsis', preferred: true, requirements: input.requirements }]
   };
 }
 
@@ -244,7 +339,7 @@ async function main() {
   const input = JSON.parse(inputBytes.toString('utf8'));
   assert.equal(input.appId, 'claudacoda'); assert.equal(input.slug, 'claudacoda');
   requiredText(input.publisherId, 'publisherId', 128);
-  assert.deepEqual(input.repository, repository, 'Repository identity must be the independent ClaudaCoda repository');
+  assert.deepEqual(input.repository, repository, 'Repository identity must be the independent CodaClauda repository');
   assert(input.release && input.installer && input.artwork && input.requirements && input.evidence, 'Release identity, installer, artwork, requirements and evidence are all required');
   positive(input.release.id, 'release.id'); positive(input.installer.assetId, 'installer.assetId'); positive(input.installer.size, 'installer.size');
   const sourceCommit = sha(input.release.sourceCommit, 'release.sourceCommit', 40);
@@ -333,11 +428,13 @@ async function main() {
   console.log(JSON.stringify({ ok: true, operation: 'manifest-prepared', manifest: { path: outputPath, sha256: digest(bytes), size: bytes.length, unchanged },
     release: { id: release.id, url: release.html_url, draft: release.draft, sourceCommit }, installer: { ...installer, assetId: asset.id, signingStatus: input.installer.signingStatus },
     artwork, evidence, contracts: validator.source, sourceVisibility: 'public', license: 'MIT',
-    marketplace: { submitted: false, accepted: false, featured: false },
+    marketplace: { displayName: parsed.data.name, listingRenameRequested: parsed.data.name === 'CodaClauda', submitted: false, accepted: false, featured: false },
     limitation: 'Preparation validates supplied evidence bytes and current structure, not the truth of screenshot/receipt claims or scanner/native acceptance. Keep this receipt private; publish only reviewed release artifacts.' }));
 }
 
-main().catch((error) => {
-  console.error(JSON.stringify({ ok: false, error: 'MANIFEST_PREPARATION_REJECTED', message: error.message }));
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(JSON.stringify({ ok: false, error: 'MANIFEST_PREPARATION_REJECTED', message: error.message }));
+    process.exitCode = 1;
+  });
+}

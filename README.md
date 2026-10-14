@@ -1,11 +1,11 @@
-# ClaudaCoda
+# CodaClauda
 
 An owner-controlled Windows desktop utility for Claude and Codex coordination:
 passive mailboxes for existing chats, and separate bounded delegated work. Published
 by **DeloresAI**. First-party source is [MIT licensed](LICENSE), copyright
 Ben Van Dorn / DeloresAI. [Public source](https://github.com/delores88/codaclauda).
 
-ClaudaCoda combines a Rust/Tauri desktop app, a JSON CLI and a request-bound stdio
+CodaClauda combines a Rust/Tauri desktop app, a JSON CLI and a request-bound stdio
 MCP server. You choose the agent, project, allowed paths, request types and limits.
 Questions and reviews are read-only. Delegated edits use a separate Git worktree;
 the returned diff is never merged automatically. Requests and receipts remain on
@@ -13,46 +13,49 @@ the local coordination board.
 
 ## Current status
 
-[Version 0.1.0](https://github.com/delores88/codaclauda/releases/tag/v0.1.0)
-was published and accepted into the ordinary, non-featured MIT Marketplace
-catalog on October 14, 2026. Its installed GUI, real Claude/Codex exchanges,
-delegated edit/review and one shared DGXBridge job have separate local acceptance
-receipts. A Marketplace client download failure is being addressed separately;
-catalog acceptance alone does not prove successful acquisition.
+[Version 0.2.0](https://github.com/delores88/codaclauda/releases/tag/v0.2.0)
+is the published release, under the former name ClaudaCoda. It was accepted into
+the ordinary, non-featured MIT Marketplace catalog on October 14, 2026. The
+installed mailbox exchange and authenticated Marketplace-served installer hash
+have separate acceptance receipts.
 
-Version 0.2.0 is in development. Its primary workflow is a passive mailbox for
-existing chats: named addresses, durable questions and replies, acknowledgments,
-bounded waits, and atomic shared-resource claims. Messages wait until the recipient
-checks. No session is launched, resumed or woken for delivery. The Mailbox view
-provides readable message cards, 20-message pages, open claims and an owner post
-box. See [the mailbox commands and etiquette](docs/MAILBOX.md).
+Version 0.3.0 is being prepared with the restored name **CodaClauda** and a new
+desktop interface. Its UI, installer upgrade and owner preview are not yet
+accepted. Publication waits until the owner has seen the candidate running and
+explicitly approves shipment. See [the 0.3.0 release plan](docs/RELEASE-0.3.md).
 
-The candidate also adds browser-approved updates and separates dedicated tasks
-from existing-chat messages. The earlier candidate passed hosted packaging; the
-new mailbox changes require their own process, installed UI and participation
-acceptance before publication. Experimental registered-session push remains
-separate and is not required for passive mailbox coordination. Automatic external
-wakeup of arbitrary Claude desktop chats has not been established.
+The released passive mailbox supports named addresses, durable questions and
+replies, acknowledgments, bounded waits and atomic shared-resource claims.
+Messages wait until the recipient checks; delivery starts no provider session.
+See [the mailbox commands and etiquette](docs/MAILBOX.md). Dedicated tasks and
+experimental registered-session push remain separate. Automatic external wakeup
+of arbitrary Claude desktop chats has not been established.
+
+Existing installations retain their physical directory, executable names,
+coordination board binding and Marketplace identity when the display name changes.
+The CLI remains `bin/claudacoda-cli.exe`. Do not move the installation or rewrite
+an existing profile to match the new display spelling.
 
 ## Start on Windows
 
-You need independently installed Claude Code and Codex native CLIs, signed into
-their respective subscription accounts, plus Git for the worktree workflow.
+For dedicated provider tasks, install the Claude Code and Codex native CLIs and
+sign into their respective subscription accounts. Git is needed for the worktree
+workflow. Passive mailbox delivery needs no provider login or model session.
 The desktop requires Windows x64 and Microsoft Edge WebView2. The first-party
 utility is free: it does not require direct API credits or bundle a model.
 Claude/Codex subscriptions and optional Spark hardware are separate products
 with their own costs and terms.
 
-After installing a verified release, launch ClaudaCoda. It automatically
+After installing a verified release, launch CodaClauda. It automatically
 finds supported provider CLIs and checks their existing sign-in once at startup.
 Choose your project with Browse and connect each provider; a detected, signed-in
 CLI is selected automatically. Rescan after installing or signing in. Advanced
 setup exposes an executable override if detection fails or needs a choice.
-In the released 0.1.0 dedicated-task workflow, connection consent explicitly
+In the dedicated-task workflow, connection consent explicitly
 authorizes **new dedicated sessions**. Version 1 does not attach to, send input
 into or interrupt an existing desktop chat. Keep your ongoing work in those chats
-and use dedicated ClaudaCoda requests for coordination. The 0.2 existing-chat
-workflow is separate and never silently substitutes a new provider session.
+and use dedicated CodaClauda requests for coordination. The passive existing-chat
+mailbox is separate and never silently substitutes a new provider session.
 
 The CLI is bundled in `bin/claudacoda-cli.exe` beside the installed desktop
 executable. Use the actual installed path shown by the app. `--json discover`
@@ -87,12 +90,12 @@ workspace; an agent's directory contains only those selected connections.
 - Hop, request, delegation, deadline and output limits are enforced. Codex dollar
   cost and hard token caps are unavailable; Claude-reported cost is an estimate.
 
-Both agents receive a private MCP connection when ClaudaCoda launches their
+Both agents receive a private MCP connection when CodaClauda launches their
 request. No global `.mcp.json` or Codex configuration change is needed. A generic
 global inbox server and automatic wakeup of existing chats are not implemented.
 
 DGXBridge optionally runs authorized build/test commands and returns job
-receipts through its public CLI. ClaudaCoda does not replace its runner, require
+receipts through its public CLI. CodaClauda does not replace its runner, require
 Spark for ordinary questions or claim a shared test passed before both real
 callers and the job result have been verified. See [Spark integration](docs/SPARK.md).
 

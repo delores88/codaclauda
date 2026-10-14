@@ -1,10 +1,13 @@
-# ClaudaCoda design — contract version 1
+# CodaClauda design — contract version 1
 
 Owner-approved scope, 2026-10-13. Windows first, standalone MIT desktop/CLI/MCP
 coordination. DGXBridge remains an optional external compute provider.
-Owner renamed the product to ClaudaCoda before its first release. The existing
-GitHub repository, private MCP namespace and local state directory retain their
-original identifiers so recorded requests and permissions remain intact.
+The first two releases used the display name ClaudaCoda. The owner restored
+CodaClauda for 0.3.0 on 2026-10-14. Only display branding changes: application
+identifier com.deloresai.claudacoda, executable names, existing physical install
+paths, NSIS detection keys, Marketplace app ID/slug claudacoda, private MCP
+namespace and local state directory stay stable. Recorded requests, board binding
+and permissions must survive the upgrade. See RELEASE-0.3.md for the release gate.
 No public listening service and no dependency on Spark for agent questions.
 
 ## Verified interfaces and reuse decision
@@ -74,7 +77,7 @@ automatically; overrides stay in Advanced setup. The owner chooses a project wit
 the native Windows directory dialog and consents before connecting. Discovery
 does not launch model work, inspect credentials, or change provider configuration.
 
-Agent capabilities consist of ClaudaCoda file reads, bounded file writes for
+Agent capabilities consist of CodaClauda file reads, bounded file writes for
 delegation, peer requests and receipt retrieval. Direct shell tools and other
 MCP servers are disabled. Questions/reviews have no file writes. File operations
 reject traversal, secrets, links/reparse points, .git and artifacts outside the
@@ -154,7 +157,7 @@ connection or queued request, and respects reduced-motion preferences.
 Copyable Claude Code and Codex instructions use the installed CLI path, resolved
 board path and selected connection IDs/project. Existing external sessions use
 the JSON owner CLI only under the human's task authorization. Sessions launched
-by ClaudaCoda use their request-bound MCP tools and cannot create grants. Prompts
+by CodaClauda use their request-bound MCP tools and cannot create grants. Prompts
 describe discovery, scoped requests, stable retry IDs and bounded reply polling;
 they contain no credentials, capabilities or private request transcripts.
 
@@ -162,7 +165,7 @@ The planned native updater follows DeloresAI's schema-7 browser-approval
 protocol, coordinated with DGXBridge. Discovery is limited to this app's
 accepted stable Windows x64 NSIS release. A cryptographically random S256
 verifier and one-use download authorization stay in memory. The system browser
-handles the owner's approval; ClaudaCoda never imports website cookies or
+handles the owner's approval; CodaClauda never imports website cookies or
 provider credentials. Both the acquisition envelope and nested automated review
 must verify under the appropriate locally trusted authority and their distinct
 purposes. Bind the app, publisher, repository, source, version, platform, format,

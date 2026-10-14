@@ -34,7 +34,7 @@ function Invoke-ProjectCargo {
     param([Parameter(Mandatory)][string[]]$CargoArgs, [Parameter(Mandatory)][string]$Stage)
     $started = [DateTime]::UtcNow
     $log = Join-Path $output "$Stage.log"
-    Write-Host "ClaudaCoda: $Stage"
+    Write-Host "CodaClauda: $Stage"
     if ($HostedCI) {
         & cargo @CargoArgs 2>&1 | Tee-Object -FilePath $log | Out-Host
     } else {
@@ -100,18 +100,19 @@ try {
     Set-Location -LiteralPath $projectRoot
     foreach ($command in @('git', 'python', 'node', 'cargo', 'rustc')) { Get-Command $command -ErrorAction Stop | Out-Null }
     $gitRoot = (& git rev-parse --show-toplevel).Trim()
-    if (![IO.Path]::GetFullPath($gitRoot).Equals($projectRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'The script must run from the ClaudaCoda repository root.' }
+    if (![IO.Path]::GetFullPath($gitRoot).Equals($projectRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'The script must run from the CodaClauda repository root.' }
     $commit = (& git rev-parse HEAD).Trim()
     if ($commit -notmatch '^[0-9a-f]{40}$') { throw 'A full source commit is required.' }
     $dirty = @(& git status --porcelain=v1 --untracked-files=all)
     if ($dirty.Count -gt 0 -and !$AllowDirty) { throw "Source is dirty. Commit reviewed source first, or explicitly use -AllowDirty for a local candidate. No build started.`n$($dirty -join "`n")" }
-    foreach ($required in @('Cargo.lock', 'src-tauri/Cargo.lock', 'LICENSE', 'PROVENANCE.md', 'THIRD_PARTY_NOTICES.md', 'scripts/notices.py')) {
+    foreach ($required in @('Cargo.lock', 'src-tauri/Cargo.lock', 'LICENSE', 'PROVENANCE.md', 'THIRD_PARTY_NOTICES.md', 'scripts/notices.py', 'scripts/vendor_notices.py', 'scripts/vendor_notices_test.py', 'scripts/test-manifest.mjs', 'scripts/verify_installer_identity.py', 'scripts/nsis/installer.nsi', 'scripts/nsis/identity-hooks.nsh', 'scripts/nsis/provenance.json', 'scripts/nsis/LICENSE-TAURI-MIT')) {
         if (!(Test-Path -LiteralPath $required -PathType Leaf) -or (Get-Item -LiteralPath $required).Length -eq 0) { throw "Required release source is missing or empty: $required" }
     }
     $config = Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
-    if ($config.productName -ne 'ClaudaCoda' -or $config.identifier -ne 'com.deloresai.claudacoda' -or $config.version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$' -or $config.version -eq '0.0.0') { throw 'Final product identity/version must be real; placeholders are forbidden.' }
+    if ($config.productName -ne 'CodaClauda' -or $config.identifier -ne 'com.deloresai.claudacoda' -or $config.version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$' -or $config.version -eq '0.0.0') { throw 'Final product identity/version must be real; placeholders are forbidden.' }
     if ($config.bundle.windows.nsis.installMode -ne 'currentUser' -or $config.bundle.windows.webviewInstallMode.type -ne 'skip') { throw 'Expected per-user NSIS and existing WebView2; re-review installer configuration.' }
     if ($config.build.PSObject.Properties.Name -contains 'beforeBundleCommand') { throw 'A beforeBundleCommand is not allowed in this bundle-only recipe; it could rebuild within the gate.' }
+    & python -I (Join-Path $projectRoot 'scripts/verify_installer_identity.py')
     $version = $config.version
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
     $flavor = if ($dirty.Count -gt 0) { 'dirty-candidate' } else { 'clean-candidate' }
@@ -125,7 +126,7 @@ try {
     $env:RUSTUP_TOOLCHAIN = $toolchain
     $rustVersion = (& rustc --version).Trim()
     if ($rustVersion -notmatch '^rustc 1\.98\.1\b') { throw "Expected installed Rust $toolchain, found $rustVersion. Install the exact toolchain explicitly first." }
-    $receipt = [ordered]@{schema_version=1; product='ClaudaCoda'; version=$version; source_commit=$commit; clean_source=($dirty.Count -eq 0); allow_dirty=[bool]$AllowDirty; flavor=$flavor; target=$targetTriple; rust=$rustVersion; mode=$(if ($HostedCI) {'github-hosted'} else {'local-shared-gate'}); started_at=[DateTime]::UtcNow.ToString('o'); result='building'; acceptance=[ordered]@{unit_and_fixture_tests='pending'; package_integrity='pending'; installed_native_workflow='not performed by this script'; model_provider_workflow='not performed by this script'; marketplace_admission='not performed by this script'; published=$false}; steps=$steps; tools=@()}
+    $receipt = [ordered]@{schema_version=1; product='CodaClauda'; version=$version; source_commit=$commit; clean_source=($dirty.Count -eq 0); allow_dirty=[bool]$AllowDirty; flavor=$flavor; target=$targetTriple; rust=$rustVersion; mode=$(if ($HostedCI) {'github-hosted'} else {'local-shared-gate'}); started_at=[DateTime]::UtcNow.ToString('o'); result='building'; acceptance=[ordered]@{unit_and_fixture_tests='pending'; package_integrity='pending'; installed_native_workflow='not performed by this script'; model_provider_workflow='not performed by this script'; marketplace_admission='not performed by this script'; published=$false}; steps=$steps; tools=@()}
     if (!$HostedCI) { $receipt.build_gate_sha256 = (Get-FileHash -LiteralPath $buildGate -Algorithm SHA256).Hash.ToLowerInvariant() }
     $receipt.tools += Install-PinnedTool -Name 'cargo-auditable' -Version '0.7.7' -Uri 'https://github.com/rust-secure-code/cargo-auditable/releases/download/v0.7.7/cargo-auditable-x86_64-pc-windows-msvc.zip' -Sha256 '717ba2d3ed7997c501e9987ee7c94bebf9d7219b18b185a03009420ec7029c7d' -Executable 'cargo-auditable.exe'
     $receipt.tools += Install-PinnedTool -Name 'cargo-tauri' -Version '2.10.1' -Uri 'https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v2.10.1/cargo-tauri-x86_64-pc-windows-msvc.zip' -Sha256 '50a3ed1c43f75ea3b6e7233a52d8a7c994cfffd98d8545ff397db8b464338d9c' -Executable 'cargo-tauri.exe'
@@ -265,6 +266,8 @@ else: raise ValueError('Unknown inspection operation')
 '@ | Set-Content -LiteralPath $inspector -Encoding utf8NoBOM
     & python -I $inspector versions $projectRoot $version
     & python -I $inspector snapshot $projectRoot (Join-Path $output 'source-tree.json')
+    & python -I (Join-Path $projectRoot 'scripts/vendor_notices_test.py') 2>&1 | Tee-Object -FilePath (Join-Path $output 'vendor-notices-tests.log') | Out-Host
+    & node --test (Join-Path $projectRoot 'scripts/test-manifest.mjs') 2>&1 | Tee-Object -FilePath (Join-Path $output 'manifest-tests.log') | Out-Host
     foreach ($script in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'ui') -File -Recurse | Where-Object { $_.Extension -in @('.js', '.mjs', '.cjs') }) {
         & node --check $script.FullName
     }
@@ -301,7 +304,7 @@ else: raise ValueError('Unknown inspection operation')
     '{"bundle":{"useLocalToolsDir":true}}' | Set-Content -LiteralPath $bundleOverride -Encoding utf8NoBOM
     # `bundle` packages these binaries without invoking a second Cargo build.
     Invoke-ProjectCargo -CargoArgs @('tauri', 'bundle', '--bundles', 'nsis', '--target', $targetTriple, '--features', 'custom-protocol', '--config', $bundleOverride, '--ci') -Stage 'bundle-nsis'
-    $installer = Join-Path $release "bundle/nsis/ClaudaCoda_${version}_x64-setup.exe"
+    $installer = Join-Path $release "bundle/nsis/CodaClauda_${version}_x64-setup.exe"
     if (!(Test-Path -LiteralPath $installer -PathType Leaf) -or (Get-Item -LiteralPath $installer).LastWriteTimeUtc -lt $bundleStarted.AddSeconds(-2)) { throw 'Expected freshly generated x64 NSIS installer was not found.' }
     Copy-Item -LiteralPath $installer -Destination $output
     # The pinned bundler restores its input after stamping the installer copy.

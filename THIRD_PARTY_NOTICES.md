@@ -1,6 +1,6 @@
-# ClaudaCoda third-party notices
+# CodaClauda third-party notices
 
-ClaudaCoda's original application source and artwork are MIT licensed. Its
+CodaClauda's original application source and artwork are MIT licensed. Its
 dependencies retain their own licenses; this statement does not relicense them.
 
 Every distributable installer must contain `notices/inventory.json` and the
@@ -10,6 +10,21 @@ registry package manifests and license files. Missing text or an unresolved
 package stops packaging. The inventory records declared license expressions,
 source provenance, affected executables, and notice file hashes. An SPDX
 expression alone is not a replacement for the actual license text.
+
+Vendored browser libraries are reconciled separately from Rust dependencies.
+`scripts/vendor_notices.py` verifies `ui/vendor/manifest.json` against exact,
+checksum-pinned npm archives, checks every shipped file against its declared
+archive member, and adds their records to the same `notices/inventory.json`.
+Exact upstream license and copyright files are installed under `notices/browser/`.
+Missing provenance, modified license text, unlisted vendor files or an
+unreviewed source transformation stops packaging. A declared package license
+does not replace additional license or NOTICE files in its archive.
+
+The 0.3 browser inventory is intended to include three.js, marked, DOMPurify,
+KaTeX and highlight.js. Exact shipped versions and hashes come from the release's
+verified manifest, not this list. DOMPurify retains its complete dual-license
+text. The planned MathML-only KaTeX integration ships no fonts or CSS; adding
+fonts requires explicit font provenance and retained notices before packaging.
 
 For MPL 2.0 components, the exact unmodified registry source archives are also
 included under `notices/sources/` as `.crate` files (gzip-compressed tar archives).
@@ -29,6 +44,12 @@ by the packaging CLI. Their license and copyright notices remain separate from
 the application's MIT license. Build-only utilities such as cargo-auditable,
 the Tauri CLI, and the project-local 7-Zip extractor are recorded in the build
 receipt and are not shipped as application payload.
+
+The custom installer template adapts Tauri's MIT-licensed NSIS template.
+`scripts/nsis/provenance.json` pins its upstream revision and original hash,
+the reviewed adapted hash and the exact upstream license bytes. Its attribution
+and provenance are included under `notices/installer/tauri-template/`. The
+separately authored installer hooks retain this repository's MIT license.
 
 For a particular release, consult its installed `notices/` directory and the
 published inventory/build receipt. This source document describes the process;

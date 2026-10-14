@@ -12,6 +12,7 @@ import base64
 import gzip
 import hashlib
 import io
+import importlib.util
 import json
 import re
 import subprocess
@@ -23,6 +24,11 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
+# Python -I deliberately excludes the script directory from sys.path. Load this
+# repository-owned helper by its exact path rather than changing import search.
+_vendor_spec = importlib.util.spec_from_file_location("vendor_notices", ROOT / "scripts/vendor_notices.py")
+vendor_notices = importlib.util.module_from_spec(_vendor_spec)
+_vendor_spec.loader.exec_module(vendor_notices)
 CACHE = ROOT / "local/release-tools/notices"
 LICENSE_NAME = re.compile(r"^(?:licen[cs]e|copying|notice|copyright|unlicense)(?:$|[-_.])", re.I)
 FIRST_PARTY = {"claudacoda-cli", "claudacoda-desktop", "coord-core"}
@@ -46,7 +52,7 @@ def fetch(url, expected=None, optional=False):
         data = cached.read_bytes()
     else:
         try:
-            request = urllib.request.Request(url, headers={"User-Agent": "ClaudaCoda-license-inventory/1"})
+            request = urllib.request.Request(url, headers={"User-Agent": "CodaClauda-license-inventory/1"})
             with urllib.request.urlopen(request, timeout=30) as response:
                 data = response.read(64 * 1024 * 1024 + 1)
                 if response.headers.get("Content-Encoding", "").lower() == "gzip":
@@ -254,6 +260,36 @@ class Inventory:
                              "dependency_notice_reference": "Rust standard-library notices and included windows-sys/windows-link crate notices",
                              "dependency_version_scope": "Upstream source declares windows-sys 0.61.2; this upstream plugin release does not publish a Cargo.lock. Reused Windows-rs license texts do not assert an exact compiled plugin dependency version."})
 
+    def installer_template(self):
+        """Retain the copied Tauri template's selected upstream MIT license."""
+        provenance_path = ROOT / "scripts/nsis/provenance.json"
+        provenance_bytes = provenance_path.read_bytes()
+        provenance = json.loads(provenance_bytes)
+        commit = provenance["revision"]
+        if not re.fullmatch(r"[0-9a-f]{40}", commit) or provenance["license"] != "MIT":
+            raise ValueError("Unresolved Tauri installer template provenance")
+        source_url = f"https://raw.githubusercontent.com/tauri-apps/tauri/{commit}/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi"
+        license_url = f"https://raw.githubusercontent.com/tauri-apps/tauri/{commit}/LICENSE_MIT"
+        if provenance["upstream_url"] != source_url or provenance["license_url"] != license_url:
+            raise ValueError("Unexpected Tauri installer template source")
+        if provenance["local_file"] != "scripts/nsis/installer.nsi" or provenance["license_file"] != "scripts/nsis/LICENSE-TAURI-MIT":
+            raise ValueError("Unexpected Tauri installer template local file")
+        source_hash = vendor_notices.required_hash(provenance["upstream_sha256"])
+        local_hash = vendor_notices.required_hash(provenance["local_sha256"])
+        license_hash = vendor_notices.required_hash(provenance["license_sha256"])
+        fetch(source_url, source_hash)
+        license_bytes = (ROOT / provenance["license_file"]).read_bytes()
+        if sha((ROOT / provenance["local_file"]).read_bytes()) != local_hash or sha(license_bytes) != license_hash:
+            raise ValueError("Tauri template or license differs from its reviewed provenance")
+        if fetch(license_url, license_hash) != license_bytes:
+            raise ValueError("Tauri template license differs from its exact upstream bytes")
+        self.records.append({"name": provenance["component"], "version": provenance["version"],
+                             "license_expression": "MIT", "source": source_url, "source_commit": commit,
+                             "source_sha256": source_hash, "adapted_file": provenance["local_file"],
+                             "adapted_sha256": local_hash, "modifications": provenance["modifications"],
+                             "notices": [self.save("installer/tauri-template/LICENSE-MIT", license_bytes, license_url),
+                                         self.save("installer/tauri-template/provenance.json", provenance_bytes, "repository/scripts/nsis/provenance.json")]})
+
     def rust(self, version):
         files = []
         for filename in ("LICENSE-MIT", "LICENSE-APACHE"):
@@ -275,7 +311,11 @@ def generate(args):
     if destination != (ROOT / "dist/notices").resolve():
         raise ValueError("Notice output is restricted to this repository's dist/notices")
     destination.mkdir(parents=True, exist_ok=True)
+    # A failed regeneration must not leave an old "complete" marker behind.
+    (destination / "inventory.json").unlink(missing_ok=True)
     inventory = Inventory(destination, args.cargo_home.resolve())
+    browser_records, browser_input = vendor_notices.collect_vendor(ROOT, fetch, inventory.save)
+    inventory.records.extend(browser_records)
     users = {}
     inputs = []
     for path in args.dependencies:
@@ -291,6 +331,7 @@ def generate(args):
         if name == "webview2-com-sys":
             inventory.webview_loader(name, version)
     inventory.installer()
+    inventory.installer_template()
     inventory.rust(args.rust_version)
     # NSIS's pinned helper links these crates; require their actual license texts
     # even if the application did not otherwise use the same versions.
@@ -298,9 +339,48 @@ def generate(args):
         if (name, version) not in users:
             inventory.crate(name, version, ["NSIS nsis-tauri-utils.dll"])
     introduction = inventory.save("THIRD_PARTY_NOTICES.md", (ROOT / "THIRD_PARTY_NOTICES.md").read_bytes(), "repository/THIRD_PARTY_NOTICES.md")
-    record = {"schema_version": 1, "status": "complete", "input_dependencies": inputs, "input_lockfiles": inventory.lock_inputs, "linked_crates_reconciled": len(users), "component_count": len(inventory.records), "introduction": introduction, "components": inventory.records}
+    record = {"schema_version": 1, "status": "complete", "input_dependencies": inputs, "input_lockfiles": inventory.lock_inputs, "input_browser_vendor": browser_input, "linked_crates_reconciled": len(users), "component_count": len(inventory.records), "introduction": introduction, "components": inventory.records}
     (destination / "inventory.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(f"Reconciled {len(users)} linked crates; preserved {len(inventory.records)} component notice records")
+
+
+def verify_notice_descriptors(inventory, roots):
+    """Require every inventoried notice/source even if it vanished before bundling."""
+    descriptors = [inventory.get("introduction")]
+    components = inventory.get("components")
+    if not isinstance(components, list) or not components:
+        raise ValueError("Notice inventory has no component records")
+    for component in components:
+        notices = component.get("notices")
+        if not isinstance(notices, list) or not notices:
+            raise ValueError("Notice component has no retained notice descriptors")
+        descriptors.extend(notices)
+        if "source_archive" in component:
+            descriptors.append(component["source_archive"])
+    seen = set()
+    for descriptor in descriptors:
+        if not isinstance(descriptor, dict):
+            raise ValueError("Missing or invalid required notice descriptor")
+        relative = vendor_notices.safe_relative(descriptor.get("file"))
+        digest = vendor_notices.required_hash(descriptor.get("sha256"))
+        size = descriptor.get("bytes")
+        if type(size) is not int or size < 0 or relative.casefold() in seen:
+            raise ValueError("Invalid size or duplicate required notice descriptor: " + relative)
+        seen.add(relative.casefold())
+        for label, root in roots:
+            path = root
+            if vendor_notices.is_link(root):
+                raise ValueError("Notice root must not be a link: " + label)
+            for part in relative.split("/"):
+                path = path / part
+                if not path.exists() or vendor_notices.is_link(path):
+                    raise ValueError("Required notice missing or linked in " + label + ": " + relative)
+            if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+                raise ValueError("Required notice is not a contained file in " + label + ": " + relative)
+            data = path.read_bytes()
+            if len(data) != size or sha(data) != digest:
+                raise ValueError("Required notice differs from inventory in " + label + ": " + relative)
+    return len(descriptors)
 
 
 def verify(args):
@@ -309,14 +389,19 @@ def verify(args):
     if len(gui) != 1:
         raise ValueError("Expected one extracted GUI before verifying installed notices")
     installed = gui[0].parent / "notices"
+    inventory_bytes = (source / "inventory.json").read_bytes()
+    if (installed / "inventory.json").read_bytes() != inventory_bytes:
+        raise ValueError("Installed notice inventory differs from the generated inventory")
+    inventory = json.loads(inventory_bytes)
+    if inventory.get("status") != "complete":
+        raise ValueError("Installed notice inventory is incomplete")
+    required_count = verify_notice_descriptors(inventory, [("generated notices", source), ("installed notices", installed)])
     expected = sorted(path for path in source.rglob("*") if path.is_file())
     for file in expected:
         extracted = installed / file.relative_to(source)
         if not extracted.is_file() or sha(extracted.read_bytes()) != sha(file.read_bytes()):
             raise ValueError("Installed notice missing or byte mismatch: " + str(file.relative_to(source)))
-    inventory = json.loads((installed / "inventory.json").read_text())
-    if inventory.get("status") != "complete":
-        raise ValueError("Installed notice inventory is incomplete")
+    vendor_notices.verify_vendor_snapshot(ROOT, inventory)
     installer = next(item for item in inventory["components"] if item["name"] == "NSIS")
     expected_dlls = installer["plugin_source_hashes"] | {"nsis_tauri_utils.dll": "5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709"}
     verified_dlls = []
@@ -330,7 +415,7 @@ def verify(args):
         elif any(part.lower() == "$pluginsdir" for part in dll.parts):
             raise ValueError("Installer contains a plugin without pinned notice provenance: " + dll.name)
     if args.report:
-        args.report.write_text(json.dumps({"status":"passed","notice_files_verified":len(expected),"installer_plugins_verified":verified_dlls},indent=2)+"\n",encoding="utf-8")
+        args.report.write_text(json.dumps({"status":"passed","notice_files_verified":len(expected),"required_notice_files_verified":required_count,"installer_plugins_verified":verified_dlls},indent=2)+"\n",encoding="utf-8")
     print(f"Verified {len(expected)} installed notice files against their generated source bytes")
 
 

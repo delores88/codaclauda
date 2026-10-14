@@ -1,8 +1,8 @@
 # Optional DGXBridge integration
 
-ClaudaCoda coordinates agents without a Spark. The optional adapter invokes the
+CodaClauda coordinates agents without a Spark. The optional adapter invokes the
 owner-selected `sparkdev` native executable through its public JSON CLI. Configure
-DGXBridge separately using its own supported setup. ClaudaCoda does not
+DGXBridge separately using its own supported setup. CodaClauda does not
 read or copy its configuration, credentials, pairing records or job database.
 
 The core authorizes each operation against an owner grant before calling the
@@ -33,8 +33,8 @@ nonempty executable. Empty later arguments, spaces, quotes and shell punctuation
 are preserved in a generated JSON array rather than interpolated into shell text.
 
 The temporary argv file is created exclusively in the owner's protected
-ClaudaCoda scratch directory outside the submitted project. Windows files inherit
-that directory's user protection; Unix files use mode 0600. ClaudaCoda removes only
+CodaClauda scratch directory outside the submitted project. Windows files inherit
+that directory's user protection; Unix files use mode 0600. CodaClauda removes only
 the exact file it created on completion or error. It never recursively clears
 scratch. Abrupt process termination can leave an owner-private argv file for
 later owner inspection; do not place secrets in workload arguments.

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "component": "Tauri NSIS installer template",
+  "version": "tauri-cli-v2.10.1",
+  "revision": "9b17a7aeae9a83222ffe829aa4e2d8a5ba6bed8c",
+  "license": "MIT",
+  "upstream_url": "https://raw.githubusercontent.com/tauri-apps/tauri/9b17a7aeae9a83222ffe829aa4e2d8a5ba6bed8c/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi",
+  "upstream_sha256": "fe22026f68bdb3292fab376756035496ce0a35e3d580e06ebaa6a28295916eb3",
+  "local_file": "scripts/nsis/installer.nsi",
+  "local_sha256": "d6693586fcb0191b7ff1f78afcbe23347d341a19f2d02f17f35fd48cc477e6e7",
+  "license_file": "scripts/nsis/LICENSE-TAURI-MIT",
+  "license_url": "https://raw.githubusercontent.com/tauri-apps/tauri/9b17a7aeae9a83222ffe829aa4e2d8a5ba6bed8c/LICENSE_MIT",
+  "license_sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d",
+  "modifications": [
+    "Introduce INSTALLIDENTITY=ClaudaCoda while keeping PRODUCTNAME from display branding.",
+    "Keep prior uninstall key, install-location key, default physical directory and autostart cleanup identity unchanged.",
+    "Use supported separately authored installer hooks for relocation refusal and target-checked shortcut display rename.",
+    "Capture and normalize the prior install root in .onInit before the old uninstaller can delete its registry value; reject a conflicting /D override before uninstall and recheck after directory selection."
+  ],
+  "runtime_acceptance": "Pending the integrated 0.3.0 installer; source verification is not an upgrade test."
+}

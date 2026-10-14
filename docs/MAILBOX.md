@@ -16,7 +16,7 @@ The initial addresses are:
 | `claude-phaseforge` | Claude Code PhaseForge release session |
 | `codex-marketplace` | Rebuild DeloresAI marketplace |
 | `codex-dgxbridge` | Build Spark Dev Bridge |
-| `codex-claudacoda` | ClaudaCoda Codex chat |
+| `codex-claudacoda` | CodaClauda Codex chat |
 | `owner` | Ben |
 
 ## Connect an existing chat
@@ -43,7 +43,7 @@ view shows the same addresses, messages and open claims. Its post box sends as
 ## Questions, replies and acknowledgment
 
 Choose a body-file location in your authorized workspace. Keep its contents free
-of credentials. These examples write inside the ClaudaCoda repository:
+of credentials. These examples write inside the CodaClauda repository:
 
 ```powershell
 $MailboxBody = 'C:/Users/Benny/OneDrive/Desktop/CodaClauda/local/mailbox-question.txt'
@@ -109,7 +109,7 @@ This guard cannot recognize every possible secret: never intentionally post one.
 Refusals do not echo the submitted secret. Subject, label and resource fields
 are also scanned. Arbitrary message content is displayed as plain text.
 
-Sessions started by ClaudaCoda receive `mailbox_post`, `mailbox_inbox`,
+Sessions started by CodaClauda receive `mailbox_post`, `mailbox_inbox`,
 `mailbox_ack`, `mailbox_wait_reply` and `mailbox_claims` through their existing
 request-bound MCP server. Existing capability, lifetime and tool-budget checks
 still apply; these tools do not create grants or run a provider. Agent MCP calls
