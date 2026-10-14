@@ -1,0 +1,70 @@
+name: Windows build and package verification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codaclauda-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Install exact Rust toolchain
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install 1.98.1 --profile minimal --target x86_64-pc-windows-msvc
+          # This is a hosted runner. Local machines must use the shared build gate.
+
+      - name: Test fixtures, build auditable executables, and verify installer
+        run: ./scripts/release.ps1 -HostedCI
+
+      - name: Upload installer, SBOM, locks, source, and evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codaclauda-windows-${{ github.sha }}
+          path: |
+            dist/releases/**/*-setup.exe
+            dist/releases/**/SHA256SUMS.txt
+            dist/releases/**/*.sbom.cdx.json
+            dist/releases/**/*.dependencies.json
+            dist/releases/**/*.Cargo.lock
+            dist/releases/**/codaclauda-source.zip
+            dist/releases/**/third-party-notices.zip
+            dist/releases/**/notices-inventory.json
+            dist/releases/**/notices-verification.json
+            dist/releases/**/source-tree*.json
+            dist/releases/**/build-receipt.json
+            dist/releases/**/*.log
+            dist/releases/**/LICENSE
+            dist/releases/**/PROVENANCE.md
+            dist/releases/**/THIRD_PARTY_NOTICES.md
+          if-no-files-found: error
+          retention-days: 14
