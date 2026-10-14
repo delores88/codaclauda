@@ -29,14 +29,18 @@ export function buildIsland(rings) {
   const half = islandHalf(rings), size = half * 2;
   const group = new THREE.Group(); group.name = 'island';
   const rnd = seeded(`island:${rings}`);
-  group.add(mesh(placed(rbox(size, 1.0, size, 1.6, 3), { y: -0.5 }), toonMaterial(PALETTE.grass), { cast: false, outline: 0.09 }));
-  group.add(mesh(placed(rbox(size - 0.9, 2.8, size - 0.9, 1.4, 2), { y: -2.1 }), toonMaterial(PALETTE.dirt), { cast: false, receive: false, outline: 0.09 }));
-  group.add(mesh(placed(rbox(size - 4, 3.4, size - 4, 1.4, 2), { y: -4.9 }), toonMaterial(PALETTE.stone), { cast: false, receive: false, outline: 0.09 }));
+  // The three slabs block picking (a hover never reaches through the island to the other side).
+  const slab = (...args) => { const m = mesh(...args); m.userData.occluder = true; return m; };
+  group.add(slab(placed(rbox(size, 1.0, size, 1.6, 3), { y: -0.5 }), toonMaterial(PALETTE.grass), { cast: false, outline: 0.09 }));
+  group.add(slab(placed(rbox(size - 0.9, 2.8, size - 0.9, 1.4, 2), { y: -2.1 }), toonMaterial(PALETTE.dirt), { cast: false, receive: false, outline: 0.09 }));
+  group.add(slab(placed(rbox(size - 4, 3.4, size - 4, 1.4, 2), { y: -4.9 }), toonMaterial(PALETTE.stone), { cast: false, receive: false, outline: 0.09 }));
   // Tapering underside: a stack of stone chunks.
   const chunks = [[0.66, -7.6, 2.4], [0.42, -9.8, 2.2], [0.2, -11.8, 2]];
   for (const [k, y, h] of chunks) {
     const w = size * k * (0.9 + rnd() * 0.15), d = size * k * (0.9 + rnd() * 0.15);
-    group.add(mesh(placed(rbox(w, h, d, 1, 2), { x: (rnd() - 0.5) * 3, y, z: (rnd() - 0.5) * 3, ry: (rnd() - 0.5) * 0.3 }), toonMaterial(k < 0.3 ? PALETTE.stoneDark : PALETTE.stone), { cast: false, receive: false, outline: 0.08 }));
+    const chunk = mesh(placed(rbox(w, h, d, 1, 2), { x: (rnd() - 0.5) * 3, y, z: (rnd() - 0.5) * 3, ry: (rnd() - 0.5) * 0.3 }), toonMaterial(k < 0.3 ? PALETTE.stoneDark : PALETTE.stone), { cast: false, receive: false, outline: 0.08 });
+    chunk.userData.taper = true;   // hidden while the Spark city hangs underneath
+    group.add(chunk);
   }
   // Grass overhang drips along the rim (instanced).
   const drip = rbox(1, 1, 1, 0.3, 1);
@@ -59,13 +63,16 @@ export function buildIsland(rings) {
     const side = k % 4, t = (rnd() - 0.5) * (size - 8), len = 1.4 + rnd() * 2.6, inset = half - 1.2 - rnd() * 1.5;
     const [x, z] = side === 0 ? [t, inset] : side === 1 ? [inset, t] : side === 2 ? [t, -inset] : [-inset, t];
     const root = placed(new THREE.CylinderGeometry(0.06, 0.14, len, 5), { x, y: -3.4 - len / 2, z, rx: (rnd() - 0.5) * 0.5, rz: (rnd() - 0.5) * 0.5 });
-    group.add(mesh(root, rootMat, { cast: false, receive: false, outline: 0.03 }));
+    const dangling = mesh(root, rootMat, { cast: false, receive: false, outline: 0.03 });
+    dangling.userData.taper = true;
+    group.add(dangling);
   }
   for (let k = 0; k < 7; k++) {
     const a = rnd() * Math.PI * 2, r = half * (0.75 + rnd() * 0.5), sz = 0.9 + rnd() * 1.8;
     const rock = placed(new THREE.DodecahedronGeometry(sz, 0), { x: Math.cos(a) * r, y: -9 - rnd() * 9, z: Math.sin(a) * r, ry: rnd() * 3 });
     const m = mesh(rock, toonMaterial(rnd() > 0.5 ? PALETTE.stone : PALETTE.dirtDark), { cast: false, receive: false, outline: 0.05 });
     m.userData.float = { base: m.position.y, phase: rnd() * 6 };
+    if (r < half * 1.12) m.userData.taper = true;
     group.add(m);
   }
   return { group, half };
@@ -391,17 +398,21 @@ function cloudGeometry(seed) {
   }
   const g = mergeParts(parts); g.userData.shared = true; return g;
 }
-export function buildClouds(half, quality = 'high') {
+let cloudGeos = null;   // shared by every rebuild (rings change, Spark underside toggle)
+/** under: the Spark city hangs below the island, so low clouds drift in bands beside it instead of under it. */
+export function buildClouds(half, quality = 'high', { under = false } = {}) {
   const group = new THREE.Group(); group.name = 'clouds';
   const r = seeded('clouds');
-  const geos = [cloudGeometry('a'), cloudGeometry('b'), cloudGeometry('c')];
+  const geos = cloudGeos ||= [cloudGeometry('a'), cloudGeometry('b'), cloudGeometry('c')];
   const material = toonMaterial('#ffffff', { cache: false });
   const total = quality === 'low' ? 12 : 22;
   const clouds = [];
   for (let k = 0; k < total; k++) {
     const below = k % 3 !== 0;
     const a = r() * Math.PI * 2, dist = half * (below ? 0.2 + r() * 1.5 : 1.25 + r() * 0.9);
-    clouds.push({ variant: k % 3, x: Math.cos(a) * dist, y: below ? -16 - r() * 18 : -3 + r() * 12, z: Math.sin(a) * dist, scale: (below ? 1.6 : 1.1) + r() * 1.4, speed: 0.4 + r() * 0.7, ry: r() * Math.PI });
+    const cloud = { variant: k % 3, x: Math.cos(a) * dist, y: below ? -16 - r() * 18 : -3 + r() * 12, z: Math.sin(a) * dist, scale: (below ? 1.6 : 1.1) + r() * 1.4, speed: 0.4 + r() * 0.7, ry: r() * Math.PI };
+    if (below && under) { cloud.x = (r() * 2 - 1) * half * 2.2; cloud.z = (r() < 0.5 ? -1 : 1) * half * (1.25 + r() * 0.9); cloud.y = -12 - r() * 30; }
+    clouds.push(cloud);
   }
   const meshes = geos.map((g, v) => {
     const inst = new THREE.InstancedMesh(g, material, Math.max(1, clouds.filter(c => c.variant === v).length));
@@ -424,6 +435,45 @@ export function buildClouds(half, quality = 'high') {
     update(dt) {
       for (const c of clouds) { c.x += c.speed * dt; if (c.x > wrap) c.x = -wrap; }
       layout();
+    },
+  };
+}
+
+/* ---------- empty-plot hover marker ---------- */
+let curtainTex = null;
+function curtainTexture() {
+  if (curtainTex) return curtainTex;
+  const canvas = document.createElement('canvas'); canvas.width = 4; canvas.height = 64;
+  const g = canvas.getContext('2d');
+  const grad = g.createLinearGradient(0, 0, 0, 64);
+  grad.addColorStop(0, 'rgba(255,255,255,0)'); grad.addColorStop(0.7, 'rgba(255,255,255,.35)'); grad.addColorStop(1, 'rgba(255,255,255,1)');
+  g.fillStyle = grad; g.fillRect(0, 0, 4, 64);
+  curtainTex = new THREE.CanvasTexture(canvas); curtainTex.colorSpace = THREE.SRGBColorSpace;
+  return curtainTex;
+}
+/** Soft glowing outline for a hovered empty lot: a square ring on the lawn plus a short fading light curtain. */
+export function buildPlotMarker() {
+  const group = new THREE.Group(); group.name = 'plot-marker'; group.visible = false;
+  const half = LOT_HALF - 0.3, radius = half * Math.SQRT2;
+  const color = new THREE.Color('#b4a6ff');
+  const ringMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, depthWrite: false });
+  const fillMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.12, depthWrite: false });
+  const curtainMat = new THREE.MeshBasicMaterial({ color, map: curtainTexture(), transparent: true, opacity: 0.5, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, fog: false });
+  const ring = new THREE.Mesh(new THREE.RingGeometry(radius - 0.42, radius, 4, 1, Math.PI / 4), ringMat);
+  ring.rotation.x = -Math.PI / 2; ring.position.y = GROUND_Y + 0.05;
+  const fill = new THREE.Mesh(new THREE.PlaneGeometry(half * 2, half * 2), fillMat);
+  fill.rotation.x = -Math.PI / 2; fill.position.y = GROUND_Y + 0.04;
+  const curtain = new THREE.Mesh(new THREE.CylinderGeometry(radius - 0.2, radius - 0.2, 1.3, 4, 1, true), curtainMat);
+  curtain.rotation.y = Math.PI / 4; curtain.position.y = GROUND_Y + 0.65;
+  for (const m of [ring, fill, curtain]) { m.raycast = () => {}; m.renderOrder = 3; m.userData.noOutline = true; group.add(m); }
+  return {
+    group,
+    show(i, j) { const c = cellCenter(i, j); group.position.set(c.x, 0, c.z); group.visible = true; },
+    hide() { group.visible = false; },
+    update(elapsed, reduced) {
+      if (!group.visible) return;
+      const k = reduced ? 0.5 : 0.5 + 0.5 * Math.sin(elapsed * 3.2);
+      ringMat.opacity = 0.6 + k * 0.35; curtainMat.opacity = 0.28 + k * 0.3; fillMat.opacity = 0.08 + k * 0.08;
     },
   };
 }

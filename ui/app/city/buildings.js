@@ -81,6 +81,61 @@ export function setBuildingNight(night) {
   MATERIALS.windowDark.emissiveIntensity = 0.05 + night * 0.25;
   MATERIALS.shop.emissiveIntensity = 0.35 + night * 1.1;
 }
+
+/* ---------- Spark underside palette ----------
+ * Mirrored buildings for the DGX Spark city reuse the same Building code with
+ * { mirror: true }: same footprint and height, original "Spark" look (graphite and
+ * indigo bodies, glowing teal / lime circuit trims, emissive windows), no props, and a
+ * handful of shared materials so the whole underside costs few programs and textures. */
+export const SPARK = { body: '#262c4a', panel: '#363e6b', dark: '#161a2b', pad: '#1d2238', glow: 'spark:glow', lime: 'spark:lime' };
+const SPARK_SET = new Set(Object.values(SPARK));
+export const SPARK_MATERIALS = {
+  body: sharedMat(toonMaterial(SPARK.body, { emissive: '#161a3c', emissiveIntensity: 0.55, cache: false })),
+  bodyActive: sharedMat(toonMaterial('#2e3566', { emissive: '#3a3fb4', emissiveIntensity: 0.5, cache: false })),
+  bodyHover: sharedMat(toonMaterial('#3a4280', { emissive: '#5b4bd6', emissiveIntensity: 0.55, cache: false })),
+  panel: sharedMat(toonMaterial(SPARK.panel, { emissive: '#12163a', emissiveIntensity: 0.45, cache: false })),
+  dark: sharedMat(toonMaterial(SPARK.dark, { emissive: '#0a0c1c', emissiveIntensity: 0.4, cache: false })),
+  pad: sharedMat(toonMaterial(SPARK.pad, { emissive: '#0d1026', emissiveIntensity: 0.45, cache: false })),
+  glow: sharedMat(toonMaterial('#1d7f73', { emissive: '#22c9ad', emissiveIntensity: 0.35, cache: false })),
+  glowActive: sharedMat(toonMaterial('#3ff0d0', { emissive: '#2ef2cf', emissiveIntensity: 1.1, cache: false })),
+  lime: sharedMat(toonMaterial('#5d7a24', { emissive: '#8fd12e', emissiveIntensity: 0.3, cache: false })),
+  limeActive: sharedMat(toonMaterial('#c8ff63', { emissive: '#b6ff3a', emissiveIntensity: 1.1, cache: false })),
+  winLit: sharedMat(toonMaterial('#4fc9b8', { emissive: '#1fb39c', emissiveIntensity: 0.4, cache: false })),
+  winLitActive: sharedMat(toonMaterial('#d8ff8a', { emissive: '#a8f046', emissiveIntensity: 1.25, cache: false })),
+  winDark: sharedMat(toonMaterial('#1a1f38', { emissive: '#0c0f26', emissiveIntensity: 0.3, cache: false })),
+};
+export const SPARK_SPARKS = ['#2ef2cf', '#b6ff3a', '#e9fff7'];
+/** Breathing glow for busy Spark buildings (shared materials: one update per frame for the whole underside). */
+export function pulseSpark(elapsed, { reducedMotion = false, night = 0 } = {}) {
+  const k = reducedMotion ? 0.6 : 0.5 + 0.5 * Math.sin(elapsed * 2.6);
+  const M = SPARK_MATERIALS;
+  M.bodyActive.emissiveIntensity = 0.3 + k * 0.45;
+  M.glowActive.emissiveIntensity = 0.75 + k * 0.7 + night * 0.3;
+  M.limeActive.emissiveIntensity = 0.75 + k * 0.6 + night * 0.3;
+  M.winLitActive.emissiveIntensity = 0.95 + k * 0.5 + night * 0.4;
+  M.glow.emissiveIntensity = 0.3 + night * 0.35;
+  M.winLit.emissiveIntensity = 0.32 + night * 0.4;
+}
+/** Collapse any facade colour onto the few Spark tones (dark, panel, or lime for bright accents). */
+function sparkTone(color) {
+  if (SPARK_SET.has(color)) return color;
+  const n = /^#[0-9a-f]{6}$/i.test(color) ? parseInt(color.slice(1), 16) : 0x808080;
+  const r = (n >> 16 & 255) / 255, g = (n >> 8 & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), light = (max + min) / 2;
+  if (max - min > 0.4 && light > 0.55) return SPARK.lime;
+  return light < 0.4 ? SPARK.dark : SPARK.panel;
+}
+function sparkMaterial(tone, active) {
+  const M = SPARK_MATERIALS;
+  if (tone === SPARK.glow) return active ? M.glowActive : M.glow;
+  if (tone === SPARK.lime) return active ? M.limeActive : M.lime;
+  if (tone === SPARK.dark) return M.dark;
+  if (tone === SPARK.pad) return M.pad;
+  return M.panel;
+}
+function sparkStyle(style) {
+  return { ...style, body: SPARK.body, trim: SPARK.glow, plinth: SPARK.dark, door: SPARK.dark, roof: SPARK.panel, awning: [SPARK.lime, SPARK.panel] };
+}
 const windowGeos = new Map();
 function windowGeometry(w, h) {
   const key = `${w}x${h}`;
@@ -90,14 +145,16 @@ function windowGeometry(w, h) {
 
 /** Collects static parts by colour and merges each colour into one outlined mesh. */
 class Batch {
-  constructor() { this.parts = new Map(); }
-  add(color, geometry) { if (!this.parts.has(color)) this.parts.set(color, []); this.parts.get(color).push(geometry); return this; }
-  build(group, { cast = true, outline = 0.04, tag } = {}) {
+  /** tone(color) → colour key (the Spark underside collapses its palette to a few tones). */
+  constructor(tone = null) { this.parts = new Map(); this.tone = tone; }
+  add(color, geometry) { const key = this.tone ? this.tone(color) : color; if (!this.parts.has(key)) this.parts.set(key, []); this.parts.get(key).push(geometry); return this; }
+  build(group, { cast = true, receive = true, outline = 0.04, tag, materialFor = null } = {}) {
     const meshes = [];
     for (const [color, list] of this.parts) {
-      const m = new THREE.Mesh(mergeParts(list), toonMaterial(color));
-      m.castShadow = cast; m.receiveShadow = true;
+      const m = new THREE.Mesh(mergeParts(list), materialFor?.(color) || toonMaterial(color));
+      m.castShadow = cast; m.receiveShadow = receive;
       if (outline) addOutline(m, { thickness: outline });
+      m.userData.paint = color;
       Object.assign(m.userData, tag || {});
       group.add(m); meshes.push(m);
     }
@@ -111,10 +168,13 @@ const easeIn = t => t * t * t;
 
 /* ---------- one building ---------- */
 export class Building {
+  /** env: { particles, reducedMotion(), animateIn, stagger(), mirror?, deckY? }. With mirror the
+   * building lives in the Spark underside group (scale.y = -1 at deckY) and hangs downward. */
   constructor(project, cell, env) {
     this.id = project.id;
     this.cell = cell;
     this.env = env;
+    this.mirror = Boolean(env.mirror);
     const c = cellCenter(cell.i, cell.j);
     this.origin = { x: c.x, z: c.z + CZ };
     this.group = new THREE.Group(); this.group.name = `building:${project.id}`;
@@ -133,7 +193,7 @@ export class Building {
   apply(project, { animate = false } = {}) {
     this.project = project;
     const size = buildingSize(project);
-    const style = styleFor(project);
+    const style = this.mirror ? sparkStyle(styleFor(project)) : styleFor(project);
     const m = project.metrics || {};
     const litFrac = Math.max(0.08, Math.min(0.92, 0.12 + (m.glow || 0) * 0.55 + Math.min(m.commits7d || 0, 30) / 60));
     const sig = JSON.stringify([size.floors, size.footprint, style.key, style.body, project.name, Math.round(litFrac * 20), (m.commits7d || 0) > 0, project.source, !!project.private]);
@@ -152,7 +212,7 @@ export class Building {
     } else if (previous && previous.floors !== size.floors && !reduced) {
       this.anim = { kind: 'grow', t: 0, from: previous.H / size.H, up: size.floors > previous.floors };
       this.tower.scale.y = previous.H / size.H;
-      if (this.anim.up) this.env.particles.emit('sparkle', this.topPoint(), 26, { spread: size.W * 0.8 });
+      if (this.anim.up && !this.mirror) this.env.particles.emit('sparkle', this.topPoint(), 26, { spread: size.W * 0.8 });
     }
     return footprintChanged;
   }
@@ -160,20 +220,21 @@ export class Building {
   clearTower() {
     for (const child of [...this.tower.children]) { this.tower.remove(child); disposeObject(child); }
     this.pickables = []; this.gear = null; this.flag = null; this.beaconLight = null; this.jib = null; this.chimneyTop = null; this.scaffold = null;
+    this.paintMeshes = []; this.litWindows = null; this.rigTip = null;
   }
 
   buildTower() {
-    const { W, D, H, floors } = this.size, s = this.style;
-    const tag = { buildingId: this.id };
+    const { W, D, H, floors } = this.size, s = this.style, mirror = this.mirror;
+    const tag = mirror ? { sparkBuildingId: this.id } : { buildingId: this.id };
     const top = PAD_TOP + H;
-    this.bodyMaterial = toonMaterial(s.body, { cache: false });
+    this.bodyMaterial = mirror ? this.sparkBody() : toonMaterial(s.body, { cache: false });
     const body = new THREE.Mesh(placed(rbox(W, H, D, 0.22), { y: PAD_TOP + H / 2 }), this.bodyMaterial);
-    body.castShadow = true; body.receiveShadow = true; body.userData = { ...tag };
+    body.castShadow = !mirror; body.receiveShadow = !mirror; body.userData = { ...tag };
     addOutline(body, { thickness: 0.06 });
     this.tower.add(body);
     this.body = body;
 
-    const batch = new Batch();
+    const batch = new Batch(mirror ? sparkTone : null);
     batch.add(s.plinth, placed(rbox(W + 0.28, 0.38, D + 0.28, 0.1), { y: PAD_TOP + 0.19 }));
     for (let f = 1; f < floors; f++) {
       const y = PAD_TOP + GF + (f - 1) * FH;
@@ -182,8 +243,10 @@ export class Building {
     batch.add(s.trim, placed(rbox(W + 0.34, 0.3, D + 0.34, 0.1), { y: top - 0.05 }));
     // Door, step and a tiny lamp.
     batch.add(s.door, placed(rbox(1.15, 1.75, 0.24, 0.1), { y: PAD_TOP + 0.875, z: D / 2 + 0.03 }));
-    batch.add('#e6dccb', placed(rbox(1.7, 0.14, 0.6, 0.05), { y: PAD_TOP + 0.07, z: D / 2 + 0.3 }));
-    batch.add('#ffd98a', placed(new THREE.BoxGeometry(0.1, 0.1, 0.1), { x: 0.75, y: PAD_TOP + 1.5, z: D / 2 + 0.06 }));
+    if (!mirror) {
+      batch.add('#e6dccb', placed(rbox(1.7, 0.14, 0.6, 0.05), { y: PAD_TOP + 0.07, z: D / 2 + 0.3 }));
+      batch.add('#ffd98a', placed(new THREE.BoxGeometry(0.1, 0.1, 0.1), { x: 0.75, y: PAD_TOP + 1.5, z: D / 2 + 0.06 }));
+    }
 
     let roofTop = top + 0.1;
     const r = seeded(this.id);
@@ -191,16 +254,18 @@ export class Building {
       const cx = W / 2 - 0.85, cz = -D / 2 + 0.85;
       batch.add(s.plinth, placed(new THREE.CylinderGeometry(0.42, 0.5, 2.9, 12), { x: cx, y: top + 1.45, z: cz }));
       batch.add('#5a3428', placed(new THREE.CylinderGeometry(0.52, 0.52, 0.22, 12), { x: cx, y: top + 2.8, z: cz }));
-      this.chimneyTop = new THREE.Vector3(cx, top + 3.05, cz);
       roofTop = top + 3;
-      // Gear sign on the facade.
-      const gearParts = [placed(new THREE.CylinderGeometry(0.6, 0.6, 0.16, 18), { rx: Math.PI / 2 })];
-      for (let k = 0; k < 8; k++) { const a = k / 8 * Math.PI * 2; gearParts.push(placed(new THREE.BoxGeometry(0.26, 0.3, 0.16), { x: Math.sin(a) * 0.68, y: Math.cos(a) * 0.68, rz: -a })); }
-      const gear = new THREE.Mesh(mergeParts(gearParts), toonMaterial('#e3a06b'));
-      const hub = new THREE.Mesh(placed(new THREE.CylinderGeometry(0.2, 0.2, 0.2, 10), { rx: Math.PI / 2 }), toonMaterial('#7a4436'));
-      gear.add(hub); addOutline(gear, { thickness: 0.03 });
-      gear.position.set(-W / 2 + 0.95, floors >= 2 ? top - 0.85 : PAD_TOP + 1.45, D / 2 + 0.16);
-      gear.userData = { ...tag }; this.gear = gear; this.tower.add(gear); this.pickables.push(gear);
+      if (!mirror) {
+        this.chimneyTop = new THREE.Vector3(cx, top + 3.05, cz);
+        // Gear sign on the facade.
+        const gearParts = [placed(new THREE.CylinderGeometry(0.6, 0.6, 0.16, 18), { rx: Math.PI / 2 })];
+        for (let k = 0; k < 8; k++) { const a = k / 8 * Math.PI * 2; gearParts.push(placed(new THREE.BoxGeometry(0.26, 0.3, 0.16), { x: Math.sin(a) * 0.68, y: Math.cos(a) * 0.68, rz: -a })); }
+        const gear = new THREE.Mesh(mergeParts(gearParts), toonMaterial('#e3a06b'));
+        const hub = new THREE.Mesh(placed(new THREE.CylinderGeometry(0.2, 0.2, 0.2, 10), { rx: Math.PI / 2 }), toonMaterial('#7a4436'));
+        gear.add(hub); addOutline(gear, { thickness: 0.03 });
+        gear.position.set(-W / 2 + 0.95, floors >= 2 ? top - 0.85 : PAD_TOP + 1.45, D / 2 + 0.16);
+        gear.userData = { ...tag }; this.gear = gear; this.tower.add(gear); this.pickables.push(gear);
+      }
     } else if (s.key === 'python') {
       const radius = Math.min(W, D) * 0.42;
       batch.add(s.roof, placed(new THREE.SphereGeometry(radius, 22, 12, 0, Math.PI * 2, 0, Math.PI / 2), { y: top + 0.1, sy: 0.78 }));
@@ -213,7 +278,7 @@ export class Building {
       batch.add(s.roof, placed(rbox(W * 0.45, 0.8, D * 0.45, 0.12), { x: -W * 0.12, y: top + 0.4, z: -D * 0.1 }));
       batch.add('#8d96b0', placed(new THREE.CylinderGeometry(0.06, 0.1, 2.8, 6), { x: W * 0.22, y: top + 1.4, z: -D * 0.18 }));
       batch.add('#8d96b0', placed(new THREE.BoxGeometry(0.7, 0.05, 0.05), { x: W * 0.22, y: top + 1.9, z: -D * 0.18 }));
-      this.addBeacon(new THREE.Vector3(W * 0.22, top + 2.9, -D * 0.18), (this.project.metrics?.commits7d || 0) > 0);
+      if (!mirror) this.addBeacon(new THREE.Vector3(W * 0.22, top + 2.9, -D * 0.18), (this.project.metrics?.commits7d || 0) > 0);
       roofTop = top + 3;
     } else if (s.key === 'workshop') {
       const shape = new THREE.Shape([new THREE.Vector2(-D / 2 - 0.35, 0), new THREE.Vector2(D / 2 + 0.35, 0), new THREE.Vector2(0, Math.min(2.2, 0.9 + D * 0.18))]);
@@ -222,20 +287,24 @@ export class Building {
       batch.add(s.roof, roof);
       batch.add('#8a8f9e', placed(new THREE.CylinderGeometry(0.15, 0.15, 1.4, 8), { x: W / 2 - 0.8, y: top + 1.0, z: -D * 0.2 }));
       roofTop = top + Math.min(2.2, 0.9 + D * 0.18);
-      // Workbench, crate and barrel beside the shed.
-      batch.add('#a8774a', placed(rbox(1.3, 0.12, 0.6, 0.04, 1), { x: W / 2 + 0.25, y: PAD_TOP + 0.75, z: D / 2 - 0.6 }));
-      batch.add('#7d5a3c', placed(new THREE.BoxGeometry(1.2, 0.7, 0.5), { x: W / 2 + 0.25, y: PAD_TOP + 0.35, z: D / 2 - 0.6 }));
-      batch.add('#c48a52', placed(rbox(0.6, 0.6, 0.6, 0.06), { x: -W / 2 - 0.1, y: PAD_TOP + 0.3, z: D / 2 - 0.3, ry: 0.4 }));
-      batch.add('#5f7fb0', placed(new THREE.CylinderGeometry(0.3, 0.3, 0.75, 12), { x: -W / 2 - 0.15, y: PAD_TOP + 0.37, z: D / 2 - 1.2 }));
+      if (!mirror) {
+        // Workbench, crate and barrel beside the shed.
+        batch.add('#a8774a', placed(rbox(1.3, 0.12, 0.6, 0.04, 1), { x: W / 2 + 0.25, y: PAD_TOP + 0.75, z: D / 2 - 0.6 }));
+        batch.add('#7d5a3c', placed(new THREE.BoxGeometry(1.2, 0.7, 0.5), { x: W / 2 + 0.25, y: PAD_TOP + 0.35, z: D / 2 - 0.6 }));
+        batch.add('#c48a52', placed(rbox(0.6, 0.6, 0.6, 0.06), { x: -W / 2 - 0.1, y: PAD_TOP + 0.3, z: D / 2 - 0.3, ry: 0.4 }));
+        batch.add('#5f7fb0', placed(new THREE.CylinderGeometry(0.3, 0.3, 0.75, 12), { x: -W / 2 - 0.15, y: PAD_TOP + 0.37, z: D / 2 - 1.2 }));
+      }
     } else if (s.key === 'storefront') {
       const stripes = 7, aw = Math.min(W - 0.4, 4.6), sw = aw / stripes;
       for (let k = 0; k < stripes; k++) batch.add(s.awning[k % 2], placed(new THREE.BoxGeometry(sw, 0.08, 1.0), { x: -aw / 2 + sw * (k + 0.5), y: PAD_TOP + 1.95, z: D / 2 + 0.45, rx: 0.32 }));
-      for (const sx of [-1, 1]) {
-        const pw = Math.max(0.6, (W - 1.6) / 2 - 0.4);
-        const pane = new THREE.Mesh(placed(new THREE.BoxGeometry(pw, 1.05, 0.1), { x: sx * (0.75 + pw / 2 + 0.05), y: PAD_TOP + 0.95, z: D / 2 + 0.02 }), MATERIALS.shop);
-        this.tower.add(pane);
+      if (!mirror) {
+        for (const sx of [-1, 1]) {
+          const pw = Math.max(0.6, (W - 1.6) / 2 - 0.4);
+          const pane = new THREE.Mesh(placed(new THREE.BoxGeometry(pw, 1.05, 0.1), { x: sx * (0.75 + pw / 2 + 0.05), y: PAD_TOP + 0.95, z: D / 2 + 0.02 }), MATERIALS.shop);
+          this.tower.add(pane);
+        }
+        for (let k = 0; k < 3; k++) batch.add(['#6cc35e', '#8bd96b', '#4fbf8a'][k], placed(new THREE.IcosahedronGeometry(0.42 + r() * 0.2, 1), { x: (k - 1) * W * 0.28, y: top + 0.45, z: -D * 0.2 + r() * 0.5 }));
       }
-      for (let k = 0; k < 3; k++) batch.add(['#6cc35e', '#8bd96b', '#4fbf8a'][k], placed(new THREE.IcosahedronGeometry(0.42 + r() * 0.2, 1), { x: (k - 1) * W * 0.28, y: top + 0.45, z: -D * 0.2 + r() * 0.5 }));
       batch.add('#c48a52', placed(rbox(W * 0.8, 0.3, 0.5, 0.06), { y: top + 0.15, z: -D * 0.2 }));
       roofTop = top + 1;
     } else {
@@ -248,15 +317,15 @@ export class Building {
         roofTop = top + 2.3;
       }
     }
-    // Generic roof props.
+    // Generic roof props (the Spark underside skips props: names show on hover instead).
     const m = this.project.metrics || {};
-    if ((m.commits7d || 0) > 0 && s.key !== 'glass') {
+    if (!mirror && (m.commits7d || 0) > 0 && s.key !== 'glass') {
       const ax = -W / 2 + 0.6, az = D / 2 - 0.6;
       batch.add('#8d96b0', placed(new THREE.CylinderGeometry(0.05, 0.07, 1.7, 6), { x: ax, y: top + 0.85, z: az }));
       this.addBeacon(new THREE.Vector3(ax, top + 1.8, az), true);
       roofTop = Math.max(roofTop, top + 1.9);
     }
-    if (this.project.source === 'github' || this.project.source === 'both') {
+    if (!mirror && (this.project.source === 'github' || this.project.source === 'both')) {
       const fx = -W / 2 + 0.55, fz = -D / 2 + 0.55;
       batch.add('#d8dbe6', placed(new THREE.CylinderGeometry(0.04, 0.05, 2.2, 6), { x: fx, y: top + 1.1, z: fz }));
       const flag = new THREE.Group();
@@ -265,23 +334,56 @@ export class Building {
       flag.add(cloth); this.flag = flag; this.tower.add(flag);
       roofTop = Math.max(roofTop, top + 2.3);
     }
-    if (this.project.private) {
+    if (!mirror && this.project.private) {
       const sign = new THREE.Mesh(new THREE.CircleGeometry(0.38, 24), new THREE.MeshBasicMaterial({ map: lockTexture(), transparent: true }));
       sign.position.set(W / 2 - 0.55, top + 0.75, D / 2 - 0.1);
       batch.add('#7d6a5a', placed(new THREE.BoxGeometry(0.08, 0.5, 0.08), { x: W / 2 - 0.55, y: top + 0.25, z: D / 2 - 0.15 }));
       this.tower.add(sign);
     }
-    this.pickables.push(body, ...batch.build(this.tower, { tag }));
+    const parts = batch.build(this.tower, mirror ? { tag, cast: false, receive: false, materialFor: tone => sparkMaterial(tone, this.active) } : { tag });
+    if (mirror) this.paintMeshes = parts;
+    this.pickables.push(body, ...parts);
     this.roofTop = roofTop;
 
-    // Name plaque above the door.
-    const plaqueW = Math.min(W * 0.84, 3.4), plaqueH = plaqueW / 4;
-    const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueH), new THREE.MeshBasicMaterial({ map: plaqueTexture(this.project.name, { accent: this.project.color }), transparent: true }));
-    plaque.position.set(0, PAD_TOP + (s.key === 'storefront' ? 2.32 : 2.18), D / 2 + 0.07);
-    plaque.userData = { ...tag };
-    this.tower.add(plaque); this.pickables.push(plaque);
+    if (!mirror) {
+      // Name plaque above the door.
+      const plaqueW = Math.min(W * 0.84, 3.4), plaqueH = plaqueW / 4;
+      const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueH), new THREE.MeshBasicMaterial({ map: plaqueTexture(this.project.name, { accent: this.project.color }), transparent: true }));
+      plaque.position.set(0, PAD_TOP + (s.key === 'storefront' ? 2.32 : 2.18), D / 2 + 0.07);
+      plaque.userData = { ...tag };
+      this.tower.add(plaque); this.pickables.push(plaque);
+    }
 
     this.buildWindows();
+  }
+
+  /* Spark underside: shared materials swap with hover / busy state. */
+  sparkBody() { const M = SPARK_MATERIALS; return this.hover ? M.bodyHover : this.active ? M.bodyActive : M.body; }
+  paintSpark() {
+    if (this.body) this.body.material = this.bodyMaterial = this.sparkBody();
+    for (const mesh of this.paintMeshes || []) mesh.material = sparkMaterial(mesh.userData.paint, this.active);
+    if (this.litWindows) this.litWindows.material = this.active ? SPARK_MATERIALS.winLitActive : SPARK_MATERIALS.winLit;
+  }
+  /** A compact crane rig on the (downward-facing) roof of a busy Spark building. */
+  buildRig() {
+    if (this.scaffold) { this.tower.remove(this.scaffold); disposeObject(this.scaffold); }
+    const { W, D, H } = this.size, M = SPARK_MATERIALS;
+    const group = new THREE.Group();
+    const crane = new THREE.Group(); crane.position.set(W / 2 - 0.7, PAD_TOP + H, D / 2 - 0.9);
+    const mast = new THREE.Mesh(placed(new THREE.BoxGeometry(0.24, 2.8, 0.24), { y: 1.4 }), M.panel);
+    const collar = new THREE.Mesh(placed(new THREE.BoxGeometry(0.42, 0.16, 0.42), { y: 1.9 }), M.glowActive);
+    const jib = new THREE.Group(); jib.position.y = 2.8;
+    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(3.6, 0.2, 0.2), { x: -1.2 }), M.glowActive));
+    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(0.55, 0.42, 0.42), { x: 0.85, y: -0.08 }), M.dark));
+    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(0.03, 1.3, 0.03), { x: -2.7, y: -0.65 }), M.dark));
+    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(0.3, 0.24, 0.3), { x: -2.7, y: -1.42 }), M.limeActive));
+    crane.add(mast, collar, jib); addOutline(crane, { thickness: 0.025 });
+    group.add(crane);
+    this.jib = jib;
+    this.rigTip = new THREE.Vector3(crane.position.x, crane.position.y + 2.9, crane.position.z);
+    this.scaffoldFront = null;
+    this.scaffold = group;
+    this.tower.add(group);
   }
 
   addBeacon(at, blinking) {
@@ -317,20 +419,23 @@ export class Building {
         }
       });
     }
-    for (const [list, material] of [[lit, MATERIALS.windowLit], [dark, MATERIALS.windowDark]]) {
+    const S = SPARK_MATERIALS;
+    const sets = this.mirror ? [[lit, this.active ? S.winLitActive : S.winLit, true], [dark, S.winDark]] : [[lit, MATERIALS.windowLit], [dark, MATERIALS.windowDark]];
+    for (const [list, material, isLit] of sets) {
       if (!list.length) continue;
       const inst = new THREE.InstancedMesh(geo, material, list.length);
       list.forEach((matrix, k) => inst.setMatrixAt(k, matrix));
       inst.userData.noOutline = true;
       this.tower.add(inst);
+      if (isLit) this.litWindows = inst;
     }
   }
 
   buildPad() {
     for (const child of [...this.padGroup.children]) { this.padGroup.remove(child); disposeObject(child); }
     const { W, D } = this.size;
-    const pad = new THREE.Mesh(placed(new RoundedBoxGeometry(W + 1.2, 0.14, D + 1.2, 1, 0.12), { y: GROUND_Y + 0.05 }), MATERIALS.pad);
-    pad.receiveShadow = true; pad.userData = { buildingId: this.id };
+    const pad = new THREE.Mesh(placed(new RoundedBoxGeometry(W + 1.2, 0.14, D + 1.2, 1, 0.12), { y: GROUND_Y + 0.05 }), this.mirror ? SPARK_MATERIALS.pad : MATERIALS.pad);
+    pad.receiveShadow = !this.mirror; pad.userData = this.mirror ? { sparkBuildingId: this.id } : { buildingId: this.id };
     addOutline(pad, { thickness: 0.03 });
     this.padGroup.add(pad);
     this.pad = pad;
@@ -339,10 +444,12 @@ export class Building {
   setActive(on) {
     if (on === this.active) return;
     this.active = on;
+    if (this.mirror) this.paintSpark();
     if (on) this.buildScaffold();
-    else if (this.scaffold) { this.tower.remove(this.scaffold); disposeObject(this.scaffold); this.scaffold = null; this.jib = null; }
+    else if (this.scaffold) { this.tower.remove(this.scaffold); disposeObject(this.scaffold); this.scaffold = null; this.jib = null; this.rigTip = null; }
   }
   buildScaffold() {
+    if (this.mirror) { this.buildRig(); return; }
     if (this.scaffold) { this.tower.remove(this.scaffold); disposeObject(this.scaffold); }
     const { W, D, H } = this.size;
     const group = new THREE.Group();
@@ -376,6 +483,7 @@ export class Building {
   setHover(on) {
     if (this.hover === on) return;
     this.hover = on;
+    if (this.mirror) { this.paintSpark(); return; }
     this.bodyMaterial.emissive.set(on ? '#5b4bd6' : '#000000');
     this.bodyMaterial.emissiveIntensity = on ? 0.22 : 1;
   }
@@ -385,11 +493,11 @@ export class Building {
     this.removing = true;
     if (this.env.reducedMotion()) { this.anim = { kind: 'sink', t: 1 }; return; }
     this.anim = { kind: 'sink', t: 0 };
-    this.env.particles.emit('dust', this.worldPoint(0, PAD_TOP + 0.4, 0), 18, { spread: this.size.W });
+    if (!this.mirror) this.env.particles.emit('dust', this.worldPoint(0, PAD_TOP + 0.4, 0), 18, { spread: this.size.W });
   }
 
-  /* World-space helpers for NPCs and overlays. */
-  worldPoint(x, y, z) { return new THREE.Vector3(this.origin.x + x, y, this.origin.z + z); }
+  /* World-space helpers for NPCs and overlays (mirror-aware: underside points hang below the deck). */
+  worldPoint(x, y, z) { return new THREE.Vector3(this.origin.x + x, this.mirror ? (this.env.deckY || 0) - y : y, this.origin.z + z); }
   topPoint() { return this.worldPoint(0, (this.roofTop || PAD_TOP + this.size.H) * this.tower.scale.y + 0.6, 0); }
   get center() { return { x: this.origin.x, z: this.origin.z }; }
   get door() { return { x: this.origin.x, z: this.origin.z + this.size.D / 2 + 0.3 }; }
@@ -409,7 +517,7 @@ export class Building {
       const a = this.anim;
       if (a.delay > 0) { a.delay -= dt; return true; }
       if (a.kind === 'rise') {
-        if (a.t === 0) env.particles.emit('dust', this.worldPoint(0, PAD_TOP + 0.3, 0), 22, { spread: this.size.W });
+        if (a.t === 0 && !this.mirror) env.particles.emit('dust', this.worldPoint(0, PAD_TOP + 0.3, 0), 22, { spread: this.size.W });
         a.t = Math.min(1, a.t + dt / 1.1);
         this.tower.scale.y = Math.max(0.02, easeOutBack(a.t));
         this.padGroup.scale.setScalar(0.6 + 0.4 * Math.min(1, a.t * 2.5));
@@ -417,7 +525,7 @@ export class Building {
       } else if (a.kind === 'grow') {
         a.t += dt;
         this.tower.scale.y = 1 + (a.from - 1) * Math.exp(-4.5 * a.t) * Math.cos(10 * a.t);
-        if (a.up && a.t < 0.6 && Math.random() < dt * 30) env.particles.emit('sparkle', this.topPoint(), 2, { spread: this.size.W });
+        if (a.up && !this.mirror && a.t < 0.6 && Math.random() < dt * 30) env.particles.emit('sparkle', this.topPoint(), 2, { spread: this.size.W });
         if (a.t > 1.4) { this.tower.scale.y = 1; this.anim = null; }
       } else if (a.kind === 'sink') {
         a.t = Math.min(1, a.t + dt / 0.9);
@@ -435,6 +543,8 @@ export class Building {
     if (env.particles.enabled && !this.removing) {
       this.elapsedEmit += dt;
       if (this.chimneyTop && Math.random() < dt * 1.6) env.particles.emit('smoke', this.worldPoint(this.chimneyTop.x, this.chimneyTop.y * this.tower.scale.y, this.chimneyTop.z), 1, { spread: 0.25 });
+      // Busy Spark buildings shed a few teal / lime sparks from their rig; they fall away into the sky.
+      if (this.rigTip && Math.random() < dt * 2.4) env.particles.emit('spark', this.worldPoint(this.rigTip.x, this.rigTip.y * this.tower.scale.y, this.rigTip.z), 3, { spread: 0.3, colors: SPARK_SPARKS });
       if (this.active && this.scaffoldFront && this.elapsedEmit > 0.28) {
         this.elapsedEmit = 0;
         const f = this.scaffoldFront;

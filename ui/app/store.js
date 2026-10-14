@@ -37,7 +37,7 @@ function emptyDesktop() {
     avatarRequests: {},
     chats: { threads: {} },
     tasks: {},
-    prefs: { theme: 'dark', notify: true, sound: true, cityQuality: 'high', cityTime: 'auto', reducedMotion: false },
+    prefs: { theme: 'dark', notify: true, sound: true, cityQuality: 'high', cityTime: 'auto', citySpark: 'auto', reducedMotion: false },
   };
 }
 const normalizePath = path => String(path || '').replaceAll('\\', '/').replace(/^\/\/\?\/UNC\//i, '//').replace(/^\/\/\?\//, '').replace(/\/+$/, '').toLowerCase();
@@ -61,6 +61,8 @@ class Store extends EventTarget {
     this.sync = { ok: false, at: 0, error: '' };
     this.startSeq = null;           // owner messages above this sequence notify
     this.liveRuns = new Map();      // requestId -> poll handle
+    this.spark = { configured: false, ok: false, at: 0, error: '', jobs: [], laptopJobs: [], limits: null, hardware: null, scheduler: null, transport: null };
+    this.sparkHashes = new Map();    // sha256(project root as sparkdev sees it) -> project id
     this._timers = [];
     this._saveTimer = null;
     this._derived = null;
@@ -84,13 +86,15 @@ class Store extends EventTarget {
     every(15000, () => this.refreshBoard());
     every(60000, () => this.refreshMail(true));
     every(60000, () => this.refreshManifest());
+    every(15000, () => this.refreshSpark());
+    this.refreshSpark();
     every(30000, async () => this.emit('change')); // keeps "x minutes ago" and statuses fresh
   }
 
   async refreshBoard() {
     try {
       const data = await rpc('status');
-      this.board = { endpoints: data.endpoints || [], grants: data.grants || [], requests: data.requests || [], paused: !!data.paused, state_dir: data.state_dir || '' };
+      this.board = { endpoints: data.endpoints || [], grants: data.grants || [], requests: data.requests || [], paused: !!data.paused, state_dir: data.state_dir || '', spark: data.spark || null };
       this.setSync(true);
     } catch (error) { this.setSync(false, error); }
   }
@@ -147,6 +151,60 @@ class Store extends EventTarget {
       if (user && !this.desktop.projects.github.user) await this.linkGithub(user).catch(() => {});
       for (const item of this.desktop.projects.local.filter(p => !p.scannedAt)) await this.scanProject(item.path).catch(() => {});
     } finally { this._adopting = false; }
+  }
+
+  /** DGXBridge (sparkdev) status through the board's owner-only, read-only Spark status call. */
+  async refreshSpark() {
+    if (!this.board.spark?.executable) {
+      if (this.spark.configured) { this.spark = { ...this.spark, configured: false, ok: false }; this.emit('change'); }
+      return;
+    }
+    try {
+      const d = await rpc('spark', { operation: 'status', arguments: {} });
+      this.spark = {
+        configured: true, ok: d.ok !== false, at: Date.now(), error: '',
+        jobs: Array.isArray(d.jobs) ? d.jobs : [], laptopJobs: Array.isArray(d.laptop_jobs) ? d.laptop_jobs : [],
+        limits: d.limits || null, hardware: d.hardware || null, scheduler: d.scheduler || null, transport: d.transport || null,
+      };
+      await this.mapSparkProjects();
+    } catch (error) {
+      this.spark = { ...this.spark, configured: true, ok: false, at: Date.now(), error: error.message || String(error) };
+    }
+    this.emit('change');
+  }
+  /** sparkdev identifies a job's project as sha256 of the project root path; hash our linked paths the same ways. */
+  async mapSparkProjects() {
+    if (!globalThis.crypto?.subtle) return;
+    const digest = async text => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map(b => b.toString(16).padStart(2, '0')).join('');
+    for (const project of this.projects) {
+      if (!project.path || [...this.sparkHashes.values()].includes(project.id)) continue;
+      const win = String(project.path).replaceAll('/', '\\').replace(/^\\\\\?\\/, '').replace(/\\+$/, '');
+      for (const variant of new Set([win, `\\\\?\\${win}`, win.toLowerCase(), win.replaceAll('\\', '/')])) this.sparkHashes.set(await digest(variant), project.id);
+    }
+  }
+  /** Work per machine: running jobs, reserved cores/memory, last-24h CPU-hours, plus per-project activity. */
+  get machines() {
+    const now = Date.now() / 1000;
+    const DONE = new Set(['succeeded', 'failed', 'cancelled', 'canceled', 'timeout', 'timed_out', 'error', 'rejected', 'expired', 'completed']);
+    const active = j => !j.finished_at && !DONE.has(String(j.state || '').toLowerCase());
+    const cpuHours = jobs => jobs.reduce((sum, j) => {
+      const start = Number(j.started_at) || 0; if (!start) return sum;
+      const end = Number(j.finished_at) || now; if (end < now - 86400) return sum;
+      return sum + (Number(j.reserved_cpu ?? j.cpu) || 0) * Math.max(0, end - Math.max(start, now - 86400)) / 3600;
+    }, 0);
+    const all = [...this.spark.jobs, ...this.spark.laptopJobs.map(j => ({ ...j, where: j.where || 'laptop' }))];
+    const byId = new Map(all.map(j => [j.job, j]));
+    const jobs = [...byId.values()].map(j => ({ ...j, machine: j.where === 'spark' ? 'spark' : 'local', projectId: this.sparkHashes.get(j.project) || null, active: active(j), provider: providerOf(j.client || '') }));
+    const summarize = list => ({ running: list.filter(j => j.active).length, cpuReserved: list.filter(j => j.active).reduce((n, j) => n + (Number(j.reserved_cpu ?? j.cpu) || 0), 0), memReservedGb: list.filter(j => j.active).reduce((n, j) => n + (Number(j.reserved_memory_gb ?? j.memory_gb) || 0), 0), cpuHours24h: cpuHours(list), finished24h: list.filter(j => Number(j.finished_at) > now - 86400).length });
+    const spark = jobs.filter(j => j.machine === 'spark'), local = jobs.filter(j => j.machine === 'local');
+    const transport = this.spark.transport || {};
+    return {
+      enabled: this.spark.configured && this.spark.ok && transport.authenticated !== false,
+      configured: this.spark.configured, error: this.spark.error, checkedAt: this.spark.at,
+      local: { name: 'This PC', ...summarize(local) },
+      spark: { name: 'DGX Spark', ...summarize(spark), reachable: transport.authenticated === true, route: transport.route || '', healthy: this.spark.scheduler?.healthy === true, cpuTotal: this.spark.limits?.cpu_total ?? null, memTotalGb: this.spark.limits?.memory_gb_total ?? null, hardware: this.spark.hardware },
+      jobs, // [{ job, machine:'spark'|'local', projectId|null, active, provider, client, runtime, state, cpu, memory_gb, started_at, finished_at, exit_code }]
+    };
   }
 
   setSync(ok, error) {
@@ -479,6 +537,9 @@ class Store extends EventTarget {
   setAgentPrefs(agentId, patch) { this.updateDesktop(d => { d.agents[agentId] = { ...d.agents[agentId], ...patch }; }); }
   setTaskOverride(taskId, patch) { this.updateDesktop(d => { d.tasks[taskId] = { ...d.tasks[taskId], ...patch }; }); }
   saveAvatar(spec) { this.updateDesktop(d => { d.avatar = normalizeAvatar(spec); }); }
+  /** City lot pins: { [projectId]: { i, j } } — a project created on a chosen plot stays there. */
+  get cityLots() { return this.desktop.cityLots || {}; }
+  setCityLot(projectId, lot) { this.updateDesktop(d => { d.cityLots = { ...(d.cityLots || {}) }; if (lot) d.cityLots[projectId] = { i: Number(lot.i), j: Number(lot.j) }; else delete d.cityLots[projectId]; }); }
   dismissAvatarRequest(id) { this.updateDesktop(d => { delete d.avatarRequests[id]; }); }
 
   /** Create a task for an agent: a mailbox message from the owner whose subject starts with "Task:". */

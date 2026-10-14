@@ -36,8 +36,13 @@ const MARKER_ENTRY_LIMIT: usize = 4_000;
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const GH_TIMEOUT: Duration = Duration::from_secs(15);
 const GH_GRAPHQL_TIMEOUT: Duration = Duration::from_secs(45);
+const GH_CREATE_TIMEOUT: Duration = Duration::from_secs(90);
+const GH_CLONE_TIMEOUT: Duration = Duration::from_secs(180);
 const API_TIMEOUT: Duration = Duration::from_secs(20);
 const GH_PAGES: usize = 3;
+const REPO_DESCRIPTION_LIMIT: usize = 350;
+const GH_SIGN_IN_HINT: &str = "Open a terminal and run gh auth login, then try again. CodaClauda never asks for your GitHub password or token.";
+const TOKEN_PREFIXES: &[&str] = &["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"];
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -839,6 +844,28 @@ fn valid_login(login: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+/// One line of tool output, safe to show: token-shaped words and URLs with
+/// embedded credentials are redacted, control characters dropped, length capped.
+fn sanitize_line(line: &str, max: usize) -> String {
+    line.split_whitespace()
+        .map(|word| {
+            let lower = word.to_ascii_lowercase();
+            if TOKEN_PREFIXES.iter().any(|prefix| lower.contains(prefix)) {
+                "[redacted]"
+            } else if word.contains("://") && word.contains('@') {
+                "[redacted-url]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(max)
+        .collect()
+}
+
 /// gh errors normally carry no secrets; scrub token-shaped words regardless.
 fn scrub(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
@@ -847,53 +874,133 @@ fn scrub(stderr: &[u8]) -> String {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("");
-    line.split_whitespace()
-        .map(|word| {
-            let lower = word.to_ascii_lowercase();
-            if ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"]
-                .iter()
-                .any(|prefix| lower.contains(prefix))
-            {
-                "[redacted]"
-            } else {
-                word
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(200)
-        .collect()
+    sanitize_line(line, 200)
 }
 
-async fn run_gh(args: &[&str], limit: Duration) -> Result<Vec<u8>, Failure> {
+/// The most telling stderr line of a failed create/clone: git progress lines
+/// ("Cloning into ...") are skipped in favour of the actual error.
+fn failure_line(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    const TELLING: &[&str] = &[
+        "error",
+        "fatal",
+        "failed",
+        "already exists",
+        "graphql",
+        "http ",
+        "not found",
+        "could not",
+        "permission",
+        "denied",
+        "unknown flag",
+    ];
+    const PROGRESS: &[&str] = &[
+        "cloning into",
+        "remote:",
+        "receiving objects",
+        "resolving deltas",
+        "updating files",
+    ];
+    let telling = lines.iter().find(|line| {
+        let lower = line.to_ascii_lowercase();
+        TELLING.iter().any(|word| lower.contains(word))
+    });
+    let fallback = || {
+        lines.iter().find(|line| {
+            let lower = line.to_ascii_lowercase();
+            !PROGRESS.iter().any(|word| lower.starts_with(word))
+        })
+    };
+    sanitize_line(telling.or_else(fallback).copied().unwrap_or(""), 300)
+}
+
+/// Spawns gh with fixed argv (never a shell), no console window and no
+/// interactive prompts. A timeout is reported as `GH_TIMEOUT`.
+async fn gh_output(
+    args: &[&str],
+    limit: Duration,
+    cwd: Option<&Path>,
+) -> Result<std::process::Output, Failure> {
     let mut command = Command::new("gh");
     command
         .args(args)
         .env("GH_PROMPT_DISABLED", "1")
         .env("GH_NO_UPDATE_NOTIFIER", "1")
         .env("NO_COLOR", "1")
+        // gh runs git for clones; neither may wait on a prompt nobody can see.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     let child = command.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             fail(
                 "GH_UNAVAILABLE",
-                "GitHub CLI (gh) is not installed or not on PATH.",
+                "GitHub CLI (gh) is not installed or not on PATH. Install it from https://cli.github.com.",
             )
         } else {
             fail("GH_UNAVAILABLE", format!("GitHub CLI could not start: {e}"))
         }
     })?;
-    let output = match timeout(limit, child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => return Err(fail("GH_UNAVAILABLE", format!("GitHub CLI failed: {e}"))),
-        Err(_) => return Err(fail("GH_UNAVAILABLE", "GitHub CLI timed out.")),
-    };
+    let pid = child.id();
+    // Pinned locally so gh stays alive (and its PID owned) until its tree is ended.
+    let mut wait = std::pin::pin!(child.wait_with_output());
+    match timeout(limit, wait.as_mut()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(fail("GH_UNAVAILABLE", format!("GitHub CLI failed: {e}"))),
+        Err(_) => {
+            // kill_on_drop ends gh only; its git/ssh children would be orphaned.
+            #[cfg(windows)]
+            if let Some(pid) = pid {
+                kill_tree(pid).await;
+            }
+            #[cfg(not(windows))]
+            let _ = pid;
+            Err(fail("GH_TIMEOUT", "GitHub CLI timed out."))
+        }
+    }
+}
+
+/// Ends a still-running process and its descendants with the system taskkill.
+#[cfg(windows)]
+async fn kill_tree(pid: u32) {
+    let root = std::env::var_os("SystemRoot")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let mut command = Command::new(root.join("System32").join("taskkill.exe"));
+    command
+        .args(["/T", "/F", "/PID"])
+        .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .creation_flags(CREATE_NO_WINDOW);
+    if let Ok(mut child) = command.spawn() {
+        let _ = timeout(Duration::from_secs(10), child.wait()).await;
+    }
+}
+
+async fn run_gh(args: &[&str], limit: Duration) -> Result<Vec<u8>, Failure> {
+    let output = gh_output(args, limit, None)
+        .await
+        .map_err(|(code, message)| match code {
+            "GH_TIMEOUT" => ("GH_UNAVAILABLE", message),
+            code => (code, message),
+        })?;
     if !output.status.success() {
         let detail = scrub(&output.stderr);
         return Err(fail(
@@ -1121,6 +1228,274 @@ pub(crate) async fn github_repos(user: String) -> Value {
             Ok(repos) => ok(json!({"user": login, "source": "api", "repos": repos})),
             Err((code, message)) => error(code, message),
         },
+    }
+}
+
+// ------------------------------------------------- GitHub: create and clone
+
+/// Repository names that are also safe Windows folder names. Names starting
+/// with '-' could be read as gh flags; '.'/'..' and a trailing dot would not
+/// name a new folder; device names cannot be folders at all. A clone folder
+/// named `.git` would make its parent a repository with cloned config.
+fn valid_repo_folder(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    !name.eq_ignore_ascii_case(".git")
+        && (1..=100).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && !name.starts_with('-')
+        && !name.ends_with('.')
+        && !RESERVED_NAMES.contains(&stem.as_str())
+}
+
+/// New repositories additionally may not start with '.'.
+fn valid_new_repo_name(name: &str) -> bool {
+    valid_repo_folder(name) && !name.starts_with('.')
+}
+
+/// `owner/name` from a GitHub remote (https, ssh:// or scp-like `git@github.com:`).
+fn github_full_name(remote: &str) -> Option<String> {
+    const HOST: &str = "github.com";
+    // ASCII lowercasing keeps byte offsets, so the index is valid in `remote`.
+    let at = remote.to_ascii_lowercase().find(HOST)?;
+    let rest = &remote[at + HOST.len()..];
+    let rest = rest.strip_prefix(':').or_else(|| rest.strip_prefix('/'))?;
+    let rest = rest.trim_end_matches('/');
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let (owner, name) = rest.split_once('/')?;
+    (valid_login(owner) && valid_repo_folder(name)).then(|| format!("{owner}/{name}"))
+}
+
+/// `<parent>/<name>` for a new clone: the parent is an existing local folder
+/// and nothing (file, folder or link) is at the target yet.
+fn clone_target(parent_dir: &str, name: &str) -> Result<(PathBuf, PathBuf), Failure> {
+    let parent =
+        existing_directory(parent_dir).map_err(|message| fail("INVALID_FOLDER", message))?;
+    let target = parent.join(name);
+    match fs::symlink_metadata(&target) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((parent, target)),
+        Ok(_) => Err(fail(
+            "FOLDER_EXISTS",
+            format!(
+                "{} already exists. Choose another name or location.",
+                display_path(&target)
+            ),
+        )),
+        Err(e) => Err(fail(
+            "INVALID_FOLDER",
+            format!("{}: {e}", display_path(&target)),
+        )),
+    }
+}
+
+/// gh's wording when it has no usable sign-in (lowercased stderr line).
+fn signed_out(lower: &str) -> bool {
+    ["gh auth login", "not logged in", "authentication", "bad credentials"]
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+}
+
+/// gh failures that mean "install or sign in to the GitHub CLI" get the hint.
+fn with_sign_in_hint((code, message): Failure) -> Failure {
+    if code == "GH_UNAVAILABLE" {
+        (code, format!("{} {GH_SIGN_IN_HINT}", message.trim()))
+    } else {
+        (code, message)
+    }
+}
+
+/// After gh finished: the folder must be a git work tree; its origin (read
+/// with the hardened git helper, credentials redacted) names the repository.
+async fn read_clone(
+    target: &Path,
+    expected: String,
+    failed: &'static str,
+) -> Result<Value, Failure> {
+    let path = display_path(target);
+    let has_git = fs::symlink_metadata(target.join(".git")).is_ok_and(|m| !is_link(&m));
+    if !has_git {
+        return Err(fail(
+            failed,
+            format!("GitHub CLI finished, but {path} is not a git repository."),
+        ));
+    }
+    let full_name = git_text(&path, &["remote", "get-url", "origin"])
+        .await
+        .and_then(|remote| redact_remote(&remote))
+        .and_then(|remote| github_full_name(&remote))
+        .unwrap_or(expected);
+    Ok(json!({
+        "path": path,
+        "url": format!("https://github.com/{full_name}"),
+        "full_name": full_name,
+    }))
+}
+
+async fn create_repo(
+    name: &str,
+    description: &str,
+    private: bool,
+    parent_dir: &str,
+) -> Result<Value, Failure> {
+    let name = name.trim();
+    if !valid_new_repo_name(name) {
+        return Err(fail(
+            "INVALID_NAME",
+            "Repository names use 1-100 letters, digits, '.', '-' or '_', cannot start with '.' or '-', cannot end with '.', and cannot be a reserved Windows name.",
+        ));
+    }
+    let description = description.trim();
+    if description.chars().count() > REPO_DESCRIPTION_LIMIT
+        || description.chars().any(char::is_control)
+    {
+        return Err(fail(
+            "INVALID_DESCRIPTION",
+            format!("Descriptions are one line of at most {REPO_DESCRIPTION_LIMIT} characters."),
+        ));
+    }
+    let (parent, target) = clone_target(parent_dir, name)?;
+    let login = gh_login().await.map_err(with_sign_in_hint)?;
+    let cwd = PathBuf::from(display_path(&parent));
+    let description_arg = format!("--description={description}");
+    let mut args = vec![
+        "repo",
+        "create",
+        name,
+        if private { "--private" } else { "--public" },
+    ];
+    if !description.is_empty() {
+        args.push(description_arg.as_str());
+    }
+    args.extend(["--add-readme", "--clone"]);
+    let output = match gh_output(&args, GH_CREATE_TIMEOUT, Some(&cwd)).await {
+        Ok(output) => output,
+        Err(("GH_TIMEOUT", _)) => {
+            return Err(fail(
+                "CREATE_FAILED",
+                format!(
+                    "GitHub CLI did not finish within {} seconds. Check https://github.com/{login}/{name} before retrying; it may already exist.",
+                    GH_CREATE_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        Err(failure) => return Err(with_sign_in_hint(failure)),
+    };
+    // Without a TTY, gh prints the new repository's URL before it clones.
+    let created = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .find_map(github_full_name);
+    if !output.status.success() {
+        let detail = failure_line(&output.stderr);
+        let lower = detail.to_ascii_lowercase();
+        if let Some(full_name) = created {
+            return Err(fail(
+                "CLONE_FAILED",
+                format!(
+                    "Created {full_name} on GitHub, but cloning it into {} failed: {detail}",
+                    display_path(&target)
+                ),
+            ));
+        }
+        if lower.contains("already exists") {
+            return Err(fail(
+                "REPO_EXISTS",
+                format!(
+                    "{login}/{name} already exists on GitHub. Pick another name, or clone it instead."
+                ),
+            ));
+        }
+        if signed_out(&lower) {
+            return Err(fail(
+                "GH_UNAVAILABLE",
+                format!("GitHub CLI is not signed in. {GH_SIGN_IN_HINT}"),
+            ));
+        }
+        return Err(fail(
+            "CREATE_FAILED",
+            if detail.is_empty() {
+                format!("GitHub CLI could not create the repository ({}).", output.status)
+            } else {
+                format!("GitHub CLI could not create the repository: {detail}")
+            },
+        ));
+    }
+    let expected = created.unwrap_or_else(|| format!("{login}/{name}"));
+    read_clone(&target, expected, "CREATE_FAILED").await
+}
+
+async fn clone_repo(full_name: &str, parent_dir: &str) -> Result<Value, Failure> {
+    let full_name = full_name.trim();
+    // valid_repo_folder also refuses "." and ".." (no trailing dot).
+    let valid = full_name.split_once('/').filter(|(owner, name)| {
+        valid_login(owner) && !owner.starts_with('-') && valid_repo_folder(name)
+    });
+    let Some((_, name)) = valid else {
+        return Err(fail(
+            "INVALID_REPO",
+            "Repositories are named owner/name (letters, digits, '.', '-' or '_').",
+        ));
+    };
+    let (parent, target) = clone_target(parent_dir, name)?;
+    let cwd = PathBuf::from(display_path(&parent));
+    let args = ["repo", "clone", full_name, name];
+    let output = match gh_output(&args, GH_CLONE_TIMEOUT, Some(&cwd)).await {
+        Ok(output) => output,
+        Err(("GH_TIMEOUT", _)) => {
+            return Err(fail(
+                "CLONE_FAILED",
+                format!(
+                    "Cloning {full_name} did not finish within {} seconds. Remove any partial folder at {} before retrying.",
+                    GH_CLONE_TIMEOUT.as_secs(),
+                    display_path(&target)
+                ),
+            ));
+        }
+        Err(failure) => return Err(with_sign_in_hint(failure)),
+    };
+    if !output.status.success() {
+        let detail = failure_line(&output.stderr);
+        if signed_out(&detail.to_ascii_lowercase()) {
+            return Err(fail(
+                "GH_UNAVAILABLE",
+                format!("GitHub CLI is not signed in. {GH_SIGN_IN_HINT}"),
+            ));
+        }
+        return Err(fail(
+            "CLONE_FAILED",
+            if detail.is_empty() {
+                format!("GitHub CLI could not clone {full_name} ({}).", output.status)
+            } else {
+                format!("GitHub CLI could not clone {full_name}: {detail}")
+            },
+        ));
+    }
+    read_clone(&target, full_name.to_owned(), "CLONE_FAILED").await
+}
+
+/// Creates `name` in the signed-in GitHub CLI account (with a README) and
+/// clones it into `<parent_dir>/<name>`. Uses gh's own sign-in; no token is
+/// read, passed or printed.
+#[tauri::command]
+pub(crate) async fn github_create_repo(
+    name: String,
+    description: Option<String>,
+    private: bool,
+    parent_dir: String,
+) -> Value {
+    let description = description.unwrap_or_default();
+    match create_repo(&name, &description, private, &parent_dir).await {
+        Ok(data) => ok(data),
+        Err((code, message)) => error(code, message),
+    }
+}
+
+/// Clones `owner/name` into `<parent_dir>/<name>` with the GitHub CLI.
+#[tauri::command]
+pub(crate) async fn github_clone_repo(full_name: String, parent_dir: String) -> Value {
+    match clone_repo(&full_name, &parent_dir).await {
+        Ok(data) => ok(data),
+        Err((code, message)) => error(code, message),
     }
 }
 

@@ -2,6 +2,7 @@
  * shows up (a lane on the Board, a building in the City). Rows are keyed by
  * project id and rebuilt only when their content changes; the Board/City
  * switches are updated in place so long lists stay fast and focus is kept. */
+import { openNewProjectDialog } from '../newproject.js';
 
 const FILTERS = [
   { id: 'all', label: 'All', test: () => true },
@@ -180,7 +181,8 @@ export function mount(root, ctx) {
   }
 
   /* ---------- static skeleton ---------- */
-  const linkButton = h('button.btn.primary', { type: 'button', onclick: event => linkFolder(event.currentTarget) }, icon('folder'), 'Link folder');
+  const newButton = h('button.btn.primary', { type: 'button', title: 'Create a GitHub repo, clone one of yours, or link a folder', onclick: () => newProject() }, icon('plus'), 'New project');
+  const linkButton = h('button.btn', { type: 'button', onclick: event => linkFolder(event.currentTarget) }, icon('folder'), 'Link folder');
   const scanButton = h('button.btn', { type: 'button', onclick: event => scanDesktop(event.currentTarget) }, icon('search'), 'Scan my Desktop');
   const githubButton = h('button.btn', { type: 'button', onclick: () => connectGithub() }, icon('github'), 'Connect GitHub');
   const rescanButton = h('button.btn.ghost', { type: 'button', onclick: () => rescanAll() }, icon('refresh'), 'Rescan all');
@@ -239,7 +241,7 @@ export function mount(root, ctx) {
         h('h1', 'Projects'),
         h('p', 'Each project is a building in your City and a lane on your Board. Link Desktop folders and GitHub repos, then choose where each one shows up.'),
       ),
-      h('div.proj-actions', linkButton, scanButton, githubButton, rescanButton),
+      h('div.proj-actions', newButton, linkButton, scanButton, githubButton, rescanButton),
     ),
     progressNode,
     sourcesSlot,
@@ -286,8 +288,9 @@ export function mount(root, ctx) {
     firstRun.hidden = hasAny;
     if (!hasAny) {
       patch(firstRun, 'empty', () => emptyState('projects', 'No projects linked yet',
-        'Link a folder from your PC, scan your Desktop for repos, or connect GitHub. Each project becomes a building in your City and a lane on your Board.',
-        h('button.btn.primary', { type: 'button', dataset: { fk: 'link' }, onclick: event => linkFolder(event.currentTarget) }, icon('folder'), 'Link folder'),
+        'Start a new GitHub repo, link a folder from your PC, scan your Desktop for repos, or connect GitHub. Each project becomes a building in your City and a lane on your Board.',
+        h('button.btn.primary', { type: 'button', dataset: { fk: 'new' }, onclick: () => newProject() }, icon('plus'), 'New project'),
+        h('button.btn', { type: 'button', dataset: { fk: 'link' }, onclick: event => linkFolder(event.currentTarget) }, icon('folder'), 'Link folder'),
         h('button.btn', { type: 'button', dataset: { fk: 'scan' }, onclick: event => scanDesktop(event.currentTarget) }, icon('search'), 'Scan my Desktop'),
         h('button.btn', { type: 'button', dataset: { fk: 'github' }, onclick: () => connectGithub() }, icon('github'), 'Connect GitHub')));
     }
@@ -542,6 +545,14 @@ export function mount(root, ctx) {
   }
 
   /* ---------- actions ---------- */
+  async function newProject() {
+    let result = null;
+    try { result = await openNewProjectDialog(ctx); }
+    catch (error) { toast(`Could not open New project: ${error.message}`, { kind: 'error' }); return; }
+    // Bring the new row into view and flash it (show() handles both).
+    if (result?.projectId && state.visible) navigate('projects', { project: result.projectId });
+  }
+
   async function openExternal(target) {
     try { await bridge.desktop.openExternal(target); }
     catch (error) { toast(`Could not open ${target}: ${error.message}`, { kind: 'error' }); }

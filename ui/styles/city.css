@@ -1,6 +1,7 @@
 /* City view: WebGL stage + HTML overlays (labels, tags, bubbles, HUD, toolbar, panels). */
 .view.view-city { overflow: hidden; }
-.city-root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); isolation: isolate; }
+.city-root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); isolation: isolate; --spark-teal: #2de2c4; --spark-lime: #b6ff3a; --spark-ink: #13a58e; }
+[data-theme="light"] .city-root { --spark-ink: #0b7d6b; }
 .city-stage { position: absolute; inset: 0; outline: none; cursor: grab; }
 .city-stage:active { cursor: grabbing; }
 .city-stage.is-pointing { cursor: pointer; }
@@ -8,7 +9,7 @@
 .city-canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 
 /* Glass surfaces shared by the floating chrome */
-.city-hud, .city-legend, .city-toolbar, .city-label, .city-tag, .city-empty {
+.city-hud, .city-legend, .city-toolbar, .city-label, .city-tag, .city-empty, .city-machines {
   background: color-mix(in srgb, var(--surface) 84%, transparent);
   backdrop-filter: blur(12px) saturate(1.2);
   -webkit-backdrop-filter: blur(12px) saturate(1.2);
@@ -41,6 +42,13 @@
 @keyframes city-pop { from { opacity: 0; scale: .9; } }
 .city-tag.on-person { margin-top: -34px; }
 .city-bubble.on-person { margin-top: -40px; }
+/* The Spark underside hangs downward: its tags and bubbles sit below the target. */
+.city-tag.is-under { margin-top: 10px; }
+.city-bubble.is-under { margin-top: 16px; }
+.city-bubble.is-under::after { top: -7px; bottom: auto; transform: translateX(-50%) rotate(225deg); }
+.city-label.is-runner { margin-top: 4px; border-color: color-mix(in srgb, var(--spark-teal) 55%, transparent); font-weight: 600; }
+.city-label.is-runner .city-label-name { max-width: 210px; }
+.city-gem.spark { background: var(--spark-teal); box-shadow: 0 0 7px var(--spark-teal); }
 
 /* HUD (top-left) */
 .city-hud { position: absolute; top: 14px; left: 14px; z-index: 3; display: grid; gap: 8px; max-width: min(430px, calc(100% - 28px)); padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); }
@@ -59,12 +67,60 @@
 .city-legend-row { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-weight: 600; }
 .city-legend-sep { height: 1px; margin: 3px 0; background: var(--border); }
 .city-legend-note { color: var(--muted); font-size: 11.5px; }
+.city-legend-extra { display: grid; gap: 5px; }
 
 /* Toolbar (bottom-right) */
 .city-toolbar { position: absolute; right: 14px; bottom: 14px; z-index: 3; display: flex; align-items: center; gap: 2px; padding: 4px; border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); transition: right var(--med) var(--ease); }
 .city-tool[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-2); }
 .city-toolbar-sep { width: 1px; height: 22px; margin: 0 3px; background: var(--border-strong); }
 .city-has-panel .city-toolbar { right: calc(min(360px, 100% - 28px) + 28px); }
+.city-flip { display: inline-flex; align-items: center; gap: 6px; height: 34px; margin-right: 2px; padding: 0 12px 0 9px; border: 0; border-radius: 10px; background: color-mix(in srgb, var(--spark-teal) 16%, transparent); color: var(--text); font-size: 12.5px; font-weight: 650; white-space: nowrap; cursor: pointer; transition: background var(--fast); }
+.city-flip:hover { background: color-mix(in srgb, var(--spark-teal) 28%, transparent); }
+.city-flip .icon { width: 16px; height: 16px; color: var(--spark-ink); }
+
+/* Machine load (top-right): this PC vs the DGX Spark */
+.city-machines { position: absolute; top: 14px; right: 14px; z-index: 3; display: grid; gap: 10px; width: min(300px, calc(100% - 28px)); padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); font-size: 12px; }
+.city-machines.is-collapsed { padding-bottom: 10px; }
+.city-has-panel .city-machines { display: none; }
+.city-machines-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.city-machines-title { display: inline-flex; align-items: center; gap: 7px; color: var(--text); font-weight: 650; }
+.city-machines-title .icon { width: 15px; height: 15px; color: var(--spark-ink); }
+.city-machines-summary { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.city-machines-head .icon-btn { width: 26px; height: 26px; margin: -4px -6px -4px auto; border-radius: 8px; }
+.city-machines-summary + .icon-btn { margin-left: 0; }
+.city-machine { display: grid; gap: 5px; }
+.city-machine-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.city-machine-top strong { color: var(--text); font-weight: 650; }
+.city-machine-jobs { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-weight: 600; }
+.city-meter { height: 6px; overflow: hidden; border-radius: 4px; background: var(--surface-3); }
+.city-meter-fill { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width var(--med) var(--ease); }
+.city-machine.is-spark .city-meter-fill { background: linear-gradient(90deg, var(--spark-teal), var(--spark-lime)); }
+.city-machine-meta { display: flex; flex-wrap: wrap; gap: 3px 10px; color: var(--muted); font-size: 11.5px; }
+.city-machine-route { display: inline-flex; align-items: center; gap: 5px; }
+.city-health { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--status-offline); }
+.city-health.ok { background: var(--success); box-shadow: 0 0 6px var(--success); }
+.city-health.bad { background: var(--danger); }
+.city-split { display: grid; gap: 6px; padding-top: 9px; border-top: 1px solid var(--border); }
+.city-split-label { color: var(--text-2); font-weight: 600; }
+.city-split-label.muted { color: var(--muted); font-weight: 500; }
+.city-split-bar { display: flex; gap: 2px; height: 6px; overflow: hidden; border-radius: 4px; background: var(--surface-3); }
+.city-split-local, .city-split-spark { flex-basis: 0; min-width: 3px; }
+.city-split-local { background: var(--accent); }
+.city-split-spark { background: var(--spark-teal); }
+.city-machines-chip { display: inline-flex; align-items: center; gap: 7px; justify-self: start; padding: 6px 11px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface-2); color: var(--muted); font-weight: 600; text-decoration: none; }
+.city-machines-chip:hover { border-color: var(--border-strong); color: var(--text); }
+.city-machines-chip .icon { width: 14px; height: 14px; }
+.city-machines-error { display: flex; align-items: flex-start; gap: 6px; margin: 0; color: var(--danger); font-size: 11.5px; overflow-wrap: anywhere; }
+.city-machines-error .icon { width: 14px; height: 14px; margin-top: 1px; }
+
+/* Compute jobs in the building panel */
+.city-jobs { display: grid; gap: 4px; }
+.city-job { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 9px; border-radius: 9px; background: var(--surface-2); font-size: 12.5px; }
+.city-job-where { flex: none; padding: 1px 7px; border-radius: var(--radius-pill); font-size: 10.5px; font-weight: 700; }
+.city-job-where.spark { background: color-mix(in srgb, var(--spark-teal) 18%, transparent); color: var(--spark-ink); }
+.city-job-where.local { background: var(--accent-soft); color: var(--accent-2); }
+.city-job-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.city-job-time { flex: none; color: var(--muted); font-size: 11.5px; }
 
 /* Help card */
 .city-help { position: absolute; top: 112px; left: 14px; z-index: 4; display: grid; gap: 12px; width: min(310px, calc(100% - 28px)); padding: 14px 16px 16px; box-shadow: var(--shadow-lg); animation: city-pop var(--med) var(--ease); }
@@ -138,8 +194,13 @@
   .city-has-panel .city-hud { max-width: calc(100% - 380px); }
   .city-legend-note { display: none; }
   .city-legend-sep { display: none; }
+  .city-machines { width: 260px; }
+}
+@media (max-width: 860px) {
+  /* Too narrow to share the top edge with the HUD: sit above the toolbar instead. */
+  .city-machines { top: auto; bottom: 70px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .city-bubble, .city-help, .city-panel, .city-task-form { animation: none; }
-  .city-toolbar { transition: none; }
+  .city-toolbar, .city-meter-fill, .city-flip { transition: none; }
 }

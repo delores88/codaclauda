@@ -1,24 +1,40 @@
 /* City view: a playful 3D "project city". Every visible project is a building on a
  * floating island; agents walk between them as little people. HTML overlays (labels,
  * tags, bubbles, panels, toolbar) sit on top of the WebGL canvas. */
-import { h, icon, iconButton, registerIcons, toast, portrait, timeAgo, fullTime, pill, statusDot, STATUS_LABEL, formatNumber, formatBytes, clear } from '../ui.js';
+import { h, icon, iconButton, registerIcons, toast, portrait, timeAgo, fullTime, pill, plural, statusDot, STATUS_LABEL, formatNumber, formatBytes, clear } from '../ui.js';
 import { PROVIDER_COLORS } from '../avatar/spec.js';
 import { THREE } from '../city/toon.js';
 import { World, webglAvailable } from '../city/world.js';
 import { BuildingManager } from '../city/buildings.js';
 import { NpcManager, loadPeople, setPeopleReducedMotion } from '../city/npc.js';
-import { SlotMap } from '../city/layout.js';
+import { SlotMap, cellCenter, cellOf, cellKey, LOT_HALF } from '../city/layout.js';
+import { buildPlotMarker, GROUND_Y } from '../city/scenery.js';
+import { SparkCity, FOUNDRY, jobLabel } from '../city/spark.js';
 
 registerIcons({
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.6 2.4c-.8.4-1.2.9-1.2 1.7v.4M12 17h.01"/>',
   crosshair: '<circle cx="12" cy="12" r="7"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="1.4"/>',
   cube: '<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/>',
+  'city-chip': '<rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+  'city-flip': '<path d="M3 12h18"/><path d="M8 8.5 12 4l4 4.5M8 15.5l4 4.5 4-4.5"/>',
+  'city-chevron-up': '<path d="m6 15 6-6 6 6"/>',
+  'city-chevron-down': '<path d="m6 9 6 6 6-6"/>',
 });
 
 const HELP_KEY = 'codaclauda.city.help-dismissed';
 const TIME_MODES = ['auto', 'day', 'night'];
 const TIME_LABEL = { auto: 'Auto (your clock)', day: 'Always day', night: 'Always night' };
 const PROVIDER_LABEL = { claude: 'Claude', codex: 'Codex', other: 'Agent' };
+const SPARK_MODES = ['auto', 'on', 'off'];
+const SPARK_LABEL = { auto: 'Auto (shown when the Spark bridge is on)', on: 'Always shown', off: 'Hidden' };
+const MACHINES_KEY = 'codaclauda.city.machines-collapsed';
+const UNDER_KINDS = new Set(['spark', 'runner', 'foundry']);
+const PLOT_HOLD_MS = 10 * 60e3;
+const EMPTY_MACHINES = { enabled: false, configured: false, error: '', local: { running: 0, cpuReserved: 0, cpuHours24h: 0 }, spark: { running: 0, cpuReserved: 0, cpuHours24h: 0 }, jobs: [] };
+const fmtCores = n => (n % 1 ? n.toFixed(1) : String(n));
+const fmtHours = n => (n < 10 ? n.toFixed(1) : String(Math.round(n)));
+const ROUTE_CAPS = new Set(['lan', 'wan', 'ssh', 'vpn', 'usb', 'tcp', 'http', 'https', 'api']);
+const prettyRoute = route => String(route || '').split(/[-_ ]+/).filter(Boolean).map((w, k) => (ROUTE_CAPS.has(w.toLowerCase()) ? w.toUpperCase() : k ? w : w[0].toUpperCase() + w.slice(1))).join(' ');
 const MAILBOX_NOTE = 'The board is a passive shared mailbox: desktop agents read it on their own heartbeat (about every 10–20 minutes), so replies are not instant. A message is information, not permission.';
 const storage = { get(key) { try { return localStorage.getItem(key); } catch { return null; } }, set(key, value) { try { localStorage.setItem(key, value); } catch { /* optional */ } } };
 
@@ -38,8 +54,12 @@ class CityView {
     this.selection = null;
     this.hover = null;
     this.labels = new Map();
+    this.runnerLabels = new Map();
     this.motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
     this.slots = new SlotMap();
+    this.cells = new Map(); this.occupied = new Set(); this.reserved = new Map(); this.rings = 1;
+    this.machines = EMPTY_MACHINES;
+    this.machinesCollapsed = storage.get(MACHINES_KEY) === '1';
     root.classList.add('city-view');
     this.buildDom();
     if (!webglAvailable()) { this.fail('This computer could not start 3D graphics (WebGL is unavailable).'); return; }
@@ -66,41 +86,49 @@ class CityView {
       h('div.city-hud-title', h('span.eyebrow', 'Project city'), this.stats),
       h('div.city-hud-row', this.timeChip, this.jump));
 
+    this.legendSpark = h('div.city-legend-extra', { hidden: true }, h('div.city-legend-sep'), h('div.city-legend-row', h('span.city-gem.spark'), 'Underside = DGX Spark'));
+    this.legendGear = h('div.city-legend-note', { hidden: true }, 'Spinning gear = a job running on this PC');
     this.legend = h('div.city-legend', { 'aria-label': 'Legend' },
       h('div.city-legend-row', h('span.city-gem.active'), 'Working'),
       h('div.city-legend-row', h('span.city-gem.idle'), 'Awake'),
       h('div.city-legend-row', h('span.city-gem.offline'), 'Powered down'),
       h('div.city-legend-sep'),
       h('div.city-legend-note', 'Taller = more code & commits'),
-      h('div.city-legend-note', 'Scaffolding = an agent is working there'));
+      h('div.city-legend-note', 'Scaffolding = an agent is working there'),
+      this.legendGear, this.legendSpark);
 
     this.followBtn = iconButton('crosshair', 'Follow my avatar', () => this.toggleFollow(), 'city-tool');
     this.timeBtn = iconButton('clock', 'Time of day', () => this.cycleTime(), 'city-tool');
     this.qualityBtn = iconButton('cube', 'Shadows', () => this.toggleQuality(), 'city-tool');
     this.helpBtn = iconButton('help', 'Controls help', () => this.toggleHelp(), 'city-tool');
+    this.sparkBtn = iconButton('city-chip', 'Spark underside', () => this.cycleSpark(), 'city-tool');
+    this.flipLabel = h('span', 'Spark side');
+    this.flipBtn = h('button.city-flip', { type: 'button', hidden: true, onclick: () => this.flipSide() }, icon('city-flip'), this.flipLabel);
     this.toolbar = h('div.city-toolbar', { role: 'toolbar', 'aria-label': 'City controls' },
+      this.flipBtn,
       iconButton('zoomIn', 'Zoom in', () => this.world?.zoomBy(0.72), 'city-tool'),
       iconButton('zoomOut', 'Zoom out', () => this.world?.zoomBy(1.38), 'city-tool'),
-      iconButton('home', 'Reset view (H)', () => this.world?.resetView(), 'city-tool'),
-      this.followBtn, h('span.city-toolbar-sep'), this.timeBtn, this.qualityBtn, this.helpBtn);
+      iconButton('home', 'Reset view (H)', () => this.resetCamera(), 'city-tool'),
+      this.followBtn, h('span.city-toolbar-sep'), this.timeBtn, this.qualityBtn, this.sparkBtn, this.helpBtn);
 
     this.help = h('div.city-help.card', { hidden: true, role: 'dialog', 'aria-label': 'City controls' },
       h('div.city-help-head', h('strong', 'Getting around'), iconButton('close', 'Close help', () => this.toggleHelp(false))),
       h('dl.city-help-list',
-        ...[['Left-drag', 'Orbit'], ['Right-drag', 'Pan'], ['Scroll wheel / pinch', 'Zoom toward the pointer'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click', 'Select a person or building'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
+        ...[['Left-drag', 'Orbit'], ['Right-drag', 'Pan'], ['Scroll wheel / pinch', 'Zoom toward the pointer'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click', 'Select a person or building'], ['Click an empty plot', 'Start a new project there'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
           .flatMap(([k, v]) => [h('dt', h('kbd', k)), h('dd', v)])),
       h('button.btn.small.primary', { type: 'button', onclick: () => this.toggleHelp(false) }, 'Got it'));
 
+    this.machinesCard = h('section.city-machines', { hidden: true, 'aria-label': 'Machine load' });
     this.panel = h('aside.city-panel.card', { hidden: true, 'aria-live': 'polite' });
     this.empty = h('div.city-empty.card', { hidden: true });
     this.fallback = h('div.city-fallback', { hidden: true });
-    this.root.append(h('div.city-root', this.stage, this.overlay, this.hud, this.legend, this.toolbar, this.help, this.panel, this.empty, this.fallback));
+    this.root.append(h('div.city-root', this.stage, this.overlay, this.hud, this.legend, this.machinesCard, this.toolbar, this.help, this.panel, this.empty, this.fallback));
     if (!storage.get(HELP_KEY)) this.help.hidden = false;
   }
 
   fail(message) {
     this.failed = true;
-    for (const node of [this.hud, this.legend, this.toolbar, this.help, this.panel, this.empty, this.overlay]) node.hidden = true;
+    for (const node of [this.hud, this.legend, this.toolbar, this.help, this.panel, this.empty, this.overlay, this.machinesCard]) node.hidden = true;
     clear(this.fallback, h('div.city-fallback-card.card',
       h('div.empty-art', icon('city')),
       h('h3', 'The city needs 3D graphics'),
@@ -120,8 +148,28 @@ class CityView {
     this.world.onKeyPan = () => { if (this.following) this.toggleFollow(false); };
     this.buildings = new BuildingManager(this.world.city, { particles: this.world.particles, reducedMotion: () => this.reduced() });
     this.npcs = new NpcManager(this.world.city, { buildings: this.buildings, particles: this.world.particles, reducedMotion: () => this.reduced() });
+    this.spark = new SparkCity(this.world, { makePerson: (spec, options) => this.npcs.makePerson(spec, options), particles: this.world.particles, reducedMotion: () => this.reduced(), topBuildings: this.buildings });
+    this.plotMarker = buildPlotMarker();
+    this.world.city.add(this.plotMarker.group);
     this.world.onFrame((dt, elapsed, env) => this.frame(dt, elapsed, env));
     this.bindInput();
+  }
+
+  sparkMode() { return SPARK_MODES.includes(this.store.prefs.citySpark) ? this.store.prefs.citySpark : 'auto'; }
+  readMachines() {
+    try { const m = this.store.machines; return m && typeof m === 'object' ? { ...EMPTY_MACHINES, ...m } : EMPTY_MACHINES; }
+    catch (error) { console.error('City: machine status unavailable', error); return EMPTY_MACHINES; }
+  }
+  /** Pin projects that just got their first lot, so the layout survives other machines and reinstalls. */
+  persistLots(fresh) {
+    if (!fresh.length || typeof this.store.setCityLot !== 'function') return;
+    const lots = fresh.map(f => ({ id: f.id, i: f.i, j: f.j }));
+    setTimeout(() => {   // never re-enter sync() from inside sync()
+      const pins = this.store.cityLots || {};
+      const todo = lots.filter(f => !pins[f.id]);
+      if (todo.length > 1 && typeof this.store.updateDesktop === 'function') this.store.updateDesktop(d => { d.cityLots = { ...(d.cityLots || {}) }; for (const f of todo) d.cityLots[f.id] = { i: f.i, j: f.j }; });
+      else for (const f of todo) this.store.setCityLot(f.id, { i: f.i, j: f.j });
+    }, 0);
   }
 
   sync() {
@@ -129,10 +177,14 @@ class CityView {
     this.dirty = false;
     const store = this.store;
     const projects = store.visibleProjects('city');
-    const { cells, rings } = this.slots.assign(projects);
+    const hold = Boolean(this.plotDialog && performance.now() - this.plotDialog.at < PLOT_HOLD_MS);
+    const { cells, rings, fresh = [], reserved = new Map() } = this.slots.assign(projects, { pins: store.cityLots || {}, reserve: store.projects.filter(p => !p.visible.city), hold });
+    this.cells = cells; this.rings = rings; this.reserved = reserved;
+    this.occupied = new Set([...cells.values()].map(c => cellKey(c.i, c.j)));
+    this.persistLots(fresh);
     const ringsChanged = this.world.setRings(rings, { animate: Boolean(this.firstSyncDone) });
     // Until the owner moves the camera, keep the whole (growing) island framed.
-    if (ringsChanged && !this.world.userMoved && !this.pendingFocus) this.world.resetView({ instant: !this.firstSyncDone });
+    if (ringsChanged && !this.world.userMoved && !this.pendingFocus) this.world.resetView({ instant: !this.firstSyncDone, auto: true });
     const agents = store.agents;
     const active = new Set(agents.filter(a => a.status === 'active' && a.currentProjectId).map(a => store.project(a.currentProjectId)?.id || a.currentProjectId));
     const lotsChanged = this.buildings.sync(projects, cells, active, { animate: true });
@@ -146,6 +198,18 @@ class CityView {
       try { this.npcs.sync(agents, { avatar: store.avatar, quality }); }
       catch (error) { console.error('City: could not place agents', error); }
     }
+    // The Spark underside (DGX Spark) and local-job gears (this PC).
+    const machines = this.readMachines();
+    const mode = this.sparkMode();
+    const under = mode === 'on' || (mode === 'auto' && Boolean(machines.enabled));
+    this.machines = machines;
+    this.world.setUnderside(under);
+    try { this.spark.sync({ shown: under, projects, cells, rings, machines, quality, peopleReady: Boolean(this.peopleReady), gears: mode !== 'off' }); }
+    catch (error) { console.error('City: could not build the Spark underside', error); }
+    this.legendSpark.hidden = !under;
+    this.legendGear.hidden = !this.spark.gears.size;
+    this.syncRunnerLabels();
+    this.renderMachines(machines, mode);
     this.firstSyncDone = true;
     this.syncLabels(agents);
     this.renderHud(projects, agents);
@@ -161,6 +225,10 @@ class CityView {
     this.buildings.update(dt, elapsed, env);
     try { this.npcs.update(dt, elapsed, env); }
     catch (error) { if (!this.npcError) { this.npcError = true; console.error('City: agent animation failed', error); } }
+    try { this.spark.update(dt, elapsed, env); }
+    catch (error) { if (!this.sparkError) { this.sparkError = true; console.error('City: Spark underside animation failed', error); } }
+    this.plotMarker.update(elapsed, env.reducedMotion);
+    this.renderFlip();
     this.hoverTimer = (this.hoverTimer || 0) - dt;
     if (this.pointer && (this.hoverDirty || this.hoverTimer <= 0) && !this.dragging) { this.hoverDirty = false; this.hoverTimer = 0.2; this.updateHover(); }
     this.updateOverlays();
@@ -173,9 +241,22 @@ class CityView {
     const world = this.world, cam = world.camera;
     cam.updateMatrixWorld();
     const scratch = new THREE.Vector3(), point = { x: 0, y: 0, visible: false };
-    const camPos = cam.position;
+    const camPos = cam.position, under = world.isUnder;
+    // HTML labels ignore depth: top-city names only from above, Spark runner tags only from below.
+    for (const [id, label] of this.runnerLabels) {
+      const runner = under ? this.spark.runner(id) : null;
+      if (!runner) { if (!label.node.hidden) label.node.hidden = true; continue; }
+      this.spark.runnerHead(runner, scratch);
+      world.project(scratch, point);
+      const fade = Math.max(0, Math.min(1, 1.7 - camPos.distanceTo(scratch) / 130));
+      const show = point.visible && fade > 0.04;
+      if (label.node.hidden === show) label.node.hidden = !show;
+      if (!show) continue;
+      label.node.style.transform = `translate3d(${point.x.toFixed(1)}px, ${point.y.toFixed(1)}px, 0) translate(-50%, 0)`;
+      label.node.style.opacity = String(fade.toFixed(2));
+    }
     for (const [key, label] of this.labels) {
-      const pos = key === 'owner' ? this.npcs.ownerPosition : this.npcs.position({ kind: 'agent', id: key });
+      const pos = under ? null : key === 'owner' ? this.npcs.ownerPosition : this.npcs.position({ kind: 'agent', id: key });
       if (!pos) { label.node.hidden = true; continue; }
       scratch.set(pos.x, pos.y + this.npcs.headroom(key === 'owner' ? { kind: 'owner' } : { kind: 'agent', id: key }), pos.z);
       world.project(scratch, point);
@@ -190,12 +271,14 @@ class CityView {
     // Tags and bubbles sit just above a person's name label (offset in screen space) or above a roof.
     const place = (node, target) => {
       const person = target.kind === 'agent' || target.kind === 'owner';
-      const p = this.targetPoint(target, person ? 0 : 0.4);
+      const below = UNDER_KINDS.has(target.kind);   // the Spark city hangs: its tags sit under the target
+      const p = this.targetPoint(target, person || below ? 0 : 0.4);
       if (!p) { node.hidden = true; return; }
       world.project(p, point);
       node.hidden = !point.visible;
       node.classList.toggle('on-person', person);
-      node.style.transform = `translate3d(${point.x.toFixed(1)}px, ${point.y.toFixed(1)}px, 0) translate(-50%, -100%)`;
+      node.classList.toggle('is-under', below);
+      node.style.transform = `translate3d(${point.x.toFixed(1)}px, ${point.y.toFixed(1)}px, 0) ${below ? 'translate(-50%, 0)' : 'translate(-50%, -100%)'}`;
     };
     const bubbleOnHover = this.bubbleTarget && this.hover && this.bubbleTarget.kind === this.hover.kind && this.bubbleTarget.id === this.hover.id;
     if (this.hover && this.hoverInfo && !bubbleOnHover) place(this.tag, this.hover);
@@ -208,6 +291,11 @@ class CityView {
     if (target.kind === 'agent' || target.kind === 'owner') { const p = this.npcs.position(target); return p ? new THREE.Vector3(p.x, p.y + this.npcs.headroom(target) + lift, p.z) : null; }
     if (target.kind === 'building') { const b = this.buildings.get(target.id); return b ? b.topPoint().add(new THREE.Vector3(0, lift, 0)) : null; }
     if (target.kind === 'hq') return new THREE.Vector3(0, 11.4 + lift, -2.95);
+    if (target.kind === 'spark') { const b = this.spark.buildings.get(target.id); return b ? b.topPoint() : null; }
+    if (target.kind === 'runner') { const r = this.spark.runner(target.id); return r ? this.spark.runnerHead(r) : null; }
+    if (target.kind === 'foundry') return this.spark.foundryPoint();
+    if (target.kind === 'gear') return this.spark.gearPoint(target.id);
+    if (target.kind === 'plot') { const c = cellCenter(target.i, target.j); return new THREE.Vector3(c.x, GROUND_Y + 1.4 + lift, c.z); }
     return null;
   }
 
@@ -228,8 +316,11 @@ class CityView {
       this.onClick(this.pick(event.clientX, event.clientY));
     });
     canvas.addEventListener('dblclick', event => {
+      clearTimeout(this.plotClickTimer); this.plotClickTimer = 0;   // a double-click on an empty plot walks, it doesn't open the dialog
       const target = this.pick(event.clientX, event.clientY);
-      if (target && target.kind !== 'owner') { this.select(target); this.focusSelection(); return; }
+      if (target?.kind === 'runner' || target?.kind === 'foundry' || target?.kind === 'gear') return;
+      if (target?.kind === 'spark') { this.select({ kind: 'building', id: target.id }); return; }
+      if (target && target.kind !== 'owner' && target.kind !== 'plot') { this.select(target); this.focusSelection(); return; }
       const ground = this.world.groundAt(this.world.ndc(event.clientX, event.clientY));
       if (ground) this.npcs.walkOwner(ground.x, ground.z);
     });
@@ -240,16 +331,35 @@ class CityView {
   }
   pick(clientX, clientY) {
     const ndc = this.world.ndc(clientX, clientY);
-    const hit = this.world.raycast(ndc, [...this.npcs.pickables(), ...this.buildings.pickables(), ...this.world.hq.pickables]);
-    if (!hit) return null;
+    // Island slabs and the Spark deck are occluders: a ray never reaches through to the other side.
+    const hit = this.world.raycast(ndc, [...this.npcs.pickables(), ...this.buildings.pickables(), ...this.world.hq.pickables, ...this.spark.pickables(), ...this.world.occluders(), ...this.spark.occluders()]);
+    if (!hit || hit.object.userData?.occluder) return this.plotAt(clientX, clientY);
     const object = hit.object;
     const person = this.npcs.targetOf(object);
     if (person) return person;
     for (let node = object; node; node = node.parent) {
-      if (node.userData?.buildingId) return this.buildings.get(node.userData.buildingId) ? { kind: 'building', id: node.userData.buildingId } : null;
-      if (node.userData?.hq) return { kind: 'hq' };
+      const data = node.userData || {};
+      if (data.buildingId) return this.buildings.get(data.buildingId) ? { kind: 'building', id: data.buildingId } : null;
+      if (data.sparkBuildingId) return this.spark.buildings.get(data.sparkBuildingId) ? { kind: 'spark', id: data.sparkBuildingId } : null;
+      if (data.sparkFoundry) return { kind: 'foundry' };
+      if (data.gearId) return { kind: 'gear', id: data.gearId };
+      if (data.hq) return { kind: 'hq' };
     }
     return null;
+  }
+  /** An unoccupied lot of the top city under the pointer (roads, sidewalks and the HQ plaza excluded). */
+  plotAt(clientX, clientY) {
+    if (this.world.isUnder) return null;
+    const ground = this.world.groundAt(this.world.ndc(clientX, clientY));
+    if (!ground) return null;
+    const { i, j } = cellOf(ground.x, ground.z);
+    if ((!i && !j) || Math.max(Math.abs(i), Math.abs(j)) > this.rings) return null;
+    const c = cellCenter(i, j);
+    if (Math.abs(ground.x - c.x) > LOT_HALF - 0.15 || Math.abs(ground.z - c.z) > LOT_HALF - 0.15) return null;
+    const key = cellKey(i, j);
+    if (this.occupied.has(key)) return null;
+    const reservedBy = this.reserved.get(key);
+    return { kind: 'plot', id: key, i, j, reservedBy: reservedBy ? reservedBy.id : null };
   }
   updateHover() { this.setHover(this.pointer ? this.pick(this.pointer.x, this.pointer.y) : null); }
   setHover(target) {
@@ -257,9 +367,15 @@ class CityView {
     if (same(target, this.hover)) { if (target) this.renderTag(target); return; }
     const prev = this.hover;
     if (prev?.kind === 'building') this.buildings.get(prev.id)?.setHover(false);
+    if (prev?.kind === 'spark') this.spark.setHover(prev.id, false);
+    if (prev?.kind === 'runner') this.spark.runner(prev.id)?.person.setHighlight(false);
+    if (prev?.kind === 'plot') this.plotMarker.hide();
     if ((prev?.kind === 'agent' || prev?.kind === 'owner') && !same(prev, this.selection)) this.npcs.setHighlight(prev, false);
     this.hover = target;
     if (target?.kind === 'building') this.buildings.get(target.id)?.setHover(true);
+    if (target?.kind === 'spark') this.spark.setHover(target.id, true);
+    if (target?.kind === 'runner') this.spark.runner(target.id)?.person.setHighlight(true);
+    if (target?.kind === 'plot' && !target.reservedBy) this.plotMarker.show(target.i, target.j);
     if (target?.kind === 'agent' || target?.kind === 'owner') this.npcs.setHighlight(target, true);
     this.stage.classList.toggle('is-pointing', Boolean(target));
     this.renderTag(target);
@@ -293,7 +409,53 @@ class CityView {
       return { title: project.name, sub: `${floors} floor${floors === 1 ? '' : 's'} · ${project.primaryLanguage}` };
     }
     if (target.kind === 'hq') return { title: 'CodaClauda HQ', sub: 'Town hall and plaza' };
+    if (target.kind === 'plot') {
+      if (!target.reservedBy) return { title: 'Empty plot', sub: 'Click to start a project here' };
+      const owner = this.store.project(target.reservedBy);
+      return { title: 'Reserved plot', sub: `${owner?.name || 'A project'} is hidden from the city · click to show it` };
+    }
+    if (target.kind === 'spark') {
+      const project = this.store.project(target.id);
+      if (!project) return null;
+      const n = this.spark.sparkJobs(target.id).length;
+      return { title: project.name, status: n ? 'active' : 'offline', sub: n ? `DGX Spark · ${plural(n, 'job')} running` : 'DGX Spark · idle', badge: 'Spark' };
+    }
+    if (target.kind === 'runner') {
+      const runner = this.spark.runner(target.id);
+      if (!runner?.job) return null;
+      const project = runner.anchor !== FOUNDRY ? this.store.project(runner.anchor) : null;
+      return { title: jobLabel(runner.job), status: 'active', sub: `DGX Spark · ${project?.name || 'Spark Foundry'}${runner.job.started_at ? ` · started ${timeAgo(runner.job.started_at)}` : ''}` };
+    }
+    if (target.kind === 'foundry') {
+      const n = this.spark.sparkJobs(FOUNDRY).length;
+      return { title: 'Spark Foundry', status: n ? 'active' : 'offline', sub: n ? `${plural(n, 'Spark job')} without a linked project` : 'Spark jobs without a linked project work here' };
+    }
+    if (target.kind === 'gear') {
+      const jobs = this.spark.gearJobs(target.id);
+      const project = target.id !== 'hq' ? this.store.project(target.id) : null;
+      return { title: `This PC${project ? ` · ${project.name}` : ''}`, status: 'active', sub: `${plural(jobs.length, 'local job')}${jobs.length ? ` · ${jobs.slice(0, 2).map(jobLabel).join(', ')}` : ''}` };
+    }
     return null;
+  }
+  /** Speech-bubble text for the Spark underside and local-job gears. */
+  computeText(target) {
+    const describeJobs = jobs => jobs.slice(0, 3).map(jobLabel).join('; ') + (jobs.length > 3 ? `; +${jobs.length - 3} more` : '');
+    if (target.kind === 'runner') {
+      const runner = this.spark.runner(target.id), job = runner?.job;
+      if (!job) return 'This Spark job just finished.';
+      const project = runner.anchor !== FOUNDRY ? this.store.project(runner.anchor) : null;
+      const memory = Number(job.memory_gb ?? job.reserved_memory_gb);
+      return `${jobLabel(job)}${memory > 0 ? ` · ${memory} GB` : ''} — ${job.state || 'running'} on the DGX Spark${project ? ` for ${project.name}` : ''}${job.started_at ? `, started ${timeAgo(job.started_at)}` : ''}.`;
+    }
+    if (target.kind === 'foundry') {
+      const jobs = this.spark.sparkJobs(FOUNDRY);
+      return jobs.length ? `Spark jobs not tied to a linked project: ${describeJobs(jobs)}.` : 'The Spark Foundry hosts DGX Spark jobs that are not tied to a linked project. Nothing is running here right now.';
+    }
+    if (target.kind === 'gear') {
+      const jobs = this.spark.gearJobs(target.id);
+      return jobs.length ? `Running on this PC: ${describeJobs(jobs)}.` : 'Nothing running on this PC right now.';
+    }
+    return '';
   }
 
   keyDown(event) {
@@ -308,7 +470,7 @@ class CityView {
       event.preventDefault(); this.world.keyDown(code); return;
     }
     if (code === 'KeyF') { event.preventDefault(); this.focusSelection(); }
-    else if (code === 'KeyH') { event.preventDefault(); this.world.resetView(); }
+    else if (code === 'KeyH') { event.preventDefault(); this.resetCamera(); }
     else if (code === 'Escape') { if (!this.help.hidden) this.toggleHelp(false); else this.select(null); }
     else if (event.key === '+' || event.key === '=') this.world.zoomBy(0.75);
     else if (event.key === '-' || event.key === '_') this.world.zoomBy(1.33);
@@ -317,6 +479,13 @@ class CityView {
   /* ---------------- selection ---------------- */
   onClick(target) {
     if (!target) { this.select(null); return; }
+    if (target.kind === 'plot') {
+      clearTimeout(this.plotClickTimer);
+      this.plotClickTimer = setTimeout(() => { this.plotClickTimer = 0; if (this.visible) this.startProjectOnPlot(target); }, 300);
+      return;
+    }
+    if (target.kind === 'spark') { this.select({ kind: 'building', id: target.id }); return; }
+    if (target.kind === 'runner' || target.kind === 'foundry' || target.kind === 'gear') { this.showBubble(target, this.computeText(target)); return; }
     if (target.kind === 'owner') {
       this.npcs.greetOwner(this.world.camera.position);
       this.showBubble(target, 'Hi! Double-click anywhere on the island to walk me there.');
@@ -370,7 +539,7 @@ class CityView {
   tryPendingFocus() {
     const pending = this.pendingFocus;
     if (!pending || !this.visible) return;
-    if (performance.now() - pending.at > 15000) { this.pendingFocus = null; return; }
+    if (performance.now() - pending.at > (pending.ttl || 15000)) { this.pendingFocus = null; return; }
     let target = null;
     if (pending.kind === 'building') { const id = this.store.project(pending.id)?.id || pending.id; if (this.buildings.get(id)) target = { kind: 'building', id }; }
     else if (pending.kind === 'agent' && this.npcs.position({ kind: 'agent', id: pending.id })) target = { kind: 'agent', id: pending.id };
@@ -406,7 +575,8 @@ class CityView {
       const project = this.store.project(s.id);
       if (!project || !project.visible.city) { this.select(null); return; }
       const here = this.agentsAt(project.id).map(a => [a.id, a.status, a.look]);
-      sig = JSON.stringify(['building', project.id, project.name, project.description, project.metrics, project.languages, project.source, project.private, project.path, project.url, here, Math.floor(Date.now() / 60000)]);
+      const compute = [...this.spark.sparkJobs(project.id), ...this.spark.gearJobs(project.id)].map(j => [j.job, j.state, j.machine]);
+      sig = JSON.stringify(['building', project.id, project.name, project.description, project.metrics, project.languages, project.source, project.private, project.path, project.url, here, compute, Math.floor(Date.now() / 60000)]);
       render = () => this.renderBuildingPanel(project);
     } else {
       sig = JSON.stringify(['hq', this.store.agents.map(a => [a.id, a.status]), this.store.visibleProjects('city').length]);
@@ -519,6 +689,11 @@ class CityView {
     if (project.url) actions.push(h('button.btn.small', { type: 'button', onclick: () => this.open(project.url) }, icon('github'), 'Open on GitHub'));
     if (project.path) actions.push(h('button.btn.small', { type: 'button', onclick: event => this.rescan(project, event.currentTarget) }, icon('refresh'), 'Rescan'));
     actions.push(h('button.btn.small.ghost', { type: 'button', onclick: () => this.hideProject(project) }, icon('eyeOff'), 'Hide from city'));
+    const jobRow = (job, spark) => h('div.city-job', h(`span.city-job-where.${spark ? 'spark' : 'local'}`, spark ? 'DGX Spark' : 'This PC'), h('span.city-job-label', jobLabel(job)), job.started_at ? h('span.city-job-time', timeAgo(job.started_at)) : null);
+    const sparkJobs = this.spark.sparkJobs(project.id), localJobs = this.spark.gearJobs(project.id);
+    const compute = sparkJobs.length || localJobs.length
+      ? h('section.city-panel-section', h('div.city-section-label', 'Compute jobs running'), h('div.city-jobs', ...sparkJobs.map(j => jobRow(j, true)), ...localJobs.map(j => jobRow(j, false))))
+      : null;
     clear(this.panel,
       this.panelHead(swatch, project.name, project.primaryLanguage ? `${project.primaryLanguage} · ${building?.size.floors || m.floors} floor${(building?.size.floors || m.floors) === 1 ? '' : 's'}` : null,
         iconButton('crosshair', 'Center view (F)', () => this.focusSelection())),
@@ -534,6 +709,7 @@ class CityView {
         here.length ? h('div.city-people', ...here.map(a => h('button.city-person', { type: 'button', title: `${a.name} · ${STATUS_LABEL[a.status] || a.status}${a.homeProjectId === project.id ? ' · lives here' : ' · visiting'}`, onclick: () => { this.select({ kind: 'agent', id: a.id }); this.focusSelection(); } },
           portrait(a.look, { size: 34, provider: a.provider, status: a.status }), h('span', a.name))))
           : h('p.muted', 'Nobody is here right now. Assign one from an agent card.')),
+      compute,
       h('div.city-actions.wrap', actions));
   }
   renderHqPanel() {
@@ -587,6 +763,69 @@ class CityView {
       clear(label.node, agent ? h(`span.city-gem.${agent.status}`) : null, h('span.city-label-name', name), agent?.visiting ? h('span.city-label-tag', 'visiting') : null, !agent ? h('span.city-label-tag.you', 'you') : null);
     }
   }
+  /** Spark runner name tags: "codex · rust · 16 cores". */
+  syncRunnerLabels() {
+    const wanted = new Map(this.spark.shown ? this.spark.runnerList.map(r => [r.id, r]) : []);
+    for (const [id, label] of this.runnerLabels) if (!wanted.has(id)) { label.node.remove(); this.runnerLabels.delete(id); }
+    for (const [id, runner] of wanted) {
+      let label = this.runnerLabels.get(id);
+      if (!label) { label = { node: h('div.city-label', { hidden: true }), sig: '' }; this.runnerLabels.set(id, label); this.labelLayer.append(label.node); }
+      const text = jobLabel(runner.job), provider = runner.job?.provider || 'other';
+      const sig = `${text}|${provider}`;
+      if (label.sig === sig) continue;
+      label.sig = sig;
+      label.node.className = `city-label is-runner provider-${provider}`;
+      clear(label.node, h('span.city-gem.spark'), h('span.city-label-name', text));
+    }
+  }
+  /** Machine load card (top right): this PC vs the DGX Spark. */
+  renderMachines(m, mode) {
+    const cores = Number(navigator.hardwareConcurrency) || 0;
+    const local = m.local || {}, spark = m.spark || {};
+    const sig = JSON.stringify([mode, this.machinesCollapsed, m.configured, m.enabled, m.error, local, { ...spark, hardware: null }, cores]);
+    if (sig === this.machinesSig) return;
+    this.machinesSig = sig;
+    const card = this.machinesCard;
+    card.hidden = mode === 'off';
+    if (card.hidden) return;
+    const collapsed = this.machinesCollapsed;
+    card.classList.toggle('is-collapsed', collapsed);
+    const toggle = iconButton(collapsed ? 'city-chevron-down' : 'city-chevron-up', collapsed ? 'Show machine load' : 'Collapse machine load', () => {
+      this.machinesCollapsed = !this.machinesCollapsed;
+      storage.set(MACHINES_KEY, this.machinesCollapsed ? '1' : '0');
+      this.machinesSig = '';
+      this.renderMachines(this.machines, this.sparkMode());
+    });
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    const summary = m.configured ? `This PC ${local.running || 0} · Spark ${spark.running || 0} running` : 'Spark not connected';
+    const head = h('header.city-machines-head', h('span.city-machines-title', icon('city-chip'), 'Machines'), collapsed ? h('span.city-machines-summary', summary) : null, toggle);
+    if (collapsed) { clear(card, head); return; }
+    if (!m.configured) { clear(card, head, h('a.city-machines-chip', { href: 'classic.html' }, icon('link'), 'Spark not connected — set it up in Classic tools')); return; }
+    const row = (label, data, total, extra, cls = '') => {
+      const used = Number(data.cpuReserved) || 0, running = Number(data.running) || 0;
+      const frac = total ? Math.min(1, used / total) : 0;
+      return h(`div.city-machine${cls}`,
+        h('div.city-machine-top', h('strong', label), h('span.city-machine-jobs', h(`span.city-gem.${running ? 'active' : 'offline'}`), `${running} running`)),
+        h('div.city-meter', { role: 'img', 'aria-label': `${fmtCores(used)} of ${total || 'unknown'} cores reserved` }, h('span.city-meter-fill', { style: { width: `${(frac * 100).toFixed(1)}%` } })),
+        h('div.city-machine-meta', h('span', `${fmtCores(used)}/${total || '—'} cores`), h('span', `${fmtHours(Number(data.cpuHours24h) || 0)} CPU-h in 24 h`), extra));
+    };
+    const healthy = spark.healthy === true;
+    const route = h('span.city-machine-route', { title: healthy ? 'Spark scheduler healthy' : 'Spark scheduler not responding' },
+      h(`span.city-health.${healthy ? 'ok' : 'bad'}`), prettyRoute(spark.route) || (spark.reachable ? 'Connected' : 'Not reachable'));
+    const lh = Number(local.cpuHours24h) || 0, sh = Number(spark.cpuHours24h) || 0, total = lh + sh;
+    const localPct = total ? Math.round(lh / total * 100) : 0;
+    const split = total > 0
+      ? h('div.city-split',
+        h('div.city-split-label', `Work split (24 h): This PC ${localPct}% · Spark ${100 - localPct}%`),
+        h('div.city-split-bar', { role: 'img', 'aria-label': `This PC ${localPct} percent, Spark ${100 - localPct} percent of CPU-hours in the last 24 hours` },
+          h('span.city-split-local', { style: { flexGrow: String(lh) } }), h('span.city-split-spark', { style: { flexGrow: String(sh) } })))
+      : h('div.city-split', h('div.city-split-label.muted', 'Work split (24 h): no compute jobs yet'));
+    const error = m.error ? h('p.city-machines-error', icon('alert'), h('span', String(m.error).replace(/\s+/g, ' ').slice(0, 140))) : null;
+    clear(card, head,
+      row('This PC', local, cores, null),
+      row('DGX Spark', spark, Number(spark.cpuTotal) || 0, route, '.is-spark'),
+      error, split);
+  }
   renderHud(projects, agents) {
     const working = agents.filter(a => a.status === 'active').length;
     const sig = JSON.stringify([projects.length, agents.length, working, projects.map(p => [p.id, p.name]), agents.map(a => [a.id, a.name])]);
@@ -621,7 +860,21 @@ class CityView {
     this.qualityBtn.setAttribute('aria-pressed', String(high));
     this.followBtn.setAttribute('aria-pressed', String(Boolean(this.following)));
     this.helpBtn.setAttribute('aria-pressed', String(!this.help.hidden));
+    const sparkLabel = `Spark underside: ${SPARK_LABEL[this.sparkMode()]} — click to change`;
+    this.sparkBtn.title = sparkLabel; this.sparkBtn.setAttribute('aria-label', sparkLabel);
+    this.sparkBtn.setAttribute('aria-pressed', String(Boolean(this.world.underside)));
+    this.flipBtn.hidden = !this.world.underside;
+    this.renderFlip(true);
     this.renderTimeChip();
+  }
+  /** "Spark side" / "Laptop side" follows where the camera actually is. */
+  renderFlip(force = false) {
+    const under = this.world.isUnder;
+    if (!force && under === this.flipUnder) return;
+    this.flipUnder = under;
+    this.flipLabel.textContent = under ? 'Laptop side' : 'Spark side';
+    const label = under ? 'Fly back up to this PC (the top city)' : 'Fly under the island to the DGX Spark city';
+    this.flipBtn.title = label; this.flipBtn.setAttribute('aria-label', label);
   }
   renderEmpty(projects) {
     const hiddenCount = this.store.projects.length - projects.length;
@@ -636,7 +889,7 @@ class CityView {
     clear(this.empty,
       h('div.empty-art', icon('city')),
       h('h3', allHidden ? 'Every project is hidden from the city' : 'Your city is empty'),
-      h('p', allHidden ? `${hiddenCount} linked project${hiddenCount === 1 ? ' is' : 's are'} hidden. Show them again from Projects.` : 'Link Desktop folders or GitHub repos and each project becomes a building here. Taller buildings mean more code and commits.'),
+      h('p', allHidden ? `${hiddenCount} linked project${hiddenCount === 1 ? ' is' : 's are'} hidden. Show them again from Projects.` : 'Link Desktop folders or GitHub repos and each project becomes a building here — or click an empty plot to start a brand-new project. Taller buildings mean more code and commits.'),
       h('button.btn.gradient', { type: 'button', onclick: () => this.ctx.navigate('projects') }, icon('projects'), allHidden ? 'Manage projects' : 'Link projects'));
   }
 
@@ -667,6 +920,59 @@ class CityView {
     if (!open) storage.set(HELP_KEY, '1');
     this.renderToolbarState();
   }
+  /** Home / H: back to the framed overview, and let auto-framing follow the island again. */
+  resetCamera() {
+    if (!this.world) return;
+    if (this.following) this.toggleFollow(false);
+    this.world.resetView({ auto: true });
+    this.world.userMoved = false;
+  }
+  cycleSpark() {
+    const next = SPARK_MODES[(SPARK_MODES.indexOf(this.sparkMode()) + 1) % SPARK_MODES.length];
+    this.store.setPref('citySpark', next);
+    toast(`Spark underside: ${SPARK_LABEL[next]}`, { timeout: 2200 });
+  }
+  flipSide() {
+    if (!this.world?.underside) return;
+    if (this.following) this.toggleFollow(false);
+    const azimuth = this.world.azimuth;
+    if (this.world.isUnder) this.world.flyTo({ ...this.world.defaultView(), azimuth }, { duration: 1.4 });
+    else this.world.flyTo(this.spark.view(azimuth), { duration: 1.4 });
+    this.stage.focus({ preventScroll: true });
+  }
+
+  /* ---------------- empty plot → new project ---------------- */
+  async startProjectOnPlot(target) {
+    if (target.reservedBy) {
+      const owner = this.store.project(target.reservedBy);
+      if (owner) { this.store.setProjectSettings(owner, { city: true }); toast(`${owner.name} is back on its plot`, { kind: 'success', timeout: 2600 }); }
+      return;
+    }
+    if (this.plotDialog) return;
+    const lot = { i: target.i, j: target.j };
+    this.plotDialog = { ...lot, at: performance.now() };   // new unpinned projects wait until the dialog pins one here
+    this.setHover(null);
+    this.dirty = true;
+    let result = null;
+    try {
+      const { openNewProjectDialog } = await import('../newproject.js');
+      result = await openNewProjectDialog(this.ctx, { lot });
+    } catch (error) {
+      console.error('City: New Project dialog failed', error);
+      toast(`Could not start a project here: ${error?.message || error}`, { kind: 'error' });
+    } finally {
+      this.plotDialog = null;
+      this.dirty = true;
+      if (this.visible && this.world && !this.world.running) this.sync();
+    }
+    if (!result?.projectId || !this.visible) return;
+    const c = cellCenter(lot.i, lot.j);
+    this.select(null);
+    this.world.flyTo({ target: new THREE.Vector3(c.x, 2, c.z), distance: 36, polar: 0.95 });
+    // Select and frame the new building as soon as it rises (cloning / scanning can take a while).
+    this.pendingFocus = { kind: 'building', id: result.projectId, at: performance.now(), ttl: 90000 };
+    this.tryPendingFocus();
+  }
 
   /* ---------------- lifecycle ---------------- */
   show(params = {}) {
@@ -680,10 +986,17 @@ class CityView {
     this.sync();
     this.world.resize();
     this.world.start();
+    // Deep link #city?side=spark flies under the island once the Spark city is shown.
+    if (params.side === 'spark') {
+      const tryFlip = (attempt = 0) => { if (this.world.underside && !this.world.isUnder) this.flipSide(); else if (!this.world.underside && attempt < 40) setTimeout(() => tryFlip(attempt + 1), 250); };
+      tryFlip();
+    }
   }
   destroy() {
     this.hide();
-    this.npcs?.dispose(); this.buildings?.dispose(); this.world?.dispose();
+    for (const label of this.runnerLabels.values()) label.node.remove();
+    this.runnerLabels.clear();
+    this.spark?.dispose(); this.npcs?.dispose(); this.buildings?.dispose(); this.world?.dispose();
     this.root.replaceChildren();
   }
   hide() {
@@ -694,6 +1007,7 @@ class CityView {
     document.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('blur', this.onBlur);
     this.setHover(null);
+    clearTimeout(this.plotClickTimer); this.plotClickTimer = 0;
     this.bubble.hidden = true; this.bubbleTarget = null;
   }
 }

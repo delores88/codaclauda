@@ -37,6 +37,10 @@ export const desktop = {
   discoverDesktop: () => invoke('desktop_discover_projects'),
   githubUser: () => invoke('github_user'),
   githubRepos: user => invoke('github_repos', { user }),
+  /** Creates a repo (with a README) in the GitHub CLI's signed-in account and clones it into parentDir\name → { path, full_name, url }. */
+  createRepo: ({ name, description = '', private: isPrivate = true, parentDir }) => invoke('github_create_repo', { name, description, private: isPrivate, parentDir }),
+  /** Clones owner/name into parentDir\name with the GitHub CLI → { path, full_name, url }. */
+  cloneRepo: ({ fullName, parentDir }) => invoke('github_clone_repo', { fullName, parentDir }),
   saveAttachment: (name, dataBase64) => invoke('attachment_save', { name, dataBase64 }),
   startDictation: () => invoke('dictation_start'),
   attention: () => invoke('window_attention'),

@@ -78,7 +78,11 @@ export class World {
     this.sun.shadow.mapSize.set(2048, 2048);
     this.sun.shadow.bias = -0.0004; this.sun.shadow.normalBias = 0.04;
     this.sun.shadow.camera.near = 1; this.sun.shadow.camera.far = 600;
-    scene.add(this.hemi, this.ambient, this.sun, this.sun.target);
+    // Cool bounce light from below: only lit while the Spark underside is shown (constant light count, no shader recompiles).
+    this.underLight = new THREE.DirectionalLight('#8d9cff', 0);
+    this.underLight.position.set(40, -220, 70);
+    scene.add(this.hemi, this.ambient, this.sun, this.sun.target, this.underLight, this.underLight.target);
+    this.underside = false;
 
     this.particles = new Particles(800);
     scene.add(this.particles.points);
@@ -95,7 +99,7 @@ export class World {
     controls.addEventListener('start', () => { this.tween = null; this.userMoved = true; });
     this.controls = controls;
     this.limits();
-    this.resetView({ instant: true });
+    this.resetView({ instant: true, auto: true });
 
     this.current = paletteAt(hourFor(timeMode));
     this.setQuality(quality);
@@ -114,8 +118,9 @@ export class World {
     for (const key of ['island', 'roads', 'clouds']) if (this[key]) { this.scene.remove(this[key].group); disposeAll(this[key].group); }
     this.rings = rings; this.half = islandHalf(rings);
     this.island = buildIsland(rings); this.roads = buildRoads(rings);
-    this.clouds = buildClouds(this.half, this.quality);
+    this.clouds = buildClouds(this.half, this.quality, { under: this.underside });
     this.scene.add(this.island.group, this.roads.group, this.clouds.group);
+    this.applyTaper();
     if (this.controls) this.limits();
     this.fitShadow();
     if (animate && !this.reducedMotion() && before) this.islandAnim = { t: 0, from: Math.max(0.86, before / this.half) };
@@ -127,6 +132,32 @@ export class World {
     this.decor = buildDecor(this.rings, lots, this.half);
     this.scene.add(this.decor);
   }
+  /* ---------- Spark underside ---------- */
+  /** Show/hide the underside mode: the camera may orbit below the island, the tapering rock under
+   * the island makes room for the hanging Spark city, low clouds move aside, a bounce light comes on. */
+  setUnderside(on) {
+    on = Boolean(on);
+    if (on === this.underside) return false;
+    this.underside = on;
+    this.controls.maxPolarAngle = on ? 2.85 : 1.3;
+    this.underLight.intensity = on ? 1.05 : 0;
+    this.applyTaper();
+    if (this.clouds) {
+      this.scene.remove(this.clouds.group); disposeAll(this.clouds.group);
+      this.clouds = buildClouds(this.half, this.quality, { under: on });
+      this.scene.add(this.clouds.group);
+      if (this.current) this.applyLighting(this.current);
+    }
+    if (!on && this.isUnder) this.flyTo({ ...this.defaultView(), azimuth: this.azimuth }, { auto: true });
+    return true;
+  }
+  applyTaper() { for (const child of this.island?.group.children || []) if (child.userData.taper) child.visible = !this.underside; }
+  /** True while the camera is below the island (looking at the Spark side). */
+  get isUnder() { return this.camera.position.y < -3; }
+  get azimuth() { return new THREE.Spherical().setFromVector3(new THREE.Vector3().subVectors(this.camera.position, this.controls.target)).theta; }
+  /** Island slabs: block picking so a hover never reaches through to the other side. */
+  occluders() { return this.island ? this.island.group.children.filter(child => child.userData.occluder) : []; }
+
   limits() {
     this.controls.maxTargetRadius = this.half * 0.95;
     this.controls.maxDistance = 70 + this.half * 1.9;
@@ -185,8 +216,10 @@ export class World {
   /* ---------- camera ---------- */
   defaultView() { return { target: new THREE.Vector3(0, 0, 0), distance: Math.min(190, 34 + this.half * 1.75), polar: 0.82, azimuth: 0.62 }; }
   resetView(opts = {}) { this.flyTo(this.defaultView(), opts); }
-  /** Ease the camera to { target, distance?, polar?, azimuth? }. */
-  flyTo({ target, distance, polar, azimuth }, { instant = false, duration = 0.95 } = {}) {
+  /** Ease the camera to { target, distance?, polar?, azimuth? }. Any flight that isn't the city's own
+   * auto-framing (auto: true) counts as the owner moving the camera, so auto-framing stops overriding them. */
+  flyTo({ target, distance, polar, azimuth }, { instant = false, duration = 0.95, auto = false } = {}) {
+    if (!auto) this.userMoved = true;
     const offset = new THREE.Vector3().subVectors(this.camera.position, this.controls?.target || new THREE.Vector3());
     const from = new THREE.Spherical().setFromVector3(offset);
     if (!this.controls) { this.camera.position.copy(target).add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(distance, polar, azimuth))); return; }
@@ -311,6 +344,7 @@ export class World {
   }
   /** Point on the walkable ground under the cursor (inside the island), or null. */
   groundAt(ndc) {
+    if (this.camera.position.y < GROUND_Y + 0.3) return null;   // looking up at the underside
     this.raycaster ||= new THREE.Raycaster();
     this.raycaster.setFromCamera(ndc, this.camera);
     const point = new THREE.Vector3();

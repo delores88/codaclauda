@@ -14,7 +14,8 @@ export const SIDEWALK = 1.95;       // sidewalk walking line, measured from a ro
 export const LOT_HALF = (PITCH - ROAD) / 2;          // 5.7: usable half-size of a lot
 export const WALK_HALF = PITCH / 2 - SIDEWALK;       // 6.05: sidewalk loop around a block
 export const ISLAND_MARGIN = 5.5;   // grass rim outside the outer ring road
-const SLOT_KEY = 'codaclauda.city.slots.v1';
+const LEGACY_SLOT_KEY = 'codaclauda.city.slots.v1';   // 0.3 per-viewer memory; read once to migrate into pins
+const MAX_PIN_RING = 24;
 
 /* ---------- spiral slots ---------- */
 const spiral = [];
@@ -35,41 +36,71 @@ export function slotCell(slot) {
   return spiral[slot];
 }
 
-/** Stable project → lot assignment. A project keeps its lot for as long as it exists
- * (remembered per viewer), new projects hash into the first ring and linearly probe
- * outward along the spiral, so adding a project never reshuffles the others. */
+export const ringOf = (i, j) => Math.max(Math.abs(i), Math.abs(j));
+/** A usable lot pin ({i, j} integers, not the HQ plaza, within reach) or null. */
+export function cleanCell(value) {
+  if (!value || typeof value !== 'object') return null;
+  const i = Number(value.i), j = Number(value.j);
+  if (!Number.isInteger(i) || !Number.isInteger(j) || (i === 0 && j === 0) || ringOf(i, j) > MAX_PIN_RING) return null;
+  return { i, j };
+}
+/** The pin of a project under any of its ids (a project can be known as local:… and gh:…). */
+export function pinOf(project, pins) {
+  for (const id of project.ids?.length ? project.ids : [project.id]) { const cell = cleanCell(pins?.[id]); if (cell) return cell; }
+  return null;
+}
+
+/** Stable project → lot assignment. Pins (store.cityLots, saved with the desktop state so a
+ * layout survives other machines and reinstalls) are honoured first; a building that already
+ * stands on a lot this session is never moved by automatic placement; everything else hashes
+ * into the first ring and probes outward along the spiral, so adding a project never
+ * reshuffles the others. assign() reports projects that got their first lot (`fresh`) so the
+ * caller can pin them. */
 export class SlotMap {
   constructor() {
-    this.memo = {};
-    try { const saved = JSON.parse(localStorage.getItem(SLOT_KEY) || '{}'); if (saved && typeof saved === 'object') this.memo = saved; } catch { /* per-viewer convenience only */ }
+    this.memo = new Map();   // project id → { i, j } placed this session
+    this.legacy = {};
+    try { const saved = JSON.parse(localStorage.getItem(LEGACY_SLOT_KEY) || '{}'); if (saved && typeof saved === 'object') this.legacy = saved; } catch { /* nothing to migrate */ }
   }
-  save() {
-    try {
-      const entries = Object.entries(this.memo);
-      if (entries.length > 400) this.memo = Object.fromEntries(entries.slice(-400));
-      localStorage.setItem(SLOT_KEY, JSON.stringify(this.memo));
-    } catch { /* storage unavailable */ }
-  }
-  /** projects → { cells: Map(id → {i, j, ring, slot}), rings } */
-  assign(projects) {
-    const cells = new Map(), taken = new Set(), fresh = [];
-    const keep = projects.filter(p => Number.isInteger(this.memo[p.id]) || (fresh.push(p), false));
-    keep.sort((a, b) => this.memo[a.id] - this.memo[b.id] || a.id.localeCompare(b.id));
-    for (const p of keep) {
-      const slot = this.memo[p.id];
-      if (taken.has(slot)) { fresh.push(p); continue; }
-      taken.add(slot); cells.set(p.id, { ...slotCell(slot), slot });
+  /** projects → { cells: Map(id → {i, j, ring}), rings, fresh: [{ id, i, j }], reserved: Map(cellKey → project) }
+   *  pins: { [projectId]: {i, j} }; reserve: projects hidden from the city (their pinned lots stay free);
+   *  hold: leave brand-new unpinned projects unplaced for now (a plot dialog is about to pin one). */
+  assign(projects, { pins = {}, reserve = [], hold = false } = {}) {
+    const cells = new Map(), taken = new Set(), fresh = [], reserved = new Map();
+    for (const p of reserve) { const c = pinOf(p, pins) || this.memo.get(p.id); if (c) reserved.set(cellKey(c.i, c.j), p); }
+    const claim = (x, c) => {
+      const key = cellKey(c.i, c.j);
+      if (taken.has(key)) return false;
+      taken.add(key);
+      const cell = { i: c.i, j: c.j, ring: ringOf(c.i, c.j) };
+      cells.set(x.p.id, cell); this.memo.set(x.p.id, cell); x.done = true;
+      if (!x.pin) fresh.push({ id: x.p.id, i: c.i, j: c.j });
+      return true;
+    };
+    const same = (a, b) => a && b && a.i === b.i && a.j === b.j;
+    const info = [...projects].sort((a, b) => a.id.localeCompare(b.id)).map(p => ({ p, pin: pinOf(p, pins), mem: this.memo.get(p.id) || null, done: false }));
+    // 1. Standing buildings stay put (a pin that matches, or no pin yet).
+    for (const x of info) if (x.mem && (!x.pin || same(x.pin, x.mem))) claim(x, x.mem);
+    // 2. Pins: plots chosen in the New Project dialog, or a layout saved earlier / elsewhere.
+    for (const x of info) if (!x.done && x.pin) claim(x, x.pin);
+    // 3. A re-pinned building whose plot is taken keeps its old lot.
+    for (const x of info) if (!x.done && x.mem) claim(x, x.mem);
+    // 4. One-time migration of the 0.3 per-viewer layout.
+    for (const x of info) {
+      if (x.done || !Number.isInteger(this.legacy[x.p.id])) continue;
+      const c = slotCell(this.legacy[x.p.id]);
+      if (!reserved.has(cellKey(c.i, c.j))) claim(x, c);
     }
-    fresh.sort((a, b) => hash(a.id) - hash(b.id) || a.id.localeCompare(b.id));
-    for (const p of fresh) {
-      let slot = hash(p.id) % 8;
-      while (taken.has(slot)) slot++;
-      taken.add(slot); this.memo[p.id] = slot; cells.set(p.id, { ...slotCell(slot), slot });
+    // 5. Everything else hashes into the first ring and probes outward.
+    const rest = info.filter(x => !x.done && !(hold && !x.pin)).sort((a, b) => hash(a.p.id) - hash(b.p.id) || a.p.id.localeCompare(b.p.id));
+    for (const x of rest) {
+      let slot = hash(x.p.id) % 8;
+      for (;;) { const c = slotCell(slot); if (!taken.has(cellKey(c.i, c.j)) && !reserved.has(cellKey(c.i, c.j))) { claim(x, c); break; } slot++; }
     }
-    if (fresh.length) this.save();
+    for (const key of taken) reserved.delete(key);
     let rings = 1;
     for (const c of cells.values()) rings = Math.max(rings, c.ring);
-    return { cells, rings };
+    return { cells, rings, fresh, reserved };
   }
 }
 

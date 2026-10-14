@@ -426,6 +426,8 @@ fn main() {
             desktop::desktop_discover_projects,
             desktop::github_user,
             desktop::github_repos,
+            desktop::github_create_repo,
+            desktop::github_clone_repo,
             desktop::attachment_save,
             desktop::dictation_start,
             desktop::window_attention,
