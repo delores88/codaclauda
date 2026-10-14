@@ -1,12 +1,65 @@
 /* The 3D world: renderer, camera + orbit controls, sky and day/night lighting synced to
  * the local clock, the floating island (grows with the city), clouds, particles and the
- * render loop. Buildings and NPCs live under world.city and are driven by their managers. */
+ * render loop. Buildings and NPCs live under world.city and are driven by their managers.
+ *
+ * Everything that belongs to the island (slabs, roads, decor, HQ, buildings, people, the
+ * Spark side and their particles) sits under ONE pivot at the island's middle (world.pivot →
+ * world.land). With the Spark side on, the island can be physically turned over: a vertical
+ * left-drag tilts it about the camera's screen-right axis (horizontal drags still orbit), the
+ * flip button / V rolls it a half turn, and on release it always settles flat with one face up.
+ * Sky, sun/moon, clouds, lights and the camera stay in world space, so the face that is up is
+ * the sunlit one and the face that is down is shaded. The camera never goes below the island.
+ * world.land's local space is "island space" (top ground at y = GROUND_Y); toWorld / toLocal
+ * convert, and the two agree while This PC is up and the island has not been turned. */
 import { THREE } from './toon.js';
 import { OrbitControls } from '../../vendor/three/addons/OrbitControls.js';
 import { buildIsland, buildRoads, buildDecor, buildHQ, buildClouds, buildSky, lampMaterial, glowMaterial, GROUND_Y } from './scenery.js';
 import { Particles, disposeAll } from './fx.js';
 import { islandHalf } from './layout.js';
 import { setBuildingNight } from './buildings.js';
+import { DECK_Y } from './spark.js';
+
+/* ---------- turning the island over ---------- */
+/** Island-space height of the pivot: midway between the two faces, so either face rests at the same height. */
+export const PIVOT_Y = (GROUND_Y + DECK_Y) / 2;
+export const TILT_POLAR = 0.82;          // fixed camera elevation (polar angle) while the island can be turned
+const TILT_PX = 420;                     // vertical drag for a half turn
+const TILT_DEADZONE = 8;                 // px before a vertical drag starts tilting (clicks stay clicks)
+const FLIP_SECONDS = 0.9;
+const SPRING_K = 95, SPRING_ZETA = 0.72; // settle spring: visibly flat in ~0.6 s, ~4 % overshoot
+const SWEEP_RISE = 24;                   // how far buildings reach from the pivot, for the sweep radius
+const CLOUD_MARGIN = 10;
+const UP = new THREE.Vector3(0, 1, 0), X_AXIS = new THREE.Vector3(1, 0, 0);
+
+/** Nearest flat resting angle (a multiple of π: one face exactly up) for a tilt angle; a flick
+ * leads by its velocity, so a quick drag carries the island over. Pure. */
+export function settleTarget(angle, velocity = 0, lead = 0.12) {
+  const target = Math.round((angle + velocity * lead) / Math.PI) * Math.PI;
+  return Object.is(target, -0) ? 0 : target;
+}
+/** One damped-spring step toward target (semi-implicit Euler, sub-stepped). Pure. */
+export function springStep(angle, velocity, target, dt, k = SPRING_K, zeta = SPRING_ZETA) {
+  const damping = 2 * zeta * Math.sqrt(k), steps = Math.max(1, Math.ceil(dt / 0.008)), h = dt / steps;
+  for (let n = 0; n < steps; n++) { velocity += (-k * (angle - target) - damping * velocity) * h; angle += velocity * h; }
+  const done = Math.abs(angle - target) < 0.0015 && Math.abs(velocity) < 0.02;
+  return { angle: done ? target : angle, velocity: done ? 0 : velocity, done };
+}
+/** Flip curve 0 → 1: slow start, then an ease-out with a small settle overshoot (about 2.6 %). Pure. */
+export function flipEase(t, c = 1.2) {
+  t = Math.min(1, Math.max(0, t));
+  if (t < 0.5) return 0.5 * Math.pow(2 * t, 3 + c);
+  const v = 2 * t - 2;
+  return 0.5 + 0.5 * (1 + (c + 1) * v * v * v + c * v * v);
+}
+/** World y of the island's up axis under orientation q: > 0 This PC face up, < 0 Spark face up. */
+const upY = q => 1 - 2 * (q.x * q.x + q.z * q.z);
+/** Snap an orientation to the exact flat one it is closest to: yaw, or yaw then a half turn about x. */
+function flatten(q) {
+  const x = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+  const out = new THREE.Quaternion().setFromAxisAngle(UP, Math.atan2(-x.z, x.x));
+  if (upY(q) < 0) out.multiply(new THREE.Quaternion().setFromAxisAngle(X_AXIS, Math.PI));
+  return out;
+}
 
 export function webglAvailable() {
   try { const canvas = document.createElement('canvas'); return Boolean(canvas.getContext('webgl2') || canvas.getContext('webgl')); }
@@ -78,16 +131,26 @@ export class World {
     this.sun.shadow.mapSize.set(2048, 2048);
     this.sun.shadow.bias = -0.0004; this.sun.shadow.normalBias = 0.04;
     this.sun.shadow.camera.near = 1; this.sun.shadow.camera.far = 600;
-    // Cool bounce light from below: only lit while the Spark underside is shown (constant light count, no shader recompiles).
-    this.underLight = new THREE.DirectionalLight('#8d9cff', 0);
+    // Soft cool fill from below while the island can be turned over: the face that is down stays
+    // readable, never pitch black (constant light count, no shader recompiles).
+    this.underLight = new THREE.DirectionalLight('#9fb4ff', 0);
     this.underLight.position.set(40, -220, 70);
     scene.add(this.hemi, this.ambient, this.sun, this.sun.target, this.underLight, this.underLight.target);
     this.underside = false;
 
+    // The island pivot (turns about the island's middle) and island space under it.
+    this.pivot = new THREE.Group(); this.pivot.name = 'island-pivot'; this.pivot.position.set(0, PIVOT_Y, 0);
+    this.land = new THREE.Group(); this.land.name = 'island-land'; this.land.position.set(0, -PIVOT_Y, 0);
+    this.pivot.add(this.land); scene.add(this.pivot);
+    this.rest = new THREE.Quaternion();   // settled orientation: always exactly flat
+    this.turn = null;                      // a turn in progress: { mode: 'drag' | 'spring' | 'flip', axis, angle, … }
+    this._pv = new THREE.Vector3(); this._qa = new THREE.Quaternion(); this._qr = new THREE.Quaternion(); this._qi = new THREE.Quaternion();
+    this._g = new THREE.Vector3(); this._centre = new THREE.Vector3(0, PIVOT_Y, 0);
+
     this.particles = new Particles(800);
-    scene.add(this.particles.points);
-    this.hq = buildHQ(); scene.add(this.hq.group);
-    this.city = new THREE.Group(); this.city.name = 'city'; scene.add(this.city);
+    this.land.add(this.particles.points);
+    this.hq = buildHQ(); this.land.add(this.hq.group);
+    this.city = new THREE.Group(); this.city.name = 'city'; this.land.add(this.city);
     this.rings = 0; this.half = islandHalf(1);
     this.setRings(1, { animate: false });
     this.setLots(new Map());
@@ -96,10 +159,11 @@ export class World {
     // Mouse wheel and touchpad/mouse pinch (Ctrl+wheel) zoom toward the pointer, like a map.
     Object.assign(controls, { enableDamping: true, dampingFactor: 0.085, screenSpacePanning: false, minDistance: 7, maxPolarAngle: 1.3, minPolarAngle: 0.12, rotateSpeed: 0.55, enableZoom: true, zoomToCursor: true, zoomSpeed: 1.25, panSpeed: 0.95 });
     controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-    controls.addEventListener('start', () => { this.tween = null; this.userMoved = true; });
+    controls.addEventListener('start', () => { this.tween = null; this.pendingFlight = null; this.userMoved = true; });
     this.controls = controls;
     this.limits();
     this.resetView({ instant: true, auto: true });
+    this.bindTilt();
 
     this.current = paletteAt(hourFor(timeMode));
     this.setQuality(quality);
@@ -115,11 +179,13 @@ export class World {
   setRings(rings, { animate = true } = {}) {
     if (rings === this.rings) return false;
     const before = this.half;
-    for (const key of ['island', 'roads', 'clouds']) if (this[key]) { this.scene.remove(this[key].group); disposeAll(this[key].group); }
+    for (const key of ['island', 'roads', 'clouds']) if (this[key]) { this[key].group.removeFromParent(); disposeAll(this[key].group); }
     this.rings = rings; this.half = islandHalf(rings);
     this.island = buildIsland(rings); this.roads = buildRoads(rings);
-    this.clouds = buildClouds(this.half, this.quality, { under: this.underside });
-    this.scene.add(this.island.group, this.roads.group, this.clouds.group);
+    // Clouds stay in world space, outside the sphere the island sweeps when it turns over.
+    this.clouds = buildClouds(this.half, this.quality, { center: PIVOT_Y, clear: this.sweepRadius() + CLOUD_MARGIN, island: this.half * 1.3 });
+    this.land.add(this.island.group, this.roads.group);
+    this.scene.add(this.clouds.group);
     this.applyTaper();
     if (this.controls) this.limits();
     this.fitShadow();
@@ -128,43 +194,204 @@ export class World {
     return true;
   }
   setLots(lots) {
-    if (this.decor) { this.scene.remove(this.decor); disposeAll(this.decor); }
+    if (this.decor) { this.decor.removeFromParent(); disposeAll(this.decor); }
     this.decor = buildDecor(this.rings, lots, this.half);
-    this.scene.add(this.decor);
+    this.land.add(this.decor);
   }
-  /* ---------- Spark underside ---------- */
-  /** Show/hide the underside mode: the camera may orbit below the island, the tapering rock under
-   * the island makes room for the hanging Spark city, low clouds move aside, a bounce light comes on. */
+  /* ---------- Spark side ---------- */
+  /** Turn the island's second face on or off. On: the tapering rock makes room for the Spark city,
+   * the side emblems show, a soft fill comes on, the camera elevation is held (vertical drags turn
+   * the island instead). Off: the island snaps back to This PC side up and orbiting is as before. */
   setUnderside(on) {
     on = Boolean(on);
     if (on === this.underside) return false;
     this.underside = on;
-    this.controls.maxPolarAngle = on ? 2.85 : 1.3;
-    this.underLight.intensity = on ? 1.05 : 0;
+    this.underLight.intensity = on ? 0.32 : 0;
     this.applyTaper();
-    if (this.clouds) {
-      this.scene.remove(this.clouds.group); disposeAll(this.clouds.group);
-      this.clouds = buildClouds(this.half, this.quality, { under: on });
-      this.scene.add(this.clouds.group);
-      if (this.current) this.applyLighting(this.current);
-    }
-    if (!on && this.isUnder) this.flyTo({ ...this.defaultView(), azimuth: this.azimuth }, { auto: true });
+    this.fitShadow();
+    if (!on) this.settleNow('pc');
+    this.applyPolarLimits();
+    if (on && Math.abs(this.polar - TILT_POLAR) > 0.01) this.flyTo({ target: this.controls.target.clone(), polar: TILT_POLAR }, { auto: true, duration: 0.6 });
     return true;
   }
-  applyTaper() { for (const child of this.island?.group.children || []) if (child.userData.taper) child.visible = !this.underside; }
-  /** True while the camera is below the island (looking at the Spark side). */
-  get isUnder() { return this.camera.position.y < -3; }
+  applyTaper() {
+    for (const child of this.island?.group.children || []) {
+      if (child.userData.taper) child.visible = !this.underside;
+      if (child.userData.sideSign) child.visible = this.underside;
+    }
+  }
   get azimuth() { return new THREE.Spherical().setFromVector3(new THREE.Vector3().subVectors(this.camera.position, this.controls.target)).theta; }
+  get polar() { return new THREE.Spherical().setFromVector3(new THREE.Vector3().subVectors(this.camera.position, this.controls.target)).phi; }
   /** Island slabs: block picking so a hover never reaches through to the other side. */
   occluders() { return this.island ? this.island.group.children.filter(child => child.userData.occluder) : []; }
 
   limits() {
     this.controls.maxTargetRadius = this.half * 0.95;
     this.controls.maxDistance = 70 + this.half * 1.9;
+    this.applyPolarLimits();
   }
+  /** While the island can be turned the camera keeps one comfortable elevation (never below the island). */
+  applyPolarLimits() {
+    if (!this.controls) return;
+    this.controls.minPolarAngle = this.underside ? TILT_POLAR : 0.12;
+    this.controls.maxPolarAngle = this.underside ? TILT_POLAR : 1.3;
+  }
+  /** Radius of the sphere the island (with its buildings) sweeps when it turns over. */
+  sweepRadius() { return Math.hypot(Math.SQRT2 * this.half, SWEEP_RISE) + 2; }
+  /** The sun's shadow box: the island's footprint, or the whole turning island while it can turn. */
   fitShadow() {
-    const cam = this.sun.shadow.camera, r = this.half + 14;
+    const cam = this.sun.shadow.camera, r = this.underside ? Math.SQRT2 * this.half + 8 : this.half + 14;
     cam.left = -r; cam.right = r; cam.top = r; cam.bottom = -r; cam.updateProjectionMatrix();
+  }
+
+  /* ---------- turning the island over ---------- */
+  /** Orientation the island is resting at, or heading to once the current turn settles. */
+  restQuaternion(out = new THREE.Quaternion()) {
+    out.copy(this.rest);
+    const t = this.turn;
+    if (t) out.premultiply(this._qa.setFromAxisAngle(t.axis, t.target ?? settleTarget(t.angle)));
+    return out;
+  }
+  /** Which face is up right now ('pc' | 'spark'). */
+  get side() { return upY(this.pivot.quaternion) >= 0 ? 'pc' : 'spark'; }
+  /** Which face is up once the island settles. */
+  get restSide() { return upY(this.restQuaternion(this._qr)) >= 0 ? 'pc' : 'spark'; }
+  /** True while the island is still (no drag, flip or settle in progress). */
+  get settled() { return !this.turn; }
+  /** Yaw of the resting island (turning it over about a different axis than before can leave it rotated). */
+  restYaw() { const x = this._pv.set(1, 0, 0).applyQuaternion(this.rest); return Math.atan2(-x.z, x.x); }
+  /** The camera's screen-right axis, flattened onto the ground plane: vertical drags roll the island about it. */
+  tiltAxis() { const az = this.azimuth; return new THREE.Vector3(Math.cos(az), 0, -Math.sin(az)); }
+  applyTurn() {
+    const q = this.pivot.quaternion.copy(this.rest);
+    if (this.turn) q.premultiply(this._qa.setFromAxisAngle(this.turn.axis, this.turn.angle));
+  }
+  /** Start a drag tilt. Grabbing the island mid-turn keeps that turn's axis, so it stays flat on release. */
+  beginTilt() {
+    if (!this.underside) return false;
+    const t = this.turn;
+    if (t?.mode === 'drag') return true;
+    const angle = t ? t.angle : 0;
+    this.turn = { mode: 'drag', axis: t ? t.axis : this.tiltAxis(), angle, base: angle, velocity: 0, at: performance.now() };
+    this.userMoved = true;
+    this.makeRoom();
+    return true;
+  }
+  /** dy: px dragged since the tilt began (down positive). Dragging up lifts the near edge, so the
+   * face underneath swings up toward the camera; 420 px is a half turn. */
+  dragTilt(dy) {
+    const t = this.turn;
+    if (t?.mode !== 'drag') return;
+    const now = performance.now(), angle = t.base + dy / TILT_PX * Math.PI;
+    const step = Math.max(4, now - t.at) / 1000;
+    t.velocity = t.velocity * 0.35 + ((angle - t.angle) / step) * 0.65;
+    t.angle = angle; t.at = now;
+    this.applyTurn();
+  }
+  /** Let go: spring to the nearest flat orientation (one face exactly up). */
+  endTilt() {
+    const t = this.turn;
+    if (t?.mode !== 'drag') return;
+    const velocity = performance.now() - t.at > 90 ? 0 : Math.max(-12, Math.min(12, t.velocity));
+    t.mode = 'spring'; t.velocity = velocity; t.target = settleTarget(t.angle, velocity);
+    if (this.reducedMotion()) this.commitTurn();
+  }
+  /** Roll the island a half turn to its other face (toolbar button, V, deep links). */
+  flip() {
+    if (!this.underside || this.turn?.mode === 'drag') return false;
+    const t = this.turn;
+    const from = t ? t.angle : 0, base = t ? (t.target ?? settleTarget(t.angle)) : 0;
+    this.turn = { mode: 'flip', axis: t ? t.axis : this.tiltAxis(), from, angle: from, target: base - Math.PI, t: 0 };
+    this.pendingFlight = null;   // a queued flight was aimed at the face this flip turns away
+    if (this.reducedMotion()) { this.commitTurn(); return true; }
+    this.makeRoom();
+    return true;
+  }
+  flipTo(side) { return this.restSide !== side ? this.flip() : false; }
+  /** Finish the current turn at its target and keep the result exactly flat. */
+  commitTurn() {
+    const t = this.turn;
+    if (!t) return;
+    this.rest.premultiply(this._qa.setFromAxisAngle(t.axis, t.target ?? settleTarget(t.angle)));
+    this.rest.copy(flatten(this.rest));
+    this.turn = null;
+    this.applyTurn();
+  }
+  /** Jump to a face with no animation (keeps the island's yaw). */
+  settleNow(side) {
+    this.turn = null; this.pendingFlight = null;
+    const flat = flatten(this.rest);
+    if ((upY(flat) >= 0 ? 'pc' : 'spark') !== side) flat.multiply(this._qa.setFromAxisAngle(X_AXIS, Math.PI));
+    this.rest.copy(flatten(flat));
+    this.applyTurn();
+  }
+  updateTurn(dt) {
+    const t = this.turn;
+    if (!t || t.mode === 'drag') return;
+    if (t.mode === 'flip') {
+      t.t = Math.min(1, t.t + dt / FLIP_SECONDS);
+      t.angle = t.from + (t.target - t.from) * flipEase(t.t);
+      if (t.t >= 1) { this.commitTurn(); return; }
+    } else {
+      const s = springStep(t.angle, t.velocity, t.target, dt);
+      t.angle = s.angle; t.velocity = s.velocity;
+      if (s.done) { this.commitTurn(); return; }
+    }
+    this.applyTurn();
+  }
+  /** A camera inside the island's sweep would be passed through: back out to the whole island first. */
+  makeRoom() {
+    const room = this.sweepRadius() + 6, tw = this.tween;
+    // A flight already under way counts by where it ends, not only where the camera is now.
+    const end = tw ? this._pv.setFromSpherical(tw.to).add(tw.toTarget) : this.camera.position;
+    if (this.camera.position.distanceTo(this._centre) >= room && end.distanceTo(this._centre) >= room) return;
+    this.flyTo({ target: new THREE.Vector3(0, 0, 0), distance: room + 6 }, { duration: 0.6, auto: true });
+  }
+  /** Vertical left-drags on the canvas tilt the island (Spark side on); OrbitControls keeps the
+   * horizontal part (orbit), right-drag pan and wheel / pinch zoom. Drags that start on an HTML
+   * overlay never reach the canvas. A second finger (pinch / two-finger pan) ends the tilt. */
+  bindTilt() {
+    const canvas = this.renderer.domElement, pointers = new Set();
+    let drag = null;
+    const end = () => { if (drag) { drag = null; this.endTilt(); } };
+    canvas.addEventListener('pointerdown', event => {
+      if (event.isPrimary) pointers.clear();   // a new primary pointer: nothing else is down (no stale ids)
+      pointers.add(event.pointerId);
+      if (pointers.size > 1) { end(); return; }
+      end();   // a drag whose up never arrived must not leave the island held mid-turn
+      const rotate = event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+      drag = rotate && this.underside && event.target === canvas ? { id: event.pointerId, x: event.clientX, y: event.clientY, tilting: false } : null;
+      if (drag && !canvas.hasPointerCapture?.(event.pointerId)) { try { canvas.setPointerCapture(event.pointerId); } catch { /* not capturable */ } }
+    });
+    canvas.addEventListener('pointermove', event => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const dy = event.clientY - drag.y;
+      if (!drag.tilting) {
+        // A drag that goes sideways first is an orbit: it never tilts (and never backs the camera out).
+        const dx = Math.abs(event.clientX - drag.x);
+        if (dx >= TILT_DEADZONE && dx >= Math.abs(dy)) { drag = null; return; }
+        if (Math.abs(dy) < TILT_DEADZONE) return;
+        if (!this.beginTilt()) { drag = null; return; }
+        drag.tilting = true; drag.y += Math.sign(dy) * TILT_DEADZONE;
+      }
+      this.dragTilt(event.clientY - drag.y);
+    });
+    const up = event => { pointers.delete(event.pointerId); if (drag && event.pointerId === drag.id) end(); };
+    canvas.addEventListener('pointerup', up);
+    canvas.addEventListener('pointercancel', up);
+    canvas.addEventListener('lostpointercapture', up);
+    /** Window blur / view hidden: let go of any drag so the island settles flat. */
+    this.releaseTilt = () => { pointers.clear(); end(); };
+  }
+  /** Island space → world space (atRest: where it will be once the island settles). */
+  toWorld(v, { atRest = false, out = new THREE.Vector3() } = {}) {
+    const q = atRest ? this.restQuaternion(this._qr) : this.pivot.quaternion;
+    return out.set(v.x, v.y - PIVOT_Y, v.z).applyQuaternion(q).add(this._pv.set(0, PIVOT_Y, 0));
+  }
+  /** World space → island space (at the island's current orientation). */
+  toLocal(v, out = new THREE.Vector3()) {
+    const qi = this._qi.copy(this.pivot.quaternion).invert();
+    return out.set(v.x, v.y - PIVOT_Y, v.z).applyQuaternion(qi).add(this._pv.set(0, PIVOT_Y, 0));
   }
 
   /* ---------- quality and time ---------- */
@@ -214,11 +441,20 @@ export class World {
   }
 
   /* ---------- camera ---------- */
-  defaultView() { return { target: new THREE.Vector3(0, 0, 0), distance: Math.min(190, 34 + this.half * 1.75), polar: 0.82, azimuth: 0.62 }; }
+  /** The framed overview, from the front of whichever face is (or will be) up. */
+  defaultView() {
+    const x = this._pv.set(1, 0, 0).applyQuaternion(this.restQuaternion(this._qr)), yaw = Math.atan2(-x.z, x.x);
+    return { target: new THREE.Vector3(0, 0, 0), distance: Math.min(190, 34 + this.half * 1.75), polar: TILT_POLAR, azimuth: 0.62 + yaw };
+  }
   resetView(opts = {}) { this.flyTo(this.defaultView(), opts); }
+  /** flyTo now, or once the island has finished turning: a flight during a flip would carry the
+   *  camera into the island's swing (makeRoom backs it out first). A newer flight, another flip or
+   *  the owner grabbing the view drops it. */
+  flyAfterTurn(view, opts) { if (this.turn) this.pendingFlight = [view, opts]; else this.flyTo(view, opts); }
   /** Ease the camera to { target, distance?, polar?, azimuth? }. Any flight that isn't the city's own
    * auto-framing (auto: true) counts as the owner moving the camera, so auto-framing stops overriding them. */
   flyTo({ target, distance, polar, azimuth }, { instant = false, duration = 0.95, auto = false } = {}) {
+    this.pendingFlight = null;
     if (!auto) this.userMoved = true;
     const offset = new THREE.Vector3().subVectors(this.camera.position, this.controls?.target || new THREE.Vector3());
     const from = new THREE.Spherical().setFromVector3(offset);
@@ -289,14 +525,16 @@ export class World {
     this.particles.enabled = !reduced;
     this.updateTime(dt);
     this.applyKeys(dt);
+    this.updateTurn(dt);
+    if (this.pendingFlight && !this.turn) { const [view, opts] = this.pendingFlight; this.flyTo(view, opts); }
     if (this.tween) {
       this.tween.t = Math.min(1, this.tween.t + dt / this.tween.duration);
       this.applyTween(this.tween, this.tween.t);
       if (this.tween.t >= 1) this.tween = null;
-    } else if (this.follow) {
+    } else if (this.follow && !this.turn && this.side === 'pc') {
       const p = this.follow();
       if (p) {
-        const goal = new THREE.Vector3(p.x, 1, p.z), delta = goal.sub(this.controls.target).multiplyScalar(reduced ? 1 : Math.min(1, dt * 3));
+        const goal = this.toWorld(this._g.set(p.x, 1, p.z), { out: this._g }), delta = goal.sub(this.controls.target).multiplyScalar(reduced ? 1 : Math.min(1, dt * 3));
         this.controls.target.add(delta); this.camera.position.add(delta);
       }
     }
@@ -308,10 +546,7 @@ export class World {
       for (const g of [this.island.group, this.roads.group, this.decor]) g.scale.set(s, 1, s);
       if (a.t >= 1) { for (const g of [this.island.group, this.roads.group, this.decor]) g.scale.set(1, 1, 1); this.islandAnim = null; }
     }
-    if (!reduced) {
-      for (const child of this.island.group.children) if (child.userData.float) child.position.y = child.userData.float.base + Math.sin(this.elapsed * 0.6 + child.userData.float.phase) * 0.35;
-      this.clouds.update(dt);
-    }
+    this.clouds.update(reduced ? 0 : dt, this.camera.position, reduced);
     this.hq.update(dt, this.elapsed, env);
     for (const fn of this.listeners) fn(dt, this.elapsed, env);
     this.particles.update(dt);
@@ -342,13 +577,15 @@ export class World {
     this.raycaster.setFromCamera(ndc, this.camera);
     return this.raycaster.intersectObjects(objects, false)[0] || null;
   }
-  /** Point on the walkable ground under the cursor (inside the island), or null. */
+  /** Point (island space) on This PC's walkable ground under the cursor, or null. Only while This PC
+   *  side is up and the island is still; either face rests with its ground at world y = GROUND_Y. */
   groundAt(ndc) {
-    if (this.camera.position.y < GROUND_Y + 0.3) return null;   // looking up at the underside
+    if (this.turn || this.side !== 'pc' || this.camera.position.y < GROUND_Y + 0.3) return null;
     this.raycaster ||= new THREE.Raycaster();
     this.raycaster.setFromCamera(ndc, this.camera);
     const point = new THREE.Vector3();
     if (!this.raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -GROUND_Y), point)) return null;
+    this.toLocal(point, point);
     const limit = this.half - 2;
     return Math.abs(point.x) < limit && Math.abs(point.z) < limit ? point : null;
   }

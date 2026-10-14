@@ -1,24 +1,28 @@
-/* The Spark underside: when the DGX Spark bridge is on, an upside-down "Spark city" hangs
- * under the floating island. The top city is this PC; the underside is the Spark. Every
- * project lot above gets a mirrored building below (same footprint and height, built by the
- * same Building code with { mirror: true }), the HQ plaza gets the "Spark Foundry" hub for
- * jobs without a linked project, and every active Spark job is a little runner working
- * feet-up on the underside. Active jobs on this PC show as spinning gears above the top city.
+/* The Spark side: when the DGX Spark bridge is on, the floating island has a second face, the
+ * "Spark city". The top face is this PC; the other face is the Spark. Every project lot above
+ * gets a Spark building on the same lot of the other face (same footprint and height, built by
+ * the same Building code with { mirror: true }), the HQ plaza's other side holds the "Spark
+ * Foundry" hub for jobs without a linked project, and every active Spark job is a little runner
+ * standing on that face. Active jobs on this PC show as spinning gears above the top city.
  *
- * Everything below lives in one group with scale.y = -1 at DECK_Y, so local coordinates are
- * the top city's coordinates (y = 0 is the deck surface, +y hangs downward in the world). */
+ * Everything here lives in one group inside the island (world.land) at DECK_Y, turned a half
+ * turn about x: local coordinates are the top city's (y = 0 is the deck surface, +y away from
+ * it), the Spark side hangs below while This PC is up and stands upright, sunlit, once the
+ * island is turned over. Island space ↔ local: y = DECK_Y - local y, z = -local z. */
 import { THREE, toonMaterial, addOutline } from './toon.js';
 import { RoundedBoxGeometry } from '../../vendor/three/addons/RoundedBoxGeometry.js';
 import { BuildingManager, SPARK_MATERIALS, pulseSpark } from './buildings.js';
-import { mergeParts, placed, plaqueTexture, disposeAll } from './fx.js';
+import { mergeParts, placed, plaqueTexture, sideTexture, disposeAll, Particles } from './fx.js';
 import { PITCH, LOT_HALF, islandHalf, cellCenter } from './layout.js';
+import { GROUND_Y, buildSideSign } from './scenery.js';
 import { agentAvatar, hash } from '../avatar/spec.js';
 
-export const DECK_Y = -7.2;          // world height of the underside "ground" the Spark city hangs from
+export const DECK_Y = -7.2;          // island-space height of the Spark side's "ground"
 export const RUNNER_CAP = 24;
 export const FOUNDRY = 'foundry';
 const HQ_GEAR = new THREE.Vector3(2.45, 9.3, -2.95);
 const FOUNDRY_RINGS = [{ r: 4.1, n: 10 }, { r: 4.9, n: 12 }, { r: 5.5, n: 14 }];
+const PLAZA_R = 6.4, PLAZA_TOP = 0.06;
 
 /** Job runner label: "codex · rust · 16 cores" (client · runtime · reserved cores). */
 export function jobLabel(job) {
@@ -26,40 +30,68 @@ export function jobLabel(job) {
   return [job?.client, job?.runtime, Number.isFinite(cores) && cores > 0 ? `${cores % 1 ? cores.toFixed(1) : cores} core${cores === 1 ? '' : 's'}` : ''].filter(Boolean).map(String).join(' · ') || 'Spark job';
 }
 
-/* ---------- deck: the underside "ground" with circuit-trace roads and matching plots ---------- */
+/* ---------- deck: a light circuit board with green traces, pale plots and the DGX SPARK emblem ---------- */
 function buildDeck(rings) {
   const half = islandHalf(rings), size = half * 2, M = SPARK_MATERIALS;
   const group = new THREE.Group(); group.name = 'spark-deck';
-  const plate = new THREE.Mesh(placed(new RoundedBoxGeometry(size - 3, 0.8, size - 3, 2, 0.6), { y: -0.4 }), M.dark);
+  const plate = new THREE.Mesh(placed(new RoundedBoxGeometry(size - 3, 0.8, size - 3, 2, 0.6), { y: -0.4 }), M.board);
   plate.userData.occluder = true;
+  plate.castShadow = true; plate.receiveShadow = true;   // shades the face that's down, takes the Spark city's shadows when up
   addOutline(plate, { thickness: 0.08 });
   group.add(plate);
-  const plots = [], traces = [], vias = [];
+  // Plots are as tall as the top city's lawns, so Spark building pads sit on them (no gap).
+  const plots = [], traces = [], vias = [], chips = [], pins = [];
   for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
     if (!i && !j) continue;
     const c = cellCenter(i, j);
-    plots.push(placed(new THREE.BoxGeometry(LOT_HALF * 2 - 0.4, 0.06, LOT_HALF * 2 - 0.4), { x: c.x, y: 0.03, z: c.z }));
+    plots.push(placed(new THREE.BoxGeometry(LOT_HALF * 2 - 0.4, GROUND_Y, LOT_HALF * 2 - 0.4), { x: c.x, y: GROUND_Y / 2, z: c.z }));
   }
   const extent = (rings + 0.5) * PITCH;
   for (let k = -rings - 1; k <= rings; k++) {
     const line = (k + 0.5) * PITCH;
-    traces.push(placed(new THREE.BoxGeometry(0.3, 0.05, extent * 2), { x: line, y: 0.025 }));
-    traces.push(placed(new THREE.BoxGeometry(extent * 2, 0.05, 0.3), { z: line, y: 0.025 }));
-    for (let q = -rings - 1; q <= rings; q++) vias.push(placed(new THREE.CylinderGeometry(0.42, 0.42, 0.08, 10), { x: line, y: 0.04, z: (q + 0.5) * PITCH }));
+    traces.push(placed(new THREE.BoxGeometry(0.34, 0.05, extent * 2), { x: line, y: 0.025 }));
+    traces.push(placed(new THREE.BoxGeometry(extent * 2, 0.05, 0.34), { z: line, y: 0.025 }));
+    for (let q = -rings - 1; q <= rings; q++) vias.push(placed(new THREE.CylinderGeometry(0.46, 0.46, 0.08, 12), { x: line, y: 0.04, z: (q + 0.5) * PITCH }));
   }
-  const flat = (parts, material) => { const m = new THREE.Mesh(mergeParts(parts), material); m.raycast = () => {}; m.userData.noOutline = true; group.add(m); return m; };
-  if (plots.length) flat(plots, M.panel);
+  // Border trace round the rim, and a little IC package in each corner.
+  const border = extent + 1.2;
+  for (const s of [-1, 1]) {
+    traces.push(placed(new THREE.BoxGeometry(border * 2 + 0.3, 0.05, 0.3), { z: s * border, y: 0.025 }));
+    traces.push(placed(new THREE.BoxGeometry(0.3, 0.05, border * 2 + 0.3), { x: s * border, y: 0.025 }));
+  }
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    const x = sx * (extent + 2.6), z = sz * (extent + 2.6);
+    chips.push(placed(new RoundedBoxGeometry(1.8, 0.34, 1.8, 1, 0.1), { x, y: 0.17, z }));
+    for (const o of [-0.55, 0, 0.55]) {
+      pins.push(placed(new THREE.BoxGeometry(0.16, 0.06, 0.34), { x: x + o, y: 0.03, z: z + 1.05 }), placed(new THREE.BoxGeometry(0.16, 0.06, 0.34), { x: x + o, y: 0.03, z: z - 1.05 }));
+      pins.push(placed(new THREE.BoxGeometry(0.34, 0.06, 0.16), { x: x + 1.05, y: 0.03, z: z + o }), placed(new THREE.BoxGeometry(0.34, 0.06, 0.16), { x: x - 1.05, y: 0.03, z: z + o }));
+    }
+  }
+  const flat = (parts, material, { outline = 0 } = {}) => {
+    const m = new THREE.Mesh(mergeParts(parts), material);
+    m.raycast = () => {}; m.receiveShadow = true;
+    if (outline) addOutline(m, { thickness: outline }); else m.userData.noOutline = true;
+    group.add(m); return m;
+  };
+  if (plots.length) flat(plots, M.plot, { outline: 0.03 });
   flat(traces, M.glow);
   flat(vias, M.lime);
+  flat([placed(new THREE.CylinderGeometry(PLAZA_R, PLAZA_R, PLAZA_TOP, 40), { y: PLAZA_TOP / 2 })], M.panel, { outline: 0.03 });
+  flat(chips, M.dark, { outline: 0.03 }).castShadow = true;
+  flat(pins, M.lime);
+  // "DGX SPARK" emblem on the front rim (local +z faces the same way as the THIS PC sign once turned over).
+  const sign = buildSideSign(sideTexture('spark'), { board: '#eef8e2', post: '#2f5a3c' });
+  sign.position.set(0, 0, extent + 2.3);
+  group.add(sign);
   return { group, plate };
 }
 
-/* ---------- the Spark Foundry, hanging under the HQ plaza ---------- */
+/* ---------- the Spark Foundry, on the other side of the HQ plaza ---------- */
 function buildFoundry() {
   const M = SPARK_MATERIALS;
   const group = new THREE.Group(); group.name = 'spark-foundry';
   const parts = { dark: [], panel: [], lime: [] };
-  parts.dark.push(placed(new THREE.CylinderGeometry(3.0, 3.4, 0.5, 8), { y: 0.25 }));
+  parts.dark.push(placed(new THREE.CylinderGeometry(3.0, 3.4, 0.5, 8), { y: PLAZA_TOP + 0.25 }));
   parts.panel.push(placed(new THREE.ConeGeometry(1.8, 2.6, 8), { y: 8.2 }));
   for (let k = 0; k < 4; k++) {
     const a = Math.PI / 4 + k * Math.PI / 2, x = Math.sin(a) * 2.85, z = Math.cos(a) * 2.85;
@@ -67,7 +99,7 @@ function buildFoundry() {
     parts.lime.push(placed(new THREE.CylinderGeometry(0.44, 0.44, 0.18, 10), { x, y: 3.95, z }));
   }
   const meshes = [];
-  const add = (geometry, material, outline = 0.05) => { const m = new THREE.Mesh(geometry, material); if (outline) addOutline(m, { thickness: outline }); m.userData.sparkFoundry = true; group.add(m); meshes.push(m); return m; };
+  const add = (geometry, material, outline = 0.05) => { const m = new THREE.Mesh(geometry, material); m.castShadow = true; m.receiveShadow = true; if (outline) addOutline(m, { thickness: outline }); m.userData.sparkFoundry = true; group.add(m); meshes.push(m); return m; };
   add(mergeParts(parts.dark), M.dark);
   add(mergeParts(parts.panel), M.panel);
   const caps = add(mergeParts(parts.lime), M.lime, 0.03);
@@ -75,10 +107,8 @@ function buildFoundry() {
   const rings = add(mergeParts([2.0, 4.0, 6.0].map(y => placed(new THREE.TorusGeometry(2.4 - (y - 0.5) / 6.4 * 0.6 + 0.04, 0.16, 6, 28), { y, rx: Math.PI / 2 }))), M.glow, 0.03);
   const crystal = add(new THREE.OctahedronGeometry(0.75, 0), M.lime, 0.04);
   crystal.position.y = 10.25;
-  // Name plaque; the texture is flipped so it reads upright on the mirrored underside.
-  const texture = plaqueTexture('Spark Foundry', { gradient: true });
-  texture.repeat.set(1, -1); texture.offset.set(0, 1);
-  const plaque = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 0.85), new THREE.MeshBasicMaterial({ map: texture, transparent: true }));
+  // Name plaque (the Spark group is a proper half turn, so the texture reads as drawn).
+  const plaque = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 0.85), new THREE.MeshBasicMaterial({ map: plaqueTexture('Spark Foundry', { accent: '#76b900' }), transparent: true }));
   plaque.position.set(0, 2.9, 2.32); plaque.userData.sparkFoundry = true;
   group.add(plaque); meshes.push(plaque);
   let active = null, spin = 0;
@@ -128,15 +158,18 @@ function makeGear() {
 /* ---------- manager ---------- */
 export class SparkCity {
   /** world: World; makePerson(spec, options) → person; topBuildings: the top city's BuildingManager. */
-  constructor(world, { makePerson, particles, reducedMotion, topBuildings }) {
+  constructor(world, { makePerson, reducedMotion, topBuildings }) {
     this.world = world;
     this.makePerson = makePerson;
     this.reducedMotion = reducedMotion;
     this.topBuildings = topBuildings;
     this.group = new THREE.Group(); this.group.name = 'spark-city';
-    this.group.position.y = DECK_Y; this.group.scale.y = -1; this.group.visible = false;
-    world.scene.add(this.group);
-    this.buildings = new BuildingManager(this.group, { mirror: true, deckY: DECK_Y, particles, reducedMotion });
+    this.group.position.y = DECK_Y; this.group.rotation.x = Math.PI; this.group.visible = false;
+    world.land.add(this.group);
+    // The Spark side's own particles: their "down" is toward the Spark deck.
+    this.particles = new Particles(320);
+    this.group.add(this.particles.points);
+    this.buildings = new BuildingManager(this.group, { mirror: true, deckY: DECK_Y, particles: this.particles, reducedMotion });
     this.foundry = buildFoundry(); this.group.add(this.foundry.group);
     this.badges = new THREE.Group(); this.badges.name = 'local-job-gears'; world.city.add(this.badges);
     this.gears = new Map();     // anchor (project id | 'hq') → { mesh, jobs, phase }
@@ -144,10 +177,10 @@ export class SparkCity {
     this.sparkByAnchor = new Map();
     this.jobIndex = new Map();
     this.deck = null; this.rings = 0; this.shown = false; this.hiddenRunners = 0;
-    this._v = new THREE.Vector3();
+    this._v = new THREE.Vector3(); this._cam = new THREE.Vector3();
   }
 
-  /** shown: underside visible; gears: show local-job gears on the top city. */
+  /** shown: Spark side visible; gears: show local-job gears on the top city. */
   sync({ shown, projects, cells, rings, machines, quality = 'high', peopleReady = false, gears = true }) {
     const jobs = Array.isArray(machines?.jobs) ? machines.jobs.filter(j => j && j.active) : [];
     const idMap = new Map();
@@ -163,11 +196,14 @@ export class SparkCity {
     this.group.visible = this.shown;
     if (this.shown) {
       if (rings !== this.rings || !this.deck) this.buildDeck(rings);
+      // The group is turned about x (local z = -island z): lot (i, -j) here is the other face of lot (i, j).
+      const under = new Map();
+      for (const [id, cell] of cells) under.set(id, { ...cell, j: -cell.j });
       const busy = new Set([...this.sparkByAnchor.keys()].filter(key => key !== FOUNDRY));
-      this.buildings.sync(projects, cells, busy, { animate: true });
+      this.buildings.sync(projects, under, busy, { animate: true });
       this.foundry.setActive(this.sparkByAnchor.has(FOUNDRY));
       if (peopleReady) this.syncRunners(spark, projectOf, quality);
-    } else this.clearRunners();
+    } else { this.clearRunners(); this.particles.clear(); }
     this.syncGears(gears ? localByAnchor : new Map());
   }
 
@@ -212,7 +248,10 @@ export class SparkCity {
       runner.job = job; runner.anchor = anchor;
       if (!runner.spot || runner.spot.x !== spot.x || runner.spot.z !== spot.z) {
         runner.spot = spot;
-        runner.person.object.position.set(spot.x, 0.06, spot.z);
+        // Feet on the surface: building work spots are on the lot (plot top), Foundry spots on its plaza.
+        let y = PLAZA_TOP;
+        if (building) { const c = cellCenter(building.cell.i, building.cell.j); y = Math.abs(spot.x - c.x) < LOT_HALF - 0.25 && Math.abs(spot.z - c.z) < LOT_HALF - 0.25 ? GROUND_Y : 0.05; }
+        runner.person.object.position.set(spot.x, y, spot.z);
         runner.person.lookAt(spot.x + spot.fx * 4, spot.z + spot.fz * 4);
       }
     }
@@ -240,14 +279,19 @@ export class SparkCity {
   update(dt, elapsed, env) {
     pulseSpark(elapsed, env);
     if (this.shown) {
-      this.buildings.update(dt, elapsed, env);
-      this.foundry.update(dt, elapsed, env);
+      const particles = this.particles;
+      particles.enabled = !env.reducedMotion;
+      particles.material.uniforms.uScale.value = this.world.particles.material.uniforms.uScale.value;
+      const local = { ...env, particles };
+      this.buildings.update(dt, elapsed, local);
+      this.foundry.update(dt, elapsed, local);
       for (const runner of this.runners.values()) runner.person.update(dt, elapsed);
+      particles.update(dt);
       const s = this.world.island?.group.scale.x || 1;   // follow the island's grow wobble
       if (this.deck) this.deck.group.scale.set(s, 1, s);
     }
     if (!this.gears.size) return;
-    const cam = this.world.camera.position;
+    const cam = this.world.toLocal(this.world.camera.position, this._cam);   // gears turn to the camera in island space
     for (const [key, gear] of this.gears) {
       const mesh = gear.mesh;
       if (key === 'hq') mesh.position.copy(HQ_GEAR);
@@ -262,7 +306,7 @@ export class SparkCity {
     }
   }
 
-  /* ---------- queries for the view ---------- */
+  /* ---------- queries for the view (points are island space unless noted) ---------- */
   pickables() {
     const out = [];
     if (this.shown) {
@@ -277,20 +321,18 @@ export class SparkCity {
   job(id) { return this.jobIndex.get(String(id)) || null; }
   runner(id) { return this.runners.get(String(id)) || null; }
   get runnerList() { return [...this.runners.values()]; }
-  /** Active Spark jobs hosted by a project's underside building (or FOUNDRY). */
+  /** Active Spark jobs hosted by a project's Spark building (or FOUNDRY). */
   sparkJobs(anchor) { return this.sparkByAnchor.get(anchor) || []; }
   gearJobs(key) { return this.gears.get(key)?.jobs || []; }
-  /** World point just past a runner's head (heads hang downward on the underside). */
+  /** WORLD point just over a runner's head (over its status gem, like the top city's people). */
   runnerHead(runner, out = new THREE.Vector3()) {
     const person = runner.person;
     person.object.updateWorldMatrix(true, false);
     const top = Number(person.topY);
-    return person.object.localToWorld(out.set(0, (Number.isFinite(top) && top > 0.5 ? top : 1.8) + 0.25, 0));
+    return person.object.localToWorld(out.set(0, (Number.isFinite(top) && top > 0.5 ? top : 1.8) + 0.62, 0));
   }
   foundryPoint() { return new THREE.Vector3(0, DECK_Y - 11.3, 0); }
   gearPoint(key) { const gear = this.gears.get(key); return gear?.mesh.visible ? gear.mesh.position.clone().add(new THREE.Vector3(0, 0.6, 0)) : null; }
-  /** Camera view looking up at the underside. */
-  view(azimuth) { return { target: new THREE.Vector3(0, DECK_Y - 9, 0), distance: Math.min(210, 44 + islandHalf(Math.max(1, this.rings)) * 1.7), polar: 2.3, azimuth }; }
 
   dispose() {
     this.clearRunners();
@@ -298,6 +340,7 @@ export class SparkCity {
     for (const gear of this.gears.values()) gear.mesh.removeFromParent();
     this.gears.clear();
     disposeAll(this.badges); this.badges.removeFromParent();
+    this.particles.dispose(); this.particles.points.removeFromParent();
     disposeAll(this.group); this.group.removeFromParent();
   }
 }

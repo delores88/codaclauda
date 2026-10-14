@@ -1,5 +1,5 @@
 /* City effects and shared helpers: one-draw-call particle system (sparkles, dust,
- * smoke, sparks, motes), canvas-drawn textures (name plaques, flags, signs),
+ * smoke, sparks, motes), canvas-drawn textures (name plaques, flags, signs, face emblems),
  * geometry merging and outlines for instanced meshes. */
 import { THREE, INK, disposeObject } from './toon.js';
 import { mergeGeometries } from '../../vendor/three/addons/BufferGeometryUtils.js';
@@ -97,6 +97,46 @@ export function lockTexture() {
     g.lineWidth = 9; g.beginPath(); g.arc(w / 2, 54, 17, Math.PI, 0); g.stroke();
     roundRect(g, w / 2 - 28, 52, 56, 42, 8); g.fillStyle = INK; g.fill();
     g.beginPath(); g.arc(w / 2, 70, 6, 0, Math.PI * 2); g.fillStyle = '#ffd36b'; g.fill();
+  });
+}
+/** Face emblem for the island's two sides (original marks, no product logos):
+ *  'pc' → a simple laptop + "THIS PC"; 'spark' → a circuit chip in green + "DGX SPARK". Aspect 4:1. */
+export function sideTexture(kind) {
+  const spark = kind === 'spark';
+  const edge = spark ? '#24461f' : INK;
+  return canvasTexture(640, 160, (g, w, h) => {
+    roundRect(g, 6, 6, w - 12, h - 12, 30); g.fillStyle = spark ? '#f1fae3' : '#fff7ea'; g.fill();
+    g.lineWidth = 8; g.strokeStyle = edge; g.stroke();
+    g.save(); g.translate(92, h / 2 - 2);
+    g.lineJoin = 'round'; g.lineCap = 'round'; g.strokeStyle = edge;
+    if (spark) {
+      // Chip: pins on four sides, a green package and a pale die.
+      g.lineWidth = 7;
+      for (const o of [-21, -7, 7, 21]) {
+        g.beginPath(); g.moveTo(o, -48); g.lineTo(o, -36); g.moveTo(o, 36); g.lineTo(o, 48);
+        g.moveTo(-48, o); g.lineTo(-36, o); g.moveTo(36, o); g.lineTo(48, o); g.stroke();
+      }
+      roundRect(g, -36, -36, 72, 72, 9); g.fillStyle = '#76b900'; g.fill(); g.lineWidth = 6; g.stroke();
+      roundRect(g, -16, -16, 32, 32, 5); g.fillStyle = '#e8ffc0'; g.fill(); g.lineWidth = 4; g.stroke();
+    } else {
+      // Laptop: open lid with a brand-gradient screen, and a flat base.
+      roundRect(g, -44, -42, 88, 60, 8); g.fillStyle = '#ffffff'; g.fill(); g.lineWidth = 6; g.stroke();
+      const grad = g.createLinearGradient(-34, -32, 34, 10);
+      grad.addColorStop(0, '#ff7a4d'); grad.addColorStop(0.5, '#9a5cff'); grad.addColorStop(1, '#12b89a');
+      roundRect(g, -34, -32, 68, 40, 4); g.fillStyle = grad; g.fill();
+      g.beginPath(); g.moveTo(-56, 26); g.lineTo(56, 26); g.lineTo(48, 40); g.lineTo(-48, 40); g.closePath();
+      g.fillStyle = '#d9dcec'; g.fill(); g.lineWidth = 6; g.stroke();
+    }
+    g.restore();
+    const label = spark ? 'DGX SPARK' : 'THIS PC';
+    let size = 76;
+    do { g.font = `800 ${size}px ${FONT}`; size -= 2; } while (g.measureText(label).width > w - 210 && size > 30);
+    g.textAlign = 'left'; g.textBaseline = 'middle';
+    g.fillStyle = spark ? '#3c7a00' : INK;
+    g.fillText(label, 168, h / 2 - 6);
+    if (spark) g.fillStyle = '#76b900';
+    else { const bar = g.createLinearGradient(168, 0, w - 40, 0); bar.addColorStop(0, '#ff7a4d'); bar.addColorStop(0.5, '#9a5cff'); bar.addColorStop(1, '#12b89a'); g.fillStyle = bar; }
+    roundRect(g, 168, h - 36, w - 208, 9, 4.5); g.fill();
   });
 }
 /** Clock face for the HQ tower. */

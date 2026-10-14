@@ -4,7 +4,7 @@
 import { THREE, toonMaterial, addOutline } from './toon.js';
 import { RoundedBoxGeometry } from '../../vendor/three/addons/RoundedBoxGeometry.js';
 import { hash } from '../avatar/spec.js';
-import { mergeParts, placed, instancedOutline, plaqueTexture, clockTexture } from './fx.js';
+import { mergeParts, placed, instancedOutline, plaqueTexture, clockTexture, sideTexture } from './fx.js';
 import { PITCH, ASPHALT, LOT_HALF, islandHalf, cellCenter } from './layout.js';
 
 export const PALETTE = {
@@ -25,13 +25,16 @@ function mesh(geometry, material, { cast = true, receive = true, outline = 0.05 
 }
 
 /* ---------- island ---------- */
+/** The island's slabs, rim and (Spark side off) its tapering rock underside. The rim stays clean:
+ *  grass top, layered soil edge, nothing dangling or floating. */
 export function buildIsland(rings) {
   const half = islandHalf(rings), size = half * 2;
   const group = new THREE.Group(); group.name = 'island';
   const rnd = seeded(`island:${rings}`);
   // The three slabs block picking (a hover never reaches through the island to the other side).
+  // The grass slab casts: once the island is turned over it shades the face that is now down.
   const slab = (...args) => { const m = mesh(...args); m.userData.occluder = true; return m; };
-  group.add(slab(placed(rbox(size, 1.0, size, 1.6, 3), { y: -0.5 }), toonMaterial(PALETTE.grass), { cast: false, outline: 0.09 }));
+  group.add(slab(placed(rbox(size, 1.0, size, 1.6, 3), { y: -0.5 }), toonMaterial(PALETTE.grass), { cast: true, outline: 0.09 }));
   group.add(slab(placed(rbox(size - 0.9, 2.8, size - 0.9, 1.4, 2), { y: -2.1 }), toonMaterial(PALETTE.dirt), { cast: false, receive: false, outline: 0.09 }));
   group.add(slab(placed(rbox(size - 4, 3.4, size - 4, 1.4, 2), { y: -4.9 }), toonMaterial(PALETTE.stone), { cast: false, receive: false, outline: 0.09 }));
   // Tapering underside: a stack of stone chunks.
@@ -57,25 +60,28 @@ export function buildIsland(rings) {
   }
   drips.count = n; drips.userData.noOutline = true;
   group.add(drips, instancedOutline(drips, 0.05));
-  // Dangling roots and a few floating rocks.
-  const rootMat = toonMaterial(PALETTE.root);
-  for (let k = 0; k < 14; k++) {
-    const side = k % 4, t = (rnd() - 0.5) * (size - 8), len = 1.4 + rnd() * 2.6, inset = half - 1.2 - rnd() * 1.5;
-    const [x, z] = side === 0 ? [t, inset] : side === 1 ? [inset, t] : side === 2 ? [t, -inset] : [-inset, t];
-    const root = placed(new THREE.CylinderGeometry(0.06, 0.14, len, 5), { x, y: -3.4 - len / 2, z, rx: (rnd() - 0.5) * 0.5, rz: (rnd() - 0.5) * 0.5 });
-    const dangling = mesh(root, rootMat, { cast: false, receive: false, outline: 0.03 });
-    dangling.userData.taper = true;
-    group.add(dangling);
-  }
-  for (let k = 0; k < 7; k++) {
-    const a = rnd() * Math.PI * 2, r = half * (0.75 + rnd() * 0.5), sz = 0.9 + rnd() * 1.8;
-    const rock = placed(new THREE.DodecahedronGeometry(sz, 0), { x: Math.cos(a) * r, y: -9 - rnd() * 9, z: Math.sin(a) * r, ry: rnd() * 3 });
-    const m = mesh(rock, toonMaterial(rnd() > 0.5 ? PALETTE.stone : PALETTE.dirtDark), { cast: false, receive: false, outline: 0.05 });
-    m.userData.float = { base: m.position.y, phase: rnd() * 6 };
-    if (r < half * 1.12) m.userData.taper = true;
-    group.add(m);
-  }
+  // "THIS PC" emblem on the front rim (shown while the Spark side exists, so you know which face is up).
+  const sign = buildSideSign(sideTexture('pc'), { board: '#fff1de', post: '#9a6a45' });
+  sign.position.set(0, 0, (rings + 0.5) * PITCH + 3.4);
+  sign.userData.sideSign = true;
+  group.add(sign);
   return { group, half };
+}
+
+/** A small standing sign for one face of the island (texture from fx.sideTexture). It faces +z,
+ *  leans back a little toward a camera looking down, and never takes part in picking. */
+export function buildSideSign(texture, { board = '#fff1de', post = '#8a6a4a', width = 7.4 } = {}) {
+  const group = new THREE.Group(); group.name = 'side-sign';
+  const height = width / 4, base = 1.0, lean = -0.24;
+  const postH = base + height * 0.55;
+  group.add(mesh(mergeParts([-1, 1].map(s => placed(new THREE.CylinderGeometry(0.1, 0.13, postH, 8), { x: s * width * 0.36, y: postH / 2, z: -0.16 }))), toonMaterial(post), { receive: false, outline: 0.03 }));
+  const panel = new THREE.Group(); panel.position.y = base + height / 2; panel.rotation.x = lean; group.add(panel);
+  panel.add(mesh(rbox(width + 0.34, height + 0.34, 0.2, 0.12), toonMaterial(board), { outline: 0.05 }));
+  const face = new THREE.Mesh(new THREE.PlaneGeometry(width, height), new THREE.MeshBasicMaterial({ map: texture, transparent: true }));
+  face.position.z = 0.112; face.userData.noOutline = true;
+  panel.add(face);
+  group.traverse(node => { if (node.isMesh) node.raycast = () => {}; });
+  return group;
 }
 
 /* ---------- roads, sidewalks, lawns, lamps ---------- */
@@ -218,14 +224,15 @@ export function buildDecor(rings, lots, half) {
       benches.push([c.x + BENCH_OFFSET.x, c.z + BENCH_OFFSET.z, 0]);
     }
   }
-  // Rim trees outside the ring road.
+  // Rim trees outside the ring road, rooted on the grass slab (y = 0); the front rim keeps room for the THIS PC sign.
   const ring = (rings + 0.5) * PITCH + 3.4;
   for (let side = 0; side < 4; side++) {
     for (let t = -ring + 2; t < ring - 2; t += 4.2 + rnd() * 2.5) {
       if (rnd() < 0.3) continue;
       const [x, z] = side === 0 ? [t, ring] : side === 1 ? [ring, -t] : side === 2 ? [-t, -ring] : [-ring, t];
       if (Math.abs(x) > half - 1.2 || Math.abs(z) > half - 1.2) continue;
-      trees.push({ x: x + (rnd() - 0.5), z: z + (rnd() - 0.5), kind: rnd() < 0.7 ? 'cone' : 'ball', scale: 0.8 + rnd() * 0.5, color: CANOPY[Math.floor(rnd() * 4)] });
+      if (side === 0 && Math.abs(t) < 5.6) continue;
+      trees.push({ x: x + (rnd() - 0.5), y: 0, z: z + (rnd() - 0.5), kind: rnd() < 0.7 ? 'cone' : 'ball', scale: 0.8 + rnd() * 0.5, color: CANOPY[Math.floor(rnd() * 4)] });
     }
   }
   addTrees(group, trees);
@@ -255,10 +262,10 @@ export function addTrees(group, trees) {
   const balls = trees.filter(t => t.kind === 'ball'), cones = trees.filter(t => t.kind === 'cone');
   const ballMesh = new THREE.InstancedMesh(ballGeo, toonMaterial('#ffffff', { cache: false }), Math.max(1, balls.length));
   const coneMesh = new THREE.InstancedMesh(coneGeo, toonMaterial('#ffffff', { cache: false }), Math.max(1, cones.length));
-  trees.forEach((t, k) => { m4.compose(v.set(t.x, LAWN_TOP, t.z), q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (t.x * 7 + t.z * 3) % 6), s.setScalar(t.scale)); trunks.setMatrixAt(k, m4); });
+  trees.forEach((t, k) => { m4.compose(v.set(t.x, t.y ?? LAWN_TOP, t.z), q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (t.x * 7 + t.z * 3) % 6), s.setScalar(t.scale)); trunks.setMatrixAt(k, m4); });
   for (const [list, inst] of [[balls, ballMesh], [cones, coneMesh]]) {
     list.forEach((t, k) => {
-      m4.compose(v.set(t.x, LAWN_TOP, t.z), q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (t.x * 5 + t.z) % 6), s.setScalar(t.scale));
+      m4.compose(v.set(t.x, t.y ?? LAWN_TOP, t.z), q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (t.x * 5 + t.z) % 6), s.setScalar(t.scale));
       inst.setMatrixAt(k, m4); inst.setColorAt(k, color.set(t.color));
     });
     inst.count = list.length;
@@ -398,33 +405,43 @@ function cloudGeometry(seed) {
   }
   const g = mergeParts(parts); g.userData.shared = true; return g;
 }
-let cloudGeos = null;   // shared by every rebuild (rings change, Spark underside toggle)
-/** under: the Spark city hangs below the island, so low clouds drift in bands beside it instead of under it. */
-export function buildClouds(half, quality = 'high', { under = false } = {}) {
+let cloudGeos = null;   // shared by every rebuild (rings change)
+/** Clouds live in world space and never touch the island, whichever way it is turned: every cloud
+ * keeps at least `clear` (the island's sweep radius plus a margin) plus its own size away from the
+ * island centre (0, center, 0). They drift along +x, so that distance is measured in the y-z plane:
+ * low clouds sit far below the centre, side clouds far out along ±z. A cloud shrinks away near the
+ * wrap edges (no popping), and while it is close to the camera or in front of the island on screen.
+ * `island` is the radius treated as "the island" for that screen test. */
+export function buildClouds(half, quality = 'high', { center = 0, clear = half * 1.8, island = half * 1.3 } = {}) {
   const group = new THREE.Group(); group.name = 'clouds';
   const r = seeded('clouds');
   const geos = cloudGeos ||= [cloudGeometry('a'), cloudGeometry('b'), cloudGeometry('c')];
+  const radii = geos.map(g => (g.boundingSphere ? g.boundingSphere.center.length() + g.boundingSphere.radius : 7));
   const material = toonMaterial('#ffffff', { cache: false });
   const total = quality === 'low' ? 12 : 22;
+  const wrap = Math.max(half * 2.6, clear + 48);
   const clouds = [];
   for (let k = 0; k < total; k++) {
-    const below = k % 3 !== 0;
-    const a = r() * Math.PI * 2, dist = half * (below ? 0.2 + r() * 1.5 : 1.25 + r() * 0.9);
-    const cloud = { variant: k % 3, x: Math.cos(a) * dist, y: below ? -16 - r() * 18 : -3 + r() * 12, z: Math.sin(a) * dist, scale: (below ? 1.6 : 1.1) + r() * 1.4, speed: 0.4 + r() * 0.7, ry: r() * Math.PI };
-    if (below && under) { cloud.x = (r() * 2 - 1) * half * 2.2; cloud.z = (r() < 0.5 ? -1 : 1) * half * (1.25 + r() * 0.9); cloud.y = -12 - r() * 30; }
-    clouds.push(cloud);
+    const low = k % 3 !== 0, variant = k % 3;
+    const scale = (low ? 1.6 : 1.1) + r() * 1.4, reach = radii[variant] * scale;
+    const x = (r() * 2 - 1) * wrap;
+    const y = low ? center - clear - reach - r() * 22 : center - 5 + r() * 15;
+    const z = low ? (r() * 2 - 1) * (clear + half) : (r() < 0.5 ? -1 : 1) * (clear + reach + r() * half * 0.6);
+    clouds.push({ variant, x, y, z, scale, reach, speed: 0.4 + r() * 0.7, ry: r() * Math.PI, vis: -1 });
   }
   const meshes = geos.map((g, v) => {
     const inst = new THREE.InstancedMesh(g, material, Math.max(1, clouds.filter(c => c.variant === v).length));
     inst.userData.noOutline = true; inst.frustumCulled = false;
     group.add(inst); return inst;
   });
-  const wrap = half * 2.6;
-  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), s = new THREE.Vector3();
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), s = new THREE.Vector3(), yAxis = new THREE.Vector3(0, 1, 0);
+  const centre = new THREE.Vector3(0, center, 0), toIsland = new THREE.Vector3(), rel = new THREE.Vector3();
   function layout() {
     const counters = [0, 0, 0];
     for (const c of clouds) {
-      m4.compose(v.set(c.x, c.y, c.z), q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), c.ry), s.setScalar(c.scale));
+      const edge = Math.min(1, Math.max(0, (wrap - Math.abs(c.x)) / (wrap * 0.18)));
+      const shown = Math.max(0, c.vis), k = shown * shown * (3 - 2 * shown);
+      m4.compose(v.set(c.x, c.y, c.z), q.setFromAxisAngle(yAxis, c.ry), s.setScalar(Math.max(1e-4, c.scale * edge * k)));
       meshes[c.variant].setMatrixAt(counters[c.variant]++, m4);
     }
     meshes.forEach((m, k) => { m.count = counters[k]; m.instanceMatrix.needsUpdate = true; });
@@ -432,8 +449,29 @@ export function buildClouds(half, quality = 'high', { under = false } = {}) {
   layout();
   return {
     group, material,
-    update(dt) {
-      for (const c of clouds) { c.x += c.speed * dt; if (c.x > wrap) c.x = -wrap; }
+    /** dt: drift time (0 = hold still); camera: world camera position; reduced: snap instead of easing. */
+    update(dt, camera, reduced = false) {
+      let L = 0, islandAngle = 0;
+      if (camera) {
+        toIsland.subVectors(centre, camera); L = toIsland.length();
+        if (L > 1e-3) toIsland.divideScalar(L);
+        islandAngle = Math.asin(Math.min(1, island / Math.max(L, 1e-3)));
+      }
+      for (const c of clouds) {
+        if (dt > 0) { c.x += c.speed * dt; if (c.x > wrap) c.x = -wrap; }
+        let hide = false;
+        if (camera) {
+          rel.set(c.x - camera.x, c.y - camera.y, c.z - camera.z);
+          const d = rel.length(), along = rel.dot(toIsland);
+          hide = d < c.reach + 14;
+          if (!hide && along > 0 && along < L) {
+            const angle = Math.acos(Math.min(1, along / Math.max(d, 1e-3)));
+            hide = angle < islandAngle + Math.asin(Math.min(1, (c.reach * 0.8) / Math.max(d, 1e-3)));
+          }
+        }
+        const goal = hide ? 0 : 1;
+        c.vis = reduced || c.vis < 0 ? goal : c.vis + (goal - c.vis) * Math.min(1, dt > 0 ? dt * 3.5 : 0.2);
+      }
       layout();
     },
   };

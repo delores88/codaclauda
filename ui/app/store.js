@@ -163,6 +163,7 @@ class Store extends EventTarget {
       const d = await rpc('spark', { operation: 'status', arguments: {} });
       this.spark = {
         configured: true, ok: d.ok !== false, at: Date.now(), error: '',
+        lastOkAt: d.ok !== false && d.transport?.authenticated !== false ? Date.now() : this.spark.lastOkAt || 0,
         jobs: Array.isArray(d.jobs) ? d.jobs : [], laptopJobs: Array.isArray(d.laptop_jobs) ? d.laptop_jobs : [],
         limits: d.limits || null, hardware: d.hardware || null, scheduler: d.scheduler || null, transport: d.transport || null,
       };
@@ -199,7 +200,10 @@ class Store extends EventTarget {
     const spark = jobs.filter(j => j.machine === 'spark'), local = jobs.filter(j => j.machine === 'local');
     const transport = this.spark.transport || {};
     return {
-      enabled: this.spark.configured && this.spark.ok && transport.authenticated !== false,
+      // The Spark side exists whenever DGXBridge is configured; `online` says whether it answered the last check.
+      enabled: this.spark.configured,
+      online: this.spark.configured && this.spark.ok && transport.authenticated !== false,
+      offlineSince: this.spark.configured && !(this.spark.ok && transport.authenticated !== false) ? (this.spark.lastOkAt || null) : null,
       configured: this.spark.configured, error: this.spark.error, checkedAt: this.spark.at,
       local: { name: 'This PC', ...summarize(local) },
       spark: { name: 'DGX Spark', ...summarize(spark), reachable: transport.authenticated === true, route: transport.route || '', healthy: this.spark.scheduler?.healthy === true, cpuTotal: this.spark.limits?.cpu_total ?? null, memTotalGb: this.spark.limits?.memory_gb_total ?? null, hardware: this.spark.hardware },

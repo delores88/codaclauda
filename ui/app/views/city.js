@@ -16,6 +16,7 @@ registerIcons({
   crosshair: '<circle cx="12" cy="12" r="7"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="1.4"/>',
   cube: '<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/>',
   'city-chip': '<rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+  'city-laptop': '<rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M2.5 18.5h19l-1.5-2.5H4Z"/>',
   'city-flip': '<path d="M3 12h18"/><path d="M8 8.5 12 4l4 4.5M8 15.5l4 4.5 4-4.5"/>',
   'city-chevron-up': '<path d="m6 15 6-6 6 6"/>',
   'city-chevron-down': '<path d="m6 9 6 6 6-6"/>',
@@ -28,7 +29,7 @@ const PROVIDER_LABEL = { claude: 'Claude', codex: 'Codex', other: 'Agent' };
 const SPARK_MODES = ['auto', 'on', 'off'];
 const SPARK_LABEL = { auto: 'Auto (shown when the Spark bridge is on)', on: 'Always shown', off: 'Hidden' };
 const MACHINES_KEY = 'codaclauda.city.machines-collapsed';
-const UNDER_KINDS = new Set(['spark', 'runner', 'foundry']);
+const SPARK_KINDS = new Set(['spark', 'runner', 'foundry']);   // targets on the Spark face (everything else is This PC's face)
 const PLOT_HOLD_MS = 10 * 60e3;
 const EMPTY_MACHINES = { enabled: false, configured: false, error: '', local: { running: 0, cpuReserved: 0, cpuHours24h: 0 }, spark: { running: 0, cpuReserved: 0, cpuHours24h: 0 }, jobs: [] };
 const fmtCores = n => (n % 1 ? n.toFixed(1) : String(n));
@@ -40,7 +41,7 @@ const storage = { get(key) { try { return localStorage.getItem(key); } catch { r
 // Name labels: screen-space declutter (see declutterLabels) re-run every DECLUTTER_MS.
 const LABEL_MAX = 10;            // labels + cluster chips on screen at once (selected/hovered always show)
 const DECLUTTER_MS = 120;
-const LABEL_H = 22, CHIP_H = 24, LABEL_LIFT = 4, RUNNER_DROP = 4;   // match .city-label / .city-cluster in city.css
+const LABEL_H = 22, CHIP_H = 24, LABEL_LIFT = 4;   // match .city-label / .city-cluster in city.css
 const LABEL_PRIORITY = { active: 60, idle: 40, offline: 20 };
 const OWNER_PRIORITY = 55;       // "You": above idle people and idle groups (chips get +10), below working agents
 const SHORT_NAME = 18;
@@ -153,7 +154,7 @@ class CityView {
 
   /* ---------------- DOM skeleton ---------------- */
   buildDom() {
-    this.stage = h('div.city-stage', { tabindex: '0', role: 'application', 'aria-label': 'Project city. Drag to orbit, right-drag to pan, scroll to zoom. W A S D pan, Q and E rotate, F focuses the selection, H resets the view.' });
+    this.stage = h('div.city-stage', { tabindex: '0', role: 'application', 'aria-label': 'Project city. Drag to orbit, right-drag to pan, scroll to zoom. With the Spark side on, drag up or down to turn the island over, or press V to flip it. W A S D pan, Q and E rotate, F focuses the selection, H resets the view.' });
     this.tag = h('div.city-tag', { hidden: true, 'aria-hidden': 'true' });
     this.bubble = h('div.city-bubble', { hidden: true, role: 'status' });
     this.labelLayer = h('div.city-labels', { 'aria-hidden': 'true' });
@@ -166,11 +167,14 @@ class CityView {
     this.stats = h('div.city-hud-stats');
     this.timeChip = h('span.city-chip');
     this.jump = h('select.select.city-jump', { 'aria-label': 'Jump to a building or agent', onchange: () => this.onJump() });
+    // Which face of the island is up (shown while the Spark side exists).
+    this.sideChip = h('span.city-side.is-pc', { hidden: true, role: 'status' });
     this.hud = h('header.city-hud',
-      h('div.city-hud-title', h('span.eyebrow', 'Project city'), this.stats),
+      h('div.city-hud-title', h('span.eyebrow', 'Project city'), this.sideChip, this.stats),
       h('div.city-hud-row', this.timeChip, this.jump));
 
-    this.legendSpark = h('div.city-legend-extra', { hidden: true }, h('div.city-legend-sep'), h('div.city-legend-row', h('span.city-gem.spark'), 'Underside = DGX Spark'));
+    this.legendSideText = h('span', 'Other side = DGX Spark');
+    this.legendSpark = h('div.city-legend-extra', { hidden: true }, h('div.city-legend-sep'), h('div.city-legend-row', h('span.city-gem.spark'), this.legendSideText));
     this.legendGear = h('div.city-legend-note', { hidden: true }, 'Spinning gear = a job running on this PC');
     this.legend = h('div.city-legend', { 'aria-label': 'Legend' },
       h('div.city-legend-row', h('span.city-gem.active'), 'Working'),
@@ -185,9 +189,10 @@ class CityView {
     this.timeBtn = iconButton('clock', 'Time of day', () => this.cycleTime(), 'city-tool');
     this.qualityBtn = iconButton('cube', 'Shadows', () => this.toggleQuality(), 'city-tool');
     this.helpBtn = iconButton('help', 'Controls help', () => this.toggleHelp(), 'city-tool');
-    this.sparkBtn = iconButton('city-chip', 'Spark underside', () => this.cycleSpark(), 'city-tool');
+    this.sparkBtn = iconButton('city-chip', 'Spark side', () => this.cycleSpark(), 'city-tool');
+    // Turns the island over (label = where you'll go); see renderFlip.
     this.flipLabel = h('span', 'Spark side');
-    this.flipBtn = h('button.city-flip', { type: 'button', hidden: true, onclick: () => this.flipSide() }, icon('city-flip'), this.flipLabel);
+    this.flipBtn = h('button.city-flip', { type: 'button', hidden: true, onclick: () => this.flipSide() }, icon('city-chip'), this.flipLabel);
     this.toolbar = h('div.city-toolbar', { role: 'toolbar', 'aria-label': 'City controls' },
       this.flipBtn,
       iconButton('zoomIn', 'Zoom in', () => this.world?.zoomBy(0.72), 'city-tool'),
@@ -198,7 +203,7 @@ class CityView {
     this.help = h('div.city-help.card', { hidden: true, role: 'dialog', 'aria-label': 'City controls' },
       h('div.city-help-head', h('strong', 'Getting around'), iconButton('close', 'Close help', () => this.toggleHelp(false))),
       h('dl.city-help-list',
-        ...[['Left-drag', 'Orbit'], ['Right-drag', 'Pan'], ['Scroll wheel / pinch', 'Zoom toward the pointer'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click', 'Select a person or building'], ['Click an empty plot', 'Start a new project there'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
+        ...[['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['V', 'Flip to the other side'], ['Right-drag', 'Pan'], ['Scroll wheel / pinch', 'Zoom toward the pointer'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click', 'Select a person or building'], ['Click an empty plot', 'Start a new project there'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
           .flatMap(([k, v]) => [h('dt', h('kbd', k)), h('dd', v)])),
       h('button.btn.small.primary', { type: 'button', onclick: () => this.toggleHelp(false) }, 'Got it'));
 
@@ -232,7 +237,7 @@ class CityView {
     this.world.onKeyPan = () => { if (this.following) this.toggleFollow(false); };
     this.buildings = new BuildingManager(this.world.city, { particles: this.world.particles, reducedMotion: () => this.reduced() });
     this.npcs = new NpcManager(this.world.city, { buildings: this.buildings, particles: this.world.particles, reducedMotion: () => this.reduced() });
-    this.spark = new SparkCity(this.world, { makePerson: (spec, options) => this.npcs.makePerson(spec, options), particles: this.world.particles, reducedMotion: () => this.reduced(), topBuildings: this.buildings });
+    this.spark = new SparkCity(this.world, { makePerson: (spec, options) => this.npcs.makePerson(spec, options), reducedMotion: () => this.reduced(), topBuildings: this.buildings });
     this.plotMarker = buildPlotMarker();
     this.world.city.add(this.plotMarker.group);
     this.world.onFrame((dt, elapsed, env) => this.frame(dt, elapsed, env));
@@ -314,21 +319,31 @@ class CityView {
     catch (error) { if (!this.sparkError) { this.sparkError = true; console.error('City: Spark underside animation failed', error); } }
     this.plotMarker.update(elapsed, env.reducedMotion);
     this.renderFlip();
+    // While the island turns: no hover, no tags (labels hide in updateOverlays); following stops on the Spark side.
+    const still = this.world.settled;
+    if (!still && this.hover) this.setHover(null);
+    if (this.following && this.world.restSide !== 'pc') this.toggleFollow(false);
     this.hoverTimer = (this.hoverTimer || 0) - dt;
-    if (this.pointer && (this.hoverDirty || this.hoverTimer <= 0) && !this.dragging) { this.hoverDirty = false; this.hoverTimer = 0.2; this.updateHover(); }
+    if (still && this.pointer && (this.hoverDirty || this.hoverTimer <= 0) && !this.dragging) { this.hoverDirty = false; this.hoverTimer = 0.2; this.updateHover(); }
     this.updateOverlays();
     if (this.bubbleUntil && performance.now() > this.bubbleUntil) { this.bubble.hidden = true; this.bubbleUntil = 0; this.bubbleTarget = null; }
     this.timeChipTimer = (this.timeChipTimer || 0) - dt;
     if (this.timeChipTimer <= 0) { this.timeChipTimer = 5; this.renderTimeChip(); }
   }
 
+  /** Is this target on the face that's up, with the island still? (Overlays only show then.) */
+  facesUp(target) {
+    const world = this.world;
+    return world.settled && world.side === (SPARK_KINDS.has(target?.kind) ? 'spark' : 'pc');
+  }
   updateOverlays() {
     const world = this.world, cam = world.camera;
     cam.updateMatrixWorld();
     const scratch = this.scratch ||= new THREE.Vector3(), point = { x: 0, y: 0, visible: false };
-    const camPos = cam.position, under = world.isUnder;
-    // 1. Project every name label (math only, no DOM). HTML labels ignore depth: top-city names only
-    //    from above, Spark runner tags only from below.
+    const camPos = cam.position;
+    // 1. Project every name label from its WORLD position (math only, no DOM). HTML labels ignore
+    //    depth, so only the face that's up shows names, and none show while the island turns.
+    const still = world.settled, pcUp = still && world.side === 'pc', sparkUp = still && world.side === 'spark';
     const projectLabel = (label, fadeFrom, fadeOver) => {
       world.project(scratch, point);
       label.dist = camPos.distanceTo(scratch);
@@ -337,7 +352,7 @@ class CityView {
       label.px = point.x; label.py = point.y;
     };
     for (const [id, label] of this.runnerLabels) {
-      const runner = under ? this.spark.runner(id) : null;
+      const runner = sparkUp ? this.spark.runner(id) : null;
       label.on = false;
       if (!runner) continue;
       this.spark.runnerHead(runner, scratch);
@@ -345,31 +360,30 @@ class CityView {
     }
     for (const [key, label] of this.labels) {
       const target = key === 'owner' ? OWNER_TARGET : { kind: 'agent', id: key };
-      const pos = under ? null : this.npcs.position(target);
+      const pos = pcUp ? this.npcs.position(target) : null;
       label.on = false;
       if (!pos) continue;
-      scratch.set(pos.x, pos.y + this.npcs.headroom(target), pos.z);
+      world.toWorld(scratch.set(pos.x, pos.y + this.npcs.headroom(target), pos.z), { out: scratch });
       projectLabel(label, 1.5, 110);
     }
     // 2. Throttled: decide which labels and cluster chips show (one read pass, then writes).
     const now = performance.now();
     if (now >= this.declutterAt) { this.declutterAt = now + DECLUTTER_MS; this.declutter(); }
-    // 3. Every frame: shown labels and chips follow the heads.
-    for (const label of this.runnerLabels.values()) this.placeLabel(label, 'translate(-50%, 0)');
+    // 3. Every frame: shown labels and chips follow the heads (Spark runners stand upright too once their side is up).
+    for (const label of this.runnerLabels.values()) this.placeLabel(label, 'translate(-50%, -100%)');
     for (const label of this.labels.values()) this.placeLabel(label, 'translate(-50%, -100%)');
     this.placeChips();
     this.placeClusterPop();
-    // Tags and bubbles sit just above a person's name label (offset in screen space) or above a roof.
+    // Tags and bubbles sit just above a person's name label (offset in screen space) or above a roof,
+    // only for targets on the face that's up.
     const place = (node, target) => {
-      const person = target.kind === 'agent' || target.kind === 'owner';
-      const below = UNDER_KINDS.has(target.kind);   // the Spark city hangs: its tags sit under the target
-      const p = this.targetPoint(target, person || below ? 0 : 0.4);
+      const person = target.kind === 'agent' || target.kind === 'owner' || target.kind === 'runner';
+      const p = this.facesUp(target) ? this.targetPoint(target, person ? 0 : 0.4) : null;
       if (!p) { node.hidden = true; return; }
       world.project(p, point);
       node.hidden = !point.visible;
       node.classList.toggle('on-person', person);
-      node.classList.toggle('is-under', below);
-      node.style.transform = `translate3d(${point.x.toFixed(1)}px, ${point.y.toFixed(1)}px, 0) ${below ? 'translate(-50%, 0)' : 'translate(-50%, -100%)'}`;
+      node.style.transform = `translate3d(${point.x.toFixed(1)}px, ${point.y.toFixed(1)}px, 0) translate(-50%, -100%)`;
     };
     const bubbleOnHover = this.bubbleTarget && this.hover && this.bubbleTarget.kind === this.hover.kind && this.bubbleTarget.id === this.hover.id;
     if (this.hover && this.hoverInfo && !bubbleOnHover) place(this.tag, this.hover);
@@ -399,7 +413,7 @@ class CityView {
     for (const [key, label] of labels) {
       if (!label.on) continue;
       const runner = label.kind === 'runner', w = label.w ?? label.estW ?? 120;
-      const top = runner ? label.py + RUNNER_DROP : label.py - LABEL_LIFT - LABEL_H;
+      const top = label.py - LABEL_LIFT - LABEL_H;
       const priority = key === selected ? 100 : key === hovered ? 90 : key === 'owner' ? OWNER_PRIORITY : runner ? LABEL_PRIORITY.active : LABEL_PRIORITY[label.agent?.status] ?? 30;
       items.push({
         key, rect: { left: label.px - w / 2, right: label.px + w / 2, top, bottom: top + LABEL_H }, ax: label.px, ay: label.py,
@@ -511,7 +525,7 @@ class CityView {
     const target = { kind: 'agent', id };
     this.select(target);
     this.focusSelection();
-    this.npcs.greet(id, this.world.camera.position);
+    this.npcs.greet(id, this.cameraLocal());
     this.showBubble(target, this.bubbleText(agent));
     this.stage.focus({ preventScroll: true });
   }
@@ -529,19 +543,23 @@ class CityView {
     top = Math.max(8, Math.min(H - pop.h - 8, top));
     this.clusterPop.style.transform = `translate3d(${left.toFixed(1)}px, ${top.toFixed(1)}px, 0)`;
   }
-  /** World point above a target (agents/owner: above the head; buildings: above the roof). */
+  /** WORLD point above a target (agents/owner: above the head; buildings: above the roof), so
+   *  overlays track the island however it is turned. Spark points are "above" toward island -y. */
   targetPoint(target, lift = 0) {
     if (!target) return null;
-    if (target.kind === 'agent' || target.kind === 'owner') { const p = this.npcs.position(target); return p ? new THREE.Vector3(p.x, p.y + this.npcs.headroom(target) + lift, p.z) : null; }
-    if (target.kind === 'building') { const b = this.buildings.get(target.id); return b ? b.topPoint().add(new THREE.Vector3(0, lift, 0)) : null; }
-    if (target.kind === 'hq') return new THREE.Vector3(0, 11.4 + lift, -2.95);
-    if (target.kind === 'spark') { const b = this.spark.buildings.get(target.id); return b ? b.topPoint() : null; }
+    const world = this.world, at = (x, y, z) => world.toWorld(new THREE.Vector3(x, y, z));
+    if (target.kind === 'agent' || target.kind === 'owner') { const p = this.npcs.position(target); return p ? at(p.x, p.y + this.npcs.headroom(target) + lift, p.z) : null; }
+    if (target.kind === 'building') { const b = this.buildings.get(target.id), p = b?.topPoint(); return p ? at(p.x, p.y + lift, p.z) : null; }
+    if (target.kind === 'hq') return at(0, 11.4 + lift, -2.95);
+    if (target.kind === 'spark') { const b = this.spark.buildings.get(target.id), p = b?.topPoint(); return p ? at(p.x, p.y - lift, p.z) : null; }
     if (target.kind === 'runner') { const r = this.spark.runner(target.id); return r ? this.spark.runnerHead(r) : null; }
-    if (target.kind === 'foundry') return this.spark.foundryPoint();
-    if (target.kind === 'gear') return this.spark.gearPoint(target.id);
-    if (target.kind === 'plot') { const c = cellCenter(target.i, target.j); return new THREE.Vector3(c.x, GROUND_Y + 1.4 + lift, c.z); }
+    if (target.kind === 'foundry') { const p = this.spark.foundryPoint(); return at(p.x, p.y - lift, p.z); }
+    if (target.kind === 'gear') { const p = this.spark.gearPoint(target.id); return p ? at(p.x, p.y + lift, p.z) : null; }
+    if (target.kind === 'plot') { const c = cellCenter(target.i, target.j); return at(c.x, GROUND_Y + 1.4 + lift, c.z); }
     return null;
   }
+  /** The camera in island space (people turn to face it). */
+  cameraLocal() { return this.world.toLocal(this.world.camera.position); }
 
   /* ---------------- input ---------------- */
   bindInput() {
@@ -556,7 +574,7 @@ class CityView {
     canvas.addEventListener('pointerup', event => {
       const down = this.down; this.down = null;
       const wasDrag = this.dragging; this.dragging = false;
-      if (!down || wasDrag || down.button !== 0 || performance.now() - down.t > 600) return;
+      if (!down || wasDrag || down.button !== 0 || performance.now() - down.t > 600 || !this.world.settled) return;
       this.onClick(this.pick(event.clientX, event.clientY));
     });
     canvas.addEventListener('dblclick', event => {
@@ -571,9 +589,16 @@ class CityView {
     canvas.addEventListener('contextmenu', event => event.preventDefault());
     this.onKeyDown = event => this.keyDown(event);
     this.onKeyUp = event => this.world.keyUp(event.code);
-    this.onBlur = () => this.world.clearKeys();
+    this.onBlur = () => { this.world.clearKeys(); this.world.releaseTilt?.(); };   // a held drag lets go: the island settles flat
   }
+  /** What's under the pointer, on the face that's up only (a building hanging past the rim from the
+   *  face that's down is not pickable), and nothing while the island is turning. */
   pick(clientX, clientY) {
+    if (!this.world.settled) return null;
+    const target = this.pickAny(clientX, clientY);
+    return target && (target.kind === 'plot' || this.facesUp(target)) ? target : null;
+  }
+  pickAny(clientX, clientY) {
     const ndc = this.world.ndc(clientX, clientY);
     // Island slabs and the Spark deck are occluders: a ray never reaches through to the other side.
     const hit = this.world.raycast(ndc, [...this.npcs.pickables(), ...this.buildings.pickables(), ...this.world.hq.pickables, ...this.spark.pickables(), ...this.world.occluders(), ...this.spark.occluders()]);
@@ -591,9 +616,10 @@ class CityView {
     }
     return null;
   }
-  /** An unoccupied lot of the top city under the pointer (roads, sidewalks and the HQ plaza excluded). */
+  /** An unoccupied lot of the top city under the pointer (roads, sidewalks and the HQ plaza excluded).
+   *  Only while This PC side is up and the island is still. */
   plotAt(clientX, clientY) {
-    if (this.world.isUnder) return null;
+    if (!this.world.settled || this.world.side !== 'pc') return null;
     const ground = this.world.groundAt(this.world.ndc(clientX, clientY));
     if (!ground) return null;
     const { i, j } = cellOf(ground.x, ground.z);
@@ -716,6 +742,7 @@ class CityView {
     }
     if (code === 'KeyF') { event.preventDefault(); this.focusSelection(); }
     else if (code === 'KeyH') { event.preventDefault(); this.resetCamera(); }
+    else if (code === 'KeyV') { if (!event.repeat) { event.preventDefault(); this.flipSide(); } }
     else if (code === 'Escape') { if (this.cluster) this.closeCluster(true); else if (!this.help.hidden) this.toggleHelp(false); else this.select(null); }
     else if (event.key === '+' || event.key === '=') this.world.zoomBy(0.75);
     else if (event.key === '-' || event.key === '_') this.world.zoomBy(1.33);
@@ -732,14 +759,14 @@ class CityView {
     if (target.kind === 'spark') { this.select({ kind: 'building', id: target.id }); return; }
     if (target.kind === 'runner' || target.kind === 'foundry' || target.kind === 'gear') { this.showBubble(target, this.computeText(target)); return; }
     if (target.kind === 'owner') {
-      this.npcs.greetOwner(this.world.camera.position);
+      this.npcs.greetOwner(this.cameraLocal());
       this.showBubble(target, 'Hi! Double-click anywhere on the island to walk me there.');
       return;
     }
     this.select(target);
     if (target.kind === 'agent') {
       const agent = this.store.agent(target.id);
-      this.npcs.greet(target.id, this.world.camera.position);
+      this.npcs.greet(target.id, this.cameraLocal());
       if (agent) this.showBubble(target, this.bubbleText(agent));
     }
   }
@@ -770,16 +797,21 @@ class CityView {
     this.taskDraft = null;
     this.refreshPanel();
   }
+  /** Fly to the selection. People, the HQ and your avatar live on This PC's face: if the Spark side
+   *  is up, the island turns back over first. A building is framed on whichever face is up. */
   focusSelection() {
-    const s = this.selection;
-    if (!s) { const owner = this.npcs.ownerPosition; if (owner) this.world.flyTo({ target: new THREE.Vector3(owner.x, 1, owner.z), distance: 16, polar: 1.0 }); return; }
+    const world = this.world, s = this.selection;
+    const fly = (x, y, z, distance, polar) => world.flyAfterTurn({ target: world.toWorld(new THREE.Vector3(x, y, z), { atRest: true }), distance, polar });
+    const pcFirst = () => { if (world.underside) world.flipTo('pc'); };
+    if (!s) { const owner = this.npcs.ownerPosition; if (owner) { pcFirst(); fly(owner.x, 1, owner.z, 16, 1.0); } return; }
     if (s.kind === 'agent') {
       const p = this.npcs.position(s);
-      if (p) this.world.flyTo({ target: new THREE.Vector3(p.x, 1, p.z), distance: 15, polar: 1.02 });
+      if (p) { pcFirst(); fly(p.x, 1, p.z, 15, 1.02); }
     } else if (s.kind === 'building') {
-      const b = this.buildings.get(s.id);
-      if (b) { const height = b.size.H; this.world.flyTo({ target: new THREE.Vector3(b.origin.x, Math.min(14, height * 0.42), b.origin.z), distance: Math.max(20, height * 1.45 + b.size.W * 2.2), polar: 1.0 }); }
-    } else if (s.kind === 'hq') this.world.flyTo({ target: new THREE.Vector3(0, 3, -0.5), distance: 26, polar: 1.0 });
+      const spark = world.restSide === 'spark' && this.spark.shown ? this.spark.buildings.get(s.id) : null;
+      const b = spark || this.buildings.get(s.id);
+      if (b) { const height = b.size.H, p = b.worldPoint(0, Math.min(14, height * 0.42), 0); fly(p.x, p.y, p.z, Math.max(20, height * 1.45 + b.size.W * 2.2), 1.0); }
+    } else if (s.kind === 'hq') { pcFirst(); fly(0, 3, -0.5, 26, 1.0); }
   }
   /** show({ focusProject }) / show({ focusAgent }) once those exist in the scene. */
   tryPendingFocus() {
@@ -1123,21 +1155,32 @@ class CityView {
     this.qualityBtn.setAttribute('aria-pressed', String(high));
     this.followBtn.setAttribute('aria-pressed', String(Boolean(this.following)));
     this.helpBtn.setAttribute('aria-pressed', String(!this.help.hidden));
-    const sparkLabel = `Spark underside: ${SPARK_LABEL[this.sparkMode()]} — click to change`;
+    const sparkLabel = `Spark side: ${SPARK_LABEL[this.sparkMode()]} — click to change`;
     this.sparkBtn.title = sparkLabel; this.sparkBtn.setAttribute('aria-label', sparkLabel);
     this.sparkBtn.setAttribute('aria-pressed', String(Boolean(this.world.underside)));
     this.flipBtn.hidden = !this.world.underside;
     this.renderFlip(true);
     this.renderTimeChip();
   }
-  /** "Spark side" / "Laptop side" follows where the camera actually is. */
+  /** The flip button names where it will turn the island to; the HUD chip and legend name the face that's up. */
   renderFlip(force = false) {
-    const under = this.world.isUnder;
-    if (!force && under === this.flipUnder) return;
-    this.flipUnder = under;
-    this.flipLabel.textContent = under ? 'Laptop side' : 'Spark side';
-    const label = under ? 'Fly back up to this PC (the top city)' : 'Fly under the island to the DGX Spark city';
+    const world = this.world, on = Boolean(world.underside), rest = world.restSide, up = world.side;
+    const sig = `${on}|${rest}|${up}`;
+    if (!force && sig === this.flipSig) return;
+    this.flipSig = sig;
+    const toSpark = rest === 'pc';
+    this.flipLabel.textContent = toSpark ? 'Spark side' : 'This PC side';
+    this.flipBtn.replaceChildren(icon(toSpark ? 'city-chip' : 'city-laptop'), this.flipLabel);
+    this.flipBtn.classList.toggle('to-pc', !toSpark);
+    const label = toSpark ? 'Turn the island over to the DGX Spark side (V)' : 'Turn the island back over to This PC side (V)';
     this.flipBtn.title = label; this.flipBtn.setAttribute('aria-label', label);
+    const spark = up === 'spark';
+    this.sideChip.hidden = !on;
+    this.sideChip.classList.toggle('is-spark', spark);
+    this.sideChip.classList.toggle('is-pc', !spark);
+    clear(this.sideChip, icon(spark ? 'city-chip' : 'city-laptop'), spark ? 'DGX Spark' : 'This PC');
+    this.sideChip.title = spark ? 'The DGX Spark side of the island is up' : 'This PC side of the island is up';
+    this.legendSideText.textContent = spark ? 'Other side = This PC' : 'Other side = DGX Spark';
   }
   renderEmpty(projects) {
     const hiddenCount = this.store.projects.length - projects.length;
@@ -1158,10 +1201,16 @@ class CityView {
 
   /* ---------------- toolbar actions ---------------- */
   toggleFollow(force) {
+    const world = this.world;
     this.following = force ?? !this.following;
-    this.world.follow = this.following ? () => this.npcs.ownerPosition : null;
-    if (this.following && this.reduced()) { const p = this.npcs.ownerPosition; if (p) this.world.flyTo({ target: new THREE.Vector3(p.x, 1, p.z), distance: 22 }, { instant: true }); }
-    else if (this.following) { const p = this.npcs.ownerPosition; if (p) this.world.flyTo({ target: new THREE.Vector3(p.x, 1, p.z), distance: Math.min(this.world.distance, 34) }); }
+    if (this.following && world.underside) world.flipTo('pc');   // your avatar lives on This PC side
+    world.follow = this.following ? () => this.npcs.ownerPosition : null;
+    const p = this.following ? this.npcs.ownerPosition : null;
+    if (p) {
+      const target = world.toWorld(new THREE.Vector3(p.x, 1, p.z), { atRest: true });
+      if (this.reduced()) world.flyAfterTurn({ target, distance: 22 }, { instant: true });
+      else world.flyAfterTurn({ target, distance: Math.min(world.distance, 34) });
+    }
     this.renderToolbarState();
   }
   cycleTime() {
@@ -1193,14 +1242,13 @@ class CityView {
   cycleSpark() {
     const next = SPARK_MODES[(SPARK_MODES.indexOf(this.sparkMode()) + 1) % SPARK_MODES.length];
     this.store.setPref('citySpark', next);
-    toast(`Spark underside: ${SPARK_LABEL[next]}`, { timeout: 2200 });
+    toast(`Spark side: ${SPARK_LABEL[next]}`, { timeout: 2200 });
   }
+  /** Toolbar button / V: roll the island a half turn to its other face (the camera stays above). */
   flipSide() {
     if (!this.world?.underside) return;
     if (this.following) this.toggleFollow(false);
-    const azimuth = this.world.azimuth;
-    if (this.world.isUnder) this.world.flyTo({ ...this.world.defaultView(), azimuth }, { duration: 1.4 });
-    else this.world.flyTo(this.spark.view(azimuth), { duration: 1.4 });
+    this.world.flip();
     this.stage.focus({ preventScroll: true });
   }
 
@@ -1231,7 +1279,8 @@ class CityView {
     if (!result?.projectId || !this.visible) return;
     const c = cellCenter(lot.i, lot.j);
     this.select(null);
-    this.world.flyTo({ target: new THREE.Vector3(c.x, 2, c.z), distance: 36, polar: 0.95 });
+    if (this.world.underside) this.world.flipTo('pc');
+    this.world.flyAfterTurn({ target: this.world.toWorld(new THREE.Vector3(c.x, 2, c.z), { atRest: true }), distance: 36, polar: 0.95 });
     // Select and frame the new building as soon as it rises (cloning / scanning can take a while).
     this.pendingFocus = { kind: 'building', id: result.projectId, at: performance.now(), ttl: 90000 };
     this.tryPendingFocus();
@@ -1249,9 +1298,14 @@ class CityView {
     this.sync();
     this.world.resize();
     this.world.start();
-    // Deep link #city?side=spark flies under the island once the Spark city is shown.
-    if (params.side === 'spark') {
-      const tryFlip = (attempt = 0) => { if (this.world.underside && !this.world.isUnder) this.flipSide(); else if (!this.world.underside && attempt < 40) setTimeout(() => tryFlip(attempt + 1), 250); };
+    // Deep link #city?side=spark (or side=pc) turns the island to that face once the Spark side exists.
+    if (params.side === 'spark' || params.side === 'pc') {
+      const side = params.side;
+      const tryFlip = (attempt = 0) => {
+        if (!this.visible || this.failed) return;
+        if (this.world.underside) this.world.flipTo(side);
+        else if (side === 'spark' && attempt < 40) setTimeout(() => tryFlip(attempt + 1), 250);
+      };
       tryFlip();
     }
   }
@@ -1265,6 +1319,7 @@ class CityView {
   hide() {
     this.visible = false;
     if (this.failed || !this.world) return;
+    this.world.releaseTilt?.();
     this.world.stop();
     document.removeEventListener('keydown', this.onKeyDown);
     document.removeEventListener('keyup', this.onKeyUp);

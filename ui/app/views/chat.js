@@ -44,7 +44,7 @@ const LIVE_STARTERS = [
 /* ---------- pure helpers ---------- */
 const providerName = provider => PROVIDER_NAME[provider] || 'Agent';
 /** Windows extended-length paths (\\?\C:\...) read better without the prefix. */
-const shownPath = path => String(path || '').replace(/^\\\\\?\\/, '');
+const shownPath = path => String(path || '').replace(/^\\\\\?\\UNC\\/i, '\\\\').replace(/^\\\\\?\\/, '');
 const providerOfName = name => (/^claude/i.test(name) ? 'claude' : /^codex/i.test(name) ? 'codex' : 'other');
 const extOf = name => (/\.([a-z0-9]+)$/i.exec(name || '')?.[1] || '').toLowerCase();
 const byteLength = text => new TextEncoder().encode(String(text)).length;
