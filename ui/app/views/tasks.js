@@ -12,7 +12,7 @@ const NONE = '__none';
 const COLUMNS = [
   { id: 'todo', label: 'To do', empty: 'Nothing queued', hint: 'Queued and not started yet.' },
   { id: 'in-progress', label: 'In progress', empty: 'Nothing in flight', hint: 'An agent has picked it up and is working on it.' },
-  { id: 'waiting', label: 'Waiting on agent', empty: 'No one to wait on', hint: 'Sent, but the agent has not opened it yet. Agents check the board on their own heartbeat (about every 10–20 minutes).' },
+  { id: 'waiting', label: 'Waiting on agent', empty: 'No one to wait on', hint: 'Sent, but the agent has not opened it yet. It sees it at its next inbox check; schedules vary.' },
   { id: 'needs-you', label: 'Needs you', empty: 'You are all caught up', hint: 'An agent asked you something, or a request is blocked until you act.' },
   { id: 'done', label: 'Done', empty: 'Nothing finished yet', hint: 'Answered, finished or closed.' },
 ];
@@ -646,7 +646,7 @@ export function mount(root, ctx) {
           task.type === 'claim' && task.expiresAt ? fact('Expires', leftEl(task.expiresAt), h('span.muted', ` · ${fullTime(task.expiresAt)}`)) : null,
           fact('Created', h('span', { title: fullTime(task.createdAt) }, timeEl(task.createdAt), h('span.muted', ` · ${fullTime(task.createdAt)}`))),
           fact('Updated', timeEl(task.updatedAt))),
-        status === 'waiting' ? h('div.tk-callout.info', icon('clock'), h('p', 'The agent has not opened this yet. Agents check the board on their own heartbeat (about every 10–20 minutes), so this is normal for a while.')) : null,
+        status === 'waiting' ? h('div.tk-callout.info', icon('clock'), h('p', 'The agent has not opened this yet. It sees it at its next inbox check (schedules vary and sending does not wake it), so this is normal for a while.')) : null,
         task.type === 'request' && source.blocker ? h('div.tk-callout', icon('alert'), h('div', h('strong', 'Blocked'), h('p', typeof source.blocker === 'string' ? source.blocker : JSON.stringify(source.blocker)))) : null,
         task.type === 'request' && source.prompt ? section('Prompt', renderMarkdown(source.prompt, { compact: true })) : null,
         section(task.type === 'request' ? 'Expected result' : task.type === 'claim' ? 'Purpose' : 'Details', detail ? renderMarkdown(detail) : h('p.muted', 'No details.')),
@@ -706,7 +706,7 @@ export function mount(root, ctx) {
       h('label.field', { for: 'tk-new-project' }, 'Project', projectSelect),
       h('label.field', { for: 'tk-new-title' }, 'Title', titleInput),
       h('label.field', { for: 'tk-new-detail' }, 'Details', detailInput),
-      h('p.field-hint.tk-new-hint', icon('clock'), 'Sent as a mailbox message. The agent picks it up at its next check-in (about every 10–20 minutes); until then it shows as Waiting on agent. A task is information, not permission. Ctrl+Enter sends.'),
+      h('p.field-hint.tk-new-hint', icon('clock'), 'Sent as a mailbox message. The agent picks it up at its next inbox check (schedules vary); until then it shows as Waiting on agent. A task is information, not permission. Ctrl+Enter sends.'),
       error);
     const submit = async () => {
       const title = titleInput.value.trim();

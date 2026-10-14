@@ -9,7 +9,7 @@
 .city-canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 
 /* Glass surfaces shared by the floating chrome */
-.city-hud, .city-legend, .city-toolbar, .city-label, .city-tag, .city-empty, .city-machines {
+.city-hud, .city-legend, .city-toolbar, .city-label, .city-cluster, .city-tag, .city-empty, .city-machines {
   background: color-mix(in srgb, var(--surface) 84%, transparent);
   backdrop-filter: blur(12px) saturate(1.2);
   -webkit-backdrop-filter: blur(12px) saturate(1.2);
@@ -26,6 +26,23 @@
 .city-label-name { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
 .city-label-tag { padding: 2px 6px; border-radius: var(--radius-pill); background: rgba(245, 181, 68, .18); color: var(--warning); font-size: 9.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .city-label-tag.you { background: rgba(255, 255, 255, .22); color: #fff; }
+/* Selected / hovered person: full name and what they're doing (others show a compact label). */
+.city-label.is-full { z-index: 1; border-color: var(--accent); box-shadow: var(--shadow); }
+.city-label.is-full .city-label-name { max-width: 240px; }
+.city-label-activity { max-width: 200px; overflow: hidden; color: var(--muted); font-weight: 500; text-overflow: ellipsis; }
+
+/* "4 agents" chip where several people stand at one spot, and its list */
+.city-chips { position: absolute; inset: 0; }
+.city-cluster { position: absolute; left: 0; top: 0; display: inline-flex; align-items: center; gap: 6px; height: 24px; margin-top: -4px; padding: 0 10px 0 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); color: var(--text); font-size: 11.5px; font-weight: 700; line-height: 1; white-space: nowrap; box-shadow: var(--shadow-sm); cursor: pointer; pointer-events: auto; will-change: transform; transition: border-color var(--fast), background var(--fast); }
+.city-cluster:hover, .city-cluster[aria-expanded="true"] { border-color: var(--accent); background: var(--surface); }
+.city-cluster-pop { position: absolute; left: 0; top: 0; display: grid; gap: 6px; width: 250px; padding: 8px 8px 8px 10px; box-shadow: var(--shadow-lg); pointer-events: auto; animation: city-pop var(--med) var(--ease); }
+.city-cluster-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12.5px; }
+.city-cluster-head .icon-btn { width: 26px; height: 26px; border-radius: 8px; }
+.city-cluster-list { display: grid; gap: 2px; max-height: 248px; margin-left: -2px; overflow-y: auto; overscroll-behavior: contain; }
+.city-cluster-item { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 5px 6px; border: 0; border-radius: 9px; background: none; color: var(--text); text-align: left; cursor: pointer; }
+.city-cluster-item:hover, .city-cluster-item:focus-visible { background: var(--surface-hover); }
+.city-cluster-name { flex: 1; min-width: 0; overflow: hidden; font-size: 12.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.city-cluster-status { flex: none; color: var(--muted); font-size: 11px; }
 
 .city-gem { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--status-offline); transform: rotate(45deg); }
 .city-gem.active { background: var(--status-active); box-shadow: 0 0 7px var(--status-active); }
@@ -201,6 +218,9 @@
   .city-machines { top: auto; bottom: 70px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .city-bubble, .city-help, .city-panel, .city-task-form { animation: none; }
-  .city-toolbar, .city-meter-fill, .city-flip { transition: none; }
+  .city-bubble, .city-help, .city-panel, .city-task-form, .city-cluster-pop { animation: none; }
+  .city-toolbar, .city-meter-fill, .city-flip, .city-cluster { transition: none; }
 }
+/* The app's own Reduce motion setting (toggled on the view root). */
+.city-view.reduce-motion .city-bubble, .city-view.reduce-motion .city-help, .city-view.reduce-motion .city-panel, .city-view.reduce-motion .city-task-form, .city-view.reduce-motion .city-cluster-pop { animation: none; }
+.city-view.reduce-motion .city-toolbar, .city-view.reduce-motion .city-meter-fill, .city-view.reduce-motion .city-flip, .city-view.reduce-motion .city-cluster { transition: none; }

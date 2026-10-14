@@ -35,8 +35,84 @@ const fmtCores = n => (n % 1 ? n.toFixed(1) : String(n));
 const fmtHours = n => (n < 10 ? n.toFixed(1) : String(Math.round(n)));
 const ROUTE_CAPS = new Set(['lan', 'wan', 'ssh', 'vpn', 'usb', 'tcp', 'http', 'https', 'api']);
 const prettyRoute = route => String(route || '').split(/[-_ ]+/).filter(Boolean).map((w, k) => (ROUTE_CAPS.has(w.toLowerCase()) ? w.toUpperCase() : k ? w : w[0].toUpperCase() + w.slice(1))).join(' ');
-const MAILBOX_NOTE = 'The board is a passive shared mailbox: desktop agents read it on their own heartbeat (about every 10–20 minutes), so replies are not instant. A message is information, not permission.';
+const MAILBOX_NOTE = 'The board is a passive shared mailbox: messages wait until each desktop agent checks its inbox. Schedules vary and posting does not wake an agent. A message is information, not permission.';
 const storage = { get(key) { try { return localStorage.getItem(key); } catch { return null; } }, set(key, value) { try { localStorage.setItem(key, value); } catch { /* optional */ } } };
+// Name labels: screen-space declutter (see declutterLabels) re-run every DECLUTTER_MS.
+const LABEL_MAX = 10;            // labels + cluster chips on screen at once (selected/hovered always show)
+const DECLUTTER_MS = 120;
+const LABEL_H = 22, CHIP_H = 24, LABEL_LIFT = 4, RUNNER_DROP = 4;   // match .city-label / .city-cluster in city.css
+const LABEL_PRIORITY = { active: 60, idle: 40, offline: 20 };
+const OWNER_PRIORITY = 55;       // "You": above idle people and idle groups (chips get +10), below working agents
+const SHORT_NAME = 18;
+const OWNER_TARGET = Object.freeze({ kind: 'owner' });
+const shortName = name => (name.length > SHORT_NAME ? `${name.slice(0, SHORT_NAME - 1).trimEnd()}…` : name);
+const chipWidth = n => Math.round(34 + `${n} agents`.length * 6.6);
+
+/** Screen-space label declutter. Pure (no DOM), so it can be checked headless.
+ * items: [{ key, rect: { left, top, right, bottom }, ax, ay, priority, dist, pinned, clusterable }]
+ *   rect is where the label would sit; (ax, ay) is the projected head it hangs from.
+ * Pinned items (selected / hovered) always show. Clusterable items whose anchors fall inside an
+ * ellipse (radius.x by radius.y px) around a stronger neighbour become one chip (chipRect gives its
+ * box). Everything else is placed greedily by priority, then nearest first, and stays hidden when it
+ * would overlap a placed label, a chip, a blocker (HUD, legend, toolbar, panels) or once `max` entries
+ * show; a hidden person whose label lands on (or who stands near) a chip joins that chip instead.
+ * Returns { shown: Set<key>, chips: [{ key, members, anchors, dx, dy }], clusterOf: Map<key, chipKey> }. */
+export function declutterLabels(items, {
+  bounds = null, blockers = [], max = 10, gap = 3, radius = { x: 56, y: 28 }, stick = 1.3, minCluster = 2, chipRect = null, prev = null,
+  chipBonus = 10,   // a chip stands for several people: it outranks one person of the same status
+  nudges = [[0, 0], [0, -28], [0, 28], [-64, 0], [64, 0], [-64, -28], [64, -28], [-64, 28], [64, 28], [0, 56], [0, -56]],
+} = {}) {
+  const hit = (a, b) => a.left < b.right + gap && b.left < a.right + gap && a.top < b.bottom + gap && b.top < a.bottom + gap;
+  const offscreen = r => Boolean(bounds) && (r.right <= bounds.left || r.left >= bounds.right || r.bottom <= bounds.top || r.top >= bounds.bottom);
+  const order = (a, b) => (b.priority - a.priority) || (a.dist - b.dist) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+  const shown = new Set(), chips = [], clusterOf = new Map(), placed = [];
+  for (const item of items.filter(i => i.pinned).sort(order)) { shown.add(item.key); placed.push({ rect: item.rect, chip: null }); }
+  // People standing at one spot: the strongest unclaimed person gathers everyone inside its ellipse
+  // (a little wider for last pass's cluster-mates, so groups don't flicker as people shuffle).
+  const rest = items.filter(i => !i.pinned && !offscreen(i.rect)).sort(order);
+  const taken = new Set(), entries = [];
+  for (const seed of rest) {
+    if (taken.has(seed.key)) continue;
+    taken.add(seed.key);
+    const group = [seed];
+    if (seed.clusterable && chipRect) {
+      const was = prev?.get(seed.key);
+      for (const other of rest) {
+        if (taken.has(other.key) || !other.clusterable) continue;
+        const k = was && prev.get(other.key) === was ? stick : 1;
+        const dx = (other.ax - seed.ax) / (radius.x * k), dy = (other.ay - seed.ay) / (radius.y * k);
+        if (dx * dx + dy * dy <= 1) { group.push(other); taken.add(other.key); }
+      }
+    }
+    if (group.length < minCluster) { entries.push(seed); continue; }
+    const key = `cluster:${seed.key}`, anchors = group.map(m => m.key);
+    for (const member of anchors) clusterOf.set(member, key);
+    entries.push({ chip: true, key, members: [...anchors], anchors, ax: group.reduce((s, m) => s + m.ax, 0) / group.length, ay: Math.min(...group.map(m => m.ay)), dx: 0, dy: 0, priority: seed.priority + chipBonus, dist: seed.dist });
+  }
+  entries.sort(order);
+  let count = placed.length;
+  for (const entry of entries) {
+    if (entry.chip) {
+      // Next to a group that already has a chip: one chip for both. Otherwise nudge it clear of
+      // labels and panels; with no room left it folds into a chip it would touch, or waits.
+      const n = entry.members.length, spots = nudges.map(([dx, dy]) => ({ r: chipRect(entry.ax + dx, entry.ay + dy, n), dx, dy }));
+      let host = placed.find(p => p.chip && hit(spots[0].r, p.rect));
+      const spot = host || count >= max ? null : spots.find(s => !offscreen(s.r) && !blockers.some(b => hit(s.r, b)) && !placed.some(p => hit(s.r, p.rect)));
+      if (spot) { entry.dx = spot.dx; entry.dy = spot.dy; placed.push({ rect: spot.r, chip: entry }); chips.push(entry); count++; continue; }
+      host ||= placed.find(p => p.chip && spots.some(s => hit(s.r, p.rect)));
+      if (host) host.chip.members.push(...entry.members);
+      continue;
+    }
+    const r = entry.rect;
+    const blocked = blockers.some(b => hit(r, b)), other = placed.find(p => hit(r, p.rect));
+    if (!blocked && !other && count < max) { shown.add(entry.key); placed.push({ rect: r, chip: null }); count++; continue; }
+    if (!entry.clusterable) continue;
+    const near = p => p.chip && ((entry.ax - p.chip.ax) / (radius.x * 2)) ** 2 + ((entry.ay - p.chip.ay) / (radius.y * 2)) ** 2 <= 1;
+    const host = other?.chip ? other : placed.find(near);
+    if (host) host.chip.members.push(entry.key);
+  }
+  return { shown, chips, clusterOf };
+}
 
 export function mount(root, ctx) {
   const view = new CityView(root, ctx);
@@ -55,6 +131,10 @@ class CityView {
     this.hover = null;
     this.labels = new Map();
     this.runnerLabels = new Map();
+    this.chips = new Map();          // cluster chips ("4 agents") by key
+    this.cluster = null;             // the open cluster list { key, members, w, h }
+    this.clusterOf = new Map();
+    this.declutterAt = 0;
     this.motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
     this.slots = new SlotMap();
     this.cells = new Map(); this.occupied = new Set(); this.reserved = new Map(); this.rings = 1;
@@ -77,7 +157,11 @@ class CityView {
     this.tag = h('div.city-tag', { hidden: true, 'aria-hidden': 'true' });
     this.bubble = h('div.city-bubble', { hidden: true, role: 'status' });
     this.labelLayer = h('div.city-labels', { 'aria-hidden': 'true' });
-    this.overlay = h('div.city-overlay', this.labelLayer, this.tag, this.bubble);
+    this.chipLayer = h('div.city-chips');
+    // Scrolling over a chip still zooms the city.
+    this.chipLayer.addEventListener('wheel', event => { event.preventDefault(); this.world?.renderer.domElement.dispatchEvent(new WheelEvent('wheel', event)); }, { passive: false });
+    this.clusterPop = h('div.city-cluster-pop.card', { hidden: true, role: 'dialog', 'aria-label': 'Agents at this spot' });
+    this.overlay = h('div.city-overlay', this.labelLayer, this.chipLayer, this.tag, this.bubble, this.clusterPop);
 
     this.stats = h('div.city-hud-stats');
     this.timeChip = h('span.city-chip');
@@ -175,6 +259,7 @@ class CityView {
   sync() {
     if (this.failed || !this.world) return;
     this.dirty = false;
+    this.root.classList.toggle('reduce-motion', this.reduced());
     const store = this.store;
     const projects = store.visibleProjects('city');
     const hold = Boolean(this.plotDialog && performance.now() - this.plotDialog.at < PLOT_HOLD_MS);
@@ -240,34 +325,40 @@ class CityView {
   updateOverlays() {
     const world = this.world, cam = world.camera;
     cam.updateMatrixWorld();
-    const scratch = new THREE.Vector3(), point = { x: 0, y: 0, visible: false };
+    const scratch = this.scratch ||= new THREE.Vector3(), point = { x: 0, y: 0, visible: false };
     const camPos = cam.position, under = world.isUnder;
-    // HTML labels ignore depth: top-city names only from above, Spark runner tags only from below.
+    // 1. Project every name label (math only, no DOM). HTML labels ignore depth: top-city names only
+    //    from above, Spark runner tags only from below.
+    const projectLabel = (label, fadeFrom, fadeOver) => {
+      world.project(scratch, point);
+      label.dist = camPos.distanceTo(scratch);
+      label.fade = Math.max(0, Math.min(1, fadeFrom - label.dist / fadeOver));
+      label.on = point.visible && label.fade > 0.04;
+      label.px = point.x; label.py = point.y;
+    };
     for (const [id, label] of this.runnerLabels) {
       const runner = under ? this.spark.runner(id) : null;
-      if (!runner) { if (!label.node.hidden) label.node.hidden = true; continue; }
+      label.on = false;
+      if (!runner) continue;
       this.spark.runnerHead(runner, scratch);
-      world.project(scratch, point);
-      const fade = Math.max(0, Math.min(1, 1.7 - camPos.distanceTo(scratch) / 130));
-      const show = point.visible && fade > 0.04;
-      if (label.node.hidden === show) label.node.hidden = !show;
-      if (!show) continue;
-      label.node.style.transform = `translate3d(${point.x.toFixed(1)}px, ${point.y.toFixed(1)}px, 0) translate(-50%, 0)`;
-      label.node.style.opacity = String(fade.toFixed(2));
+      projectLabel(label, 1.7, 130);
     }
     for (const [key, label] of this.labels) {
-      const pos = under ? null : key === 'owner' ? this.npcs.ownerPosition : this.npcs.position({ kind: 'agent', id: key });
-      if (!pos) { label.node.hidden = true; continue; }
-      scratch.set(pos.x, pos.y + this.npcs.headroom(key === 'owner' ? { kind: 'owner' } : { kind: 'agent', id: key }), pos.z);
-      world.project(scratch, point);
-      const dist = camPos.distanceTo(scratch);
-      const fade = Math.max(0, Math.min(1, 1.5 - dist / 110));
-      const show = point.visible && fade > 0.04;
-      if (label.node.hidden === show) label.node.hidden = !show;
-      if (!show) continue;
-      label.node.style.transform = `translate3d(${point.x.toFixed(1)}px, ${point.y.toFixed(1)}px, 0) translate(-50%, -100%)`;
-      label.node.style.opacity = String(fade.toFixed(2));
+      const target = key === 'owner' ? OWNER_TARGET : { kind: 'agent', id: key };
+      const pos = under ? null : this.npcs.position(target);
+      label.on = false;
+      if (!pos) continue;
+      scratch.set(pos.x, pos.y + this.npcs.headroom(target), pos.z);
+      projectLabel(label, 1.5, 110);
     }
+    // 2. Throttled: decide which labels and cluster chips show (one read pass, then writes).
+    const now = performance.now();
+    if (now >= this.declutterAt) { this.declutterAt = now + DECLUTTER_MS; this.declutter(); }
+    // 3. Every frame: shown labels and chips follow the heads.
+    for (const label of this.runnerLabels.values()) this.placeLabel(label, 'translate(-50%, 0)');
+    for (const label of this.labels.values()) this.placeLabel(label, 'translate(-50%, -100%)');
+    this.placeChips();
+    this.placeClusterPop();
     // Tags and bubbles sit just above a person's name label (offset in screen space) or above a roof.
     const place = (node, target) => {
       const person = target.kind === 'agent' || target.kind === 'owner';
@@ -284,6 +375,159 @@ class CityView {
     if (this.hover && this.hoverInfo && !bubbleOnHover) place(this.tag, this.hover);
     else this.tag.hidden = true;
     if (this.bubbleTarget) place(this.bubble, this.bubbleTarget);
+  }
+  /** Label declutter pass: reads first (panel rects, label sizes), then writes. */
+  declutter() {
+    const { w: W, h: H } = this.world.size;
+    const base = this.overlay.getBoundingClientRect();
+    const blockers = [];
+    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.help, this.empty, this.tag, this.bubble, this.clusterPop]) {
+      if (node.hidden) continue;
+      const r = node.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) blockers.push({ left: r.left - base.left, top: r.top - base.top, right: r.right - base.left, bottom: r.bottom - base.top });
+    }
+    const labels = [...this.labels.entries(), ...[...this.runnerLabels].map(([id, label]) => [`runner:${id}`, label])];
+    for (const [, label] of labels) if (label.w == null && !label.node.hidden) label.w = label.node.offsetWidth || null;
+    // Writes from here on. The selected / hovered person gets the full label (name + activity).
+    const pinKey = t => (t?.kind === 'agent' ? t.id : t?.kind === 'owner' ? 'owner' : t?.kind === 'runner' ? `runner:${t.id}` : null);
+    const selected = pinKey(this.selection), hovered = pinKey(this.hover);
+    for (const [key, label] of this.labels) {
+      const full = key === selected || key === hovered;
+      if (label.full !== full) { label.full = full; this.renderLabel(label); }
+    }
+    const items = [];
+    for (const [key, label] of labels) {
+      if (!label.on) continue;
+      const runner = label.kind === 'runner', w = label.w ?? label.estW ?? 120;
+      const top = runner ? label.py + RUNNER_DROP : label.py - LABEL_LIFT - LABEL_H;
+      const priority = key === selected ? 100 : key === hovered ? 90 : key === 'owner' ? OWNER_PRIORITY : runner ? LABEL_PRIORITY.active : LABEL_PRIORITY[label.agent?.status] ?? 30;
+      items.push({
+        key, rect: { left: label.px - w / 2, right: label.px + w / 2, top, bottom: top + LABEL_H }, ax: label.px, ay: label.py,
+        priority: priority + (label.show ? 1 : 0),   // already showing wins ties: no swapping as the camera drifts
+        dist: label.dist, pinned: key === selected || key === hovered, clusterable: !runner && Boolean(label.agent),
+      });
+    }
+    const result = declutterLabels(items, {
+      bounds: { left: 0, top: 0, right: W, bottom: H }, blockers, max: LABEL_MAX, prev: this.clusterOf,
+      chipRect: (x, y, n) => { const w = chipWidth(n); return { left: x - w / 2, right: x + w / 2, top: y - LABEL_LIFT - CHIP_H, bottom: y - LABEL_LIFT }; },
+    });
+    this.clusterOf = result.clusterOf;
+    for (const [key, label] of labels) label.show = result.shown.has(key);
+    this.renderChips(result.chips);
+  }
+  placeLabel(label, shift) {
+    const show = Boolean(label.on && label.show);
+    if (label.node.hidden === show) label.node.hidden = !show;
+    if (!show) return;
+    label.node.style.transform = `translate3d(${label.px.toFixed(1)}px, ${label.py.toFixed(1)}px, 0) ${shift}`;
+    label.node.style.opacity = label.fade.toFixed(2);
+  }
+  /** "4 agents" chips for people standing at one spot; clicking one lists them. */
+  renderChips(chips) {
+    const seen = new Set();
+    for (const chip of chips) {
+      const agents = chip.members.map(id => this.labels.get(id)?.agent).filter(Boolean);
+      if (agents.length < 2) continue;
+      const key = chip.key;
+      seen.add(key);
+      let entry = this.chips.get(key);
+      if (!entry) {
+        entry = { node: h('button.city-cluster', { type: 'button', hidden: true, 'aria-haspopup': 'dialog', 'aria-expanded': 'false', onclick: event => this.toggleCluster(key, event) }), sig: '' };
+        this.chips.set(key, entry);
+        this.chipLayer.append(entry.node);
+      }
+      Object.assign(entry, { members: agents.map(a => a.id), anchors: chip.anchors, dx: chip.dx, dy: chip.dy });
+      const best = ['active', 'idle'].find(s => agents.some(a => a.status === s)) || 'offline';
+      const names = agents.map(a => a.name).join(', ');
+      const sig = `${best}|${names}`;
+      if (entry.sig === sig) continue;
+      entry.sig = sig;
+      clear(entry.node, h(`span.city-gem.${best}`), `${agents.length} agents`);
+      entry.node.title = names;
+      entry.node.setAttribute('aria-label', `${agents.length} agents here: ${names}. Show the list.`);
+    }
+    for (const [key, entry] of this.chips) {
+      if (seen.has(key)) continue;
+      if (entry.node === document.activeElement) this.stage.focus({ preventScroll: true });
+      entry.node.remove();
+      this.chips.delete(key);
+    }
+  }
+  /** Centre of a group's heads in screen space (x: mean, y: the highest head). */
+  groupPoint(keys) {
+    let x = 0, y = Infinity, n = 0, fade = 0;
+    for (const key of keys) {
+      const label = this.labels.get(key);
+      if (!label?.on) continue;
+      x += label.px; y = Math.min(y, label.py); fade = Math.max(fade, label.fade); n++;
+    }
+    return n ? { x: x / n, y, fade } : null;
+  }
+  placeChips() {
+    for (const entry of this.chips.values()) {
+      const p = this.groupPoint(entry.anchors);
+      if (entry.node.hidden === Boolean(p)) entry.node.hidden = !p;
+      if (!p) continue;
+      entry.node.style.transform = `translate3d(${(p.x + entry.dx).toFixed(1)}px, ${(p.y + entry.dy).toFixed(1)}px, 0) translate(-50%, -100%)`;
+      entry.node.style.opacity = p.fade.toFixed(2);
+    }
+  }
+  toggleCluster(key, event) {
+    if (this.cluster?.key === key) { this.closeCluster(); return; }
+    const entry = this.chips.get(key);
+    if (!entry) return;
+    this.closeCluster();
+    const rank = a => LABEL_PRIORITY[a.status] ?? 0;
+    const agents = entry.members.map(id => this.store.agent(id)).filter(Boolean).sort((a, b) => rank(b) - rank(a) || a.name.localeCompare(b.name));
+    if (!agents.length) return;
+    clear(this.clusterPop,
+      h('div.city-cluster-head', h('strong', `${agents.length} agents here`), iconButton('close', 'Close list', () => this.closeCluster(true))),
+      h('div.city-cluster-list', ...agents.map(a => h('button.city-cluster-item', {
+        type: 'button', title: `${a.name} · ${STATUS_LABEL[a.status] || a.status}`,
+        onclick: () => this.pickFromCluster(a.id),
+        onpointerenter: () => this.setHover({ kind: 'agent', id: a.id }),
+        onpointerleave: () => { if (!this.pointer) this.setHover(null); },
+      }, portrait(a.look, { size: 28, provider: a.provider, status: a.status }), h('span.city-cluster-name', a.name), h('span.city-cluster-status', STATUS_LABEL[a.status] || a.status)))));
+    this.clusterPop.hidden = false;
+    this.cluster = { key, members: agents.map(a => a.id), w: this.clusterPop.offsetWidth, h: this.clusterPop.offsetHeight };
+    entry.node.setAttribute('aria-expanded', 'true');
+    this.placeClusterPop();
+    if (event?.detail === 0) this.clusterPop.querySelector('.city-cluster-item')?.focus({ preventScroll: true });   // opened from the keyboard
+  }
+  closeCluster(refocus = false) {
+    if (!this.cluster) return;
+    const chip = this.chips.get(this.cluster.key)?.node;
+    chip?.setAttribute('aria-expanded', 'false');
+    this.cluster = null;
+    this.clusterPop.hidden = true;
+    this.clusterPop.replaceChildren();
+    if (!this.pointer && this.hover?.kind === 'agent') this.setHover(null);   // a row was hovered
+    if (refocus) (chip?.isConnected ? chip : this.stage).focus({ preventScroll: true });
+  }
+  pickFromCluster(id) {
+    this.closeCluster();
+    const agent = this.store.agent(id);
+    if (!agent) return;
+    const target = { kind: 'agent', id };
+    this.select(target);
+    this.focusSelection();
+    this.npcs.greet(id, this.world.camera.position);
+    this.showBubble(target, this.bubbleText(agent));
+    this.stage.focus({ preventScroll: true });
+  }
+  /** The open cluster list rides above its group (below it near the top edge), kept inside the view. */
+  placeClusterPop() {
+    const pop = this.cluster;
+    if (!pop) return;
+    const p = this.groupPoint(pop.members);
+    if (!p) { this.closeCluster(); return; }
+    const { w: W, h: H } = this.world.size;
+    const lift = LABEL_LIFT + CHIP_H + 8 - Math.min(0, this.chips.get(pop.key)?.dy || 0);
+    const left = Math.max(8, Math.min(W - pop.w - 8, p.x - pop.w / 2));
+    let top = p.y - lift - pop.h;
+    if (top < 8) top = p.y + 12;
+    top = Math.max(8, Math.min(H - pop.h - 8, top));
+    this.clusterPop.style.transform = `translate3d(${left.toFixed(1)}px, ${top.toFixed(1)}px, 0)`;
   }
   /** World point above a target (agents/owner: above the head; buildings: above the roof). */
   targetPoint(target, lift = 0) {
@@ -308,7 +552,7 @@ class CityView {
       if (this.down && Math.hypot(event.clientX - this.down.x, event.clientY - this.down.y) > 5) this.dragging = true;
     });
     canvas.addEventListener('pointerleave', () => { this.pointer = null; this.setHover(null); });
-    canvas.addEventListener('pointerdown', event => { this.down = { x: event.clientX, y: event.clientY, t: performance.now(), button: event.button }; this.dragging = false; this.stage.focus({ preventScroll: true }); });
+    canvas.addEventListener('pointerdown', event => { this.down = { x: event.clientX, y: event.clientY, t: performance.now(), button: event.button }; this.dragging = false; this.closeCluster(); this.stage.focus({ preventScroll: true }); });
     canvas.addEventListener('pointerup', event => {
       const down = this.down; this.down = null;
       const wasDrag = this.dragging; this.dragging = false;
@@ -372,6 +616,7 @@ class CityView {
     if (prev?.kind === 'plot') this.plotMarker.hide();
     if ((prev?.kind === 'agent' || prev?.kind === 'owner') && !same(prev, this.selection)) this.npcs.setHighlight(prev, false);
     this.hover = target;
+    this.declutterAt = 0;   // expand the hovered person's label right away
     if (target?.kind === 'building') this.buildings.get(target.id)?.setHover(true);
     if (target?.kind === 'spark') this.spark.setHover(target.id, true);
     if (target?.kind === 'runner') this.spark.runner(target.id)?.person.setHighlight(true);
@@ -471,7 +716,7 @@ class CityView {
     }
     if (code === 'KeyF') { event.preventDefault(); this.focusSelection(); }
     else if (code === 'KeyH') { event.preventDefault(); this.resetCamera(); }
-    else if (code === 'Escape') { if (!this.help.hidden) this.toggleHelp(false); else this.select(null); }
+    else if (code === 'Escape') { if (this.cluster) this.closeCluster(true); else if (!this.help.hidden) this.toggleHelp(false); else this.select(null); }
     else if (event.key === '+' || event.key === '=') this.world.zoomBy(0.75);
     else if (event.key === '-' || event.key === '_') this.world.zoomBy(1.33);
   }
@@ -516,6 +761,7 @@ class CityView {
     const prev = this.selection;
     if (prev?.kind === 'agent' && !(this.hover?.kind === 'agent' && this.hover.id === prev.id)) this.npcs.setHighlight(prev, false);
     this.selection = target && target.kind !== 'owner' ? target : null;
+    this.declutterAt = 0;
     this.buildings.select(this.selection?.kind === 'building' ? this.selection.id : null);
     if (this.selection?.kind === 'agent') this.npcs.setHighlight(this.selection, true);
     if (!this.selection && this.bubbleTarget?.kind === 'agent') { this.bubble.hidden = true; this.bubbleTarget = null; }
@@ -663,7 +909,7 @@ class CityView {
     button.disabled = true;
     try {
       await this.store.post({ to: agent.address, kind: 'question', subject: 'Status check' + (project ? ' [' + project.name + ']' : ''), body: 'Quick status check from the City view: what are you working on, and anything blocked?' });
-      toast(`Asked ${agent.name} for a status update. Desktop agents read the board on their heartbeat (about 10–20 min).`, { kind: 'success', timeout: 7000 });
+      toast(`Asked ${agent.name} for a status update. It will see the question when it next checks its inbox.`, { kind: 'success', timeout: 7000 });
     } catch (error) { toast(`Could not post: ${error.message}`, { kind: 'error' }); }
     finally { button.disabled = false; }
   }
@@ -753,15 +999,30 @@ class CityView {
     for (const [key, label] of this.labels) if (!wanted.has(key) || (key !== 'owner' && !this.npcs.position({ kind: 'agent', id: key }))) { label.node.remove(); this.labels.delete(key); }
     for (const [key, agent] of wanted) {
       if (key !== 'owner' && !this.npcs.position({ kind: 'agent', id: key })) continue;
-      const name = agent ? agent.name : this.store.avatar?.name || 'You';
-      const sig = JSON.stringify(agent ? [name, agent.status, agent.visiting, agent.provider] : ['owner', name]);
       let label = this.labels.get(key);
-      if (!label) { label = { node: h('div.city-label', { hidden: true }), sig: '' }; this.labels.set(key, label); this.labelLayer.append(label.node); }
-      if (label.sig === sig) continue;
-      label.sig = sig;
-      label.node.className = `city-label ${agent ? `provider-${agent.provider || 'other'}` : 'is-owner'}`;
-      clear(label.node, agent ? h(`span.city-gem.${agent.status}`) : null, h('span.city-label-name', name), agent?.visiting ? h('span.city-label-tag', 'visiting') : null, !agent ? h('span.city-label-tag.you', 'you') : null);
+      if (!label) { label = { node: h('div.city-label', { hidden: true }), sig: '', kind: key === 'owner' ? 'owner' : 'agent', full: false, show: false, on: false, w: null }; this.labels.set(key, label); this.labelLayer.append(label.node); }
+      label.agent = agent;
+      label.name = String(agent ? agent.name : this.store.avatar?.name || 'You');
+      this.renderLabel(label);
     }
+    this.declutterAt = 0;
+  }
+  /** Compact label (status gem + short name) unless the person is selected or hovered: then the
+   *  full name, "visiting" and what they're doing. */
+  renderLabel(label) {
+    const agent = label.agent, full = Boolean(label.full);
+    const name = full || !agent ? label.name : shortName(label.name);
+    const activity = full && agent ? String(agent.activity || '').replace(/\s+/g, ' ').trim().slice(0, 90) : '';
+    const visiting = full && Boolean(agent?.visiting);
+    const sig = JSON.stringify([agent ? agent.provider || 'other' : 'owner', agent?.status, name, full, visiting, activity]);
+    if (label.sig === sig) return;
+    label.sig = sig;
+    label.w = null;   // measured on the next declutter pass once it shows; until then a guess
+    label.estW = Math.round((agent ? 31 : 18) + Math.min(name.length * 6.6, full ? 240 : 150) + (visiting ? 61 : 0) + (agent ? 0 : 35) + (activity ? 5 + Math.min(activity.length * 6, 200) : 0));
+    label.node.className = `city-label ${agent ? `provider-${agent.provider || 'other'}` : 'is-owner'}${full ? ' is-full' : ''}`;
+    clear(label.node, agent ? h(`span.city-gem.${agent.status}`) : null, h('span.city-label-name', name),
+      visiting ? h('span.city-label-tag', 'visiting') : null, agent ? null : h('span.city-label-tag.you', 'you'),
+      activity ? h('span.city-label-activity', activity) : null);
   }
   /** Spark runner name tags: "codex · rust · 16 cores". */
   syncRunnerLabels() {
@@ -769,11 +1030,13 @@ class CityView {
     for (const [id, label] of this.runnerLabels) if (!wanted.has(id)) { label.node.remove(); this.runnerLabels.delete(id); }
     for (const [id, runner] of wanted) {
       let label = this.runnerLabels.get(id);
-      if (!label) { label = { node: h('div.city-label', { hidden: true }), sig: '' }; this.runnerLabels.set(id, label); this.labelLayer.append(label.node); }
+      if (!label) { label = { node: h('div.city-label', { hidden: true }), sig: '', kind: 'runner', show: false, on: false, w: null }; this.runnerLabels.set(id, label); this.labelLayer.append(label.node); }
       const text = jobLabel(runner.job), provider = runner.job?.provider || 'other';
       const sig = `${text}|${provider}`;
       if (label.sig === sig) continue;
       label.sig = sig;
+      label.w = null;
+      label.estW = Math.round(31 + Math.min(String(text).length * 6.4, 210));
       label.node.className = `city-label is-runner provider-${provider}`;
       clear(label.node, h('span.city-gem.spark'), h('span.city-label-name', text));
     }
@@ -1006,6 +1269,7 @@ class CityView {
     document.removeEventListener('keydown', this.onKeyDown);
     document.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('blur', this.onBlur);
+    this.closeCluster();
     this.setHover(null);
     clearTimeout(this.plotClickTimer); this.plotClickTimer = 0;
     this.bubble.hidden = true; this.bubbleTarget = null;

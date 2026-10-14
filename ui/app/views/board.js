@@ -23,7 +23,7 @@ const TABS = [
   { id: 'claims', label: 'Claims', icon: 'bd-lock' },
 ];
 const PAGE = 50;
-const HEARTBEAT = 'Agents read the board on their own heartbeat (about every 10–20 minutes), so replies are not instant.';
+const HEARTBEAT = 'Messages wait until each agent checks its inbox. Schedules vary and posting does not wake an agent, so replies are not instant.';
 const ICONS = {
   'bd-lock': '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
   'bd-unlock': '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.6-1.8"/>',

@@ -15,6 +15,7 @@ const SORTS = {
   name: (a, b) => a.name.localeCompare(b.name),
   activity: (a, b) => (b.metrics.lastActivityAt || 0) - (a.metrics.lastActivityAt || 0) || a.name.localeCompare(b.name),
 };
+const PAGE_SIZE = 20;     // bounded pages: the list never grows past one page
 const SURFACE_TEXT = { board: { on: 'on the Board', from: 'from the Board' }, city: { on: 'in the City', from: 'from the City' } };
 const MANIFEST_EXAMPLE = `{
   "schema": "codaclauda.projects/1",
@@ -56,8 +57,8 @@ export function mount(root, ctx) {
     tag: '<path d="M3 12V4h8l10 10-8 8Z"/><circle cx="7.5" cy="8.5" r="1.3"/>',
   });
 
-  const state = { filter: 'all', query: '', sort: 'size', visible: false, dirty: true, frame: 0 };
-  const rows = new Map();         // project id -> { node, sig, board, city }
+  const state = { filter: 'all', query: '', sort: 'size', visible: false, dirty: true, frame: 0, page: 0, pageSig: '', focusId: null };
+  const rows = new Map();         // project id -> { node, sig, board, city } (off-page rows stay cached, detached)
   const scanning = new Set();     // normalized paths being scanned right now
   const sigs = new WeakMap();     // slot -> last signature
   let shownProjects = [];
@@ -140,6 +141,8 @@ export function mount(root, ctx) {
     if (store.prefs.reducedMotion) menu.classList.add('reduce-motion');
     for (const item of items.filter(Boolean)) {
       if (item === 'sep') { menu.append(h('div.proj-menu-sep', { role: 'separator' })); continue; }
+      // Visual scope note; the menu's aria-label and item labels carry the same scope for screen readers.
+      if (item.hint) { menu.append(h('div.proj-menu-hint', { 'aria-hidden': 'true' }, item.hint)); continue; }
       menu.append(h(`button.proj-menu-item${item.danger ? '.danger' : ''}`, {
         type: 'button', role: 'menuitem', disabled: Boolean(item.disabled), title: item.title || '',
         onclick: () => { closeMenu(); item.run(); },
@@ -229,8 +232,12 @@ export function mount(root, ctx) {
     h('div.segmented', { role: 'group', 'aria-label': 'Filter projects' }, filterButtons),
     h('div.proj-search', icon('search'), searchInput),
     h('div.proj-toolbar-end', countsNode, bulkButton));
+  const pagePrev = h('button.btn.ghost.small', { type: 'button', 'aria-label': 'Previous page of projects', onclick: () => goPage(-1) }, 'Previous');
+  const pageNext = h('button.btn.ghost.small', { type: 'button', 'aria-label': 'Next page of projects', onclick: () => goPage(1) }, 'Next');
+  const pageRange = h('span.proj-pager-range', { 'aria-live': 'polite' });
+  const pager = h('nav.proj-pager', { 'aria-label': 'Project list pages', hidden: true }, pageRange, h('div.proj-pager-controls', pagePrev, pageNext));
   const listEmpty = h('div.proj-list-empty', { hidden: true });
-  const mainArea = h('div.proj-main', toolbar, listNode, listEmpty);
+  const mainArea = h('div.proj-main', toolbar, listNode, pager, listEmpty);
   const firstRun = h('div.proj-first-run', { hidden: true });
 
   root.classList.add('projects-view');
@@ -259,6 +266,14 @@ export function mount(root, ctx) {
     state.filter = id;
     for (const button of filterButtons) button.setAttribute('aria-pressed', String(button.dataset.filter === id));
     schedule();
+  }
+  function goPage(delta) {
+    state.page += delta;
+    if (state.frame) { cancelAnimationFrame(state.frame); state.frame = 0; }
+    render();
+    // Paging from the bottom pager: bring the top of the new page back into view.
+    const top = listNode.getBoundingClientRect().top;
+    if (top < root.getBoundingClientRect().top || top < 0) listNode.scrollIntoView({ block: 'start', behavior: store.prefs.reducedMotion ? 'auto' : 'smooth' });
   }
   function haystack(p) {
     return [p.name, p.description, p.path, p.repo?.full_name, p.primaryLanguage, ...p.aliases, ...p.languages.map(l => l.name)].filter(Boolean).join(' ').toLowerCase();
@@ -304,9 +319,23 @@ export function mount(root, ctx) {
     const filterTest = FILTERS.find(f => f.id === state.filter)?.test || (() => true);
     let shown = projects.filter(p => filterTest(p) && (!query || haystack(p).includes(query)));
     if (SORTS[state.sort]) shown = [...shown].sort(SORTS[state.sort]);
-    shownProjects = shown;
+    shownProjects = shown; // every match across all pages: bulk actions apply to all of them
     bulkButton.disabled = !shown.length;
-    bulkButton.querySelector('.bulk-label').textContent = shown.length === projects.length ? 'Visibility' : `Visibility (${shown.length})`;
+    bulkButton.querySelector('.bulk-label').textContent = shown.length === projects.length ? 'Visibility' : `Visibility (${shown.length} matching)`;
+    bulkButton.title = `Show or hide all ${shown.length === projects.length ? plural(shown.length, 'project') : `${shown.length} matching ${shown.length === 1 ? 'project' : 'projects'}`} at once${shown.length > PAGE_SIZE ? ', on every page' : ''}`;
+
+    // Filter, search or sort changes return to the first page; data changes clamp to the last page.
+    const pageSig = JSON.stringify([state.filter, query, state.sort]);
+    if (pageSig !== state.pageSig) { state.pageSig = pageSig; state.page = 0; }
+    if (state.focusId) {
+      const at = shown.findIndex(p => p.id === state.focusId);
+      if (at >= 0) state.page = Math.floor(at / PAGE_SIZE);
+      state.focusId = null;
+    }
+    const pages = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
+    state.page = Math.min(pages - 1, Math.max(0, state.page));
+    const first = state.page * PAGE_SIZE;
+    const pageRows = shown.slice(first, first + PAGE_SIZE);
     for (const [key, cell] of Object.entries(headCells)) {
       if (!(key in SORTS) && key !== 'code') continue;
       const sortKey = key === 'code' ? 'size' : key;
@@ -315,7 +344,7 @@ export function mount(root, ctx) {
     }
 
     const keep = new Set();
-    shown.forEach((project, index) => {
+    pageRows.forEach((project, index) => {
       keep.add(project.id);
       const info = { linked: isLinkedLocal(project, linked), manifest: isFromManifest(project, fromManifest), agents: agentsByHome.get(project.id) || [], scanning: Boolean(project.path && scanning.has(normalizePath(project.path))) };
       const sig = rowSignature(project, info);
@@ -341,7 +370,22 @@ export function mount(root, ctx) {
       const at = rowsNode.children[index];
       if (at !== entry.node) rowsNode.insertBefore(entry.node, at || null);
     });
-    for (const [id, entry] of rows) if (!keep.has(id)) { entry.node.remove(); rows.delete(id); }
+    // Off-page rows are detached but stay cached so paging back reuses them; unlinked projects are dropped.
+    const exists = new Set(projects.map(p => p.id));
+    for (const [id, entry] of rows) {
+      if (keep.has(id)) continue;
+      if (menuState && entry.node.contains(menuState.anchor)) closeMenu();
+      entry.node.remove();
+      if (!exists.has(id)) rows.delete(id);
+    }
+
+    const focused = document.activeElement;
+    pager.hidden = !shown.length;
+    pageRange.textContent = `${shown.length ? first + 1 : 0}–${first + pageRows.length} of ${shown.length} · Page ${state.page + 1} of ${pages}`;
+    pagePrev.disabled = state.page === 0;
+    pageNext.disabled = state.page >= pages - 1;
+    // Keep keyboard focus in the pager when the button that was pressed becomes disabled.
+    if ((focused === pageNext || focused === pagePrev) && focused.disabled) (focused === pageNext ? pagePrev : pageNext).focus({ preventScroll: true });
 
     listNode.hidden = !shown.length;
     listEmpty.hidden = Boolean(shown.length) || !hasAny;
@@ -519,15 +563,22 @@ export function mount(root, ctx) {
   }
 
   function openBulkMenu(anchor) {
+    // Scope is every project matching the current filter and search, on all pages, not just the visible page.
     const n = shownProjects.length;
-    const scope = n === store.projects.length ? `all ${n}` : `${n} shown`;
+    const everything = n === store.projects.length;
+    const scope = everything ? `all ${n}` : `all ${n} matching`;
+    const multiPage = n > PAGE_SIZE;
+    const hint = everything
+      ? `Applies to all ${plural(n, 'project')}${multiPage ? ', on every page' : ''}`
+      : `Applies to all ${n} matching ${n === 1 ? 'project' : 'projects'}${multiPage ? ', on every page' : ''}`;
     openMenu(anchor, [
+      { hint },
       { icon: 'eye', label: `Show ${scope} in City`, run: () => bulk('city', true) },
       { icon: 'eyeOff', label: `Hide ${scope} from City`, run: () => bulk('city', false) },
       'sep',
       { icon: 'eye', label: `Show ${scope} on Board`, run: () => bulk('board', true) },
       { icon: 'eyeOff', label: `Hide ${scope} from Board`, run: () => bulk('board', false) },
-    ], 'Visibility for the projects shown');
+    ], `Visibility: ${hint.charAt(0).toLowerCase()}${hint.slice(1)}`);
   }
 
   function bulk(surface, value) {
@@ -844,10 +895,12 @@ export function mount(root, ctx) {
       state.visible = true;
       if (params.filter && FILTERS.some(f => f.id === params.filter)) setFilter(params.filter);
       if (state.frame) { cancelAnimationFrame(state.frame); state.frame = 0; }
-      render();
       const target = params.project || params.projectId;
-      const entry = target && rows.get(store.project(target)?.id);
-      if (entry) {
+      const targetId = target ? store.project(target)?.id : null;
+      state.focusId = targetId || null; // render() turns to the page that holds it
+      render();
+      const entry = targetId && rows.get(targetId);
+      if (entry?.node.isConnected) {
         entry.node.scrollIntoView({ block: 'center', behavior: store.prefs.reducedMotion ? 'auto' : 'smooth' });
         entry.node.classList.remove('flash');
         void entry.node.offsetWidth;
