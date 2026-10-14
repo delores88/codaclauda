@@ -1,7 +1,7 @@
 # ClaudaCoda
 
-An owner-controlled Windows desktop utility for asking Claude Code and Codex to
-consult each other, review changes and perform bounded delegated work. Published
+An owner-controlled Windows desktop utility for Claude and Codex coordination:
+passive mailboxes for existing chats, and separate bounded delegated work. Published
 by **DeloresAI**. First-party source is [MIT licensed](LICENSE), copyright
 Ben Van Dorn / DeloresAI. [Public source](https://github.com/delores88/codaclauda).
 
@@ -13,14 +13,26 @@ the local coordination board.
 
 ## Current status
 
-This is a development candidate. Real bidirectional provider exchange, delegated
-edit/review, installed desktop acceptance, final installer verification and normal
-Marketplace admission remain release gates until their receipts are recorded.
-Source code, parser tests, a CLI log or a packaged GUI alone do not complete those
-gates. Optional DGXBridge acceptance is tracked separately.
+[Version 0.1.0](https://github.com/delores88/codaclauda/releases/tag/v0.1.0)
+was published and accepted into the ordinary, non-featured MIT Marketplace
+catalog on October 14, 2026. Its installed GUI, real Claude/Codex exchanges,
+delegated edit/review and one shared DGXBridge job have separate local acceptance
+receipts. A Marketplace client download failure is being addressed separately;
+catalog acceptance alone does not prove successful acquisition.
 
-The release is intended for the ordinary, non-featured Marketplace catalog. No
-Marketplace acceptance or available release download is implied by this README.
+Version 0.2.0 is in development. Its primary workflow is a passive mailbox for
+existing chats: named addresses, durable questions and replies, acknowledgments,
+bounded waits, and atomic shared-resource claims. Messages wait until the recipient
+checks. No session is launched, resumed or woken for delivery. The Mailbox view
+provides readable message cards, 20-message pages, open claims and an owner post
+box. See [the mailbox commands and etiquette](docs/MAILBOX.md).
+
+The candidate also adds browser-approved updates and separates dedicated tasks
+from existing-chat messages. The earlier candidate passed hosted packaging; the
+new mailbox changes require their own process, installed UI and participation
+acceptance before publication. Experimental registered-session push remains
+separate and is not required for passive mailbox coordination. Automatic external
+wakeup of arbitrary Claude desktop chats has not been established.
 
 ## Start on Windows
 
@@ -31,24 +43,22 @@ utility is free: it does not require direct API credits or bundle a model.
 Claude/Codex subscriptions and optional Spark hardware are separate products
 with their own costs and terms.
 
-After a verified installer is available, launch ClaudaCoda. It automatically
+After installing a verified release, launch ClaudaCoda. It automatically
 finds supported provider CLIs and checks their existing sign-in once at startup.
 Choose your project with Browse and connect each provider; a detected, signed-in
 CLI is selected automatically. Rescan after installing or signing in. Advanced
 setup exposes an executable override if detection fails or needs a choice.
-Connection consent explicitly
+In the released 0.1.0 dedicated-task workflow, connection consent explicitly
 authorizes **new dedicated sessions**. Version 1 does not attach to, send input
 into or interrupt an existing desktop chat. Keep your ongoing work in those chats
-and use dedicated ClaudaCoda requests for coordination.
+and use dedicated ClaudaCoda requests for coordination. The 0.2 existing-chat
+workflow is separate and never silently substitutes a new provider session.
 
-The CLI example path below is a packaging placeholder; verify the actual installed
-CLI path in the GUI settings before use:
-
-```powershell
-$Coda = Join-Path $env:LOCALAPPDATA 'ClaudaCoda\bin\claudacoda-cli.exe'
-& $Coda --json discover
-& $Coda --json status
-```
+The CLI is bundled in `bin/claudacoda-cli.exe` beside the installed desktop
+executable. Use the actual installed path shown by the app. `--json discover`
+checks available providers; `--json status` reports connections and the resolved
+coordination board. When using another launch context, pass the reported board
+explicitly with `--state-dir` so both clients use the same history.
 
 Follow [the CLI walkthrough](docs/CLI.md) to connect both providers, create a
 bounded owner grant and run questions, edits and reviews. Typical owner requests
