@@ -59,6 +59,14 @@ enum Action {
         #[arg(long)]
         request: String,
     },
+    /// MCP bound to one owner-registered existing conversation; never launches a provider.
+    SessionMcp {
+        #[arg(long)]
+        registration: String,
+        /// Advertise Claude's opt-in channel extension; does not enable it in Claude.
+        #[arg(long)]
+        claude_channel: bool,
+    },
     #[command(hide = true)]
     Worker {
         #[arg(long)]
@@ -74,6 +82,9 @@ fn input() -> Result<Value> {
     serde_json::from_str(&data).context("Expected a JSON object on stdin")
 }
 fn run(args: Cli) -> Result<Option<Value>> {
+    let request_present = std::env::var_os("CODACLAUDA_CAPABILITY").is_some();
+    let session_present = std::env::var_os("CLAUDACODA_SESSION_CAPABILITY").is_some();
+    enforce_capability_boundary(&args.command, request_present, session_present)?;
     let store = Store::new(args.state_dir)?;
     let cli = std::env::current_exe()?;
     let capability = std::env::var("CODACLAUDA_CAPABILITY").unwrap_or_default();
@@ -81,10 +92,17 @@ fn run(args: Cli) -> Result<Option<Value>> {
         coord_core::mcp::serve(&store, &request, &capability, &cli)?;
         return Ok(None);
     }
-    ensure!(
-        capability.is_empty(),
-        "Scoped agent process cannot invoke owner operations"
-    );
+    if let Action::SessionMcp {
+        registration,
+        claude_channel,
+    } = args.command
+    {
+        let capability = std::env::var("CLAUDACODA_SESSION_CAPABILITY").map_err(|_| {
+            anyhow::anyhow!("Session capability must be supplied through the private environment")
+        })?;
+        coord_core::session_mcp::serve(&store, &registration, &capability, claude_channel)?;
+        return Ok(None);
+    }
     let result = match args.command {
         Action::Api { op } => owner_api(&store, &op, &input()?, &cli)?,
         Action::Discover => owner_api(&store, "discover", &json!({}), &cli)?,
@@ -120,21 +138,97 @@ fn run(args: Cli) -> Result<Option<Value>> {
             coord_core::worker(&store, &id, &claim, &token, &cli)?;
             return Ok(None);
         }
-        Action::Mcp { .. } => unreachable!(),
+        Action::Mcp { .. } | Action::SessionMcp { .. } => unreachable!(),
     };
     Ok(Some(result))
 }
+fn enforce_capability_boundary(
+    command: &Action,
+    request_present: bool,
+    session_present: bool,
+) -> Result<()> {
+    match command {
+        Action::Mcp { .. } => ensure!(
+            request_present && !session_present,
+            "Request MCP requires its own private capability only"
+        ),
+        Action::SessionMcp { .. } => ensure!(
+            session_present && !request_present,
+            "Session MCP requires its own private capability only"
+        ),
+        _ => ensure!(
+            !request_present && !session_present,
+            "Scoped agent process cannot invoke owner operations"
+        ),
+    }
+    Ok(())
+}
 fn main() {
     let args = Cli::parse();
+    let mcp_transport = matches!(
+        &args.command,
+        Action::Mcp { .. } | Action::SessionMcp { .. }
+    );
     match run(args) {
         Ok(Some(data)) => println!("{}", json!({"ok":true,"data":data})),
         Ok(None) => {}
         Err(e) => {
+            if mcp_transport {
+                let message: String = coord_core::redact(&format!("{e:#}"))
+                    .chars()
+                    .take(1024)
+                    .collect();
+                eprintln!("ClaudaCoda MCP stopped: {message}");
+                std::process::exit(2);
+            }
             println!(
                 "{}",
                 json!({"ok":false,"error":{"code":"REQUEST_REJECTED","message":coord_core::redact(&format!("{e:#}"))}})
             );
             std::process::exit(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn either_capability_presence_denies_owner_and_worker_commands() {
+        for command in [
+            Action::Status,
+            Action::Api {
+                op: "session-register".into(),
+            },
+            Action::Worker {
+                id: "x".into(),
+                claim: "y".into(),
+            },
+        ] {
+            assert!(enforce_capability_boundary(&command, false, false).is_ok());
+            for (request, session) in [(true, false), (false, true), (true, true)] {
+                assert!(enforce_capability_boundary(&command, request, session).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn capabilities_cannot_cross_mcp_modes() {
+        let request = Action::Mcp {
+            request: "r".into(),
+        };
+        let session = Action::SessionMcp {
+            registration: "s".into(),
+            claude_channel: false,
+        };
+        assert!(enforce_capability_boundary(&request, true, false).is_ok());
+        assert!(enforce_capability_boundary(&session, false, true).is_ok());
+        for command in [&request, &session] {
+            assert!(enforce_capability_boundary(command, false, false).is_err());
+            assert!(enforce_capability_boundary(command, true, true).is_err());
+        }
+        assert!(enforce_capability_boundary(&request, false, true).is_err());
+        assert!(enforce_capability_boundary(&session, true, false).is_err());
     }
 }

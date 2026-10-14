@@ -141,3 +141,96 @@ normal scanner admission and authenticated served-download hash.
 
 Native Computer Use policy blocks, authentication failures and Spark readiness
 remain explicit limitations; they are never replaced by fabricated acceptance.
+
+## Version 0.2 design: updates and activity
+
+Owner-approved on 2026-10-14 through the coordinated DGXBridge chat. The next
+release puts Updates and Agent setup in the navigation drawer. Its history
+separates actual active requests, requests requiring attention, and completed
+work. Each section remains bounded; completed history has pagination. Motion
+indicates delivered/acknowledged/running provider work only, never an idle
+connection or queued request, and respects reduced-motion preferences.
+
+Copyable Claude Code and Codex instructions use the installed CLI path, resolved
+board path and selected connection IDs/project. Existing external sessions use
+the JSON owner CLI only under the human's task authorization. Sessions launched
+by ClaudaCoda use their request-bound MCP tools and cannot create grants. Prompts
+describe discovery, scoped requests, stable retry IDs and bounded reply polling;
+they contain no credentials, capabilities or private request transcripts.
+
+The planned native updater follows DeloresAI's schema-7 browser-approval
+protocol, coordinated with DGXBridge. Discovery is limited to this app's
+accepted stable Windows x64 NSIS release. A cryptographically random S256
+verifier and one-use download authorization stay in memory. The system browser
+handles the owner's approval; ClaudaCoda never imports website cookies or
+provider credentials. Both the acquisition envelope and nested automated review
+must verify under the appropriate locally trusted authority and their distinct
+purposes. Bind the app, publisher, repository, source, version, platform, format,
+installer size and SHA-256 throughout discovery, approval, transfer and final
+revalidation. An expired or ambiguous authorization requires explicit approval
+again; no cached-metadata or direct-GitHub fallback is part of the updater.
+
+Installation is a separate explicit action. A narrowly scoped helper must report
+READY before the desktop exits, revalidate and rehash before setup, preserve
+the coordination board and connections, and use the normal physical per-user
+installation context. Inherited packaged-Codex installer context is refused.
+An updater check, verified download, setup exit and successful relaunch are
+separate acceptance observations. Shared code is copied only after a reviewed
+handoff with exact revision/file hashes and MIT provenance; other repositories
+and applications remain untouched by this project.
+
+The native desktop binds its actual canonical board once per physical
+installation. A small sibling settings directory records the installation root
+and board pointer, outside installer-owned payload files. Existing bindings must
+remain valid; a missing board, changed installation identity or malformed
+binding stops startup instead of selecting a new empty board. An explicit
+first-launch `--state-dir` can preserve an existing board across Windows launch
+contexts. Every GUI CLI call and update helper uses that same binding.
+
+Before setup the helper holds the coordination board's existing `state.lock`
+exclusively and refuses queued, running or unknown request states. Holding that
+guard prevents another client admitting work between the check and replacement.
+It never changes the dispatch pause setting, provider authentication or request
+records. Requests requiring owner attention retain their terminal history.
+
+## Version 0.2 correction: existing conversations and readable messages
+
+The owner's clarified primary workflow is an existing Claude conversation and
+an existing Codex conversation exchanging messages through MCP, addressed by
+their real conversation IDs. Dedicated-session work remains an explicitly
+separate option. Sending a message must never silently start or resume another
+provider engine, attach a terminal, edit provider history, or use undocumented
+IPC. An unreachable existing conversation is a visible connection problem.
+
+Registered conversations and their messages have a separate durable model from
+worker requests. Each registration records provider, exact chat ID, owner label,
+canonical project and supported delivery mode. The owner authorizes a bounded,
+expiring conversation between exact registrations. The session MCP server is
+bound to one registration through a private capability; sender identity and
+reply routing are derived server-side. A shared global MCP configuration cannot
+prove which chat called it, so this mode must state its owner-registered identity
+and must not claim provider-verified identity. Connecting the MCP server does not
+restrict the existing agent's native tools or extend the human's task authority.
+
+Messages use stable idempotency IDs, parent/root links, bounded text and hop/count
+limits. Queued means durably recorded only. Provider transport acceptance is
+distinct from recipient acknowledgment; only the recipient's bound MCP tools can
+acknowledge or reply. No implicit retry follows an ambiguous provider outcome.
+The existing state lock serializes all operations. Before new records are stored,
+schema 1 is backed up and atomically upgraded to schema 2, which old binaries
+already refuse. Legacy request history and grants remain intact.
+
+Supported push candidates are Codex's public running-server proxy plus its
+loaded-thread protocol and queue command, and Claude's opt-in MCP channel.
+Provider connection ownership must be verified before queue delivery. Claude
+channel setup requires its documented interactive opt-in; ordinary MCP alone is
+polling, and that limitation must remain visible. No development-channel consent
+is automated. Both provider adapters need actual existing-conversation delivery
+acceptance before the release can claim the primary workflow is complete.
+
+The primary message board shows a chronological conversation, readable full
+message/reply text, human sender and recipient labels, timestamps and explicit
+delivery status. It paginates at 20 messages and places exact IDs and technical
+receipts behind Details. Message content is untrusted plain text, with preserved
+line breaks and no raw HTML or remote previews. Legacy task answers also get a
+readable conversation view; existing bounded History remains available.

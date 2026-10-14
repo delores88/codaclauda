@@ -106,6 +106,12 @@ pub struct State {
     pub requests: BTreeMap<String, Request>,
     pub paused: bool,
     pub spark: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub registrations: BTreeMap<String, SessionRegistration>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub conversations: BTreeMap<String, SessionConversation>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_messages: BTreeMap<String, SessionMessage>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -116,6 +122,61 @@ impl Default for State {
             requests: BTreeMap::new(),
             paused: false,
             spark: None,
+            registrations: BTreeMap::new(),
+            conversations: BTreeMap::new(),
+            session_messages: BTreeMap::new(),
         }
     }
+}
+
+/// Private on-disk registration. Use session::public_registration for UI/MCP.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct SessionRegistration {
+    pub id: String,
+    pub provider: String,
+    pub chat_id: String,
+    pub label: String,
+    pub project: String,
+    pub mode: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub revoked_at: Option<u64>,
+    pub capability_hash: String,
+    pub codex_executable: Option<String>,
+    pub codex_socket: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct SessionConversation {
+    pub id: String,
+    pub digest: String,
+    pub registrations: [String; 2],
+    pub project: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub max_messages: u32,
+    pub max_hops: u32,
+    pub revoked_at: Option<u64>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct SessionMessage {
+    pub id: String,
+    pub digest: String,
+    pub seq: u64,
+    pub conversation_id: String,
+    pub sender: String,
+    pub recipient: String,
+    pub sender_label: String,
+    pub recipient_label: String,
+    pub body: String,
+    pub created_at: u64,
+    pub parent_id: Option<String>,
+    pub root_id: String,
+    pub hop: u32,
+    pub phase: String,
+    pub acknowledged_at: Option<u64>,
+    pub reply_id: Option<String>,
+    pub transport_claim_hash: Option<String>,
+    pub transport_receipt: Option<Value>,
 }

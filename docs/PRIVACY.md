@@ -1,11 +1,19 @@
 # ClaudaCoda privacy and local data
 
 ClaudaCoda is a DeloresAI desktop utility for owner-authorized coordination between
-Claude Code and Codex. This document describes the version-1 implementation. It
-does not claim that a development candidate has completed installed acceptance,
-been published or obtained Marketplace admission.
+Claude Code and Codex. This document describes the 0.2 release candidate. Its
+new update flow requires separate installed acceptance before release; source
+documentation alone does not establish publication or Marketplace admission.
 
 ## Data used for a request
+
+Existing-conversation messaging records owner-registered provider/chat IDs,
+human labels, an exact conversation pair, expiry/count/hop limits and the text
+and delivery receipts exchanged by that pair. It does not copy whole provider
+transcripts. Its messages are untrusted peer content, not new human authority.
+Connecting an existing agent does not restrict that agent's native tools.
+Owner registration is not proof of the invoking chat's identity when an MCP
+configuration is shared across chats; the interface identifies that boundary.
 
 The owner selects a project, allowed relative file paths, endpoints, request types
 and limits. ClaudaCoda records the request prompt, scope, expected result and
@@ -29,8 +37,9 @@ that a Spark job completed.
 
 ## Local storage and retention
 
-By default, ClaudaCoda uses the Windows LocalAppData KnownFolder, without package
-redirection, under `DeloresAI/CodaClauda`. The CLI `status` command reports the
+By default, ClaudaCoda requests the Windows LocalAppData KnownFolder with package
+redirection disabled, under `DeloresAI/CodaClauda`. Windows launch context can
+still redirect filesystem access. The CLI `status` command reports the actual
 resolved path. An owner can explicitly choose a different board with
 `--state-dir`; its filesystem location and permissions then matter as well.
 
@@ -67,6 +76,21 @@ capabilities are redacted from returned text. Redaction is a secondary safeguard
 not a guarantee that arbitrary text contains no secret. Scoped file tools also
 reject recognizable secret/internal paths and out-of-project references.
 
+Registered conversations use separate expiring, revocable MCP capabilities.
+The board stores their hashes; private setup configuration contains the secret
+and must remain local. The setup dialog offers it once and clears it when closed.
+An explicit rotation invalidates the old capability. Capabilities are neither
+provider account tokens nor permission to create unrelated conversations.
+Opted-in Claude channels can deliver notifications to their connected session;
+Codex routing requires the exact chat loaded on a reachable supported server.
+Inbox-only mode waits for the recipient to check messages and cannot wake it.
+Transport acceptance, recipient acknowledgment and a reply are distinct states.
+
+The first existing-conversation write backs up the prior schema-1 board and
+atomically moves to schema 2. Older ClaudaCoda binaries refuse that schema.
+The backup also contains private coordination history and is retained locally;
+it must not be committed or attached as public release evidence.
+
 ClaudaCoda has no public coordination listener, cloud inbox or independent
 always-on service. It starts user-level workers for authorized requests and
 scopes provider cancellation to its owned Windows process job. It does not need
@@ -81,11 +105,24 @@ their own settings and policies. Provider account and usage statements should be
 checked with those services; a locally reported cost estimate is not an invoice.
 
 The Windows GUI requires Microsoft Edge WebView2 to be installed separately.
-ClaudaCoda does not contain a runtime executable downloader or self-updater.
-Approved ClaudaCoda package updates use the normal Marketplace installation
-workflow; other installed tools manage their own updates independently. Before
-replacing or rolling back a release, stop active requests and back up local state
-and unmerged work. Cross-release data compatibility is not assumed.
+The 0.2 updater contacts `deloresai.com` to discover accepted stable ClaudaCoda
+releases. Checking sends the app identifier and the normal network information
+needed for HTTPS; it sends no coordination prompts, project files or provider
+credentials. Download authorization opens the system browser for the owner's
+Marketplace sign-in and approval. ClaudaCoda does not read or copy browser cookies.
+
+The updater keeps its short-lived proof and one-use download capability in memory.
+It verifies the acquisition signature, nested review signature, artifact identity,
+installer size and SHA-256. Installation requires a separate explicit action and
+fresh revalidation. It retains local update status and the verified installer for
+the update workflow; an interrupted or ambiguous operation is not retried silently.
+Expired authorization requires approval again. The updater does not fall back to
+unsigned metadata or a direct GitHub installer download.
+
+The installer preserves the selected coordination board, connections and history.
+Provider CLIs and optional DGXBridge manage their own updates independently. Before
+replacement or rollback, stop active requests and preserve local state and
+unmerged work. Backward compatibility with an older release is not assumed.
 
 First-party source is available under the [MIT license](../LICENSE). Third-party
 components and external services retain their own licenses and terms. Review
