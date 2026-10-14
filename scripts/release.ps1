@@ -304,9 +304,14 @@ else: raise ValueError('Unknown inspection operation')
     '{"bundle":{"useLocalToolsDir":true}}' | Set-Content -LiteralPath $bundleOverride -Encoding utf8NoBOM
     # `bundle` packages these binaries without invoking a second Cargo build.
     Invoke-ProjectCargo -CargoArgs @('tauri', 'bundle', '--bundles', 'nsis', '--target', $targetTriple, '--features', 'custom-protocol', '--config', $bundleOverride, '--ci') -Stage 'bundle-nsis'
-    $installer = Join-Path $release "bundle/nsis/CodaClauda_${version}_x64-setup.exe"
-    if (!(Test-Path -LiteralPath $installer -PathType Leaf) -or (Get-Item -LiteralPath $installer).LastWriteTimeUtc -lt $bundleStarted.AddSeconds(-2)) { throw 'Expected freshly generated x64 NSIS installer was not found.' }
-    Copy-Item -LiteralPath $installer -Destination $output
+    $bundledInstaller = Join-Path $release "bundle/nsis/CodaClauda_${version}_x64-setup.exe"
+    if (!(Test-Path -LiteralPath $bundledInstaller -PathType Leaf) -or (Get-Item -LiteralPath $bundledInstaller).LastWriteTimeUtc -lt $bundleStarted.AddSeconds(-2)) { throw 'Expected freshly generated x64 NSIS installer was not found.' }
+    # Installed 0.2 clients require this historical asset filename during discovery.
+    # Only the outer filename differs; installer product and window branding stay CodaClauda.
+    $installer = Join-Path $output "ClaudaCoda_${version}_x64-setup.exe"
+    Copy-Item -LiteralPath $bundledInstaller -Destination $installer
+    $bundledInstallerHash = (Get-FileHash -LiteralPath $bundledInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $bundledInstallerHash) { throw 'Compatibility-named installer copy differs from the bundler output.' }
     # The pinned bundler restores its input after stamping the installer copy.
     # Preserve both input and restored bytes before checking the exact transform.
     $restoredGui = Join-Path $output 'claudacoda.restored.exe'
@@ -341,7 +346,7 @@ else: raise ValueError('Unknown inspection operation')
     Copy-Item -LiteralPath 'src-tauri/Cargo.lock' -Destination (Join-Path $output 'desktop.Cargo.lock')
     Copy-Item -LiteralPath 'LICENSE', 'PROVENANCE.md', 'THIRD_PARTY_NOTICES.md' -Destination $output
     $receipt.payloads = $payloads
-    $receipt.installer = [ordered]@{file=[IO.Path]::GetFileName($installer); sha256=(Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant(); bytes=(Get-Item -LiteralPath $installer).Length; install_mode='currentUser'; webview_install_mode='skip'}
+    $receipt.installer = [ordered]@{file=[IO.Path]::GetFileName($installer); sha256=(Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant(); bytes=(Get-Item -LiteralPath $installer).Length; bundler_file=[IO.Path]::GetFileName($bundledInstaller); bundler_sha256=$bundledInstallerHash; install_mode='currentUser'; webview_install_mode='skip'}
     $receipt.acceptance.package_integrity = 'passed: extracted executable paths/hashes, auditable metadata, and notice file hashes'
     $receipt.result = 'candidate-built'
     $receipt.finished_at = [DateTime]::UtcNow.ToString('o')

@@ -200,6 +200,7 @@ export function makeManifest(input) {
   assert(['ClaudaCoda', 'CodaClauda'].includes(displayName), 'marketplaceDisplayName must be ClaudaCoda or CodaClauda');
   assert.equal(input.appId, 'claudacoda', 'Keep the existing Marketplace appId for upgrades');
   assert.equal(input.slug, 'claudacoda', 'Keep the existing Marketplace slug for upgrades');
+  assert.equal(input.installer.filename, `ClaudaCoda_${input.release.version}_x64-setup.exe`, 'Keep the historical installer filename and exact version for installed 0.2 updater compatibility');
   assert(['signed', 'unsigned'].includes(input.installer.signingStatus), 'Declare the actual installer signing status');
   const signingDisclosure = input.installer.signingStatus === 'signed'
     ? 'The installer is signed; see the release signing receipt for its verification result.'

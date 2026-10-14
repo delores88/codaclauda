@@ -10,7 +10,7 @@ function input(overrides = {}) {
   return {
     appId: 'claudacoda', slug: 'claudacoda', publisherId: 'synthetic-publisher',
     release: { id: 101, tag: 'v0.3.0', version: '0.3.0', channel: 'stable', sourceCommit: '1234567890abcdef1234567890abcdef12345678' },
-    installer: { assetId: 202, filename: 'CodaClauda_0.3.0_x64-setup.exe', signingStatus: 'unsigned' },
+    installer: { assetId: 202, filename: 'ClaudaCoda_0.3.0_x64-setup.exe', signingStatus: 'unsigned' },
     artwork: { icon: { url: `${art}icon.png` }, thumbnail: { url: `${art}thumbnail.png` }, screenshots: [{ url: `${art}mailbox.png`, alt: 'Synthetic test screenshot metadata' }] },
     requirements: { minimumOs: '10.0.26200', memoryGb: 32, diskMb: 18, gpu: null, runtimes: ['Microsoft Edge WebView2'], distributions: [] },
     functionalTest: 'Synthetic metadata validation only; not installed acceptance.',
@@ -18,13 +18,13 @@ function input(overrides = {}) {
   };
 }
 
-test('a new product version and installer name do not implicitly rename the live listing', () => {
+test('a new product version does not implicitly rename the live listing', () => {
   const manifest = makeManifest(input());
   assert.equal(manifest.name, 'ClaudaCoda');
   assert.equal(manifest.appId, 'claudacoda');
   assert.equal(manifest.slug, 'claudacoda');
   assert.equal(manifest.release.version, '0.3.0');
-  assert.equal(manifest.artifacts[0].filename, 'CodaClauda_0.3.0_x64-setup.exe');
+  assert.equal(manifest.artifacts[0].filename, 'ClaudaCoda_0.3.0_x64-setup.exe');
 });
 
 test('explicit display rename preserves every release and upgrade identity', () => {
@@ -34,7 +34,13 @@ test('explicit display rename preserves every release and upgrade identity', () 
   for (const field of ['appId', 'slug', 'publisherId', 'repository', 'release', 'artifacts', 'artwork', 'screenshots']) {
     assert.deepEqual(after[field], before[field], field);
   }
-  assert.doesNotMatch(JSON.stringify(after), /ClaudaCoda/);
+  assert.doesNotMatch(JSON.stringify({ ...after, artifacts: [] }), /ClaudaCoda/);
+});
+
+test('installer names preserve discovery by installed 0.2 clients and bind the exact version', () => {
+  for (const filename of ['CodaClauda_0.3.0_x64-setup.exe', 'ClaudaCoda_0.2.0_x64-setup.exe', '../ClaudaCoda_0.3.0_x64-setup.exe', 'ClaudaCoda_0.3.0_arm64-setup.exe']) {
+    assert.throws(() => makeManifest(input({ installer: { ...input().installer, filename } })), /historical installer filename and exact version/);
+  }
 });
 
 test('invalid display selections and changed routing identities fail closed', () => {

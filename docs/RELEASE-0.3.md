@@ -28,7 +28,8 @@ release is active; acknowledge handled messages and retain stable reply IDs.
 | Item | 0.3.0 value / behavior |
 | --- | --- |
 | Product, window, installer and shortcut display | CodaClauda |
-| Installer filename | `CodaClauda_0.3.0_x64-setup.exe` |
+| Distributed installer filename | `ClaudaCoda_0.3.0_x64-setup.exe` (0.2 updater compatibility) |
+| Internal Tauri bundle filename | `CodaClauda_0.3.0_x64-setup.exe` |
 | Application identifier / AppUserModelID | `com.deloresai.claudacoda` |
 | Desktop executable | `claudacoda.exe` |
 | CLI relative path | `bin/claudacoda-cli.exe` |
@@ -48,6 +49,17 @@ identity invariants before every package with:
 ```powershell
 python -I scripts/verify_installer_identity.py
 ```
+
+The published 0.2 updater requires the exact historical installer filename before
+it will offer an update. Keep that filename for distributed artifacts while
+direct upgrades from 0.2 remain supported. The release script copies the newly
+branded Tauri installer without changing its bytes, verifies both hashes, and
+extracts and records the compatibility-named copy. Product, window and installer
+display remain CodaClauda. The manifest generator rejects renamed or mismatched
+version filenames. Accepting both names in the new updater does not change the
+checks already installed in 0.2; retain the compatibility filename even after
+that new updater is shipped. Verify discovery from the installed 0.2 client
+against the eventual accepted artifact separately from these source checks.
 
 Changing the live Marketplace name requires coordination with its operator.
 Accepted intake copies `manifest.name` to the catalog, so publishing a manifest
