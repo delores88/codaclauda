@@ -15,6 +15,8 @@ let filter = 'all';
 let selectedRequest = null;
 let refreshing = false;
 let discovered = [];
+let discoveryPhase = 'idle';
+let discoveryPromise = null;
 let toastTimer;
 let pendingSubmission = null;
 
@@ -87,7 +89,7 @@ function renderConnections(container, settings = false) {
     pages[agent] = pageSlice(state.endpoints.filter(item => item.agent === agent), connectionPages[agent]);
     connectionPages[agent] = pages[agent].page;
   }
-  const signature = JSON.stringify([state.endpoints, settings ? connectionPages : null]);
+  const signature = JSON.stringify([state.endpoints, settings ? connectionPages : null, discoveryPhase, discovered]);
   if (container.dataset.signature === signature) return;
   const focused = container.contains(document.activeElement) ? document.activeElement.id : null;
   container.dataset.signature = signature;
@@ -98,9 +100,10 @@ function renderConnections(container, settings = false) {
     const top = element('div', 'connection-top');
     const glyph = element('div', `agent-icon ${agent}`, agent === 'codex' ? 'Cₓ' : 'C');
     const title = element('div', 'connection-title'); title.append(element('h2', '', names[agent]), element('span', '', agent === 'codex' ? 'OpenAI CLI' : 'Anthropic CLI'));
-    top.append(glyph, title, badge(endpoints.length ? 'configured' : 'not connected')); card.append(top);
+    const detection = detectionFor(agent);
+    top.append(glyph, title, badge(detection.status)); card.append(top);
+    card.append(element('p', 'connection-detection', detection.message));
     if (!endpoints.length) {
-      card.append(element('p', 'connection-description', 'Connect your CLI and choose a workspace to get started.'));
       const footer = element('div', 'connection-footer'); footer.append(element('span', 'connection-mode', 'Dedicated sessions'), button(`Connect ${names[agent]}`, 'button secondary small', () => openConnect(agent), 'plus')); card.append(footer);
     } else {
       const workspaces = element('div', settings ? 'endpoint-list' : '');
@@ -111,7 +114,7 @@ function renderConnections(container, settings = false) {
         if (settings) identity.append(button('Rename', 'button subtle small', () => openLabelEditor(item)));
         info.append(identity);
         const path = element('div', 'workspace-path'); path.title = item.workspace; path.append(icon('folder'), element('span', '', item.workspace));
-        info.append(path, element('p', 'endpoint-meta', `${item.version || 'Version unavailable'} · Auth: ${readable(item.auth_status)}`));
+        info.append(path, element('p', 'endpoint-meta', `${item.version || 'Version unavailable'} · Last connection: ${readable(item.auth_status)}`));
         if (settings) info.append(element('code', 'endpoint-id', `Agent ID: ${item.id}`), element('code', 'endpoint-executable', item.executable));
         workspaces.append(info);
       }
@@ -219,30 +222,67 @@ async function refresh(silent = false) {
     if (!silent || !$('#error-banner').textContent) showError($('#error-banner'), error);
   } finally { refreshing = false; }
 }
-async function discoverAgents() {
-  const result = await rpc('discover');
-  discovered = Array.isArray(result.agents) ? result.agents.filter(item => item.executable || item.path) : [];
-  return discovered;
+function detectionFor(agent) {
+  const candidates = discovered.filter(item => item.agent === agent && (item.executable || item.path));
+  const ready = candidates.filter(item => item.supported === true && item.authenticated === true);
+  const result = { candidates, selected: ready.length === 1 ? ready[0] : null, manual: false };
+  if (discoveryPhase === 'idle' || discoveryPhase === 'checking') return { ...result, selected: null, status: 'Checking', message: 'Checking the installed CLI and its existing sign-in…' };
+  if (discoveryPhase === 'error') return { ...result, selected: null, manual: true, status: 'Check failed', message: 'Automatic detection could not finish. Rescan or choose the executable in Advanced setup.' };
+  if (ready.length === 1) return { ...result, status: 'Signed in', message: `${names[agent]} detected and authenticated. Choose a workspace to connect.` };
+  if (ready.length > 1) return { ...result, manual: true, status: 'Choose CLI', message: 'Multiple authenticated CLIs were detected. Choose the one to use in Advanced setup.' };
+  if (!candidates.length) return { ...result, manual: true, status: 'Not found', message: `Install the official ${names[agent]} CLI, then rescan. You can also choose its executable in Advanced setup.` };
+  if (candidates.some(item => item.supported === true)) return { ...result, status: 'Sign in needed', message: `CLI detected. Sign in through ${names[agent]}’s official login using your ${agent === 'codex' ? 'ChatGPT' : 'Claude'} account, then rescan.` };
+  return { ...result, manual: true, status: 'Update needed', message: `The detected CLI does not support this connection. Update the official ${names[agent]} CLI and rescan, or choose another executable.` };
+}
+async function discoverAgents(force = false) {
+  if (discoveryPromise) return discoveryPromise;
+  if (!force && discoveryPhase !== 'idle') return discovered;
+  discoveryPhase = 'checking'; render();
+  if ($('#connect-dialog').open) renderDiscovered($('#connect-form').elements.agent.value);
+  $$('#discover, #connect-rescan').forEach(control => { control.disabled = true; });
+  discoveryPromise = (async () => {
+    try {
+      const result = await rpc('discover');
+      discovered = Array.isArray(result.agents) ? result.agents.filter(item => item && names[item.agent]) : [];
+      discoveryPhase = 'ready'; return discovered;
+    } catch (error) { discoveryPhase = 'error'; throw error; }
+    finally {
+      discoveryPromise = null;
+      $$('#discover, #connect-rescan').forEach(control => { control.disabled = false; });
+      render();
+      if ($('#connect-dialog').open) renderDiscovered($('#connect-form').elements.agent.value);
+    }
+  })();
+  return discoveryPromise;
 }
 function renderDiscovered(agent) {
+  const form = $('#connect-form'); const detection = detectionFor(agent);
+  const manual = form.dataset.manual === 'true';
+  $('#connect-detection-title').textContent = detection.status;
+  $('#connect-detection-message').textContent = detection.message;
+  const selected = detection.selected || (detection.candidates.length === 1 ? detection.candidates[0] : null);
+  $('#detected-executable').textContent = selected ? `${selected.version || 'Version unavailable'}\n${selected.executable || selected.path}` : 'No single supported, signed-in CLI selected.';
+  if (!manual) form.elements.executable.value = detection.selected ? detection.selected.executable || detection.selected.path : '';
+  if (manual || discoveryPhase !== 'checking') $('#manual-executable').hidden = !manual && !detection.manual;
+  if (detection.manual) $('#connect-advanced').open = true;
+  $('#connect-selection').textContent = manual ? 'Manual selection · checked when connecting' : detection.selected ? 'Detected CLI selected automatically' : 'Choose a CLI or complete its official sign-in';
   const host = $('#discovered-options'); host.replaceChildren();
-  const candidates = discovered.filter(item => item.agent === agent && (item.executable || item.path));
-  for (const item of candidates) {
+  for (const item of detection.candidates) {
     const path = item.executable || item.path;
-    host.append(button(`Use detected CLI${item.version ? ` · ${item.version}` : ''}`, 'detected-option', () => { $('#connect-form').elements.executable.value = path; }, 'check'));
+    const option = button(`${item.supported && item.authenticated ? 'Signed in' : item.supported ? 'Sign in needed' : 'Unsupported'} · ${item.version || path}`, 'detected-option', () => {
+      form.dataset.manual = 'true'; form.elements.executable.value = path; renderDiscovered(agent);
+    });
+    option.title = path; host.append(option);
   }
-  const first = candidates[0];
-  if (first && !$('#connect-form').elements.executable.value) $('#connect-form').elements.executable.value = first.executable || first.path;
 }
 function openConnect(agent) {
   const form = $('#connect-form'); form.reset(); form.elements.agent.value = agent;
-  form.elements.label.value = names[agent];
+  form.dataset.manual = 'false'; form.elements.label.placeholder = `${names[agent]} (default)`;
+  $('#connect-advanced').open = false; $('#connect-label-details').open = false;
+  $('#manual-executable').hidden = true;
   $('#connect-title').textContent = `Connect ${names[agent]}`;
   form.elements.executable.placeholder = `C:\\path\\to\\${agent}.exe`;
-  const existing = state.endpoints.find(item => item.agent === agent);
-  if (existing) { form.elements.executable.value = existing.executable; form.elements.workspace.value = existing.workspace; }
   clearError($('#connect-error')); renderDiscovered(agent); $('#connect-dialog').showModal();
-  if (!discovered.length) discoverAgents().then(() => { if (form.elements.agent.value === agent) renderDiscovered(agent); }).catch(error => showError($('#connect-error'), error));
 }
 function openLabelEditor(item) {
   const form = $('#label-form'); form.reset(); form.elements.id.value = item.id; form.elements.label.value = endpointLabel(item);
@@ -385,16 +425,41 @@ for (const name of ['inbox', 'history']) {
 $('#pause').addEventListener('click', event => busy(event.currentTarget, async () => {
   try { await rpc('pause', { paused: !state.paused }); await refresh(); } catch (error) { showError($('#error-banner'), error); }
 }));
-$('#discover').addEventListener('click', event => busy(event.currentTarget, async () => {
-  try { const agents = await discoverAgents(); toast(agents.length ? `Found ${agents.length} CLI candidate${agents.length === 1 ? '' : 's'}. Choose an agent connection to use one.` : 'No supported CLI was detected. Enter its executable path when connecting.'); } catch (error) { showError($('#error-banner'), error); }
+$$('#discover, #connect-rescan').forEach(control => control.addEventListener('click', async () => {
+  clearError($('#connect-dialog').open ? $('#connect-error') : $('#error-banner'));
+  try { await discoverAgents(true); toast('CLI detection updated. Sign-in status is shown on each agent.'); }
+  catch (error) { showError($('#connect-dialog').open ? $('#connect-error') : $('#error-banner'), error); }
 }));
+$('#change-executable').addEventListener('click', () => {
+  const form = $('#connect-form'); form.dataset.manual = 'true'; renderDiscovered(form.elements.agent.value); form.elements.executable.focus();
+});
+$('#connect-form').elements.executable.addEventListener('input', () => {
+  $('#connect-form').dataset.manual = 'true'; $('#connect-selection').textContent = 'Manual selection · checked when connecting';
+});
+$$('[data-pick-workspace]').forEach(control => control.addEventListener('click', () => busy(control, async () => {
+  const form = control.form; const error = form.id === 'connect-form' ? $('#connect-error') : $('#compose-error');
+  clearError(error);
+  try {
+    const result = await invoke('pick_workspace');
+    if (result.cancelled === true) return;
+    if (typeof result.path !== 'string' || !result.path) throw new Error('The folder picker did not return a workspace.');
+    const input = form.elements[control.dataset.pickWorkspace]; input.value = result.path;
+    input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true }));
+  } catch (failure) { showError(error, failure); }
+})));
 $('#connect-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.currentTarget; const control = $('button[type=submit]', form); clearError($('#connect-error'));
   await busy(control, async () => {
     try {
       const agent = form.elements.agent.value;
-      const label = form.elements.label.value.trim();
+      const label = form.elements.label.value.trim() || names[agent];
       const workspace = form.elements.workspace.value.trim();
+      if (!form.elements.executable.value.trim()) {
+        const detection = detectionFor(agent);
+        if (detection.status === 'Sign in needed') throw new Error(detection.message);
+        $('#connect-advanced').open = true; $('#manual-executable').hidden = false;
+        throw new Error('Choose a detected CLI or enter its executable in Advanced setup.');
+      }
       const matches = state.endpoints.filter(item => item.agent === agent && sameWorkspace(item.workspace, workspace) && endpointLabel(item) === label);
       if (matches.length > 1) throw new Error('Multiple connections share this label; choose a unique label for a new connection.');
       const existing = matches[0];
@@ -473,5 +538,6 @@ document.addEventListener('keydown', event => {
 render();
 invoke('preferences').then(data => { $('#cli-path').textContent = data.cli_path; $('#app-version').textContent = data.version || '0.1.0'; }).catch(error => { $('#cli-path').textContent = error.message; });
 refresh();
+discoverAgents().catch(() => { /* Cards show the failed check; the owner can rescan or choose a CLI. */ });
 setInterval(() => { if (!document.hidden) refresh(true); }, 5000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(true); });

@@ -31,8 +31,12 @@ utility is free: it does not require direct API credits or bundle a model.
 Claude/Codex subscriptions and optional Spark hardware are separate products
 with their own costs and terms.
 
-After a verified installer is available, launch ClaudaCoda, choose your repository
-and connect the two discovered executable paths. Connection consent explicitly
+After a verified installer is available, launch ClaudaCoda. It automatically
+finds supported provider CLIs and checks their existing sign-in once at startup.
+Choose your project with Browse and connect each provider; a detected, signed-in
+CLI is selected automatically. Rescan after installing or signing in. Advanced
+setup exposes an executable override if detection fails or needs a choice.
+Connection consent explicitly
 authorizes **new dedicated sessions**. Version 1 does not attach to, send input
 into or interrupt an existing desktop chat. Keep your ongoing work in those chats
 and use dedicated ClaudaCoda requests for coordination.

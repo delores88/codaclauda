@@ -45,8 +45,10 @@ with JSON commands and a newline-delimited stdio MCP server. Tauri's GUI binary
 is claudacoda.exe; it invokes only the bundled CLI using structured stdin/argv.
 The GUI has no remote content or unrestricted shell bridge.
 
-Default state uses the Windows LocalAppData KnownFolder with package redirection
-disabled so Explorer, Codex and Claude see one owner-local board. State lives
+Default state requests the Windows LocalAppData KnownFolder with package redirection
+disabled. Windows launch context may still redirect filesystem access; `status`
+reports the actual resolved board path. Explicit CLI `--state-dir` selects a
+recorded board when coordinating across launch contexts. State lives
 under DeloresAI/CodaClauda, never in another product's directories. Exclusive OS
 file locking plus atomic replacement serializes mutation. No network listener.
 State/config/log artifacts are owner-local and are not published.
@@ -65,6 +67,12 @@ endpoint directory and same-grant request/session mappings with effective labels
 it does not index unrelated chats. Labels may repeat, are untrusted display data,
 and never replace endpoint IDs for routing or authorization. Inbox, history and
 the connection directory use bounded six-item pages with clamped page controls.
+
+The desktop discovers supported provider executables and their existing sign-in
+once at startup or on explicit rescan. A single authenticated candidate is selected
+automatically; overrides stay in Advanced setup. The owner chooses a project with
+the native Windows directory dialog and consents before connecting. Discovery
+does not launch model work, inspect credentials, or change provider configuration.
 
 Agent capabilities consist of ClaudaCoda file reads, bounded file writes for
 delegation, peer requests and receipt retrieval. Direct shell tools and other

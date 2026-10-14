@@ -65,3 +65,19 @@ button:disabled{cursor:default}
   #spark-form label{flex-basis:100%}
   .modal-footer .footer-note{max-width:100%}
 }
+.connection-detection{color:var(--muted);font-size:11px;line-height:1.7;margin:18px 0;overflow-wrap:anywhere}
+.path-picker{display:flex;align-items:center;gap:10px;min-width:0}
+.path-picker input{flex:1;min-width:0;width:0}
+.path-picker .button{flex-shrink:0}
+.detection-summary{display:flex;align-items:flex-start;gap:16px;padding:16px;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin:20px 0}
+.detection-summary>div{flex:1;min-width:0}
+.detection-summary strong{font-size:12px}
+.detection-summary p{margin:7px 0 0;font-size:11px;line-height:1.7;color:var(--muted);overflow-wrap:anywhere}
+.detection-summary .button{flex-shrink:0}
+.setup-details{border-top:1px solid var(--line);padding:14px 0;margin:0}
+.setup-details summary{cursor:pointer;font-size:12px;font-weight:600;line-height:1.6}
+.setup-details summary span{font-size:10px;font-weight:400;color:var(--muted);margin-left:8px}
+.setup-details[open]>label,.setup-details[open]>p{margin-top:14px}
+.detected-executable{display:block;white-space:pre-wrap;overflow-wrap:anywhere;font-size:10px;line-height:1.8;color:var(--muted);user-select:text;margin:10px 0}
+#manual-executable{margin-top:14px}
+#manual-executable .discovered-options{max-height:150px;overflow:auto;overscroll-behavior:contain}

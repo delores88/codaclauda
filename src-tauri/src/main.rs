@@ -29,11 +29,126 @@ fn error(code: &str, message: impl Into<String>) -> Value {
     json!({"ok": false, "error": {"code": code, "message": message.into()}})
 }
 
+#[cfg(windows)]
+fn set_taskbar_icon(window: &tauri::WebviewWindow) -> Result<(), Box<dyn std::error::Error>> {
+    use windows::{
+        Win32::{
+            Foundation::{HINSTANCE, HWND, LPARAM, WPARAM},
+            System::LibraryLoader::GetModuleHandleW,
+            UI::WindowsAndMessaging::{
+                ICON_BIG, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED, LoadImageW, SendMessageW, WM_SETICON,
+            },
+        },
+        core::PCWSTR,
+    };
+
+    let hwnd = HWND(window.hwnd()?.0);
+    unsafe {
+        let module = GetModuleHandleW(None)?;
+        // tauri-build embeds our configured multi-size icon under this public ID.
+        let icon = LoadImageW(
+            Some(HINSTANCE(module.0)),
+            PCWSTR(tauri::utils::platform::WINDOWS_APP_ICON_RESOURCE_ID as usize as *const u16),
+            IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED,
+        )?;
+        // Tauri retains ICON_SMALL. This shared resource lives until process exit.
+        // WM_SETICON returns the previous icon; zero is not a failure indication.
+        SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(icon.0 as isize)));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn preferences(app: tauri::AppHandle) -> Value {
     match cli_path(&app) {
         Ok(path) => json!({"ok":true,"data":{"cli_path":path,"version":env!("CARGO_PKG_VERSION")}}),
         Err(message) => error("CLI_MISSING", message),
+    }
+}
+
+#[cfg(windows)]
+fn choose_workspace(owner: isize) -> Result<Option<PathBuf>, String> {
+    use windows::{
+        Win32::{
+            Foundation::{ERROR_CANCELLED, HWND},
+            System::Com::{
+                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+                CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+            },
+            UI::Shell::{
+                FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS,
+                FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH,
+            },
+        },
+        core::{HRESULT, w},
+    };
+
+    struct ComApartment;
+    impl Drop for ComApartment {
+        fn drop(&mut self) {
+            // Paired with the successful initialization on this dedicated thread.
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    // The dialog and all its COM interfaces remain on one fresh STA thread.
+    // The owner is the invoking Tauri window, never a caller-supplied handle.
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)
+            .ok().map_err(|e| e.to_string())?;
+        let _apartment = ComApartment;
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| e.to_string())?;
+        let options = dialog.GetOptions().map_err(|e| e.to_string())?;
+        dialog.SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR)
+            .map_err(|e| e.to_string())?;
+        dialog.SetTitle(w!("Choose your project folder")).map_err(|e| e.to_string())?;
+        if let Err(e) = dialog.Show(Some(HWND(owner as *mut std::ffi::c_void))) {
+            return if e.code() == HRESULT::from_win32(ERROR_CANCELLED.0) {
+                Ok(None)
+            } else {
+                Err(e.to_string())
+            };
+        }
+        let item = dialog.GetResult().map_err(|e| e.to_string())?;
+        let allocated = item.GetDisplayName(SIGDN_FILESYSPATH).map_err(|e| e.to_string())?;
+        let selected = allocated.to_string();
+        // GetDisplayName allocates this string even if UTF-16 conversion fails.
+        CoTaskMemFree(Some(allocated.0.cast()));
+        let path = PathBuf::from(selected.map_err(|e| e.to_string())?);
+        if !path.is_absolute() || !path.is_dir() {
+            return Err("The selected project folder is no longer available.".into());
+        }
+        Ok(Some(path))
+    }
+}
+
+/// Only user-selected directories are returned; this is not a filesystem bridge.
+#[tauri::command]
+async fn pick_workspace(window: tauri::WebviewWindow) -> Value {
+    #[cfg(windows)]
+    {
+        let owner = match window.hwnd() {
+            Ok(handle) => handle.0 as isize,
+            Err(e) => return error("DIRECTORY_PICKER_FAILED", e.to_string()),
+        };
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        if let Err(e) = std::thread::Builder::new().name("workspace-picker".into()).spawn(move || {
+            let _ = sender.send(choose_workspace(owner));
+        }) {
+            return error("DIRECTORY_PICKER_FAILED", e.to_string());
+        }
+        match receiver.await {
+            Ok(Ok(Some(path))) => json!({"ok":true,"data":{"path":path}}),
+            Ok(Ok(None)) => json!({"ok":true,"data":{"cancelled":true}}),
+            Ok(Err(message)) => error("DIRECTORY_PICKER_FAILED", message),
+            Err(_) => error("DIRECTORY_PICKER_FAILED", "The project folder chooser closed unexpectedly."),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        error("DIRECTORY_PICKER_UNAVAILABLE", "Enter your project folder path on this platform.")
     }
 }
 
@@ -90,8 +205,25 @@ async fn rpc(app: tauri::AppHandle, op: String, args: Value) -> Value {
 }
 
 fn main() {
+    #[cfg(windows)]
+    unsafe {
+        windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(
+            windows::core::w!("com.deloresai.claudacoda"),
+        )
+    }.expect("Could not set ClaudaCoda's Windows application identity");
+
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![rpc, preferences])
+        .setup(|app| {
+            #[cfg(windows)]
+            {
+                let window = app.get_webview_window("main").ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "ClaudaCoda main window is missing")
+                })?;
+                set_taskbar_icon(&window)?;
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![rpc, preferences, pick_workspace])
         .run(tauri::generate_context!())
         .expect("ClaudaCoda could not start");
 }
