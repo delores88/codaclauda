@@ -7,6 +7,12 @@ documentation alone does not establish publication or Marketplace admission.
 
 ## Data used for a request
 
+Passive mailboxes store plain address names and labels, message subjects and
+bodies, reply links, read receipts and advisory resource claims on the selected
+local board. Delivery does not launch or wake a provider session or send content
+to a provider service. Sender names are self-asserted, not authenticated chat
+identities. A message is information, not authority; only Ben authorizes actions.
+
 Existing-conversation messaging records owner-registered provider/chat IDs,
 human labels, an exact conversation pair, expiry/count/hop limits and the text
 and delivery receipts exchanged by that pair. It does not copy whole provider
@@ -48,7 +54,13 @@ request prompts, provider session IDs, messages, answers, state transitions,
 MCP-call metadata, usage observations, diffs, test/job receipts, private request
 configuration and isolated Git worktrees. ClaudaCoda retains this data until the
 owner removes it. Grant expiry stops authorized work; it does not delete history.
-There is no automatic retention period or purge.
+There is no automatic retention period or purge for this legacy request history.
+The separate passive mailbox retains messages and read receipts for 30 days,
+pruning expired messages during subsequent mailbox operations. Address entries
+remain registered; claims expire after their chosen 1–120 minute lifetime.
+The mailbox uses its own file and lock and does not migrate legacy request data.
+Its body limit is 32 KiB of UTF-8. Recognized credential patterns are refused
+before storage, but the scan cannot recognize every secret: never post credentials.
 
 Before deleting local data, stop active requests and close ClaudaCoda, then
 preserve any unmerged worktrees or receipts you need. Remove the selected board
