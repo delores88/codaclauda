@@ -114,7 +114,7 @@ impl Proxy {
             inbound,
             next_id: 1,
         };
-        proxy.call("initialize", json!({"clientInfo":{"name":"claudacoda_live","title":"ClaudaCoda existing-conversation messaging","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
+        proxy.call("initialize", json!({"clientInfo":{"name":"claudacoda_live","title":"CodaClauda existing-conversation messaging","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
         proxy.send(
             json!({"method":"initialized"}),
             Instant::now() + CALL_TIMEOUT,
@@ -198,7 +198,7 @@ fn verify_metadata(result: &Value, chat_id: &str, project: &Path) -> Result<Valu
         .context("Codex did not report the selected chat's project")?;
     ensure!(
         std::fs::canonicalize(cwd)? == std::fs::canonicalize(project)?,
-        "Codex chat project differs from its ClaudaCoda registration"
+        "Codex chat project differs from its CodaClauda registration"
     );
     Ok(
         json!({"thread_id":chat_id,"project":project,"status":thread["status"],"identity":"loaded-thread-on-connected-server","adapter":"codex-public-proxy","queue_api":"experimental"}),

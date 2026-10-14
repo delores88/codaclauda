@@ -60,7 +60,7 @@ def main():
 
     try:
         for name, label in [('claude-phaseforge', 'Claude Code PhaseForge release session'),
-                            ('codex-claudacoda', 'ClaudaCoda Codex chat')]:
+                            ('codex-claudacoda', 'CodaClauda Codex chat')]:
             run('mailbox', 'register', name, '--label', label)
         question = post('claude-phaseforge', 'codex-claudacoda', 'question', 'roundtrip-question')
         original = run(*question)

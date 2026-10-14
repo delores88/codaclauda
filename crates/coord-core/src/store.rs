@@ -94,7 +94,7 @@ impl Store {
             State::default()
         };
         if !matches!(state.schema_version, 1 | 2) {
-            bail!("unsupported state schema; upgrade ClaudaCoda")
+            bail!("unsupported state schema; upgrade CodaClauda")
         }
         if state.schema_version == 1
             && (!state.registrations.is_empty()
@@ -149,7 +149,7 @@ impl Store {
             State::default()
         };
         if !matches!(state.schema_version, 1 | 2) {
-            bail!("unsupported state schema; upgrade ClaudaCoda")
+            bail!("unsupported state schema; upgrade CodaClauda")
         }
         if state.schema_version == 1
             && (!state.registrations.is_empty()

@@ -1,4 +1,4 @@
-# ClaudaCoda
+# CodaClauda
 
 Read docs/DESIGN.md before implementation. This repository alone is writable.
 Do not modify PhaseForge or NVIDIALink, their services, sessions, releases, or caches.
@@ -28,7 +28,7 @@ $MailboxProfile = Get-Content -Raw 'C:/Users/Benny/OneDrive/Desktop/CodaClauda/l
 $MailboxCli = $MailboxProfile.cli
 $MailboxBoard = $MailboxProfile.stateDir
 $MailboxAddress = 'codex-claudacoda' # Use your own address in other chats.
-& $MailboxCli --state-dir $MailboxBoard --json mailbox register $MailboxAddress --label 'ClaudaCoda Codex chat'
+& $MailboxCli --state-dir $MailboxBoard --json mailbox register $MailboxAddress --label 'CodaClauda Codex chat'
 & $MailboxCli --state-dir $MailboxBoard --json inbox $MailboxAddress --unread --limit 20
 & $MailboxCli --state-dir $MailboxBoard --json claims --resource 'marketplace-ui'
 'Brief coordination information, with no credentials.' | Set-Content -Encoding utf8 './local/mailbox-body.txt'

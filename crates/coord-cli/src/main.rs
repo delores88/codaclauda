@@ -11,7 +11,7 @@ use std::{
 #[derive(Parser)]
 #[command(
     version,
-    about = "ClaudaCoda: owner-scoped Claude Code and Codex coordination"
+    about = "CodaClauda: owner-scoped Claude Code and Codex coordination"
 )]
 struct Cli {
     #[arg(long, global = true)]
@@ -101,7 +101,7 @@ enum Action {
     Pause,
     Resume,
     Reconnect,
-    /// Request-bound stdio MCP; launched with a private capability by ClaudaCoda.
+    /// Request-bound stdio MCP; launched with a private capability by CodaClauda.
     Mcp {
         #[arg(long)]
         request: String,
@@ -279,7 +279,7 @@ fn main() {
                     .chars()
                     .take(1024)
                     .collect();
-                eprintln!("ClaudaCoda MCP stopped: {message}");
+                eprintln!("CodaClauda MCP stopped: {message}");
                 std::process::exit(2);
             }
             let (body, code) = error_envelope(&e);

@@ -16,7 +16,7 @@ fn git_windows_worktree_accepts_canonical_and_rejects_overlong_destination() {
         &repository,
         &[
             "-c",
-            "user.name=ClaudaCoda Unit Test",
+            "user.name=CodaClauda Unit Test",
             "-c",
             "user.email=unit@example.invalid",
             "-c",
@@ -54,7 +54,7 @@ fn git_windows_worktree_accepts_canonical_and_rejects_overlong_destination() {
         add_worktree(&repository, &one_too_long)
             .unwrap_err()
             .to_string()
-            .contains("choose a shorter ClaudaCoda state directory")
+            .contains("choose a shorter CodaClauda state directory")
     );
     assert!(!one_too_long.exists());
     let mut long_parent = temp.path().canonicalize().unwrap();
@@ -68,7 +68,7 @@ fn git_windows_worktree_accepts_canonical_and_rejects_overlong_destination() {
     assert!(
         error
             .to_string()
-            .contains("choose a shorter ClaudaCoda state directory")
+            .contains("choose a shorter CodaClauda state directory")
     );
     assert!(!long_destination.exists());
     assert_eq!(git(&repository, &["status", "--porcelain"]).unwrap(), "");
@@ -283,7 +283,7 @@ fn delegation_from_repository_subdirectory_is_rejected_before_worktree_creation(
         &repository,
         &[
             "-c",
-            "user.name=ClaudaCoda Unit Test",
+            "user.name=CodaClauda Unit Test",
             "-c",
             "user.email=unit@example.invalid",
             "-c",

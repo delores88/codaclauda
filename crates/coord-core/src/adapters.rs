@@ -559,7 +559,7 @@ impl Parsed {
                     || servers[0]["status"] != "connected"
                 {
                     bail!(
-                        "Claude must connect exactly the owned ClaudaCoda MCP server; launch refused"
+                        "Claude must connect exactly the owned CodaClauda MCP server; launch refused"
                     );
                 }
                 self.claude_tools_verified = true;

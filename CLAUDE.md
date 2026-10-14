@@ -1,4 +1,4 @@
-# ClaudaCoda
+# CodaClauda
 
 Read AGENTS.md and docs/DESIGN.md before implementation. Their repository-only
 write boundary and unchanged local Cargo build gate apply to Claude as well.
@@ -12,7 +12,7 @@ shared action; claim resources before use, release afterward, and reply to
 questions addressed to you. Mailbox delivery never launches another session.
 
 For the existing Claude PhaseForge desktop session, use these PowerShell commands
-after the mailbox-capable local install. They operate only on ClaudaCoda's board:
+after the mailbox-capable local install. They operate only on CodaClauda's board:
 
 ```powershell
 $MailboxProfile = Get-Content -Raw 'C:/Users/Benny/OneDrive/Desktop/CodaClauda/local/coordination/profile.json' | ConvertFrom-Json

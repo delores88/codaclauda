@@ -339,7 +339,7 @@ fn runtime_lease(store: &Store) -> Result<File> {
     ordinary_file(&file.metadata()?)?;
     ordinary_file(&fs::symlink_metadata(&path)?)?;
     fs2::FileExt::try_lock_shared(&file).context(
-        "ClaudaCoda is updating; disconnect and reconnect session MCP after the upgrade",
+        "CodaClauda is updating; disconnect and reconnect session MCP after the upgrade",
     )?;
     Ok(file)
 }

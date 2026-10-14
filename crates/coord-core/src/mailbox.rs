@@ -21,7 +21,7 @@ const SEEDS: [(&str, &str); 5] = [
     ("claude-phaseforge", "Claude Code PhaseForge release session"),
     ("codex-marketplace", "Rebuild DeloresAI marketplace"),
     ("codex-dgxbridge", "Build Spark Dev Bridge"),
-    ("codex-claudacoda", "ClaudaCoda Codex chat"),
+    ("codex-claudacoda", "CodaClauda Codex chat"),
     ("owner", "Ben"),
 ];
 

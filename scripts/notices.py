@@ -173,7 +173,7 @@ class Inventory:
     def crate(self, name, version, users):
         label = safe_part(name) + "-" + safe_part(version)
         if name in FIRST_PARTY:
-            record = {"name": name, "version": version, "license_expression": "MIT", "source": "ClaudaCoda first-party source", "executables": users,
+            record = {"name": name, "version": version, "license_expression": "MIT", "source": "CodaClauda first-party source", "executables": users,
                       "notices": [self.save(f"crates/{label}/LICENSE", (ROOT / "LICENSE").read_bytes(), "repository/LICENSE")]}
         else:
             path, package = self.registry_package(name, version)
