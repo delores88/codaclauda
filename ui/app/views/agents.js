@@ -18,7 +18,7 @@ const ACCESSORY_LABEL = { none: 'None', glasses: 'Glasses', sunglasses: 'Shades'
 const TOP_COLORS = ['#d97757', '#10a37f', '#7c6cf2', '#2f6fed', '#e0475b', '#f5b544', '#3ccf8e', '#22c7a9', '#ff6fae', '#2b2b33', '#f2f2f5', '#5a3a26'];
 const ACCESSORY_COLORS = ['#222222', '#3a2318', '#0b2e26', '#5b6cff', '#d97757', '#e0475b', '#f2f2f5'];
 const ASK_COOLDOWN = 30 * 60e3;
-const HEARTBEAT_COPY = 'Desktop chats read the board on their own heartbeat (about every 10–20 min), so replies are not instant.';
+const HEARTBEAT_COPY = 'Desktop chats see new messages when they next check their inbox. Each one has its own schedule and sending does not wake it, so replies are not instant.';
 
 const normalizePath = path => String(path || '').replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase();
 const pickRandom = list => list[Math.floor(Math.random() * list.length)];

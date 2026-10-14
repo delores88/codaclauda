@@ -375,7 +375,7 @@ class Store extends EventTarget {
       const running = requests.filter(r => RUNNING.has(r.state));
       const lastAt = Math.max(0, ...requests.map(r => toMs(r.updated_at) || 0));
       // Dedicated endpoints are on-demand workers: show them only when they have recent work.
-      if (!running.length && now - lastAt > 24 * 3600e3) continue;
+      if (!running.length && now - lastAt > AWAKE_WINDOW) continue;
       const status = running.length ? 'active' : now - lastAt < AWAKE_WINDOW ? 'idle' : 'offline';
       const workspaceProject = projects.find(p => p.path && normalizePath(p.path) === normalizePath(endpoint.workspace));
       agents.push(this.agentRecord({ id: `endpoint:${endpoint.id}`, endpointId: endpoint.id, provider: endpoint.agent, kind: 'dedicated', name: endpoint.label || endpoint.id, status, lastAt, claims: [], involved: [], sent: [], projects, agentPrefs, requests, running, workspaceProject }));

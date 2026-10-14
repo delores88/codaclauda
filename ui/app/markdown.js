@@ -52,7 +52,9 @@ const PURIFY = {
   FORBID_TAGS: ['style', 'form', 'input', 'button', 'textarea', 'select', 'iframe', 'object', 'embed', 'video', 'audio', 'source', 'svg'],
   FORBID_ATTR: ['style', 'srcset'],
   ALLOW_DATA_ATTR: true,
-  ADD_TAGS: ['input'], // task-list checkboxes (re-checked below)
+  // task-list checkboxes (re-checked below); KaTeX's semantics/annotation are kept as
+  // elements so enhance() can drop the TeX source instead of leaving it as loose text.
+  ADD_TAGS: ['input', 'semantics', 'annotation'],
 };
 
 /** Render untrusted Markdown to a detached <div class="md"> element. */
@@ -67,6 +69,8 @@ export function renderMarkdown(text, { compact = false } = {}) {
 }
 
 function enhance(root) {
+  // KaTeX keeps the TeX source in a MathML <annotation>; WebView2 can draw it, duplicating the formula.
+  for (const note of root.querySelectorAll('annotation, annotation-xml')) note.remove();
   for (const input of root.querySelectorAll('input')) {
     if (input.type !== 'checkbox') { input.remove(); continue; }
     input.disabled = true; input.classList.add('task-check');

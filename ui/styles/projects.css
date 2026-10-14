@@ -125,6 +125,11 @@
 .proj-commits { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; color: var(--text-2); }
 .proj-recent { color: var(--success); font-size: 12px; font-weight: 600; white-space: nowrap; }
 
+/* Pager (mirrors the Tasks table pager) */
+.proj-pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 4px 4px; color: var(--muted); font-size: 12.5px; }
+.proj-pager-range { font-variant-numeric: tabular-nums; }
+.proj-pager-controls { display: flex; gap: 10px; }
+
 /* Empty states inside the list area */
 .proj-list-empty .empty, .proj-first-run .empty { border: 1px dashed var(--border-strong); border-radius: var(--radius-lg); }
 .proj-first-run .empty { padding: 64px 24px; }
@@ -139,6 +144,7 @@
 .proj-menu-item:disabled { opacity: .45; cursor: default; }
 .proj-menu-item.danger, .proj-menu-item.danger .icon { color: var(--danger); }
 .proj-menu-sep { height: 1px; margin: 4px 6px; background: var(--border); }
+.proj-menu-hint { max-width: 260px; padding: 5px 10px 6px; color: var(--muted); font-size: 12px; line-height: 1.4; }
 
 /* Modals */
 .scan-modal > p { margin: 0 0 10px; }

@@ -2,7 +2,7 @@
  *
  * Two kinds of thread:
  *   mailbox  existing desktop chats. Messages go to the passive shared board; the agent
- *            reads it on its own heartbeat (~10–20 min), so replies are not instant.
+ *            reads it when it next checks its inbox (schedules vary), so replies are not instant.
  *   live     every message starts a fresh dedicated agent session (~30–90 s per answer).
  * A message is information, not permission. Message content is untrusted and is only
  * rendered through markdown.js. Re-renders are keyed by id + signature so scroll
@@ -43,6 +43,8 @@ const LIVE_STARTERS = [
 
 /* ---------- pure helpers ---------- */
 const providerName = provider => PROVIDER_NAME[provider] || 'Agent';
+/** Windows extended-length paths (\\?\C:\...) read better without the prefix. */
+const shownPath = path => String(path || '').replace(/^\\\\\?\\/, '');
 const providerOfName = name => (/^claude/i.test(name) ? 'claude' : /^codex/i.test(name) ? 'codex' : 'other');
 const extOf = name => (/\.([a-z0-9]+)$/i.exec(name || '')?.[1] || '').toLowerCase();
 const byteLength = text => new TextEncoder().encode(String(text)).length;
@@ -275,7 +277,7 @@ export function mount(root, ctx) {
       const name = agent?.name || endpoint?.label || raw.endpointId;
       return {
         id, kind: 'live', title: raw.title || name, agentId, agent, provider, name, endpoint, endpointId: raw.endpointId,
-        workspace: endpoint?.workspace || '', status: activeRun(id) ? 'active' : 'idle', lastSeenAt: agent?.lastSeenAt || 0,
+        workspace: shownPath(endpoint?.workspace), status: activeRun(id) ? 'active' : 'idle', lastSeenAt: agent?.lastSeenAt || 0,
         look: agent?.look || agentAvatar(agentId, provider, name), missing: !endpoint && store.sync.ok,
       };
     }
@@ -448,7 +450,7 @@ export function mount(root, ctx) {
           h('div.head-sub', live && info.title !== info.name ? h('span.head-thread', info.title) : null, h('span.head-status', statusText(info)))),
         live
           ? h('span.mode-pill.live', { tabindex: '0', title: 'Each message starts a fresh dedicated agent session that reads this conversation, answers in about 30–90 seconds, then exits.' }, icon('bolt'), h('b', 'Live'), h('span.mode-detail', '· new session per message'))
-          : h('span.mode-pill.mailbox', { tabindex: '0', title: 'An existing desktop chat. It reads the shared board on its own heartbeat (usually every 10–20 minutes), so replies are not instant. A message is information, not permission.' }, icon('clock'), h('b', 'Mailbox'), h('span.mode-detail', '· replies when the agent checks in')),
+          : h('span.mode-pill.mailbox', { tabindex: '0', title: 'An existing desktop chat. Messages wait until it checks its inbox; its schedule may vary and sending does not wake it. A message is information, not permission.' }, icon('clock'), h('b', 'Mailbox'), h('span.mode-detail', '· replies when the agent checks in')),
         h('div.head-actions',
           iconButton('city', 'Show in City', () => navigate('city', { focusAgent: info.agentId })),
           iconButton('agents', 'Agent details', () => navigate('agents', { agent: info.agentId })),
@@ -666,7 +668,7 @@ export function mount(root, ctx) {
         h('strong', seen ? `${info.name} has seen your message` : `Waiting for ${info.name} to check the board`),
         h('p', seen
           ? "Their reply will appear here when they post it — you'll be notified."
-          : "Agents check in on their own schedule (usually every 10–20 minutes), so replies aren't instant. You'll be notified here."),
+          : "Messages wait until the agent checks its inbox. Its schedule may vary and sending doesn't wake it. You'll be notified here when it replies."),
         offline && !seen ? h('p.wait-extra', `${info.name} looks powered down${info.lastSeenAt ? ` (last seen ${timeAgo(info.lastSeenAt)})` : ''}. The message waits on the board until they're back.`) : null)));
   }
 
@@ -723,7 +725,7 @@ export function mount(root, ctx) {
       h('div.intro-mode', live ? pill('Live · ~30–90 s per reply', 'accent') : pill(`Mailbox · ${STATUS_LABEL[info.status] || 'Powered down'}`, info.status === 'active' ? 'success' : 'neutral')),
       h('p', live
         ? [`Each message starts a fresh ${who} session`, info.workspace ? [' in ', h('span.mono', info.workspace)] : '', '. It reads the recent conversation, answers in about 30–90 seconds, then exits.']
-        : `${info.name} is an existing desktop chat. Your message is saved to the shared board and they read it on their own heartbeat (usually every 10–20 minutes), so replies are not instant.`),
+        : `${info.name} is an existing desktop chat. Your message is saved to the shared board and it waits until they check their inbox. Their schedule may vary and sending does not wake them.`),
       h('div.intro-chips', (live ? LIVE_STARTERS : MAIL_STARTERS).map(text => h('button.intro-chip', { type: 'button', onclick: () => prefill(text) }, text))));
   }
 
@@ -813,7 +815,7 @@ export function mount(root, ctx) {
       portrait(look, { size: 36, provider, status }), h('span.newchat-text', h('strong', title), h('span', sub)), extra, icon('arrowRight', 'newchat-arrow'));
     const mailboxSection = h('section.newchat-section',
       h('header', h('h3', 'Message an existing desktop chat'), pill('Async', 'neutral')),
-      h('p.field-hint', 'Saved to the shared board. The chat reads it on its own heartbeat (usually every 10–20 minutes) and replies there.'),
+      h('p.field-hint', 'Saved to the shared board. The chat reads it when it next checks its inbox (schedules vary) and replies there.'),
       mailAgents.length
         ? h('div.newchat-list', mailAgents.map(a => row(a.look, a.provider, a.status, a.name, `${STATUS_LABEL[a.status] || ''} · ${a.lastSeenAt ? `seen ${timeAgo(a.lastSeenAt)}` : 'not seen yet'}`, providerPill(a.provider), () => select(`mail:${a.address}`))))
         : h('div.newchat-empty', 'No desktop chats have registered a mailbox yet. An agent appears here after it runs the mailbox register command from docs/MAILBOX.md.'));
@@ -825,7 +827,7 @@ export function mount(root, ctx) {
           const provider = e.agent === 'claude' || e.agent === 'codex' ? e.agent : 'other';
           const needsAuth = e.auth_status && e.auth_status !== 'authenticated';
           return row(store.agent(`endpoint:${e.id}`)?.look || agentAvatar(`endpoint:${e.id}`, provider, e.label || e.id), provider, undefined, e.label || e.id,
-            `Fresh ${providerName(provider)} session per message, ~30–90 s${e.workspace ? ` · ${e.workspace}` : ''}`,
+            `Fresh ${providerName(provider)} session per message, ~30–90 s${e.workspace ? ` · ${shownPath(e.workspace)}` : ''}`,
             needsAuth ? pill('Sign-in needed', 'warning') : providerPill(provider), () => startLive(e.id));
         }))
         : h('div.newchat-empty', h('span', 'No live endpoints yet. Connect Claude Code or Codex in Classic tools to start live chats.'),
@@ -889,7 +891,7 @@ export function mount(root, ctx) {
     refreshSendState();
     const who = info.provider === 'other' ? info.name : providerName(info.provider);
     const note = mailbox
-      ? `Saved to the shared board — ${info.name} reads it at their next check-in (~10–20 min). A message is information, not permission.`
+      ? `Saved to the shared board — ${info.name} reads it at their next inbox check (schedules vary; sending doesn't wake them). A message is information, not permission.`
       : run ? `${who} is answering — press Stop to cancel.` : `Starts a fresh ${who} session for this message — replies in ~30–90 s.`;
     if (note !== state.noteSig) {
       state.noteSig = note;

@@ -541,7 +541,7 @@ export function mount(root, ctx) {
       h('p.field-hint.av-privacy', icon('av-lock'), h('span', 'Your photo stays on this PC. If you ask an agent to build your avatar, the photo is saved to the board\'s attachments folder so that agent can open it.'))),
     section('agent', 'Have an agent build it', 'agents', 'Send your photo to a Claude or Codex agent. It designs your avatar and replies on the board.',
       agentList, h('div.av-send-row', sendBtn), sendHint, requestsBox,
-      h('p.field-hint.av-agent-note', icon('clock'), h('span', 'Agents reply when they next check the board. Existing chats look about every 10–20 minutes, so this is not instant. A reply is a suggestion: nothing changes until you preview or apply it.'))),
+      h('p.field-hint.av-agent-note', icon('clock'), h('span', 'Agents reply when they next check their inbox. Each agent has its own schedule and sending does not wake it, so this is not instant. A reply is a suggestion: nothing changes until you preview or apply it.'))),
     section('basics', 'Name & skin', 'av-drop', null,
       field('Name', nameInput),
       colorField('Skin tone', 'skin', SKIN)),
