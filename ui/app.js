@@ -1,6 +1,7 @@
 /* First-party ClaudaCoda desktop UI. No remote content, dependencies, or seeded data. */
 'use strict';
 import { activeStates, requestGroup, setupPrompt, updatePresentation, taskConversations, messagePage, messageDelivery } from './view-model.js';
+import { createMailbox } from './mailbox.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -11,7 +12,7 @@ const kindIcons = { question: 'message', review: 'check', delegate: 'branch' };
 const pageSize = 6;
 const requestPages = { inbox: 1, history: 1, live: 1 };
 const connectionPages = { codex: 1, claude: 1 };
-let view = 'messages';
+let view = 'mailbox';
 let filter = 'active';
 let selectedRequest = null;
 let refreshing = false;
@@ -46,6 +47,7 @@ let messageGeneration = 0;
 let messageLoadError = '';
 let pendingRegistration = null;
 let pendingConversation = null;
+const mailbox = createMailbox({ rpc, renderMessageBody, localTime, toast });
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -106,11 +108,13 @@ function switchView(next) {
   view = next;
   $$('.page-view').forEach(node => node.classList.toggle('hidden', node.id !== `view-${next}`));
   $$('.nav-item').forEach(node => node.classList.toggle('active', node.dataset.view === next));
-  $('#view-label').textContent = { messages: 'Messages', sessions: 'Conversation setup', board: 'Dedicated tasks', history: 'Task activity & history', connections: 'Dedicated connections', setup: 'Dedicated task setup', updates: 'Updates' }[next];
+  $('#view-label').textContent = { mailbox: 'Mailbox', messages: 'Messages', sessions: 'Conversation setup', board: 'Dedicated tasks', history: 'Task activity & history', connections: 'Dedicated connections', setup: 'Dedicated task setup', updates: 'Updates' }[next];
+  $('#top-new-request').lastChild.textContent = next === 'mailbox' ? 'Write message' : 'New conversation';
   $('#navigation-drawer').close();
   render();
   $('.page-scroll').scrollTop = 0;
   if (next === 'updates') updateOperation('status');
+  if (next === 'mailbox') mailbox.refresh();
   if (next === 'messages' || next === 'sessions') refreshSessions();
   if (next === 'sessions') {
     const form = $('#session-register-form');
@@ -755,10 +759,10 @@ $$('.nav-item').forEach(node => node.addEventListener('click', () => switchView(
 $$('[data-go]').forEach(node => node.addEventListener('click', () => switchView(node.dataset.go)));
 $('#open-navigation').addEventListener('click', () => $('#navigation-drawer').showModal());
 $('#navigation-drawer').addEventListener('click', event => { if (event.target === event.currentTarget && event.offsetX > event.currentTarget.clientWidth) event.currentTarget.close(); });
-$('#top-new-request').addEventListener('click', () => switchView('sessions'));
-$('#top-new-request').lastChild.textContent = 'New conversation';
+$('#top-new-request').addEventListener('click', () => view === 'mailbox' ? mailbox.openComposer() : switchView('sessions'));
+$('#top-new-request').lastChild.textContent = 'Write message';
 $('#new-request').innerText = 'New dedicated task';
-$('#view-label').textContent = 'Messages';
+$('#view-label').textContent = 'Mailbox';
 $('#view-board h1').textContent = 'Dedicated tasks';
 $('#conversation-filter').addEventListener('click', event => {
   const control = event.target.closest('[data-message-source]'); if (!control || control.dataset.messageSource === conversationSource) return;
@@ -859,11 +863,11 @@ $('#prompt-recipient').addEventListener('click', event => {
 $('#copy-setup-prompt').addEventListener('click', () => copyText($('#setup-prompt').value, $('#setup-prompt')));
 $('#copy-update-code').addEventListener('click', () => copyText(updateState.approval_code || ''));
 $('#confirm-update-install').addEventListener('click', () => { $('#update-install-dialog').close(); if (updateState.actions.includes('install')) updateOperation('install'); });
-$('.brand').addEventListener('click', event => { event.preventDefault(); switchView('messages'); });
+$('.brand').addEventListener('click', event => { event.preventDefault(); switchView('mailbox'); });
 $$('[data-close]').forEach(node => node.addEventListener('click', () => $(`#${node.dataset.close}`).close()));
 $('#detail-dialog').addEventListener('close', () => { selectedRequest = null; });
 $('#new-request').addEventListener('click', () => { $('#navigation-drawer').close(); openComposer(); });
-$('#refresh').addEventListener('click', event => busy(event.currentTarget, () => Promise.all([refresh(), refreshSessions()])));
+$('#refresh').addEventListener('click', event => busy(event.currentTarget, () => view === 'mailbox' ? mailbox.refresh() : Promise.all([refresh(), refreshSessions()])));
 $('#history-search').addEventListener('input', () => { requestPages.history = 1; render(); });
 $('#inbox-filters').addEventListener('click', event => {
   const control = event.target.closest('[data-filter]'); if (!control) return;
@@ -985,12 +989,13 @@ $('#theme-toggle').addEventListener('click', () => applyTheme(document.documentE
 try { const saved = localStorage.getItem('codaclauda.theme'); if (saved === 'light' || saved === 'dark') applyTheme(saved); } catch { /* No local preferences available. */ }
 document.addEventListener('keydown', event => {
   if (event.key.toLowerCase() !== 'n' || event.ctrlKey || event.metaKey || event.altKey || $('dialog[open]') || /INPUT|TEXTAREA|SELECT/.test(event.target.tagName)) return;
-  event.preventDefault(); openComposer();
+  event.preventDefault(); if (view === 'mailbox') mailbox.openComposer(); else openComposer();
 });
 render();
 updateSessionMode();
 invoke('preferences').then(data => { preferences = data; $('#cli-path').textContent = data.cli_path; $('#app-version').textContent = data.version || 'Unknown version'; renderSetup(); }).catch(error => { $('#cli-path').textContent = error.message; renderSetup(); });
 refresh();
+mailbox.refresh();
 refreshSessions();
 discoverAgents().catch(() => { /* Cards show the failed check; the owner can rescan or choose a CLI. */ });
 setInterval(() => { if (!document.hidden) { refresh(true); if (['messages', 'sessions'].includes(view)) refreshSessions(); } }, 5000);

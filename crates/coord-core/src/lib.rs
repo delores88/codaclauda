@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod mailbox;
 pub mod mcp;
 pub mod model;
 pub mod paths;
@@ -231,6 +232,7 @@ fn public_endpoint(endpoint: &Endpoint) -> Value {
 
 pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value> {
     match op {
+        "mailbox-register" | "mailbox-directory" | "mailbox-post" | "mailbox-inbox" | "mailbox-ack" | "mailbox-wait-reply" | "mailbox-claims" => mailbox::api(store, op.strip_prefix("mailbox-").unwrap(), a),
         "session-probe" => session_transport::probe(store, field(a, "registration_id")?),
         "session-register" | "session-rotate" | "session-conversation" | "session-list" | "session-revoke" => session::owner_api(store, op, a),
         "discover" => Ok(adapters::discover()),

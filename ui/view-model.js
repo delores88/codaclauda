@@ -19,6 +19,35 @@ export function messageDelivery(value) {
   return labels[value] || 'Status unavailable';
 }
 
+// Owner mailbox posts carry information, never a new agent permission grant.
+export function mailboxPayload(fields) {
+  const text = key => String(fields[key] || '').trim();
+  const kind = text('kind');
+  if (!['notice', 'question', 'reply', 'claim', 'release'].includes(kind)) throw new Error('Choose a supported message kind.');
+  const payload = { to: text('to'), from: 'owner', kind, subject: text('subject'), body: String(fields.body || '') };
+  if (!payload.to || !payload.subject || !payload.body.trim()) throw new Error('Recipient, subject and message are required.');
+  if (kind === 'reply') {
+    if (!text('reply_to')) throw new Error('A reply needs the original message ID.');
+    payload.reply_to = text('reply_to');
+  }
+  if (['claim', 'release'].includes(kind)) {
+    if (!text('resource')) throw new Error('Enter the exact shared resource name.');
+    payload.resource = text('resource');
+  }
+  if (kind === 'claim') {
+    const ttl = Number(fields.ttl);
+    if (!Number.isInteger(ttl) || ttl < 1 || ttl > 120) throw new Error('Claim expiry must be a whole number from 1 to 120 minutes.');
+    payload.ttl = ttl;
+  }
+  return payload;
+}
+
+export function mailboxAttempt(previous, payload, newId) {
+  const fingerprint = JSON.stringify(payload);
+  if (previous && previous.fingerprint !== fingerprint) throw new Error('The previous post has an uncertain outcome. Inspect its recipient inbox before starting a changed draft.');
+  return previous || { id: newId, fingerprint };
+}
+
 // Legacy requests remain separate from registered existing-chat conversations.
 export function taskConversations(requests, label = value => value) {
   const groups = new Map();

@@ -16,6 +16,13 @@ use tauri::Manager;
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 
 const OPERATIONS: &[&str] = &[
+    "mailbox-register",
+    "mailbox-directory",
+    "mailbox-post",
+    "mailbox-inbox",
+    "mailbox-ack",
+    "mailbox-wait-reply",
+    "mailbox-claims",
     "discover",
     "status",
     "connect",

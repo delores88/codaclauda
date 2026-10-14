@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { requestGroup, activeStates, setupPrompt, psLiteral, updatePresentation, taskConversations, messagePage, messageDelivery } from '../view-model.js';
+import { requestGroup, activeStates, setupPrompt, psLiteral, updatePresentation, taskConversations, messagePage, messageDelivery, mailboxPayload, mailboxAttempt } from '../view-model.js';
 
 test('only dispatched states are active; queue and attention remain distinct', () => {
   for (const state of ['delivered', 'acknowledged', 'running']) {
@@ -77,4 +77,29 @@ test('updater progress and approval URL use real bounded values', () => {
   assert.equal(valid.progress, 100); assert.equal(valid.total, 100); assert.ok(valid.approvalUrl);
   for (const values of [{}, { total_bytes: 0, progress_bytes: 2 }, { total_bytes: 20, progress_bytes: -1 }]) assert.equal(updatePresentation(values).progress, null);
   assert.equal(updatePresentation({ approval_url: 'javascript:alert(1)' }).approvalUrl, null);
+});
+
+test('owner mailbox posts keep plain text and cannot select another sender', () => {
+  const body = '    indented code\n<script>literal only</script>\n';
+  const payload = mailboxPayload({ to: 'claude', from: 'codex', kind: 'notice', subject: ' FYI ', body, resource: 'unused', ttl: 999, reply_to: 'unused' });
+  assert.deepEqual(payload, { to: 'claude', from: 'owner', kind: 'notice', subject: 'FYI', body });
+  assert.throws(() => mailboxPayload({ ...payload, kind: 'execute' }));
+  assert.throws(() => mailboxPayload({ ...payload, body: '   ' }));
+});
+test('claim and reply fields are explicit and bounded', () => {
+  const common = { to: 'codex', subject: 'Build check', body: 'Please check the shared slot.' };
+  const claim = mailboxPayload({ ...common, kind: 'claim', resource: 'shared build slot', ttl: '120' });
+  assert.equal(claim.resource, 'shared build slot'); assert.equal(claim.ttl, 120);
+  for (const ttl of [0, 121, 1.5, 'bad']) assert.throws(() => mailboxPayload({ ...claim, ttl }));
+  assert.throws(() => mailboxPayload({ ...common, kind: 'release', resource: '' }));
+  assert.throws(() => mailboxPayload({ ...common, kind: 'reply', reply_to: '' }));
+  assert.equal(mailboxPayload({ ...common, kind: 'reply', reply_to: 'original-id' }).reply_to, 'original-id');
+  assert.ok(!('ttl' in mailboxPayload({ ...claim, kind: 'release' })));
+});
+test('uncertain mailbox posts retry unchanged with one stable ID', () => {
+  const payload = mailboxPayload({ to: 'claude', kind: 'question', subject: 'Review', body: 'Any concern?' });
+  const first = mailboxAttempt(null, payload, 'first-id');
+  assert.equal(mailboxAttempt(first, payload, 'unused-id'), first);
+  assert.throws(() => mailboxAttempt(first, { ...payload, body: 'Changed' }, 'new-id'), /uncertain outcome/);
+  assert.equal(mailboxAttempt(null, { ...payload, body: 'Changed' }, 'new-id').id, 'new-id');
 });

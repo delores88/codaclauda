@@ -278,6 +278,7 @@ else: raise ValueError('Unknown inspection operation')
     $release = Join-Path $target "$targetTriple/release"
     $cli = Join-Path $release 'claudacoda-cli.exe'
     & python -I (Join-Path $projectRoot 'scripts/test-session-mcp.py') --cli $cli 2>&1 | Tee-Object -FilePath (Join-Path $output 'session-mcp-process-tests.log') | Out-Host
+    & python -I (Join-Path $projectRoot 'scripts/test-mailbox.py') --cli $cli --output (Join-Path $projectRoot 'local/mailbox-process-tests') 2>&1 | Tee-Object -FilePath (Join-Path $output 'mailbox-process-tests.log') | Out-Host
     $resources = Join-Path $projectRoot 'dist/bin'
     New-Item -ItemType Directory -Path $resources -Force | Out-Null
     $extras = @(Get-ChildItem -LiteralPath $resources -Force | Where-Object { $_.Name -ne 'claudacoda-cli.exe' -or $_.PSIsContainer })

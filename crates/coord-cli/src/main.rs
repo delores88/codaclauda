@@ -3,8 +3,9 @@ use clap::{Parser, Subcommand};
 use coord_core::{owner_api, store::Store};
 use serde_json::{Value, json};
 use std::{
+    fs::File,
     io::{self, Read},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 #[derive(Parser)]
@@ -22,6 +23,52 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Manage passive, self-asserted mailbox addresses. Never starts an agent.
+    Mailbox {
+        #[command(subcommand)]
+        command: MailboxAction,
+    },
+    /// Save a passive message. Its contents do not grant task authority.
+    Post {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        from: String,
+        #[arg(long, value_parser = ["notice", "question", "reply", "claim", "release"])]
+        kind: String,
+        #[arg(long)]
+        subject: String,
+        #[arg(long)]
+        body_file: PathBuf,
+        #[arg(long)]
+        reply_to: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        resource: Option<String>,
+        /// Advisory claim lifetime in minutes, from 1 to 120.
+        #[arg(long)]
+        ttl: Option<u64>,
+    },
+    Inbox {
+        addr: String,
+        #[arg(long, default_value_t = 0)]
+        since: u64,
+        #[arg(long)]
+        unread: bool,
+        #[arg(long, default_value_t = 20)]
+        limit: u64,
+    },
+    Ack { addr: String, id: String },
+    WaitReply {
+        id: String,
+        #[arg(long, default_value_t = 20)]
+        timeout: u64,
+    },
+    Claims {
+        #[arg(long)]
+        resource: Option<String>,
+    },
     /// Structured owner operation; reads one JSON object from stdin.
     Api {
         op: String,
@@ -75,11 +122,35 @@ enum Action {
         claim: String,
     },
 }
+#[derive(Subcommand)]
+enum MailboxAction {
+    Register {
+        name: String,
+        #[arg(long)]
+        label: String,
+    },
+    Directory,
+}
+
+fn read_mailbox_body(path: &Path) -> Result<String> {
+    let mut bytes = Vec::new();
+    File::open(path)
+        .context("Could not open the mailbox body file")?
+        .take(32_772)
+        .read_to_end(&mut bytes)
+        .context("Could not read the mailbox body file")?;
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+    ensure!(bytes.len() <= 32_768, "Mailbox body file exceeds 32768 bytes");
+    String::from_utf8(bytes.to_vec()).context("Mailbox body file must be UTF-8")
+}
+
 fn input() -> Result<Value> {
     let mut data = String::new();
     io::stdin().take(1048577).read_to_string(&mut data)?;
     ensure!(data.len() <= 1048576, "Input exceeds 1 MiB");
-    serde_json::from_str(&data).context("Expected a JSON object on stdin")
+    let value: Value = serde_json::from_str(&data).context("Expected a JSON object on stdin")?;
+    ensure!(value.is_object(), "Expected a JSON object on stdin");
+    Ok(value)
 }
 fn run(args: Cli) -> Result<Option<Value>> {
     let request_present = std::env::var_os("CODACLAUDA_CAPABILITY").is_some();
@@ -104,6 +175,26 @@ fn run(args: Cli) -> Result<Option<Value>> {
         return Ok(None);
     }
     let result = match args.command {
+        Action::Mailbox { command } => match command {
+            MailboxAction::Register { name, label } => owner_api(&store, "mailbox-register", &json!({"name":name,"label":label}), &cli)?,
+            MailboxAction::Directory => owner_api(&store, "mailbox-directory", &json!({}), &cli)?,
+        },
+        Action::Post { to, from, kind, subject, body_file, reply_to, id, resource, ttl } => {
+            let mut input = json!({"to":to,"from":from,"kind":kind,"subject":subject,"body":read_mailbox_body(&body_file)?});
+            if let Some(value) = reply_to { input["reply_to"] = json!(value); }
+            if let Some(value) = id { input["id"] = json!(value); }
+            if let Some(value) = resource { input["resource"] = json!(value); }
+            if let Some(value) = ttl { input["ttl"] = json!(value); }
+            owner_api(&store, "mailbox-post", &input, &cli)?
+        }
+        Action::Inbox { addr, since, unread, limit } => owner_api(&store, "mailbox-inbox", &json!({"addr":addr,"since":since,"unread":unread,"limit":limit}), &cli)?,
+        Action::Ack { addr, id } => owner_api(&store, "mailbox-ack", &json!({"addr":addr,"id":id}), &cli)?,
+        Action::WaitReply { id, timeout } => owner_api(&store, "mailbox-wait-reply", &json!({"id":id,"timeout":timeout}), &cli)?,
+        Action::Claims { resource } => {
+            let mut input = json!({});
+            if let Some(value) = resource { input["resource"] = json!(value); }
+            owner_api(&store, "mailbox-claims", &input, &cli)?
+        }
         Action::Api { op } => owner_api(&store, &op, &input()?, &cli)?,
         Action::Discover => owner_api(&store, "discover", &json!({}), &cli)?,
         Action::Status => owner_api(&store, "status", &json!({}), &cli)?,
@@ -164,7 +255,17 @@ fn enforce_capability_boundary(
     Ok(())
 }
 fn main() {
-    let args = Cli::parse();
+    let args = match Cli::try_parse() {
+        Ok(args) => args,
+        Err(error) if matches!(error.kind(), clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion) => {
+            let _ = error.print();
+            return;
+        }
+        Err(error) => {
+            println!("{}", json!({"ok":false,"error":{"code":"REQUEST_REJECTED","message":coord_core::redact(&error.to_string())}}));
+            std::process::exit(2);
+        }
+    };
     let mcp_transport = matches!(
         &args.command,
         Action::Mcp { .. } | Action::SessionMcp { .. }
@@ -181,13 +282,18 @@ fn main() {
                 eprintln!("ClaudaCoda MCP stopped: {message}");
                 std::process::exit(2);
             }
-            println!(
-                "{}",
-                json!({"ok":false,"error":{"code":"REQUEST_REJECTED","message":coord_core::redact(&format!("{e:#}"))}})
-            );
-            std::process::exit(2)
+            let (body, code) = error_envelope(&e);
+            println!("{body}");
+            std::process::exit(code)
         }
     }
+}
+
+fn error_envelope(error: &anyhow::Error) -> (Value, i32) {
+    if let Some(conflict) = error.downcast_ref::<coord_core::mailbox::ClaimConflict>() {
+        return (json!({"ok":false,"error":{"code":"CLAIM_CONFLICT","message":coord_core::redact(&error.to_string()),"current_holder":conflict.current_holder}}), 3);
+    }
+    (json!({"ok":false,"error":{"code":"REQUEST_REJECTED","message":coord_core::redact(&format!("{error:#}"))}}), 2)
 }
 
 #[cfg(test)]

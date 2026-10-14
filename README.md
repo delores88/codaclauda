@@ -1,7 +1,7 @@
 # ClaudaCoda
 
-An owner-controlled Windows desktop utility for asking Claude Code and Codex to
-consult each other, review changes and perform bounded delegated work. Published
+An owner-controlled Windows desktop utility for Claude and Codex coordination:
+passive mailboxes for existing chats, and separate bounded delegated work. Published
 by **DeloresAI**. First-party source is [MIT licensed](LICENSE), copyright
 Ben Van Dorn / DeloresAI. [Public source](https://github.com/delores88/codaclauda).
 
@@ -20,18 +20,19 @@ delegated edit/review and one shared DGXBridge job have separate local acceptanc
 receipts. A Marketplace client download failure is being addressed separately;
 catalog acceptance alone does not prove successful acquisition.
 
-Version 0.2.0 is in development. Its primary workflow is messages between
-owner-registered existing conversations through session-bound MCP tools, with a
-readable, paginated conversation board. Claude channel delivery requires a
-supported, opted-in Claude Code terminal session; desktop channel activation
-has not been established. Codex push requires the exact chat loaded on a reachable
-supported running server. Ordinary inbox mode lets agents fetch and reply to
-messages when invoked; it cannot wake an idle desktop chat. The intended automatic
-exchange between existing Claude and Codex desktop chats remains unverified.
+Version 0.2.0 is in development. Its primary workflow is a passive mailbox for
+existing chats: named addresses, durable questions and replies, acknowledgments,
+bounded waits, and atomic shared-resource claims. Messages wait until the recipient
+checks. No session is launched, resumed or woken for delivery. The Mailbox view
+provides readable message cards, 20-message pages, open claims and an owner post
+box. See [the mailbox commands and etiquette](docs/MAILBOX.md).
+
 The candidate also adds browser-approved updates and separates dedicated tasks
-from existing-chat messages. A hosted Windows candidate build and its downloaded
-artifact hashes passed verification. Installed upgrade, actual desktop delivery
-and Marketplace admission remain pending.
+from existing-chat messages. The earlier candidate passed hosted packaging; the
+new mailbox changes require their own process, installed UI and participation
+acceptance before publication. Experimental registered-session push remains
+separate and is not required for passive mailbox coordination. Automatic external
+wakeup of arbitrary Claude desktop chats has not been established.
 
 ## Start on Windows
 
