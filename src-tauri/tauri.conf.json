@@ -9,6 +9,7 @@
     "windows": [{
       "label": "main",
       "title": "CodaClauda",
+      "dragDropEnabled": false,
       "width": 1280,
       "height": 850,
       "minWidth": 900,
