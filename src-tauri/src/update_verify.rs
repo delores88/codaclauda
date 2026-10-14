@@ -161,7 +161,13 @@ pub fn artifact(value: &Value) -> Result<Artifact> {
         )?;
     }
     let filename = text(&value["filename"])?;
-    require(filename == format!("ClaudaCoda_{version}_x64-setup.exe"))?;
+    // 0.3.0 renamed the product. Accept exactly the historical or the new installer
+    // name for this version; every other identity and hash check is unchanged.
+    require(
+        ["ClaudaCoda", "CodaClauda"]
+            .iter()
+            .any(|name| filename == format!("{name}_{version}_x64-setup.exe")),
+    )?;
     // The upstream URL is identity evidence only. The client never fetches it.
     let expected =
         format!("https://github.com/delores88/codaclauda/releases/download/v{version}/{filename}");
@@ -431,6 +437,30 @@ mod tests {
                 STANDARD.encode(inner.verifying_key().to_bytes()),
             )]),
         )
+    }
+    #[test]
+    fn accepts_exactly_the_historical_and_renamed_installer_filenames() {
+        let (_, m, _, _, _) = fixture();
+        let with = |name: &str, url_name: &str| {
+            let mut v = m["artifact"].clone();
+            v["filename"] = json!(name);
+            v["url"] = json!(format!("https://github.com/delores88/codaclauda/releases/download/v0.3.0/{url_name}"));
+            artifact(&v)
+        };
+        for good in ["ClaudaCoda_0.3.0_x64-setup.exe", "CodaClauda_0.3.0_x64-setup.exe"] {
+            assert!(with(good, good).is_ok(), "{good} should be accepted");
+        }
+        for bad in [
+            "CodaClauda_0.2.9_x64-setup.exe",
+            "codaclauda_0.3.0_x64-setup.exe",
+            "CodaClauda_0.3.0_x64-setup.exe.exe",
+            "Other_0.3.0_x64-setup.exe",
+            "CodaClauda_0.3.0_arm64-setup.exe",
+        ] {
+            assert!(with(bad, bad).is_err(), "{bad} should be refused");
+        }
+        // The URL must name the same file.
+        assert!(with("CodaClauda_0.3.0_x64-setup.exe", "ClaudaCoda_0.3.0_x64-setup.exe").is_err());
     }
     #[test]
     fn authenticates_both_purposes_and_retains_historical_immutable_review() {
