@@ -13,20 +13,17 @@ the local coordination board.
 
 ## Current status
 
-[Version 0.2.0](https://github.com/delores88/codaclauda/releases/tag/v0.2.0)
-is the published release, under the former name ClaudaCoda. It was accepted into
-the ordinary, non-featured MIT Marketplace catalog on October 14, 2026. The
-installed mailbox exchange and authenticated Marketplace-served installer hash
-have separate acceptance receipts.
+[Version 0.3.1](https://github.com/delores88/codaclauda/releases/tag/v0.3.1)
+is the published release, displayed as **CodaClauda**. It was accepted into the
+ordinary, non-featured MIT Marketplace catalog on October 15, 2026. Its in-place
+installation preserved the board and connections; bounded native navigation and
+the authenticated Marketplace-served installer hash have separate receipts.
 
-Version 0.3.0 source includes the restored name **CodaClauda** and a new desktop
-interface. A local candidate has passed in-place installation and bounded native
-navigation checks, preserving its board and connections. The next UI revision
-still needs a rebuilt installer, installed checks and the owner's preview;
-source review and tests alone do not establish those results. Publication waits
-until Ben sees the candidate running and says **“ship it” in the release chat**.
-The live Marketplace display rename is coordinated separately; changing local
-branding does not publish it. See [the 0.3.0 release plan](docs/RELEASE-0.3.md).
+Version 0.3.2 is in preparation. The owner has approved publication after the
+required checks. The updated UI still needs its final handoff, a clean installer
+build and installed workflow checks; source review alone does not establish
+those results. See [the 0.3.2 release plan](docs/RELEASE-0.3.2.md). The interface
+instructions below describe the released 0.3.1 build.
 
 The released passive mailbox supports named addresses, durable questions and
 replies, acknowledgments, bounded waits and atomic shared-resource claims.

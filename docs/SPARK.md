@@ -77,11 +77,18 @@ and cache checks, but had an overall failed result with a queued job. That recei
 excluded actual Claude Code invocation and native desktop/hotspot acceptance.
 This historical inspection is not a current release or installation claim.
 
-The adapter's parameter-validation tests establish local behavior only. Real
-acceptance remains pending until a supported DGXBridge installation is
-connected, an actual agent submits a bounded build/test, and the other actual
-agent retrieves and attributes that job's logs and result. Synthetic subprocesses,
-MCP clients and client labels cannot substitute for those receipts.
+On October 14, 2026, installed Claude Code and Codex sessions shared one uncached
+Python unittest job through DGXBridge over authenticated LAN SSH. The job used a
+4-CPU, 8-GB allocation, exited successfully and reported one passing test. Both
+agents called wait and logs; independent public-CLI readback corroborated the
+result. This establishes that bounded workflow, separately from parameter tests,
+native UI checks and Marketplace admission.
+
+It does not establish GPU execution, speed improvements, hotspot or sleep
+recovery, laptop execution, dependency preparation or arbitrary workloads.
+DGXBridge runs authorized jobs; it does not expand a provider chat's context
+window or subscription allowance. Synthetic clients and accounting labels alone
+cannot substitute for real-agent execution receipts.
 
 No Spark source was copied into this adapter. The public CLI contract was used as
 a reference; licensing and provenance remain in the root project records.
