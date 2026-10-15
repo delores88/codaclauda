@@ -185,15 +185,27 @@ async function postNotices(store, addresses, subjectFor, bodyFor) {
  *  Throws (saving nothing) only on invalid fields. */
 export async function createApproval(store, fields, { notify = false, except = null } = {}) {
   const approval = buildApproval(fields);
+  const before = JSON.parse(JSON.stringify(listApprovals(store)));
   saveApproval(store, approval);
-  await store.saveDesktop();
+  try { await strictSave(store); }
+  catch (error) {
+    store.updateDesktop(d => { d.approvals = before; });   // roll back: nothing is shown as granted
+    throw new Error(`Could not save the permission to disk (${errText(error)}). Nothing was granted or posted; try again.`);
+  }
   const targets = notify ? approval.agents.filter(a => a !== except) : [];
   if (!targets.length) return { approval, notified: false, failed: [], reasons: {} };
   const { ids, failed, reasons } = await postNotices(store, targets, () => noticeSubject(approval), () => noticeBody(approval));
   Object.assign(approval, { notices: ids, noticeFailed: failed });
   saveApproval(store, { id: approval.id, notices: ids, noticeFailed: failed });
-  await store.saveDesktop();
-  return { approval, notified: true, failed, reasons };
+  let saveWarning = '';
+  try { await strictSave(store); } catch (error) { saveWarning = `The permission is saved, but its FYI delivery details could not be written to disk (${errText(error)}).`; }
+  return { approval, notified: true, failed, reasons, saveWarning };
+}
+
+/** Permissions must reach the native state file; a browser-storage fallback is not a durable save. */
+async function strictSave(store) {
+  if (typeof store.saveDesktopStrict === 'function') await store.saveDesktopStrict();
+  else await store.saveDesktop();
 }
 
 /** Marks permissions revoked locally and flushes to disk, then optionally posts one FYI notice per agent.
@@ -203,8 +215,13 @@ export async function revokeApprovals(store, ids, { notify = false } = {}) {
   const targets = listApprovals(store).filter(a => wanted.has(a.id));
   if (!targets.length) throw new Error('Permission not found.');
   const now = Date.now();
+  const before = JSON.parse(JSON.stringify(listApprovals(store)));
   store.updateDesktop(d => { for (const a of d.approvals || []) if (wanted.has(a.id) && !a.revokedAt) a.revokedAt = now; });
-  await store.saveDesktop();
+  try { await strictSave(store); }
+  catch (error) {
+    store.updateDesktop(d => { d.approvals = before; });   // roll back: nothing is shown as revoked
+    throw new Error(`Could not save the revocation to disk (${errText(error)}). Nothing was revoked or posted; try again.`);
+  }
   const byAgent = revokeByAgent(targets);
   const agents = Object.keys(byAgent);
   if (!notify || !agents.length) return { byAgent, notified: false, posted: [], failed: [], reasons: {} };

@@ -240,6 +240,12 @@ class Store extends EventTarget {
     try { await desktop.saveState(this.desktop); }
     catch { try { localStorage.setItem(LOCAL_KEY, JSON.stringify(this.desktop)); } catch { /* best effort */ } }
   }
+  /** Durable save for records that must not silently fall back (standing permissions):
+   *  writes to the native desktop state file now and throws if that fails. */
+  async saveDesktopStrict() {
+    clearTimeout(this._saveTimer); this._saveTimer = null;
+    await desktop.saveState(this.desktop);
+  }
   get prefs() { return this.desktop.prefs; }
   setPref(key, value) { this.updateDesktop(d => { d.prefs[key] = value; }); }
 
