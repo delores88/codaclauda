@@ -316,6 +316,114 @@ export function mount(root, ctx) {
       h('div.cx-copy-row', taskCopy, taskNote)));
 
   /* =====================================================================
+   * b2. Grant & send (the 0.2 composer): one immutable owner grant plus one request.
+   *     Same validation, limits, peers, compute permissions and uncertain-outcome rule.
+   * ===================================================================== */
+  const KINDS = [{ id: 'question', label: 'Question', hint: 'Ask for an answer' }, { id: 'review', label: 'Review', hint: 'Get another perspective' }, { id: 'delegate', label: 'Delegate', hint: 'Create a scoped diff' }];
+  let pendingSubmission = null;
+  const gs = { kind: 'question' };
+  const num = (name, min, max, value) => h('input.input', { type: 'number', name, min, max, value, required: true });
+  const gsTarget = h('select.select', { required: true, onchange: () => { gsProject.value = store.board.endpoints.find(e => e.id === gsTarget.value)?.workspace || ''; renderPeers(true); } });
+  const gsProject = h('input.input.mono', { type: 'text', required: true, spellcheck: 'false', autocomplete: 'off', onchange: () => renderPeers() });
+  const gsBrowse = h('button.btn', { type: 'button', onclick: async () => { try { const folder = await bridge.desktop.pickFolder(); if (folder) { gsProject.value = folder; renderPeers(); } } catch (error) { toast(error.message || String(error), { kind: 'error' }); } } }, 'Browse…');
+  const gsPeers = [0, 1, 2].map(() => h('select.select'));
+  const gsPeerHint = h('span.field-hint');
+  const gsPrompt = h('textarea.textarea', { rows: 4, required: true, placeholder: 'Describe the problem, context, and what you want the agent to do.' });
+  const gsPaths = h('textarea.textarea.mono', { rows: 3, required: true, spellcheck: 'false', placeholder: 'README.md\nsrc/components/' });
+  const gsExpected = h('textarea.textarea', { rows: 3, required: true, placeholder: 'For example: a concise explanation with file references and any remaining uncertainty.' });
+  const gsScope = h('p.field-hint');
+  const gsLimits = { max_requests: num('max_requests', 1, 16, 8), max_delegations: num('max_delegations', 0, 8, 2), max_hops: num('max_hops', 0, 3, 2), timeout_seconds: num('timeout_seconds', 10, 600, 180), expiry_minutes: num('expiry_minutes', 1, 60, 30) };
+  const gsCompute = h('textarea.textarea.mono', { rows: 3, spellcheck: 'false', value: '[]' });
+  const gsComputeOk = h('input', { type: 'checkbox' });
+  const gsConsent = h('input', { type: 'checkbox', required: true });
+  const gsError = h('p.inline-error', { role: 'alert', hidden: true });
+  const gsSend = h('button.btn.primary', { type: 'submit' }, icon('send'), 'Grant & send');
+  const gsKind = segmented(KINDS, gs.kind, id => { gs.kind = id; renderScope(); }, 'Request type');
+  function renderScope() {
+    gsScope.textContent = gs.kind === 'delegate' ? 'Scoped delegation. Changes are made in an isolated Git worktree and returned for review. Nothing auto-merges.' : `Read-only ${gs.kind}. The grant allows file reads within your scope.`;
+  }
+  function renderPeers(useDefaults = false) {
+    const peers = store.board.endpoints.filter(e => e.id !== gsTarget.value && sameWorkspace(e.workspace, gsProject.value.trim()));
+    gsPeers.forEach((select, index) => {
+      const previous = select.value;
+      selectOptions(select, peers.map(p => ({ value: p.id, label: `${labelFor(p.id)} · ${p.id}` })), 'None');
+      if (!select.querySelector('option[value=""]')) select.prepend(h('option', { value: '' }, 'None'));
+      select.value = useDefaults ? (peers.length <= 3 ? peers[index]?.id || '' : '') : (peers.some(p => p.id === previous) ? previous : '');
+      select.disabled = !peers.length;
+    });
+    gsPeerHint.textContent = peers.length > 3 ? `Choose up to three of ${peers.length} connections in this workspace. Only the selected peers may receive handoffs.` : peers.length ? 'Only the selected peers may receive handoffs. Choose None to remove a peer from this grant.' : 'No other connections are available in this workspace. This grant will authorize only the primary agent.';
+  }
+  function renderGrantSend() {
+    const endpoints = store.board.endpoints, previous = gsTarget.value;
+    selectOptions(gsTarget, endpoints.map(e => ({ value: e.id, label: `${labelFor(e.id)} · ${e.workspace} · ${e.id}` })), endpoints.length ? null : 'Connect an agent under Dedicated connections first');
+    if (endpoints.some(e => e.id === previous)) gsTarget.value = previous;
+    if (!gsProject.value && gsTarget.value) gsProject.value = endpoints.find(e => e.id === gsTarget.value)?.workspace || '';
+    gsSend.disabled = !endpoints.length;
+    renderPeers(); renderScope();
+  }
+  const gsForm = h('form.cx-form', { oninput: () => { if (pendingSubmission) pendingSubmission.dirty = true; }, onsubmit: async event => {
+    event.preventDefault(); gsError.hidden = true; gsSend.disabled = true;
+    try {
+      if (!gsConsent.checked) throw new Error('Authorize the scope and limits before sending.');
+      const values = { kind: gs.kind, target: gsTarget.value, project: gsProject.value, prompt: gsPrompt.value, expected_result: gsExpected.value, allowed_paths: gsPaths.value, compute: gsCompute.value, peers: gsPeers.map(s => s.value), ...Object.fromEntries(Object.entries(gsLimits).map(([k, input]) => [k, input.value])) };
+      const paths = [...new Set(values.allowed_paths.split(/\r?\n/).map(path => path.trim()).filter(Boolean))];
+      if (!paths.length) throw new Error('Enter at least one allowed relative path.');
+      let compute;
+      try { compute = JSON.parse(values.compute || '[]'); } catch { throw new Error('Compute commands must be a valid JSON array. Leave [] for no external jobs.'); }
+      if (!Array.isArray(compute) || compute.length > 4) throw new Error('Authorize up to four exact external compute commands in a JSON array.');
+      for (const permission of compute) {
+        if (!permission || Array.isArray(permission) || !Array.isArray(permission.argv) || !permission.argv.length || permission.argv.some(item => typeof item !== 'string') || !['auto', 'laptop', 'spark'].includes(permission.placement) || !['python', 'node', 'rust'].includes(permission.runtime) || Object.keys(permission).some(k => !['argv', 'placement', 'runtime'].includes(k))) {
+          throw new Error('Each compute permission needs argv (a nonempty string array), placement (auto, laptop, or spark), and runtime (python, node, or rust).');
+        }
+      }
+      if (compute.length && !gsComputeOk.checked) throw new Error('Explicitly authorize external job execution for the listed commands.');
+      const endpointOf = id => store.board.endpoints.find(e => e.id === id);
+      const targets = [...new Set([values.target, ...values.peers].filter(Boolean))];
+      if (targets.some(id => !endpointOf(id) || !sameWorkspace(endpointOf(id).workspace, values.project.trim()))) throw new Error('Every selected agent must be connected to this workspace. Update the target and peer selections first.');
+      const payload = { target: values.target, kind: values.kind, prompt: values.prompt.trim(), expected_result: values.expected_result.trim() };
+      const fingerprint = JSON.stringify({ values, paths, targets });
+      if (pendingSubmission && pendingSubmission.fingerprint !== fingerprint) throw new Error('The previous submission had an uncertain outcome. Reload this page and inspect Tasks before starting a changed request.');
+      if (!pendingSubmission) {
+        const grant = await bridge.rpc('grant', { project: values.project.trim(), allowed_paths: paths, targets, kinds: values.kind === 'delegate' ? ['question', 'review', 'delegate'] : ['question', 'review'], expected_result: values.expected_result.trim(), max_requests: Number(values.max_requests), max_delegations: values.kind === 'delegate' ? Number(values.max_delegations) : 0, max_hops: Number(values.max_hops), timeout_seconds: Number(values.timeout_seconds), expires_seconds: Number(values.expiry_minutes) * 60, compute });
+        pendingSubmission = { id: crypto.randomUUID(), grant_id: grant.id, fingerprint, dirty: false };
+      }
+      const request = await bridge.rpc('submit', { ...payload, id: pendingSubmission.id, grant_id: pendingSubmission.grant_id });
+      pendingSubmission = null;
+      gsPrompt.value = ''; gsExpected.value = ''; gsConsent.checked = false; gsComputeOk.checked = false;
+      toast('Request recorded. Follow its progress in Tasks.', { kind: 'success' });
+      await reloadBoard();
+      navigate('tasks', { task: `request:${request.id}` });
+    } catch (error) {
+      gsError.textContent = (error.message || String(error)) + (pendingSubmission ? ` Request ID: ${pendingSubmission.id}. Retrying unchanged uses the same ID; check Tasks before creating another request.` : '');
+      gsError.hidden = false;
+    } finally { gsSend.disabled = !store.board.endpoints.length; }
+  } },
+    h('div.cx-wide', gsKind),
+    h('label.field', h('span', 'Send to'), gsTarget),
+    h('label.field', h('span', 'Workspace'), h('span.cx-path-picker', gsProject, gsBrowse)),
+    h('div.field.cx-wide', h('span', 'Optional peers for handoffs'), h('div.cx-form', ...gsPeers.map((s, i) => h('label.field', h('span', `Peer ${i + 1}`), s))), gsPeerHint),
+    h('label.field.cx-wide', h('span', 'Request'), gsPrompt),
+    h('label.field', h('span', 'Allowed paths'), gsPaths, h('span.field-hint', 'Exact relative files or folders, one per line. Secret files and paths outside the workspace are blocked.')),
+    h('label.field', h('span', 'Expected result'), gsExpected),
+    h('div.cx-wide', icon('shield'), ' ', gsScope),
+    h('details.cx-sub.cx-wide', h('summary', 'Scope & limits ', h('span.muted', '8 requests · 2 delegations · 2 hops · 3 min/run')),
+      h('div.cx-form',
+        h('label.field', h('span', 'Maximum requests'), gsLimits.max_requests), h('label.field', h('span', 'Maximum delegations'), gsLimits.max_delegations),
+        h('label.field', h('span', 'Maximum hops'), gsLimits.max_hops), h('label.field', h('span', 'Seconds per run'), gsLimits.timeout_seconds),
+        h('label.field', h('span', 'Grant expiry (minutes)'), gsLimits.expiry_minutes)),
+      h('p.field-hint', 'Peer requests may target only the primary agent and the optional peers selected above in this workspace. Question and review grants permit read-only requests; delegation grants also permit scoped writes in an isolated Git worktree. Nothing auto-merges.')),
+    h('details.cx-sub.cx-wide', h('summary', 'External compute authorization ', h('span.muted', 'Optional · no jobs by default')),
+      h('label.field', h('span', 'Exact command permissions (JSON array)'), gsCompute),
+      h('p.field-hint', 'Up to four objects, each with an argv string array, placement (auto, laptop, or spark) and runtime (python, node, or rust). Only an exact match may run through your configured DGXBridge, with your access.'),
+      h('label.checkbox-label', gsComputeOk, h('span', 'I authorize external job execution of the exact commands listed above.'))),
+    h('label.checkbox-label.cx-wide', gsConsent, h('span', 'I authorize this scope and these limits for this request and its peer handoffs.')),
+    h('div.cx-wide', gsError),
+    h('div.cx-copy-row.cx-wide', gsSend, h('span.field-hint', 'Creates a new immutable owner grant.')));
+  const grantCard = h('details.card.cx-advanced',
+    h('summary', icon('shield'), h('span.cx-summary-text', h('strong', 'Grant & send'), h('small', 'Advanced · authorize a scoped question, review or delegation (isolated worktree) for a connected agent, with optional peers and compute.'))),
+    h('div.cx-advanced-body', gsForm));
+
+  /* =====================================================================
    * c. Dedicated connections (0.2 connections list + "Connect an agent")
    * ===================================================================== */
   const detection = { phase: 'idle', agents: [], promise: null };
@@ -535,7 +643,7 @@ export function mount(root, ctx) {
       h('p', 'Put your Claude Code and Codex desktop chats on one board so they can message each other, claim shared resources and ask you for approval.'))),
     inviteCard, rosterCard,
     h('h2.cx-group-title', 'Advanced'),
-    taskCard, connCard, controlsCard));
+    taskCard, grantCard, connCard, controlsCard));
 
   function refresh() {
     const projects = [...store.projects].sort((a, b) => a.name.localeCompare(b.name));
@@ -544,7 +652,7 @@ export function mount(root, ctx) {
     if (!form.copied) suggestAddress();
     suggestLabel();
     checkJoins();
-    refreshInvite(); renderRoster(); renderTaskPrompt(); renderConnections(); renderControls();
+    refreshInvite(); renderRoster(); renderTaskPrompt(); renderGrantSend(); renderConnections(); renderControls();
   }
 
   suggest();
