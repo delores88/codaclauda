@@ -10,6 +10,7 @@
       "label": "main",
       "title": "CodaClauda",
       "dragDropEnabled": false,
+      "zoomHotkeysEnabled": true,
       "width": 1280,
       "height": 850,
       "minWidth": 900,

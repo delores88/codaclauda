@@ -21,8 +21,8 @@ const KINDS = [
 ];
 const KIND_LABEL = Object.fromEntries(KINDS.map(k => [k.id, k.label]));
 const TABS = [
-  { id: 'for-you', label: 'For you', icon: 'bell' },
   { id: 'everything', label: 'Everything', icon: 'board' },
+  { id: 'for-you', label: 'For you', icon: 'bell' },
   { id: 'claims', label: 'Claims', icon: 'bd-lock' },
 ];
 const PAGE = 50;       // flat lists
@@ -102,7 +102,7 @@ export function mount(root, ctx) {
   ui.registerIcons(ICONS);
 
   const state = {
-    tab: 'for-you',
+    tab: 'everything',   // the whole board first; For you is the inbox
     agent: null,
     project: null,         // lane key filter: 'p:<id>' | 'unfiled' | 'hidden' | null (all)
     kinds: new Set(KINDS.map(k => k.id)),
@@ -565,16 +565,22 @@ export function mount(root, ctx) {
     h('span.bd-agent-text', h('span.bd-agent-name', address ? who.name : 'All agents'), address ? h('span.bd-agent-addr', address) : null),
     h('span.bd-agent-count', String(count)));
   }
-  function projectRow({ key, project, label, count, unread, active }) {
+  function projectRow({ key, project, label, count, unread, active, boardCount = 0 }) {
     const all = key === '*';
+    const forYou = state.tab === 'for-you';
+    // On For you, a project with board traffic but nothing addressed to you stays listed (dimmed) and opens Everything.
+    const elsewhereOnly = forYou && !all && count === 0 && boardCount > 0;
     const lead = all ? h('span.bd-agent-all', icon('projects')) : key === 'hidden' ? h('span.bd-agent-all', icon('eyeOff')) : h('span.bd-project-mark', projectDot(project));
-    return h(`button.bd-agent.bd-project-row${active ? '.active' : ''}`, { type: 'button', 'aria-pressed': String(active), dataset: { fid: 'project' },
-      title: all ? 'Show every project' : active ? 'Show all projects' : (LANE_HINT[key] || `Show only threads for ${label}`),
-      onclick: () => { state.project = all || active ? null : key; resetPaging(); renderNow(); } },
+    const countTitle = forYou
+      ? `${count} message${count === 1 ? '' : 's'} to you · ${boardCount} thread${boardCount === 1 ? '' : 's'} on the board`
+      : `${count} thread${count === 1 ? '' : 's'}`;
+    return h(`button.bd-agent.bd-project-row${active ? '.active' : ''}${elsewhereOnly ? '.bd-elsewhere' : ''}`, { type: 'button', 'aria-pressed': String(active), dataset: { fid: 'project' },
+      title: all ? 'Show every project' : active ? 'Show all projects' : elsewhereOnly ? `Nothing addressed to you — open ${boardCount} ${label} thread${boardCount === 1 ? '' : 's'} in Everything` : (LANE_HINT[key] || `Show only ${label}`),
+      onclick: () => { state.project = all || active ? null : key; resetPaging(); if (elsewhereOnly) setTab('everything'); else renderNow(); } },
     lead,
     h('span.bd-agent-text', h('span.bd-agent-name', label)),
     unread ? h('span.bd-unread-pip', { title: `${unread} unread for you` }, String(unread)) : null,
-    h('span.bd-agent-count', { title: `${count} thread${count === 1 ? '' : 's'}` }, String(count)));
+    h('span.bd-agent-count', { title: countTitle }, elsewhereOnly ? `0 · ${boardCount}` : String(count)));
   }
 
   /* ---------- lanes (project sections) ---------- */
@@ -718,24 +724,34 @@ export function mount(root, ctx) {
     const loading = !store.sync.at && !all.length;
     const byNewest = (a, b) => ((toMs(b.created_at) || 0) - (toMs(a.created_at) || 0)) || ((b.sequence || 0) - (a.sequence || 0));
 
-    /* sidebar: projects */
+    /* sidebar: projects — counts follow the open tab (For you counts messages to you; Everything counts threads) */
+    const forYouTab = state.tab === 'for-you';
+    const threadOfMsg = new Map();
+    for (const t of threads.values()) for (const m of t.messages) threadOfMsg.set(m.id, t);
+    const mineAllForCounts = all.filter(m => m.to === OWNER);
     const laneStats = new Map();
-    for (const t of threads.values()) {
-      let s = laneStats.get(t.lane);
-      if (!s) laneStats.set(t.lane, s = { key: t.lane, project: t.lane.startsWith('p:') ? t.project : null, count: 0, unread: 0, latest: 0 });
-      s.count += 1; s.unread += t.unreadMine.length; s.latest = Math.max(s.latest, toMs(t.last.created_at) || 0);
-    }
-    const projectItems = [{ key: '*', label: 'All projects', count: threads.size, unread: 0, active: !state.project }];
+    const bump = (lane, project, n, unread, at) => {
+      let s = laneStats.get(lane);
+      if (!s) laneStats.set(lane, s = { key: lane, project: lane.startsWith('p:') ? project : null, count: 0, unread: 0, latest: 0 });
+      s.count += n; s.unread += unread; s.latest = Math.max(s.latest, at);
+    };
+    // Every project with board traffic is always listed; boardCount = its threads on the whole board.
+    const boardCounts = new Map();
+    for (const t of threads.values()) { boardCounts.set(t.lane, (boardCounts.get(t.lane) || 0) + 1); bump(t.lane, t.project, 0, 0, toMs(t.last.created_at) || 0); }
+    if (forYouTab) for (const m of mineAllForCounts) { const t = threadOfMsg.get(m.id); if (t) bump(t.lane, t.project, 1, m.read_at ? 0 : 1, toMs(m.created_at) || 0); }
+    else for (const t of threads.values()) bump(t.lane, t.project, 1, t.unreadMine.length, 0);
+    const projectItems = [{ key: '*', label: 'All projects', count: forYouTab ? mineAllForCounts.length : threads.size, unread: 0, active: !state.project }];
     for (const s of [...laneStats.values()].sort((a, b) => laneRank(a.key) - laneRank(b.key) || b.latest - a.latest)) {
-      projectItems.push({ key: s.key, project: s.project, label: s.project?.name || laneLabel(s.key), count: s.count, unread: s.unread, active: state.project === s.key });
+      projectItems.push({ key: s.key, project: s.project, label: s.project?.name || laneLabel(s.key), count: s.count, unread: s.unread, active: state.project === s.key, boardCount: boardCounts.get(s.key) || 0 });
     }
     if (state.project && !laneStats.has(state.project)) projectItems.push({ key: state.project, project: state.project.startsWith('p:') ? store.project(state.project.slice(2)) : null, label: laneLabel(state.project), count: 0, unread: 0, active: true });
-    stable(filters, projectList, () => reconcile(projectList, caches.projects, projectItems.map(item => ({ ...item, sig: JSON.stringify([item.label, item.count, item.unread, item.active, item.project?.color]) })), projectRow, ''));
+    stable(filters, projectList, () => reconcile(projectList, caches.projects, projectItems.map(item => ({ ...item, sig: JSON.stringify([item.label, item.count, item.unread, item.active, item.project?.color, state.tab, item.boardCount || 0]) })), projectRow, ''));
 
     /* sidebar: agents + kinds */
     const counts = new Map();
-    for (const m of all) for (const address of new Set([m.from, m.to])) counts.set(address, (counts.get(address) || 0) + 1);
-    const agentItems = [{ key: '*', address: null, count: all.length, active: !state.agent }];
+    const agentPool = forYouTab ? mineAllForCounts : all;
+    for (const m of agentPool) for (const address of new Set([m.from, m.to])) counts.set(address, (counts.get(address) || 0) + 1);
+    const agentItems = [{ key: '*', address: null, count: agentPool.length, active: !state.agent }];
     for (const { name } of store.addresses) if (name !== OWNER) agentItems.push({ key: name, address: name, count: counts.get(name) || 0, active: state.agent === name });
     if (state.agent && !agentItems.some(a => a.address === state.agent)) agentItems.push({ key: state.agent, address: state.agent, count: counts.get(state.agent) || 0, active: true });
     stable(filters, agentList, () => reconcile(agentList, caches.agents, agentItems.map(item => ({ ...item, sig: JSON.stringify([item.count, item.active, item.address && looks]) })), agentRow, ''));
@@ -782,11 +798,16 @@ export function mount(root, ctx) {
       }
       const revealKey = renderLanes('for-you', sections, mineCard);
       mineList.hidden = !sections.length;
+      // Nothing addressed to you matches, but the same filters match threads on the whole board: offer them.
+      const elsewhere = !sections.length && filtersActive() ? [...threads.values()].filter(t =>
+        (!state.agent || t.participants.includes(state.agent)) && t.messages.some(m => state.kinds.has(m.kind)) && projectPass(t) &&
+        (!query || projectNameMatch(t, query) || t.messages.some(m => textMatch(m, query)))).length : 0;
       setEmpty(mineEmpty, sections.length ? null
         : loading ? h('div.bd-loading', h('span.spinner'), 'Connecting to the board…')
+          : elsewhere ? emptyState('bd-inbox', 'Nothing addressed to you here', `${elsewhere} thread${elsewhere === 1 ? '' : 's'} on the board match${elsewhere === 1 ? 'es' : ''} these filters — they're between agents or from you.`, h('button.btn.primary', { type: 'button', onclick: () => setTab('everything') }, `Show ${elsewhere} in Everything`))
           : mineAll.length && filtersActive() ? filteredEmpty('messages')
             : emptyState('bd-inbox', 'Nothing for you right now', `When an agent posts a question or update addressed to you, it lands here. ${HEARTBEAT}`, h('button.btn.ghost', { type: 'button', onclick: () => setTab('everything') }, 'See everything on the board')),
-      sections.length ? '' : loading ? 'loading' : mineAll.length && filtersActive() ? 'filtered' : 'empty');
+      sections.length ? '' : loading ? 'loading' : elsewhere ? `elsewhere:${elsewhere}` : mineAll.length && filtersActive() ? 'filtered' : 'empty');
       renderChips(mine.length ? `${mine.length} message${mine.length === 1 ? '' : 's'}${unreadCount ? ` · ${unreadCount} unread` : ''}` : '');
       finishReveal('for-you', revealKey, !loading);
     } else if (state.tab === 'everything') {

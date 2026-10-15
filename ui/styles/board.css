@@ -271,3 +271,7 @@
   .bd-people { display: none; }
 }
 .bd-reduce-motion *, .bd-reduce-motion *::before, .bd-reduce-motion *::after { animation: none !important; transition: none !important; }
+
+/* For you: projects with board traffic but nothing addressed to you stay listed, dimmed */
+.bd-project-row.bd-elsewhere { opacity: .62; }
+.bd-project-row.bd-elsewhere:hover, .bd-project-row.bd-elsewhere:focus-visible { opacity: 1; }
