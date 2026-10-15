@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "version": "0.3.0",
+  "capturedAt": "2026-10-15T02:05:48.433Z",
+  "sourceCommit": "e84b74b4ec9d0a11b7ba8a6a306dc3e11a48e2ed",
+  "installerSha256": "212da78aa1f9d27fc9d75624ac44c7972bc1426fca37452f18de7c17cf9543ad",
+  "installedGuiSha256": "0746ab3f7a4316904bb6bf3eb20d511a697a8814b19ee39a3190ac483fb51fd4",
+  "installedCliSha256": "c9adbe755f30915f41f01e70308e3424b352713b2b74386f104aa99b52883fce",
+  "captureMode": "Isolated copy of the verified installed payload",
+  "ordinaryInstalledPathCapture": false,
+  "installedPayloadHashesMatched": true,
+  "nativeAppWindowObserved": true,
+  "view": "Message board, expanded synthetic question and reply",
+  "data": "Synthetic Demo Notebook board and Demo owner; no real account, project or message data",
+  "providerSessionsStarted": 0,
+  "separateInPlaceInstallReceiptSha256": "ec6b8618638e74b9a37604dfa21af1a6a46b28686b0cb4902636e79f7d749628",
+  "screenshot": {
+    "file": "marketplace-screenshot.png",
+    "sha256": "00ca18cc50663ce41f0a2f4a8898111cd3878a020910c253ec23d6c17024565a",
+    "bytes": 534597,
+    "width": 1283,
+    "height": 881,
+    "originalCaptureEncoding": "JPEG",
+    "losslessPngEncodingOnly": true,
+    "decodedPixelsUnchanged": true,
+    "cropped": false,
+    "retouched": false,
+    "syntheticRendering": false
+  },
+  "limitations": [
+    "This is real application rendering with synthetic mailbox data, not live provider work.",
+    "Installation and board-preservation acceptance are recorded separately; this capture was made from an isolated byte-identical payload copy.",
+    "Activity labels reflect application heuristics and sample data, not independently verified agent presence."
+  ],
+  "privacyReview": "Only synthetic demo labels/messages visible; no private board, account, project, filesystem, machine or job details."
+}
