@@ -155,7 +155,7 @@ async function boot() {
     const agents = store.agents.filter(a => a.kind === 'mailbox');
     if (!store.desktop.approvalsPrompted && !(store.desktop.approvals || []).length && agents.length) {
       store.updateDesktop(d => { d.approvalsPrompted = true; });
-      toast(`Let your ${agents.length} agents do routine work while you're away? Set up standing approvals in one click.`, { kind: 'info', timeout: 15000, action: { label: 'Set up', run: () => navigate('approvals') } });
+      toast(`Let your ${agents.length} agents do routine work while you're away? Set up standing permissions once and paste them into each chat.`, { kind: 'info', timeout: 15000, action: { label: 'Set up', run: () => navigate('approvals') } });
     }
   }).catch(error => toast(`Could not reach the local board: ${error.message}`, { kind: 'error' }));
 }

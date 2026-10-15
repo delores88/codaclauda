@@ -83,20 +83,19 @@ export function setBuildingNight(night) {
 }
 
 /* ---------- Spark side palette ----------
- * Buildings for the DGX Spark city reuse the same Building code with { mirror: true }:
- * same footprint and height, built on the island's other face (they hang below while This PC
- * is up and stand upright once the island is turned over). Original toybox "Spark" look that
- * leans toward a bright green: mint / white / teal / lime bodies with green circuit trims,
- * light green-grey board, windows that read lit by day and glow at night, no props, and a
- * handful of shared materials so the whole side costs few programs and textures. */
+ * Buildings for the DGX Spark city reuse the same Building code with { mirror: true }: each is
+ * the same building as its This PC twin (same style, footprint, height, windows, roof and props,
+ * name plaque) on the other face of the same lot, so turning the island over shows a mirror
+ * image. Only the palette changes, deterministically: the body is the PC body mixed toward a
+ * light green-grey, trims glow green, roofs go leaf green, dark parts go deep green, bright
+ * accents lime. All Spark parts share a few materials (body tones are cached per colour), so
+ * busy pulsing and the offline grey reach every part at once. */
 export const SPARK_GREEN = '#76b900';
-export const SPARK = { body: '#c3efd9', panel: '#eef6e7', dark: '#2f5a3c', pad: '#d4e6c8', glow: 'spark:glow', lime: 'spark:lime' };
+export const SPARK = { body: '#c3efd9', panel: '#eef6e7', dark: '#2f5a3c', pad: '#d4e6c8', glow: 'spark:glow', lime: 'spark:lime', leaf: 'spark:leaf' };
 const SPARK_SET = new Set(Object.values(SPARK));
 const sparkToon = (color, emissive, intensity) => sharedMat(toonMaterial(color, { emissive, emissiveIntensity: intensity, cache: false }));
-/** Resting body tones (mint, white, teal, lime-cream); a building keeps its tone for its lifetime. */
-const SPARK_BODIES = ['#c3efd9', '#f3f8ee', '#a9e3d6', '#dcf2b2'].map(color => sparkToon(color, '#123d1a', 0.12));
 export const SPARK_MATERIALS = {
-  body: SPARK_BODIES[0],
+  body: sparkToon('#c3efd9', '#123d1a', 0.12),
   bodyActive: sparkToon('#dcffa4', SPARK_GREEN, 0.4),
   bodyHover: sparkToon('#eaffd6', '#9be04a', 0.42),
   panel: sparkToon(SPARK.panel, '#123d1a', 0.08),
@@ -108,27 +107,58 @@ export const SPARK_MATERIALS = {
   glowActive: sparkToon('#b8ff3e', '#8fe000', 1.0),
   lime: sparkToon('#c8ef58', '#a6e22e', 0.14),
   limeActive: sparkToon('#e8ff80', '#c8ff3a', 1.0),
+  leaf: sparkToon('#9ccc3c', '#3f7a12', 0.12),
   winLit: sparkToon('#effed6', '#9be04a', 0.34),
   winLitActive: sparkToon('#fbffc6', '#c6ff4a', 1.1),
   winDark: sparkToon('#46705a', '#0e2a1c', 0.22),
 };
 export const SPARK_SPARKS = ['#b6ff3a', SPARK_GREEN, '#f3ffe0'];
 /* Spark offline: every shared Spark material turns a flat grey with its glow off (they are used
- * by the Spark side only, so changing them in place greys the whole side at once). */
+ * by the Spark side only, so changing them in place greys the whole side at once). Textured signs
+ * (name plaques, flags, locks) dim to the same grey as the Foundry plaque. */
 let sparkOffline = false;
-const SPARK_ALL = [...new Set([...SPARK_BODIES, ...Object.values(SPARK_MATERIALS)])];
+const SPARK_ALL = new Set(Object.values(SPARK_MATERIALS));
+const SPARK_SIGNS = new Set();
+const SIGN_GREY = '#8e928e';
+const greyHsl = {};
+function greySpark(m, on) {
+  const keep = m.userData.online ||= { color: m.color.clone(), emissive: m.emissive.clone(), emissiveIntensity: m.emissiveIntensity };
+  if (on) { keep.color.getHSL(greyHsl); m.color.setHSL(greyHsl.h, 0.03, 0.24 + greyHsl.l * 0.5); m.emissive.set('#000000'); m.emissiveIntensity = 0; }
+  else { m.color.copy(keep.color); m.emissive.copy(keep.emissive); m.emissiveIntensity = keep.emissiveIntensity; }
+}
 export function setSparkOffline(on) {
   on = Boolean(on);
   if (on === sparkOffline) return false;
   sparkOffline = on;
-  const hsl = {};
-  for (const m of SPARK_ALL) {
-    const keep = m.userData.online ||= { color: m.color.clone(), emissive: m.emissive.clone(), emissiveIntensity: m.emissiveIntensity };
-    if (on) { keep.color.getHSL(hsl); m.color.setHSL(hsl.h, 0.03, 0.24 + hsl.l * 0.5); m.emissive.set('#000000'); m.emissiveIntensity = 0; }
-    else { m.color.copy(keep.color); m.emissive.copy(keep.emissive); m.emissiveIntensity = keep.emissiveIntensity; }
-  }
+  for (const m of SPARK_ALL) greySpark(m, on);
+  for (const m of SPARK_SIGNS) m.color.set(on ? SIGN_GREY : '#ffffff');
   return true;
 }
+/** Shared Spark body tone for a PC body colour: mixed 55% toward a light green-grey (cached). */
+const SPARK_MIX = 0xdfe8d8;
+const sparkBodies = new Map();
+function sparkBodyMaterial(hex) {
+  let m = sparkBodies.get(hex);
+  if (!m) {
+    const n = parseInt(toHex(hex).slice(1), 16);
+    let mixed = 0;
+    for (const s of [16, 8, 0]) mixed |= Math.round((n >> s & 255) * 0.45 + (SPARK_MIX >> s & 255) * 0.55) << s;
+    m = sparkToon(`#${mixed.toString(16).padStart(6, '0')}`, '#123d1a', 0.12);
+    if (sparkOffline) greySpark(m, true);
+    SPARK_ALL.add(m); sparkBodies.set(hex, m);
+  }
+  return m;
+}
+/** Spark sign material (texture board); shared ones (flag, lock) are made once. */
+function sparkSign(map, options = {}) {
+  const m = new THREE.MeshBasicMaterial({ map, ...options });
+  if (sparkOffline) m.color.set(SIGN_GREY);
+  SPARK_SIGNS.add(m);
+  return m;
+}
+const sparkShared = {};
+const sparkFlag = () => sparkShared.flag ||= sharedMat(sparkSign(githubFlagTexture(), { side: THREE.DoubleSide }));
+const sparkLock = () => sparkShared.lock ||= sharedMat(sparkSign(lockTexture(), { transparent: true }));
 export const sparkIsOffline = () => sparkOffline;
 /** Breathing glow for busy Spark buildings and the day/night glow of the Spark side (shared
  * materials: one update per frame for the whole side). */
@@ -142,27 +172,34 @@ export function pulseSpark(elapsed, { reducedMotion = false, night = 0 } = {}) {
   M.winLitActive.emissiveIntensity = 0.9 + k * 0.5 + night * 0.4;
   M.glow.emissiveIntensity = 0.18 + night * 0.6;
   M.lime.emissiveIntensity = 0.12 + night * 0.4;
+  M.leaf.emissiveIntensity = 0.1 + night * 0.3;
   M.winLit.emissiveIntensity = 0.3 + night * 0.95;
 }
-/** Collapse any facade colour onto the few Spark tones (dark, panel, or lime for bright accents). */
+/** Map any facade / prop colour onto the few Spark tones: dark parts deep green, bright saturated
+ * accents lime, mid saturated parts leaf green, the rest a pale panel. Deterministic. */
 function sparkTone(color) {
   if (SPARK_SET.has(color)) return color;
   const n = /^#[0-9a-f]{6}$/i.test(color) ? parseInt(color.slice(1), 16) : 0x808080;
   const r = (n >> 16 & 255) / 255, g = (n >> 8 & 255) / 255, b = (n & 255) / 255;
-  const max = Math.max(r, g, b), min = Math.min(r, g, b), light = (max + min) / 2;
-  if (max - min > 0.4 && light > 0.55) return SPARK.lime;
-  return light < 0.4 ? SPARK.dark : SPARK.panel;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), light = (max + min) / 2, sat = max - min;
+  if (light < 0.4) return SPARK.dark;
+  if (sat > 0.4 && light > 0.62) return SPARK.lime;
+  if (sat > 0.25 && light <= 0.62) return SPARK.leaf;
+  return SPARK.panel;
 }
 function sparkMaterial(tone, active) {
   const M = SPARK_MATERIALS;
   if (tone === SPARK.glow) return active ? M.glowActive : M.glow;
   if (tone === SPARK.lime) return active ? M.limeActive : M.lime;
+  if (tone === SPARK.leaf) return M.leaf;
   if (tone === SPARK.dark) return M.dark;
   if (tone === SPARK.pad) return M.pad;
   return M.panel;
 }
+/** The PC twin's style with the Spark palette: same key, windows and shape; body keeps the PC
+ * hue mixed toward green-grey (see sparkBodyMaterial), trims glow, roofs leaf, plinth/door dark. */
 function sparkStyle(style) {
-  return { ...style, body: SPARK.body, trim: SPARK.glow, plinth: SPARK.dark, door: SPARK.dark, roof: SPARK.panel, awning: [SPARK.lime, SPARK.panel] };
+  return { ...style, body: toHex(style.body), trim: SPARK.glow, plinth: SPARK.dark, door: SPARK.dark, roof: SPARK.leaf, awning: [SPARK.lime, SPARK.panel] };
 }
 const windowGeos = new Map();
 function windowGeometry(w, h) {
@@ -205,7 +242,6 @@ export class Building {
     this.cell = cell;
     this.env = env;
     this.mirror = Boolean(env.mirror);
-    if (this.mirror) this.sparkBase = SPARK_BODIES[Math.floor(seeded(`${project.id}:spark`)() * SPARK_BODIES.length)];
     const c = cellCenter(cell.i, cell.j);
     this.origin = { x: c.x, z: c.z + CZ };
     this.group = new THREE.Group(); this.group.name = `building:${project.id}`;
@@ -251,13 +287,22 @@ export class Building {
   clearTower() {
     for (const child of [...this.tower.children]) { this.tower.remove(child); disposeObject(child); }
     this.pickables = []; this.gear = null; this.flag = null; this.beaconLight = null; this.jib = null; this.chimneyTop = null; this.scaffold = null;
-    this.paintMeshes = []; this.litWindows = null; this.rigTip = null;
+    this.paintMeshes = []; this.litWindows = null; this.litPanes = []; this.rigTip = null;
+    for (const m of this.signs || []) SPARK_SIGNS.delete(m);
+    this.signs = [];
+  }
+  /** Spark side: put a mesh on a shared Spark tone (repainted with the busy state). */
+  sparkPaint(mesh, tone) {
+    mesh.userData.paint = tone; mesh.material = sparkMaterial(tone, this.active);
+    this.paintMeshes.push(mesh);
+    return mesh;
   }
 
   buildTower() {
     const { W, D, H, floors } = this.size, s = this.style, mirror = this.mirror;
     const tag = mirror ? { sparkBuildingId: this.id } : { buildingId: this.id };
     const top = PAD_TOP + H;
+    if (mirror) this.sparkBase = sparkBodyMaterial(s.body);
     this.bodyMaterial = mirror ? this.sparkBody() : toonMaterial(s.body, { cache: false });
     const body = new THREE.Mesh(placed(rbox(W, H, D, 0.22), { y: PAD_TOP + H / 2 }), this.bodyMaterial);
     body.castShadow = true; body.receiveShadow = true; body.userData = { ...tag };
@@ -274,10 +319,8 @@ export class Building {
     batch.add(s.trim, placed(rbox(W + 0.34, 0.3, D + 0.34, 0.1), { y: top - 0.05 }));
     // Door, step and a tiny lamp.
     batch.add(s.door, placed(rbox(1.15, 1.75, 0.24, 0.1), { y: PAD_TOP + 0.875, z: D / 2 + 0.03 }));
-    if (!mirror) {
-      batch.add('#e6dccb', placed(rbox(1.7, 0.14, 0.6, 0.05), { y: PAD_TOP + 0.07, z: D / 2 + 0.3 }));
-      batch.add('#ffd98a', placed(new THREE.BoxGeometry(0.1, 0.1, 0.1), { x: 0.75, y: PAD_TOP + 1.5, z: D / 2 + 0.06 }));
-    }
+    batch.add('#e6dccb', placed(rbox(1.7, 0.14, 0.6, 0.05), { y: PAD_TOP + 0.07, z: D / 2 + 0.3 }));
+    batch.add('#ffd98a', placed(new THREE.BoxGeometry(0.1, 0.1, 0.1), { x: 0.75, y: PAD_TOP + 1.5, z: D / 2 + 0.06 }));
 
     let roofTop = top + 0.1;
     const r = seeded(this.id);
@@ -286,17 +329,16 @@ export class Building {
       batch.add(s.plinth, placed(new THREE.CylinderGeometry(0.42, 0.5, 2.9, 12), { x: cx, y: top + 1.45, z: cz }));
       batch.add('#5a3428', placed(new THREE.CylinderGeometry(0.52, 0.52, 0.22, 12), { x: cx, y: top + 2.8, z: cz }));
       roofTop = top + 3;
-      if (!mirror) {
-        this.chimneyTop = new THREE.Vector3(cx, top + 3.05, cz);
-        // Gear sign on the facade.
-        const gearParts = [placed(new THREE.CylinderGeometry(0.6, 0.6, 0.16, 18), { rx: Math.PI / 2 })];
-        for (let k = 0; k < 8; k++) { const a = k / 8 * Math.PI * 2; gearParts.push(placed(new THREE.BoxGeometry(0.26, 0.3, 0.16), { x: Math.sin(a) * 0.68, y: Math.cos(a) * 0.68, rz: -a })); }
-        const gear = new THREE.Mesh(mergeParts(gearParts), toonMaterial('#e3a06b'));
-        const hub = new THREE.Mesh(placed(new THREE.CylinderGeometry(0.2, 0.2, 0.2, 10), { rx: Math.PI / 2 }), toonMaterial('#7a4436'));
-        gear.add(hub); addOutline(gear, { thickness: 0.03 });
-        gear.position.set(-W / 2 + 0.95, floors >= 2 ? top - 0.85 : PAD_TOP + 1.45, D / 2 + 0.16);
-        gear.userData = { ...tag }; this.gear = gear; this.tower.add(gear); this.pickables.push(gear);
-      }
+      if (!mirror) this.chimneyTop = new THREE.Vector3(cx, top + 3.05, cz);   // smoke on the PC side only
+      // Gear sign on the facade.
+      const gearParts = [placed(new THREE.CylinderGeometry(0.6, 0.6, 0.16, 18), { rx: Math.PI / 2 })];
+      for (let k = 0; k < 8; k++) { const a = k / 8 * Math.PI * 2; gearParts.push(placed(new THREE.BoxGeometry(0.26, 0.3, 0.16), { x: Math.sin(a) * 0.68, y: Math.cos(a) * 0.68, rz: -a })); }
+      const gear = new THREE.Mesh(mergeParts(gearParts), toonMaterial('#e3a06b'));
+      const hub = new THREE.Mesh(placed(new THREE.CylinderGeometry(0.2, 0.2, 0.2, 10), { rx: Math.PI / 2 }), toonMaterial('#7a4436'));
+      gear.add(hub); addOutline(gear, { thickness: 0.03 });
+      gear.position.set(-W / 2 + 0.95, floors >= 2 ? top - 0.85 : PAD_TOP + 1.45, D / 2 + 0.16);
+      gear.userData = { ...tag }; this.gear = gear; this.tower.add(gear); this.pickables.push(gear);
+      if (mirror) { this.sparkPaint(gear, SPARK.glow); this.sparkPaint(hub, SPARK.dark); }
     } else if (s.key === 'python') {
       const radius = Math.min(W, D) * 0.42;
       batch.add(s.roof, placed(new THREE.SphereGeometry(radius, 22, 12, 0, Math.PI * 2, 0, Math.PI / 2), { y: top + 0.1, sy: 0.78 }));
@@ -309,7 +351,7 @@ export class Building {
       batch.add(s.roof, placed(rbox(W * 0.45, 0.8, D * 0.45, 0.12), { x: -W * 0.12, y: top + 0.4, z: -D * 0.1 }));
       batch.add('#8d96b0', placed(new THREE.CylinderGeometry(0.06, 0.1, 2.8, 6), { x: W * 0.22, y: top + 1.4, z: -D * 0.18 }));
       batch.add('#8d96b0', placed(new THREE.BoxGeometry(0.7, 0.05, 0.05), { x: W * 0.22, y: top + 1.9, z: -D * 0.18 }));
-      if (!mirror) this.addBeacon(new THREE.Vector3(W * 0.22, top + 2.9, -D * 0.18), (this.project.metrics?.commits7d || 0) > 0);
+      this.addBeacon(new THREE.Vector3(W * 0.22, top + 2.9, -D * 0.18), (this.project.metrics?.commits7d || 0) > 0);
       roofTop = top + 3;
     } else if (s.key === 'workshop') {
       const shape = new THREE.Shape([new THREE.Vector2(-D / 2 - 0.35, 0), new THREE.Vector2(D / 2 + 0.35, 0), new THREE.Vector2(0, Math.min(2.2, 0.9 + D * 0.18))]);
@@ -318,24 +360,22 @@ export class Building {
       batch.add(s.roof, roof);
       batch.add('#8a8f9e', placed(new THREE.CylinderGeometry(0.15, 0.15, 1.4, 8), { x: W / 2 - 0.8, y: top + 1.0, z: -D * 0.2 }));
       roofTop = top + Math.min(2.2, 0.9 + D * 0.18);
-      if (!mirror) {
-        // Workbench, crate and barrel beside the shed.
-        batch.add('#a8774a', placed(rbox(1.3, 0.12, 0.6, 0.04, 1), { x: W / 2 + 0.25, y: PAD_TOP + 0.75, z: D / 2 - 0.6 }));
-        batch.add('#7d5a3c', placed(new THREE.BoxGeometry(1.2, 0.7, 0.5), { x: W / 2 + 0.25, y: PAD_TOP + 0.35, z: D / 2 - 0.6 }));
-        batch.add('#c48a52', placed(rbox(0.6, 0.6, 0.6, 0.06), { x: -W / 2 - 0.1, y: PAD_TOP + 0.3, z: D / 2 - 0.3, ry: 0.4 }));
-        batch.add('#5f7fb0', placed(new THREE.CylinderGeometry(0.3, 0.3, 0.75, 12), { x: -W / 2 - 0.15, y: PAD_TOP + 0.37, z: D / 2 - 1.2 }));
-      }
+      // Workbench, crate and barrel beside the shed.
+      batch.add('#a8774a', placed(rbox(1.3, 0.12, 0.6, 0.04, 1), { x: W / 2 + 0.25, y: PAD_TOP + 0.75, z: D / 2 - 0.6 }));
+      batch.add('#7d5a3c', placed(new THREE.BoxGeometry(1.2, 0.7, 0.5), { x: W / 2 + 0.25, y: PAD_TOP + 0.35, z: D / 2 - 0.6 }));
+      batch.add('#c48a52', placed(rbox(0.6, 0.6, 0.6, 0.06), { x: -W / 2 - 0.1, y: PAD_TOP + 0.3, z: D / 2 - 0.3, ry: 0.4 }));
+      batch.add('#5f7fb0', placed(new THREE.CylinderGeometry(0.3, 0.3, 0.75, 12), { x: -W / 2 - 0.15, y: PAD_TOP + 0.37, z: D / 2 - 1.2 }));
     } else if (s.key === 'storefront') {
       const stripes = 7, aw = Math.min(W - 0.4, 4.6), sw = aw / stripes;
       for (let k = 0; k < stripes; k++) batch.add(s.awning[k % 2], placed(new THREE.BoxGeometry(sw, 0.08, 1.0), { x: -aw / 2 + sw * (k + 0.5), y: PAD_TOP + 1.95, z: D / 2 + 0.45, rx: 0.32 }));
-      if (!mirror) {
-        for (const sx of [-1, 1]) {
-          const pw = Math.max(0.6, (W - 1.6) / 2 - 0.4);
-          const pane = new THREE.Mesh(placed(new THREE.BoxGeometry(pw, 1.05, 0.1), { x: sx * (0.75 + pw / 2 + 0.05), y: PAD_TOP + 0.95, z: D / 2 + 0.02 }), MATERIALS.shop);
-          this.tower.add(pane);
-        }
-        for (let k = 0; k < 3; k++) batch.add(['#6cc35e', '#8bd96b', '#4fbf8a'][k], placed(new THREE.IcosahedronGeometry(0.42 + r() * 0.2, 1), { x: (k - 1) * W * 0.28, y: top + 0.45, z: -D * 0.2 + r() * 0.5 }));
+      for (const sx of [-1, 1]) {
+        const pw = Math.max(0.6, (W - 1.6) / 2 - 0.4);
+        const paneMaterial = mirror ? (this.active ? SPARK_MATERIALS.winLitActive : SPARK_MATERIALS.winLit) : MATERIALS.shop;
+        const pane = new THREE.Mesh(placed(new THREE.BoxGeometry(pw, 1.05, 0.1), { x: sx * (0.75 + pw / 2 + 0.05), y: PAD_TOP + 0.95, z: D / 2 + 0.02 }), paneMaterial);
+        this.tower.add(pane);
+        if (mirror) this.litPanes.push(pane);
       }
+      for (let k = 0; k < 3; k++) batch.add(['#6cc35e', '#8bd96b', '#4fbf8a'][k], placed(new THREE.IcosahedronGeometry(0.42 + r() * 0.2, 1), { x: (k - 1) * W * 0.28, y: top + 0.45, z: -D * 0.2 + r() * 0.5 }));
       batch.add('#c48a52', placed(rbox(W * 0.8, 0.3, 0.5, 0.06), { y: top + 0.15, z: -D * 0.2 }));
       roofTop = top + 1;
     } else {
@@ -348,42 +388,43 @@ export class Building {
         roofTop = top + 2.3;
       }
     }
-    // Generic roof props (the Spark underside skips props: names show on hover instead).
+    // Generic roof props (the Spark twin carries the same props in its own palette).
     const m = this.project.metrics || {};
-    if (!mirror && (m.commits7d || 0) > 0 && s.key !== 'glass') {
+    if ((m.commits7d || 0) > 0 && s.key !== 'glass') {
       const ax = -W / 2 + 0.6, az = D / 2 - 0.6;
       batch.add('#8d96b0', placed(new THREE.CylinderGeometry(0.05, 0.07, 1.7, 6), { x: ax, y: top + 0.85, z: az }));
       this.addBeacon(new THREE.Vector3(ax, top + 1.8, az), true);
       roofTop = Math.max(roofTop, top + 1.9);
     }
-    if (!mirror && (this.project.source === 'github' || this.project.source === 'both')) {
+    if (this.project.source === 'github' || this.project.source === 'both') {
       const fx = -W / 2 + 0.55, fz = -D / 2 + 0.55;
       batch.add('#d8dbe6', placed(new THREE.CylinderGeometry(0.04, 0.05, 2.2, 6), { x: fx, y: top + 1.1, z: fz }));
       const flag = new THREE.Group();
       flag.position.set(fx, top + 1.85, fz);
-      const cloth = new THREE.Mesh(placed(new THREE.PlaneGeometry(0.95, 0.68), { x: 0.5 }), new THREE.MeshBasicMaterial({ map: githubFlagTexture(), side: THREE.DoubleSide }));
+      const cloth = new THREE.Mesh(placed(new THREE.PlaneGeometry(0.95, 0.68), { x: 0.5 }), mirror ? sparkFlag() : new THREE.MeshBasicMaterial({ map: githubFlagTexture(), side: THREE.DoubleSide }));
       flag.add(cloth); this.flag = flag; this.tower.add(flag);
       roofTop = Math.max(roofTop, top + 2.3);
     }
-    if (!mirror && this.project.private) {
-      const sign = new THREE.Mesh(new THREE.CircleGeometry(0.38, 24), new THREE.MeshBasicMaterial({ map: lockTexture(), transparent: true }));
+    if (this.project.private) {
+      const sign = new THREE.Mesh(new THREE.CircleGeometry(0.38, 24), mirror ? sparkLock() : new THREE.MeshBasicMaterial({ map: lockTexture(), transparent: true }));
       sign.position.set(W / 2 - 0.55, top + 0.75, D / 2 - 0.1);
       batch.add('#7d6a5a', placed(new THREE.BoxGeometry(0.08, 0.5, 0.08), { x: W / 2 - 0.55, y: top + 0.25, z: D / 2 - 0.15 }));
       this.tower.add(sign);
     }
     const parts = batch.build(this.tower, mirror ? { tag, materialFor: tone => sparkMaterial(tone, this.active) } : { tag });
-    if (mirror) this.paintMeshes = parts;
+    if (mirror) this.paintMeshes.push(...parts);
     this.pickables.push(body, ...parts);
     this.roofTop = roofTop;
 
-    if (!mirror) {
-      // Name plaque above the door.
-      const plaqueW = Math.min(W * 0.84, 3.4), plaqueH = plaqueW / 4;
-      const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueH), new THREE.MeshBasicMaterial({ map: plaqueTexture(this.project.name, { accent: this.project.color }), transparent: true }));
-      plaque.position.set(0, PAD_TOP + (s.key === 'storefront' ? 2.32 : 2.18), D / 2 + 0.07);
-      plaque.userData = { ...tag };
-      this.tower.add(plaque); this.pickables.push(plaque);
-    }
+    // Name plaque above the door (Spark: the same name on the Spark plaque style).
+    const plaqueW = Math.min(W * 0.84, 3.4), plaqueH = plaqueW / 4;
+    let plaqueMaterial;
+    if (mirror) { plaqueMaterial = sparkSign(plaqueTexture(this.project.name, { accent: SPARK_GREEN }), { transparent: true }); this.signs.push(plaqueMaterial); }
+    else plaqueMaterial = new THREE.MeshBasicMaterial({ map: plaqueTexture(this.project.name, { accent: this.project.color }), transparent: true });
+    const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueH), plaqueMaterial);
+    plaque.position.set(0, PAD_TOP + (s.key === 'storefront' ? 2.32 : 2.18), D / 2 + 0.07);
+    plaque.userData = { ...tag };
+    this.tower.add(plaque); this.pickables.push(plaque);
 
     this.buildWindows();
   }
@@ -393,7 +434,9 @@ export class Building {
   paintSpark() {
     if (this.body) this.body.material = this.bodyMaterial = this.sparkBody();
     for (const mesh of this.paintMeshes || []) mesh.material = sparkMaterial(mesh.userData.paint, this.active);
-    if (this.litWindows) this.litWindows.material = this.active ? SPARK_MATERIALS.winLitActive : SPARK_MATERIALS.winLit;
+    const lit = this.active ? SPARK_MATERIALS.winLitActive : SPARK_MATERIALS.winLit;
+    if (this.litWindows) this.litWindows.material = lit;
+    for (const pane of this.litPanes || []) pane.material = lit;
   }
   /** A compact crane rig on the roof of a busy Spark building. */
   buildRig() {
@@ -418,6 +461,12 @@ export class Building {
   }
 
   addBeacon(at, blinking) {
+    if (this.mirror) {   // Spark: a lime (or pale) lamp on the shared materials; it pulses with the busy state, no per-building blink
+      const tone = blinking ? SPARK.lime : SPARK.panel;
+      const ball = this.sparkPaint(new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 8), sparkMaterial(tone, this.active)), tone);
+      ball.position.copy(at); this.tower.add(ball);
+      return;
+    }
     const material = toonMaterial(blinking ? '#ff6b7a' : '#c9cedd', { emissive: blinking ? '#ff3b5c' : '#000000', emissiveIntensity: blinking ? 1 : 0, cache: false });
     const ball = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 8), material);
     ball.position.copy(at); this.tower.add(ball);

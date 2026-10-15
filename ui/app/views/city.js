@@ -1010,6 +1010,13 @@ class CityView {
     } else if (s.kind === 'owner') {
       sig = JSON.stringify(['owner', this.store.avatar, Boolean(this.following), Boolean(this.street || this.streetPending)]);
       render = () => this.renderOwnerPanel();
+    } else if (s.kind === 'runner') {
+      // Spark runner or crew bot: its own card, never the HQ card. Gone (job finished, Spark hidden) → deselect.
+      const runner = this.spark.runner(s.id);
+      if (!runner || (!runner.crew && !runner.job)) { this.select(null); return; }
+      const agent = runner.agent;
+      sig = JSON.stringify(['runner', runner.id, Boolean(runner.crew), this.sparkOffline, this.computeText(s), agent ? [agent.id, agent.name, agent.status, agent.look] : null, Math.floor(Date.now() / 60000)]);
+      render = () => this.renderRunnerPanel(runner, s);
     } else {
       sig = JSON.stringify(['hq', this.store.agents.map(a => [a.id, a.status]), this.store.visibleProjects('city').length]);
       render = () => this.renderHqPanel();
@@ -1156,6 +1163,38 @@ class CityView {
         h('button.btn.small.primary', { type: 'button', onclick: () => this.toggleStreet() }, icon('city-street'), inStreet ? 'Exit street view' : 'Street view (G)'),
         h('button.btn.small', { type: 'button', 'aria-pressed': String(Boolean(this.following)), onclick: () => this.toggleFollow() }, icon('crosshair'), this.following ? 'Stop following' : 'Follow me'),
         h('button.btn.small', { type: 'button', onclick: () => this.ctx.navigate('avatar') }, icon('avatar'), avatar ? 'Edit avatar' : 'Create avatar')));
+  }
+  /** A Spark runner (one DGXBridge job) or the resting Spark crew (Jump to… → DGX Spark). */
+  renderRunnerPanel(runner, target) {
+    const job = runner.job, agent = runner.agent;
+    const asleep = Boolean(runner.crew && this.sparkOffline);
+    const center = iconButton('crosshair', 'Center view (F)', () => this.focusSelection());
+    const machine = h('dd', h('span.city-job-where.spark', 'DGX Spark'), this.sparkOffline ? h('span.muted', ` ${this.offlineText.replace(/^O/, 'o')}`) : null);
+    if (runner.crew) {
+      clear(this.panel,
+        this.panelHead(h('span.city-swatch', icon('city-chip')), 'Spark crew', asleep ? 'Asleep — Spark offline' : 'Resting — no Spark job running', center),
+        h('p.city-desc', this.computeText(target)),
+        h('dl.city-facts',
+          h('dt', 'Machine'), machine,
+          h('dt', 'Status'), h('dd', statusDot(asleep ? 'offline' : 'idle'), ' ', asleep ? 'Asleep — Spark offline' : 'Resting — no Spark job running')));
+      return;
+    }
+    const project = runner.anchor !== FOUNDRY ? this.store.project(runner.anchor) : null;
+    const cores = Number(job.reserved_cpu ?? job.cpu);
+    const jobText = [job.runtime, Number.isFinite(cores) && cores > 0 ? `${fmtCores(cores)} core${cores === 1 ? '' : 's'}` : ''].filter(Boolean).map(String).join(' · ');
+    const art = agent ? portrait(agent.look, { size: 52, provider: agent.provider || 'other', status: agent.status }) : h('span.city-swatch', icon('city-chip'));
+    clear(this.panel,
+      this.panelHead(art, agent ? agent.name : jobLabel(job), agent ? jobLabel(job) : 'DGX Spark job', center),
+      h('p.city-desc', this.computeText(target)),
+      h('dl.city-facts',
+        h('dt', 'Machine'), machine,
+        h('dt', 'Project'), h('dd', project
+          ? h('button.city-link', { type: 'button', onclick: () => { this.select({ kind: 'building', id: project.id }); this.focusSelection(); } }, project.name)
+          : 'Spark Foundry'),
+        h('dt', 'Job'), h('dd', jobText || jobLabel(job)),
+        h('dt', 'State'), h('dd', String(job.state || 'running')),
+        h('dt', 'Started'), h('dd', job.started_at ? h('span', { title: fullTime(job.started_at) }, timeAgo(job.started_at)) : h('span.muted', 'Unknown')),
+        agent ? [h('dt', 'Likely from'), h('dd', h('button.city-link', { type: 'button', onclick: () => { this.select({ kind: 'agent', id: agent.id }); this.focusSelection(); } }, agent.name), h('span.muted', ' · on this PC'))] : null));
   }
   renderHqPanel() {
     const agents = this.store.agents;

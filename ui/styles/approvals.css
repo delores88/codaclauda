@@ -1,4 +1,4 @@
-/* Approvals view (owner console). */
+/* Approvals view (owner console): standing permissions Ben pastes into each chat. */
 .approvals-page { max-width: 980px; }
 .appr-section { display: grid; gap: 12px; margin-bottom: 22px; }
 .appr-section-title { display: flex; align-items: center; gap: 8px; margin: 0; font: 600 15px/1.3 var(--font-display); }
@@ -54,12 +54,30 @@
 .appr-history-side { display: grid; justify-items: end; gap: 2px; font-size: 12px; color: var(--text-2); white-space: nowrap; }
 .appr-pager { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 4px 18px 14px; font-size: 12.5px; }
 
-/* One-time setup */
+/* How this works */
 .appr-setup { display: grid; gap: 12px; padding: 18px 20px; }
 .appr-setup p { margin: 0; }
 .appr-instruction { margin: 0; padding: 12px 14px; max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text-2); font: 12px/1.55 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .appr-honest { display: flex; align-items: flex-start; gap: 6px; }
 .appr-honest .icon { width: 14px; height: 14px; flex: none; margin-top: 2px; color: var(--warning); }
+.appr-how-steps { display: grid; gap: 4px; margin: 0; padding-left: 20px; color: var(--text-2); font-size: 13px; }
+
+/* Paste sheets (inside modals) */
+.appr-paste-count { color: var(--text-2); font-size: 12.5px; font-weight: 600; }
+.appr-paste-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.appr-paste-card { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
+.appr-paste-card.done { border-color: color-mix(in srgb, var(--success) 55%, var(--border)); }
+.appr-paste-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.appr-paste-head .mono { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.appr-paste-head .appr-note { margin-left: auto; }
+.appr-paste-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.appr-check { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; color: var(--text); cursor: pointer; }
+.appr-check input { margin: 0; accent-color: var(--success); }
+.appr-note { display: inline-flex; align-items: center; gap: 5px; margin: 0; color: var(--muted); font-size: 12px; }
+.appr-note.bad { color: var(--warning); }
+.appr-note .icon { width: 13px; height: 13px; flex: none; }
+.appr-agent .icon { width: 13px; height: 13px; color: var(--success); }
+.appr-uses-wrap { display: grid; gap: 4px; }
 
 /* Grant / deny forms (inside modals) */
 .appr-form { display: grid; gap: 14px; }
@@ -92,7 +110,7 @@
   .appr-history-side { grid-column: 2; justify-items: start; }
 }
 
-/* Standing approvals (one click) + select-all controls */
+/* Standing permissions (one click) + select-all controls */
 .appr-standing { display: grid; gap: 12px; padding: 18px 20px; margin-bottom: 18px; border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); background: linear-gradient(135deg, var(--accent-soft), transparent 70%), var(--surface); }
 .appr-standing-head { display: flex; gap: 12px; align-items: flex-start; }
 .appr-standing-head > .icon { width: 26px; height: 26px; color: var(--accent-2); margin-top: 2px; }
