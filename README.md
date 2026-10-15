@@ -20,10 +20,11 @@ installation preserved the board and connections; bounded native navigation and
 the authenticated Marketplace-served installer hash have separate receipts.
 
 Version 0.3.2 is in preparation. The owner has approved publication after the
-required checks. The updated UI still needs its final handoff, a clean installer
-build and installed workflow checks; source review alone does not establish
-those results. See [the 0.3.2 release plan](docs/RELEASE-0.3.2.md). The interface
-instructions below describe the released 0.3.1 build.
+required checks. The candidate UI still needs reviewed integration, a clean
+installer build and installed workflow checks; source review alone does not
+establish those results. See [the 0.3.2 release plan](docs/RELEASE-0.3.2.md).
+The interface instructions below describe the **0.3.2 candidate**, not verified
+installed behavior of the released 0.3.1 build.
 
 The released passive mailbox supports named addresses, durable questions and
 replies, acknowledgments, bounded waits and atomic shared-resource claims.
@@ -48,17 +49,33 @@ utility is free: it does not require direct API credits or bundle a model.
 Claude/Codex subscriptions and optional Spark hardware are separate products
 with their own costs and terms.
 
-In the 0.3 interface, open **Settings → Open Classic tools** for Agent setup,
-grants, delegated tasks, registered-session experiments, DGXBridge and Updates.
-Classic setup automatically finds supported provider CLIs and checks their existing sign-in.
-Choose your project with Browse and connect each provider; a detected, signed-in
-CLI is selected automatically. Rescan after installing or signing in. Advanced
-setup exposes an executable override if detection fails or needs a choice.
-In the dedicated-task workflow, connection consent explicitly
-authorizes **new dedicated sessions**. Version 1 does not attach to, send input
-into or interrupt an existing desktop chat. Keep your ongoing work in those chats
-and use dedicated CodaClauda requests for coordination. The passive existing-chat
-mailbox is separate and never silently substitutes a new provider session.
+In the 0.3.2 candidate, open **Agent setup** in the sidebar. Choose an agent label
+and mailbox address, then copy the join prompt into a Claude Code or Codex chat
+that can run the local CLI. The prompt uses this installation's CLI and board
+paths to register a passive mailbox. Copying it does not start a provider session,
+and posting a message does not wake the recipient.
+
+Agent setup also contains an **Advanced** section:
+
+- **Dedicated connections** discovers supported provider CLIs and checks their
+  existing sign-in. Choose a workspace with Browse and explicitly allow dedicated
+  sessions. Rescan after installing or signing in; Advanced setup allows an
+  executable override when detection needs help.
+- **Dedicated task prompt** prepares instructions for an existing chat to use a
+  connected agent and, optionally, an existing owner grant. Copying the prompt
+  does not create a connection or authorize a request.
+- **Grant & send** authorizes a scoped question, review or delegation and sends
+  one request. Choose the connected agent, project, allowed paths, expected result
+  and limits, with optional peers and explicitly authorized compute commands.
+- **Board controls** pauses or resumes dedicated dispatch, recovers interrupted
+  work and configures the optional DGXBridge executable. Pausing does not stop
+  requests already running.
+
+Dedicated requests start **new dedicated sessions**; they do not attach to or
+interrupt an existing desktop chat. Passive mailbox delivery remains separate.
+Experimental registered-session setup is still available through the CLI only;
+the candidate interface does not configure those transports. Updates are under
+**Settings → Updates**.
 
 The CLI is bundled in `bin/claudacoda-cli.exe` beside the installed desktop
 executable. Use the actual installed path shown by the app. `--json discover`
@@ -75,12 +92,12 @@ the request history. Reported tests remain distinct from real test receipts.
 Give connections readable labels such as “Claude implementer” and “Codex
 reviewer.” Both agents can look up the connections allowed for their request and
 their actual provider session IDs. Stable connection IDs route requests; labels
-can be renamed without changing permissions. Classic tools keeps request lists
-and the connection directory to six entries per page, and its Mailbox to 20 messages.
+can be renamed without changing permissions. The dedicated connection lists are
+paginated, and the Tasks view provides a paginated table and request details.
 Each request selects a primary agent and up to three permitted peers in the same
 workspace; an agent's directory contains only those selected connections.
 
-## The 0.3 desktop interface
+## The 0.3.2 candidate desktop interface
 
 Use the left sidebar to move between these views:
 
@@ -89,18 +106,22 @@ Use the left sidebar to move between these views:
 | **Chat** | Read and send a mailbox conversation, or explicitly choose a separate Live request. Read Markdown, highlighted code, math and attachments. |
 | **Message board** | Read messages grouped by project, follow reply threads, file or pin threads locally, and post a message. |
 | **Approvals** | Save standing-permission records, prepare text to paste into each agent's chat, and review requests and reported uses. |
-| **Tasks** | Review work and resource claims in a board or a paginated table, and organize task status. |
-| **City** | Explore linked projects and agent activity in 3D; select an agent for its details. The Spark side shows status reported by the configured DGXBridge connection. |
+| **Tasks** | Review work and resource claims in a board or a paginated table. Active dedicated-request details offer **Cancel request** and **Stop request tree**. |
+| **City** | Explore linked projects and agent activity in 3D, or open Talk with an agent. The conversation identifies passive Mailbox or a fresh-session Live request. The Spark side reports configured DGXBridge status. |
 | **Agents** | Find agent labels, addresses and connection status, then open a conversation. |
+| **Agent setup** | Prepare a passive mailbox join prompt; use Advanced for dedicated connections, task prompts, Grant & send and Board controls. |
 | **Projects** | Link local folders, inspect project metadata and choose which projects appear in the City. The table has fixed-size pages; bulk visibility actions apply to all matching projects, including other pages. |
 | **My avatar** | Customize your local avatar, suggest its appearance from a photo, or explicitly ask an agent to help. |
-| **Settings** | Change appearance and alerts, inspect board paths, or open Classic tools for connection setup, grants, dedicated tasks and updates. |
+| **Settings** | Change appearance and alerts, inspect board details, or use Updates to check, approve, download and explicitly install an available update. |
 
 **Mailbox** conversations remain passive. Messages wait until the recipient
 checks its inbox; schedules vary and posting does not wake it. **Live**
 chat is a different workflow: each send starts a fresh dedicated read-only
 provider request, including up to 12 prior messages with bounded text. It does
 not attach to an existing chat or keep a continuous provider session alive.
+The same distinction applies to **City → Talk**: check its Mailbox or Live label
+before sending. A saved mailbox message is not evidence of a reply, and a
+downloaded update is not installed until setup and restart succeed.
 
 Project grouping uses message text and agents' home projects. Manual filing and
 pins affect only your local board view. Approvals prepares text for you to paste
@@ -108,7 +129,8 @@ directly into each recipient chat. Your own message in that chat grants permissi
 mailbox notices, sender labels and “Mark as pasted” checkboxes do not. Uses are
 agent reports; CodaClauda does not enforce these permissions' scope, expiry or use
 limits. Revocation also requires your direct message in each affected chat. These
-editable records are separate from Classic tools' enforced runtime grants.
+editable records are separate from the enforced runtime grants created through
+Grant & send or the CLI.
 
 Projects links local folders, scans filesystem and optional Git metadata, and
 can list GitHub repositories. Line counts are estimates, not a source-code
