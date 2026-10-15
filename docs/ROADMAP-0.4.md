@@ -21,5 +21,43 @@ Feasibility key: **Verified** = checked against the installed tool on 2026-10-14
 | 8 | **Agent-built avatars end to end.** Upload a photo → choose Claude or Codex → the agent returns a richer spec (and optionally a custom 3D accessory) → one-click apply. | Known | 0.3 already sends the request and applies a JSON spec from the reply; 0.4 adds progress, preview diff and accessory meshes. |
 | 9 | **Shared world for teams** (several owners, one city). | Deferred | Needs a real sync service and identity; out of scope until single-owner use is solid. Listed so it isn't forgotten, not promised. |
 
+## Notes: start and run agents without the desktop apps (Ben, 2026-10-15)
+
+Owner decision: this is 0.4 work, explicitly **not** part of 0.3.2. 0.3.2 only fixes
+the agent-setup prompts, the zoom pitch and the NPC talk view. These notes extend
+rows 1 and 1b.
+
+Today CodaClauda cannot start a desktop chat. The mailbox only passes messages, so a
+new agent starts in the Claude Code or Codex app and joins by pasted prompt. Owning
+sessions removes that step:
+
+1. **Start agent.** Pick Claude Code or Codex, a project and a task. CodaClauda
+   launches the user's installed CLI, records the provider session ID and registers
+   the session's mailbox address automatically.
+2. **Wake on mail.** When a message arrives for a CodaClauda-owned agent, resume its
+   session for one turn (`claude -p --resume`, `codex exec resume`, or Codex's
+   app-server protocol). This gives real push and instant replies in the City talk
+   view. Each wake costs a model turn on the user's plan, so show it and allow a
+   per-agent off switch.
+3. **Approvals in-app.** Headless sessions cannot ask in their own window. Route their
+   permission requests to the Approvals view: Codex app-server emits approval events;
+   for Claude Code, use a pre-set allowed-tool list or SDK permission callbacks.
+4. **Stop and resume controls, with transcripts streaming into Chat** (stream-json / JSONL).
+
+Constraints to respect:
+- **Auth.** Wrap the user's own installed CLI and its existing login, as Conductor,
+  Claude Squad and Vibe Kanban do. Anthropic's Agent SDK docs say third-party products
+  built on the SDK should use API-key auth rather than claude.ai login unless approved,
+  so building on the SDK means asking users for API keys.
+- **Desktop history.** Unverified whether CLI-started sessions appear in the Claude or
+  Codex desktop apps. Assume they live in CodaClauda only.
+- **Market.** Starting and stopping sessions is commodity: the platforms ship it
+  (Claude Code parallel sessions and Agent Teams, the Codex app, GitHub Agent HQ). Its
+  value here is removing copy-paste between apps. The differentiators remain
+  cross-provider in one place plus the City.
+- **Rough size (estimate).** Several days of agent-built work. CodaClauda's Live chat
+  already launches dedicated CLI sessions; the gap is keeping one alive and resumable
+  per agent.
+
 Release rule unchanged: Codex builds installers and runs Marketplace submission;
 Claude owns UI. Nothing publishes without Ben's explicit "ship it".

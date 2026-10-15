@@ -6,10 +6,11 @@ import { PROVIDER_COLORS, defaultAvatar } from '../avatar/spec.js';
 import { THREE } from '../city/toon.js';
 import { World, webglAvailable, wheelZoomLog } from '../city/world.js';
 import { BuildingManager } from '../city/buildings.js';
-import { NpcManager, loadPeople, setPeopleReducedMotion, streetMove } from '../city/npc.js';
+import { NpcManager, loadPeople, setPeopleReducedMotion, streetMove, groundY } from '../city/npc.js';
 import { SlotMap, cellCenter, cellOf, cellKey, LOT_HALF } from '../city/layout.js';
 import { buildPlotMarker, GROUND_Y } from '../city/scenery.js';
 import { SparkCity, FOUNDRY, jobLabel } from '../city/spark.js';
+import { TalkPanel, talkSpot, talkShot, sayLine, STAGE } from '../city/talk.js';
 
 registerIcons({
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.6 2.4c-.8.4-1.2.9-1.2 1.7v.4M12 17h.01"/>',
@@ -21,6 +22,7 @@ registerIcons({
   'city-chevron-up': '<path d="m6 15 6-6 6 6"/>',
   'city-chevron-down': '<path d="m6 9 6 6 6-6"/>',
   'city-street': '<path d="M9.5 3 5 21M14.5 3 19 21"/><path d="M12 5v2.5M12 11v2.5M12 17v3"/>',
+  'city-leave': '<path d="M19 12H5M11 6l-6 6 6 6"/>',
 });
 
 const HELP_KEY = 'codaclauda.city.help-dismissed';
@@ -59,6 +61,7 @@ const LABEL_PRIORITY = { active: 60, idle: 40, offline: 20 };
 const OWNER_PRIORITY = 55;       // "You": above idle people and idle groups (chips get +10), below working agents
 const SHORT_NAME = 18;
 const OWNER_TARGET = Object.freeze({ kind: 'owner' });
+const TALK_BAR = 0.08;           // letterbox bar height (share of the view), as .city-bar in city.css
 const shortName = name => (name.length > SHORT_NAME ? `${name.slice(0, SHORT_NAME - 1).trimEnd()}…` : name);
 const chipWidth = n => Math.round(34 + `${n} agents`.length * 6.6);
 
@@ -157,6 +160,7 @@ class CityView {
     this.street = null;              // street view state { heading, back, moving, turned } while it runs
     this.streetPending = false;      // waiting for the island to turn back to This PC side first
     this.streetKeys = new Set();
+    this.talk = null;                // talk mode { id, back, phase: 'wait' | 'walk' | 'on', spot, … } (enterTalk)
     this.sparkOffline = false;
     root.classList.add('city-view');
     this.buildDom();
@@ -171,14 +175,16 @@ class CityView {
 
   /* ---------------- DOM skeleton ---------------- */
   buildDom() {
-    this.stage = h('div.city-stage', { tabindex: '0', role: 'application', 'aria-label': 'Project city. Drag to orbit, right-drag to pan, scroll to zoom. With the Spark side on, drag up or down to turn the island over, or press V to flip it. W A S D pan, Q and E rotate, F focuses the selection, H resets the view, M finds your avatar, G starts street view (W and S walk, A and D turn, Escape exits).' });
+    this.stage = h('div.city-stage', { tabindex: '0', role: 'application', 'aria-label': 'Project city. Click an agent to talk to them. Drag to orbit, right-drag to pan, scroll to zoom. With the Spark side on, drag up or down to turn the island over, or press V to flip it. W A S D pan, Q and E rotate, F focuses the selection, H resets the view, M finds your avatar, G starts street view (W and S walk, A and D turn, Escape exits).' });
     this.tag = h('div.city-tag', { hidden: true, 'aria-hidden': 'true' });
     this.bubble = h('div.city-bubble', { hidden: true, role: 'status' });
     this.labelLayer = h('div.city-labels', { 'aria-hidden': 'true' });
     this.chipLayer = h('div.city-chips');   // wheel over a chip still zooms: see bindWheel
     this.clusterPop = h('div.city-cluster-pop.card', { hidden: true, role: 'dialog', 'aria-label': 'Agents at this spot' });
     this.sparkTag = h('div.city-offline-tag', { hidden: true, 'aria-hidden': 'true' }, 'Offline');   // over the DGX SPARK emblem
-    this.overlay = h('div.city-overlay', this.labelLayer, this.sparkTag, this.chipLayer, this.tag, this.bubble, this.clusterPop);
+    // Talk mode: what you and the agent say, over your heads.
+    this.talkBubbles = { owner: { node: h('div.city-bubble.city-talk-say.is-owner', { hidden: true, 'aria-hidden': 'true' }), until: 0, size: null }, agent: { node: h('div.city-bubble.city-talk-say', { hidden: true, 'aria-hidden': 'true' }), until: 0, size: null } };
+    this.overlay = h('div.city-overlay', this.labelLayer, this.sparkTag, this.chipLayer, this.tag, this.bubble, this.talkBubbles.owner.node, this.talkBubbles.agent.node, this.clusterPop);
 
     this.stats = h('div.city-hud-stats');
     this.timeChip = h('span.city-chip');
@@ -229,7 +235,7 @@ class CityView {
     this.help = h('div.city-help.card', { hidden: true, role: 'dialog', 'aria-label': 'City controls' },
       h('div.city-help-head', h('strong', 'Getting around'), iconButton('close', 'Close help', () => this.toggleHelp(false))),
       h('dl.city-help-list',
-        ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click', 'Select a person or building'], ['Click an empty plot', 'Start a new project there'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
+        ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
           .flatMap(([k, v]) => [h('dt', h('kbd', k)), h('dd', v)])),
       h('button.btn.small.primary', { type: 'button', onclick: () => this.toggleHelp(false) }, 'Got it'));
 
@@ -237,14 +243,26 @@ class CityView {
     this.panel = h('aside.city-panel.card', { hidden: true, 'aria-live': 'polite' });
     this.empty = h('div.city-empty.card', { hidden: true });
     this.fallback = h('div.city-fallback', { hidden: true });
-    this.cityRoot = h('div.city-root', this.stage, this.overlay, this.hud, this.legend, this.machinesCard, this.streetHint, this.zoomHint, this.toolbar, this.help, this.panel, this.empty, this.fallback);
+    // Talk mode: letterbox bars, the way out and the conversation (city/talk.js).
+    this.bars = [h('div.city-bar.top', { 'aria-hidden': 'true' }), h('div.city-bar.bottom', { 'aria-hidden': 'true' })];
+    this.leaveBtn = h('button.city-talk-leave', { type: 'button', title: 'Leave the conversation (Esc)', onclick: () => this.exitTalk() }, icon('city-leave'), h('span', 'Leave conversation'), h('kbd', 'Esc'));
+    this.talkPanel = new TalkPanel({
+      store: this.store, navigate: (view, params) => this.ctx.navigate(view, params),
+      onLeave: () => this.exitTalk(),
+      onSent: text => this.talkSent(text),
+      onAgentLine: text => this.talkHeard(text),
+      onThinking: on => this.talkThinking(on),
+    });
+    this.cityRoot = h('div.city-root', this.stage, ...this.bars, this.overlay, this.hud, this.legend, this.machinesCard, this.streetHint, this.zoomHint, this.toolbar, this.help, this.panel, this.empty, this.leaveBtn, this.talkPanel.node, this.fallback);
     this.root.append(this.cityRoot);
     if (!storage.get(HELP_KEY)) this.help.hidden = false;
   }
 
   fail(message) {
     this.failed = true;
-    for (const node of [this.hud, this.legend, this.toolbar, this.help, this.panel, this.empty, this.overlay, this.machinesCard]) node.hidden = true;
+    this.talk = null;
+    this.cityRoot.classList.remove('is-talk');
+    for (const node of [this.hud, this.legend, this.toolbar, this.help, this.panel, this.empty, this.overlay, this.machinesCard, this.leaveBtn, this.talkPanel.node, ...this.bars]) node.hidden = true;
     clear(this.fallback, h('div.city-fallback-card.card',
       h('div.empty-art', icon('city')),
       h('h3', 'The city needs 3D graphics'),
@@ -262,6 +280,7 @@ class CityView {
     this.world = new World(this.stage, { quality: prefs.cityQuality || 'high', reducedMotion: () => this.reduced(), timeMode: prefs.cityTime || 'auto' });
     this.world.onContextLost = () => this.fail('The graphics context was lost (the GPU may have been reset). Reload the window to bring the city back.');
     this.world.onKeyPan = () => { if (this.following) this.toggleFollow(false); };
+    this.world.collide = p => this.solidAt(p);
     this.buildings = new BuildingManager(this.world.city, { particles: this.world.particles, reducedMotion: () => this.reduced() });
     this.npcs = new NpcManager(this.world.city, { buildings: this.buildings, particles: this.world.particles, reducedMotion: () => this.reduced() });
     this.spark = new SparkCity(this.world, { makePerson: (spec, options) => this.npcs.makePerson(spec, options), reducedMotion: () => this.reduced(), topBuildings: this.buildings });
@@ -341,6 +360,7 @@ class CityView {
     this.renderEmpty(projects);
     this.renderToolbarState();
     this.refreshPanel();
+    if (this.talk) this.talkPanel.refresh();
     this.tryPendingFocus();
   }
 
@@ -359,6 +379,7 @@ class CityView {
       if (this.world.side === 'pc' && this.npcs.owner) this.beginStreet(); else this.renderToolbarState();
     }
     if (this.street && !this.npcs.owner) this.exitStreet({ fly: true });
+    this.updateTalk();
     if (this.zoomHintAt && performance.now() - (this.zoomOverAt || 0) > 2500) this.hideZoomHint();
     this.renderFlip();
     // While the island turns: no hover, no tags (labels hide in updateOverlays); following stops on the Spark side.
@@ -431,6 +452,7 @@ class CityView {
     if (this.hover && this.hoverInfo && !bubbleOnHover) place(this.tag, this.hover);
     else this.tag.hidden = true;
     if (this.bubbleTarget) place(this.bubble, this.bubbleTarget);
+    if (this.talk) this.placeTalkBubbles(scratch, point);
     // Spark offline: a small tag over the DGX SPARK emblem while that face is up.
     const tagOn = sparkUp && this.sparkOffline && this.spark.shown && Boolean(this.spark.deck);
     if (tagOn) { world.toWorld(this.spark.signPoint(scratch), { out: scratch }); world.project(scratch, point); }
@@ -443,7 +465,7 @@ class CityView {
     const { w: W, h: H } = this.world.size;
     const base = this.overlay.getBoundingClientRect();
     const blockers = [];
-    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.help, this.empty, this.tag, this.bubble, this.clusterPop, this.streetHint, this.zoomHint, this.sparkTag]) {
+    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.help, this.empty, this.tag, this.bubble, this.clusterPop, this.streetHint, this.zoomHint, this.sparkTag, this.talkPanel.node, this.leaveBtn]) {
       if (node.hidden) continue;
       const r = node.getBoundingClientRect();
       if (r.width > 0 && r.height > 0) blockers.push({ left: r.left - base.left, top: r.top - base.top, right: r.right - base.left, bottom: r.bottom - base.top });
@@ -568,14 +590,7 @@ class CityView {
   }
   pickFromCluster(id) {
     this.closeCluster();
-    const agent = this.store.agent(id);
-    if (!agent) return;
-    const target = { kind: 'agent', id };
-    this.select(target);
-    this.focusSelection();
-    this.npcs.greet(id, this.cameraLocal());
-    this.showBubble(target, this.bubbleText(agent));
-    this.stage.focus({ preventScroll: true });
+    if (this.store.agent(id)) this.enterTalk(id);   // the same as clicking that agent
   }
   /** The open cluster list rides above its group (below it near the top edge), kept inside the view. */
   placeClusterPop() {
@@ -638,6 +653,7 @@ class CityView {
     });
     canvas.addEventListener('dblclick', event => {
       clearTimeout(this.plotClickTimer); this.plotClickTimer = 0;   // a double-click on an empty plot walks, it doesn't open the dialog
+      if (this.talk) return;   // talk mode: the camera is staged; clicks pick who to talk to
       const target = this.pick(event.clientX, event.clientY);
       if (target?.kind === 'runner' || target?.kind === 'foundry' || target?.kind === 'gear') return;
       if (target?.kind === 'spark') { if (!this.sparkOffline) this.select({ kind: 'building', id: target.id }); return; }
@@ -660,7 +676,7 @@ class CityView {
     const root = this.cityRoot;
     root.addEventListener('wheel', event => {
       if (!this.visible || this.failed || !this.world) return;
-      const scroller = event.target instanceof Element ? event.target.closest('.city-panel, .city-help, .city-cluster-pop') : null;
+      const scroller = event.target instanceof Element ? event.target.closest('.city-panel, .city-help, .city-cluster-pop, .city-talk') : null;
       if (scroller && !event.ctrlKey) return;
       event.preventDefault(); event.stopPropagation();
       this.wheelZoom(wheelZoomLog(event), event.clientX, event.clientY);
@@ -681,7 +697,7 @@ class CityView {
   wheelZoom(log, clientX, clientY) {
     if (!log) return;
     const now = performance.now(), world = this.world;
-    if (now < (this.wheelMuteUntil || 0)) return;   // let a street-view entry / exit flight play out
+    if (now < (this.wheelMuteUntil || 0) || this.talk) return;   // let a street-view entry / exit flight play out; talk mode holds its shot
     if (this.street) {
       const back = this.street.back * Math.exp(log);
       if (back > STREET.max) { this.wheelMuteUntil = now + 700; this.exitStreet(); }
@@ -867,6 +883,7 @@ class CityView {
     if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
     if (document.querySelector('dialog[open]')) return;
     const code = event.code;
+    if (this.talk) { if (code === 'Escape') { event.preventDefault(); this.exitTalk(); } return; }   // talk mode: only Esc (the panel has the rest)
     if (STREET_KEYS.has(code)) {
       if (t?.tagName === 'BUTTON' && code.startsWith('Arrow')) return;
       event.preventDefault();
@@ -885,6 +902,8 @@ class CityView {
 
   /* ---------------- selection ---------------- */
   onClick(target) {
+    // Talk mode: another agent switches the conversation; empty ground (or anything else but you) leaves it.
+    if (this.talk) { if (target?.kind === 'agent') this.enterTalk(target.id); else if (target?.kind !== 'owner') this.exitTalk(); return; }
     if (!target) { this.select(null); return; }
     if (target.kind === 'plot') {
       clearTimeout(this.plotClickTimer);
@@ -902,12 +921,8 @@ class CityView {
       this.showBubble(OWNER_TARGET, this.street ? 'W/S to walk, A/D to turn. Esc takes you back up.' : 'Hi! Double-click anywhere on the island to walk me there, or press G for street view.');
       return;
     }
+    if (target.kind === 'agent') { this.enterTalk(target.id); return; }   // agents: a conversation in the city
     this.select(target);
-    if (target.kind === 'agent') {
-      const agent = this.store.agent(target.id);
-      this.npcs.greet(target.id, this.cameraLocal());
-      if (agent) this.showBubble(target, this.bubbleText(agent));
-    }
   }
   bubbleText(agent) {
     const project = this.store.project(agent.currentProjectId);
@@ -1064,7 +1079,8 @@ class CityView {
       h('section.city-panel-section', h('div.city-section-label', 'Doing'), agent.activity ? h('p.city-activity', String(agent.activity).slice(0, 400)) : h('p.muted', 'No recent activity on the board.')),
       facts,
       h('div.city-actions',
-        h('button.btn.small.primary', { type: 'button', onclick: () => this.ctx.navigate('chat', { agentId: agent.id }) }, icon('chat'), 'Chat'),
+        h('button.btn.small.primary', { type: 'button', title: 'Walk over and talk here in the city', onclick: () => this.enterTalk(agent.id) }, icon('chat'), 'Talk'),
+        h('button.btn.small', { type: 'button', onclick: () => this.ctx.navigate('chat', { agentId: agent.id }) }, icon('chat'), 'Open in Chat'),
         askBtn, taskBtn),
       this.taskFormFor === agent.id && isMailbox ? this.taskForm(agent, current || home) : null,
       h('p.city-note', isMailbox ? MAILBOX_NOTE : 'Live chats start a fresh dedicated agent session for each message (answers in about 30–90 seconds).'));
@@ -1313,7 +1329,7 @@ class CityView {
     const summary = !m.configured ? 'Spark not connected' : offline ? `This PC ${local.running || 0} running · Spark offline` : `This PC ${local.running || 0} · Spark ${spark.running || 0} running`;
     const head = h('header.city-machines-head', h('span.city-machines-title', icon('city-chip'), 'Machines'), collapsed ? h('span.city-machines-summary', summary) : null, toggle);
     if (collapsed) { clear(card, head); return; }
-    if (!m.configured) { clear(card, head, h('a.city-machines-chip', { href: 'classic.html' }, icon('link'), 'Spark not connected — set it up in Classic tools')); return; }
+    if (!m.configured) { clear(card, head, h('p.city-machines-chip', icon('city-chip'), 'Spark not connected — set it up in the DGXBridge app')); return; }
     const row = (label, data, total, extra, cls = '') => {
       const used = Number(data.cpuReserved) || 0, running = Number(data.running) || 0;
       const frac = total ? Math.min(1, used / total) : 0;
@@ -1554,11 +1570,9 @@ class CityView {
     this.stage.focus({ preventScroll: true });
   }
   beginStreet() {
-    const world = this.world, tw = world.tween;
+    const world = this.world;
     // Where to come back to: the overhead view (or where a flight under way was heading).
-    this.streetReturn = tw
-      ? { target: tw.toTarget.clone(), position: new THREE.Vector3().setFromSpherical(tw.to).add(tw.toTarget) }
-      : { target: world.controls.target.clone(), position: world.camera.position.clone() };
+    this.streetReturn = this.cameraPose();
     this.street = { heading: this.npcs.ownerHeading, back: STREET.back, moving: false, turned: true };
     this.streetKeys.clear();
     this.hideZoomHint();   // G / the button at the closest zoom: the "Keep zooming" chip would sit on the street hint
@@ -1595,6 +1609,13 @@ class CityView {
     }
     return out;
   }
+  /** Is an island-space point inside a building or the town hall (This PC side up)? Wheel zoom stops at walls. */
+  solidAt(p) {
+    if (this.world.side !== 'pc') return false;
+    const r = STREET.radius, hall = HQ_BOXES[0];
+    if (p.y < 11.5 && p.x > hall.x0 - r && p.x < hall.x1 + r && p.z > hall.z0 - r && p.z < hall.z1 + r) return true;
+    return this.buildings.list.some(b => p.y < GROUND_Y + b.size.H + 0.6 && Math.abs(p.x - b.origin.x) < b.size.W / 2 + 0.14 + r && Math.abs(p.z - b.origin.z) < b.size.D / 2 + 0.14 + r);
+  }
   /** Called by the world every frame in street view: walk / turn the avatar, return the camera pose. */
   streetPose(dt) {
     const st = this.street, owner = this.npcs.owner;
@@ -1628,6 +1649,206 @@ class CityView {
     if (this.following) this.toggleFollow(false);
     this.world.flip();
     this.stage.focus({ preventScroll: true });
+  }
+
+  /** Where the camera is (or where a flight under way is heading): { target, position }, world space. */
+  cameraPose() {
+    const world = this.world, tw = world.tween;
+    return tw && !tw.free
+      ? { target: tw.toTarget.clone(), position: new THREE.Vector3().setFromSpherical(tw.to).add(tw.toTarget) }
+      : { target: world.controls.target.clone(), position: world.camera.position.clone() };
+  }
+
+  /* ---------------- talk mode ---------------- */
+  /** Click an agent: your avatar walks over, the two face each other and the camera drops to an
+   *  over-the-shoulder shot while the conversation opens on the right (city/talk.js). Esc, Leave or a
+   *  click on empty ground ends it: the camera eases back, the HUD returns, the agent carries on.
+   *  Agents live on This PC side: with the Spark side up the island turns over first. */
+  enterTalk(id) {
+    const world = this.world, agent = this.store.agent(id);
+    if (!world || this.failed || !agent) return;
+    if (this.talk?.id === id) { this.talkPanel.focus(); return; }
+    const prev = this.talk;
+    if (prev) this.releaseTalk(prev);   // another agent: keep where to go back to
+    let back = prev?.back || null;
+    if (this.street || this.streetPending) { back ||= this.streetReturn; this.exitStreet({ fly: false }); }   // street view: back to the overview it began from
+    back ||= this.cameraPose();
+    if (this.following) this.toggleFollow(false);
+    this.closeCluster(); this.hideZoomHint(); this.setHover(null); this.select(null);
+    this.bubble.hidden = true; this.bubbleTarget = null; this.bubbleUntil = 0;
+    for (const b of Object.values(this.talkBubbles)) b.node.hidden = true;
+    this.talk = { id, back, phase: 'wait', at: performance.now() };
+    this.npcs.hold(id, true);
+    if (world.underside && world.restSide !== 'pc') world.flipTo('pc');
+    this.cityRoot.classList.add('is-talk');
+    this.talkPanel.open(agent);
+    this.talkPanel.focus();
+    this.declutterAt = 0;
+  }
+  /** Leave the conversation: the camera eases back to where it was, the HUD returns, the agent carries on. */
+  exitTalk({ instant = false } = {}) {
+    const t = this.talk, world = this.world;
+    if (!t || !world) return;
+    this.talk = null;
+    this.releaseTalk(t);
+    this.talkPanel.close();
+    this.cityRoot.classList.remove('is-talk');
+    for (const b of Object.values(this.talkBubbles)) b.node.hidden = true;
+    world.setShot(null);
+    if (t.back) {
+      const s = new THREE.Spherical().setFromVector3(t.back.position.clone().sub(t.back.target));
+      world.flyAfterTurn({ target: t.back.target, distance: s.radius, polar: s.phi, azimuth: s.theta }, { duration: 1, instant });
+    }
+    this.declutterAt = 0;
+    this.renderToolbarState();
+    if (!instant) this.stage.focus({ preventScroll: true });
+  }
+  releaseTalk(t) {
+    this.npcs.hold(t.id, false);
+    if (t.ownerPose && this.npcs.owner && !this.npcs.owner.path.length) this.npcs.act(OWNER_TARGET, 'stand');
+  }
+  /** Once a frame: wait for the island to settle (This PC side up), stage the scene, finish the walk-up,
+   *  end timed gestures and re-aim the shot when the view or the panel changes size. */
+  updateTalk() {
+    const t = this.talk, world = this.world;
+    if (!t) return;
+    const now = performance.now();
+    if (t.phase === 'wait') {
+      if (!world.settled) return;   // still turning over
+      if (world.side !== 'pc' && world.underside && now - t.at < 4000) { world.flipTo('pc'); return; }
+      this.stageTalk(t);
+    }
+    const agentT = { kind: 'agent', id: t.id }, owner = this.npcs.owner;
+    if (t.phase === 'walk') {
+      if (owner && !t.seated) this.npcs.face(agentT, owner.pos.x, owner.pos.z);   // it watches you come over
+      if (!owner || !owner.path.length || now - t.walkAt > 6000) this.arriveTalk(t);
+    }
+    for (const [key, target] of [['ownerPose', OWNER_TARGET], ['agentPose', agentT]]) {
+      const pose = t[key];
+      if (pose && now > pose.until) { t[key] = null; this.npcs.act(target, pose.next || 'stand'); }
+    }
+    if (t.spot && now > (t.frameCheck || 0)) {
+      t.frameCheck = now + 400;
+      if (this.talkFrameSig() !== t.frameSig) this.aimTalk(t, this.reduced() ? 0 : 0.45);
+    }
+  }
+  /** Pick Ben's spot in front of the agent, send him there (briskly; reappearing close by when he is
+   *  across town; snapping there with reduced motion) and fly the camera to the shot. */
+  stageTalk(t) {
+    const world = this.world, agentT = { kind: 'agent', id: t.id }, a = this.npcs.position(agentT), owner = this.npcs.owner;
+    t.phase = 'on';
+    if (!a || world.side !== 'pc') return;   // no figure to stage (yet): the conversation still works without the scene
+    const reduced = this.reduced(), boxes = this.streetBoxes(), limit = world.half - 2;
+    const near = owner && Math.hypot(owner.pos.x - a.x, owner.pos.z - a.z) < 9;
+    t.seated = this.npcs.seated(t.id);
+    // A bottom sheet leaves a short strip of the view: stand the camera further back so the two still fit.
+    const vis = this.talkFraming().vis, k = Math.min(1.6, Math.max(1, Math.sqrt(world.size.h / Math.max(1, vis.y1 - vis.y0))));
+    const spot = talkSpot(a, near ? owner.pos : this.cameraLocal(), { boxes, limit, facing: t.seated ? this.npcs.yaw(agentT) : null, back: STAGE.back * k, side: STAGE.side * k });
+    t.spot = spot; t.a = { x: a.x, y: a.y, z: a.z };
+    if (owner) {
+      const far = Math.hypot(owner.pos.x - spot.x, owner.pos.z - spot.z);
+      if (reduced || far < 0.25) this.npcs.driveOwner(spot.x, spot.z, spot.heading, false);
+      else {
+        if (far > 7) {
+          const sx = spot.x + Math.sin(spot.yaw) * STAGE.approach, sz = spot.z + Math.cos(spot.yaw) * STAGE.approach;
+          const open = Math.abs(sx) < limit && Math.abs(sz) < limit && !boxes.some(b => sx > b.x0 && sx < b.x1 && sz > b.z0 && sz < b.z1);
+          world.particles.emit('sparkle', { x: owner.pos.x, y: owner.pos.y + 1, z: owner.pos.z }, 12, { spread: 0.5 });
+          this.npcs.driveOwner(open ? sx : spot.x, open ? sz : spot.z, spot.heading, false);
+        }
+        this.npcs.walkOwner(spot.x, spot.z, { speed: 3.2, marker: false, direct: true });
+        if (owner.path.length) { t.phase = 'walk'; t.walkAt = performance.now(); }
+      }
+    }
+    if (t.phase === 'on') this.arriveTalk(t);
+    this.aimTalk(t, reduced ? 0 : 1.25);
+  }
+  /** Ben is in place: the two face each other and the agent says hello. */
+  arriveTalk(t) {
+    t.phase = 'on';
+    const agentT = { kind: 'agent', id: t.id }, owner = this.npcs.owner, a = this.npcs.position(agentT);
+    if (owner && a) { this.npcs.face(OWNER_TARGET, a.x, a.z); if (!t.seated) this.npcs.face(agentT, owner.pos.x, owner.pos.z); }
+    const agent = this.store.agent(t.id);
+    if (!agent || t.greeted) return;
+    t.greeted = true;
+    this.npcs.act(agentT, 'wave'); t.agentPose = { until: performance.now() + 1600, next: 'stand' };
+    this.talkSay('agent', this.bubbleText(agent));
+  }
+  /** Fly to (or, after a resize, re-aim) the over-the-shoulder shot. */
+  aimTalk(t, duration) {
+    const world = this.world, spot = t.spot;
+    if (!spot) return;
+    const frame = this.talkFraming();
+    const face = { x: t.a.x, y: t.a.y + this.npcs.faceHeight({ kind: 'agent', id: t.id }), z: t.a.z };
+    const shot = talkShot(spot, face, { eyeY: groundY(spot.x, spot.z) + this.npcs.topHeight(OWNER_TARGET) * 0.86, nx: frame.nx, ny: frame.ny, vfov: world.camera.fov, aspect: world.size.w / Math.max(1, world.size.h) });
+    const v = p => world.toWorld(new THREE.Vector3(p.x, p.y, p.z), { atRest: true });
+    world.setShot({ eye: v(shot.eye), look: v(shot.look) }, { duration, instant: !duration });
+    t.frameSig = this.talkFrameSig(); t.vis = frame.vis;
+  }
+  /** Where the agent's face should land (NDC): in the part of the view the conversation leaves free
+   *  (left of the docked panel, or above the bottom sheet on narrow windows). Layout boxes, not the
+   *  panel's slide-in transform. */
+  talkFraming() {
+    const { w: W, h: H } = this.world.size, panel = this.talkPanel.node, vis = { x0: 0, x1: W, y0: 0, y1: H };
+    if (!panel.hidden && panel.offsetWidth && panel.offsetHeight) {
+      if (panel.offsetTop > H * 0.25) vis.y1 = Math.max(H * 0.3, panel.offsetTop);   // bottom sheet
+      else vis.x1 = Math.max(W * 0.35, panel.offsetLeft);                             // docked on the right
+    }
+    const px = vis.x0 + (vis.x1 - vis.x0) * 0.56, py = vis.y0 + (vis.y1 - vis.y0) * 0.47;
+    return { nx: 2 * px / W - 1, ny: 1 - 2 * py / H, vis };
+  }
+  talkFrameSig() { const p = this.talkPanel.node, { w, h } = this.world.size; return `${w}x${h}|${p.offsetLeft}|${p.offsetTop}`; }
+  /** A speech bubble over you ('owner') or the agent ('agent'); '…' shows typing dots. */
+  talkSay(who, text, ms = 7000) {
+    const b = this.talkBubbles[who], typing = text === '…';
+    if (!b || !text) return;
+    if (typing) clear(b.node, h('span.typing-dots', h('i'), h('i'), h('i'))); else b.node.textContent = text;
+    b.node.classList.toggle('is-typing', typing);
+    b.node.hidden = false; b.until = performance.now() + ms; b.size = null;
+  }
+  talkSent(text) {
+    const t = this.talk;
+    if (!t) return;
+    this.talkSay('owner', sayLine(text), 6000);
+    this.npcs.act(OWNER_TARGET, 'talk'); t.ownerPose = { until: performance.now() + 2400, next: 'stand' };
+  }
+  talkHeard(text) {
+    const t = this.talk;
+    if (!t) return;
+    this.talkSay('agent', text, 9000);
+    this.npcs.act({ kind: 'agent', id: t.id }, 'talk'); t.agentPose = { until: performance.now() + 3400, next: 'stand' };
+  }
+  /** A live reply is being written: typing dots over the agent, which gets busy at its laptop. */
+  talkThinking(on) {
+    const t = this.talk, agentT = { kind: 'agent', id: t?.id };
+    if (!t) return;
+    if (on) { this.talkSay('agent', '…', 15 * 60e3); this.npcs.act(agentT, 'work'); t.agentPose = null; return; }
+    const b = this.talkBubbles.agent;
+    if (b.node.classList.contains('is-typing')) b.node.hidden = true;
+    if (!t.agentPose) this.npcs.act(agentT, 'stand');   // a reply that just landed keeps its talk gesture
+  }
+  /** Talk bubbles ride above the two heads, kept inside the part of the view the panel leaves free. */
+  placeTalkBubbles(scratch, point) {
+    const t = this.talk, world = this.world, now = performance.now(), cam = world.camera;
+    const dir = cam.getWorldDirection(this._talkDir ||= new THREE.Vector3());
+    const { w: W, h: H } = world.size, vis = t.vis || { x0: 0, x1: W, y0: 0, y1: H }, bar = t.spot ? H * TALK_BAR : 0;
+    for (const [who, b] of Object.entries(this.talkBubbles)) {
+      if (b.node.hidden) continue;
+      if (now > b.until) { b.node.hidden = true; continue; }
+      const target = who === 'owner' ? OWNER_TARGET : { kind: 'agent', id: t.id };
+      const pos = this.facesUp(target) ? this.npcs.position(target) : null;
+      let on = Boolean(pos);
+      if (pos) {
+        world.toWorld(scratch.set(pos.x, pos.y + this.npcs.topHeight(target) + 0.3, pos.z), { out: scratch });
+        on = (this._talkTo ||= new THREE.Vector3()).subVectors(scratch, cam.position).dot(dir) > 0.2;   // in front of the camera (off-screen is clamped in, below)
+        world.project(scratch, point);
+      }
+      b.node.style.visibility = on ? '' : 'hidden';
+      if (!on) continue;
+      b.size ||= { w: b.node.offsetWidth, h: b.node.offsetHeight };
+      const x = Math.max(vis.x0 + b.size.w / 2 + 10, Math.min(vis.x1 - b.size.w / 2 - 10, point.x));
+      const y = Math.max(vis.y0 + bar + b.size.h + 12, Math.min(vis.y1 - bar - 12, point.y));
+      b.node.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -100%)`;
+    }
   }
 
   /* ---------------- empty plot → new project ---------------- */
@@ -1699,6 +1920,7 @@ class CityView {
   hide() {
     this.visible = false;
     if (this.failed || !this.world) return;
+    this.exitTalk({ instant: true });
     this.exitStreet({ instant: true });   // coming back to the City starts from the overview
     this.world.releaseTilt?.();
     this.world.stop();

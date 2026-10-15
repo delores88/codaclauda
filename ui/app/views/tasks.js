@@ -26,6 +26,7 @@ const TYPES = [
 const TYPE = Object.fromEntries(TYPES.map(t => [t.id, t]));
 const MOVABLE = new Set(['task', 'question']);
 const LOCKED_TIP = "Status comes from the agent's real state";
+const REQUEST_FINAL = new Set(['completed', 'failed', 'cancelled', 'needs-owner']); // same set Classic hid Cancel for
 const REQUEST_STATE = { queued: 'Queued', delivered: 'Delivered', acknowledged: 'Acknowledged', running: 'Running', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled', 'needs-owner': 'Needs you' };
 const DONE_PAGE = 30;
 const TABLE_PAGE = 25;   // bounded pages: the table never grows past one page
@@ -103,7 +104,7 @@ function readMode() { try { return localStorage.getItem(MODE_KEY) === 'table' ? 
 function saveMode(mode) { try { localStorage.setItem(MODE_KEY, mode); } catch { /* per-viewer convenience only */ } }
 
 export function mount(root, ctx) {
-  const { store, ui, navigate } = ctx;
+  const { store, ui, navigate, bridge } = ctx;
   const { h, icon, iconButton, portrait, toast, timeAgo, fullTime, emptyState, clear, toMs, STATUS_LABEL } = ui;
   ui.registerIcons(ICONS);
 
@@ -575,13 +576,23 @@ export function mount(root, ctx) {
   }
   function fact(label, ...value) { return [h('dt', label), h('dd', value)]; }
   function section(title, ...content) { return h('section.tk-section', h('h3', title), content); }
+  // Dedicated requests: the same cancel calls Classic made (one request, or its whole root tree).
+  async function cancelRequest(source, all, control) {
+    control.disabled = true;
+    try {
+      await bridge.rpc('cancel', { id: all ? source.root_id || source.id : source.id, all });
+      toast(all ? 'Stop requested for this request tree.' : 'Cancellation requested.', { kind: 'success' });
+      await store.refreshBoard(); store.emit('change');
+    } catch (error) { toast(error.message || String(error), { kind: 'error' }); }
+    finally { control.disabled = false; }
+  }
   function setStatus(task, status) { store.setTaskOverride(task.id, { status }); toast(status === 'done' ? 'Marked done.' : 'Reopened.', { kind: 'success', timeout: 2600 }); }
 
   function renderDrawer(force, looks = lookSignature()) {
     const task = state.drawer ? store.tasks.find(t => t.id === state.drawer) : null;
     const override = task ? overrideOf(task.id) : {};
     const project = task ? proj(task.projectId) : null;
-    const sig = JSON.stringify([state.drawer, task && [task.title, task.detail, statusOf(task), task.state, task.updatedAt, task.projectId, task.expiresAt, task.source?.blocker, task.source?.answer, (task.replies || []).map(r => `${r.id}:${r.read_at ? 1 : 0}`)], override, project && [project.name, project.color], looks, store.visibleProjects('board').map(p => p.id)]);
+    const sig = JSON.stringify([state.drawer, task && [task.title, task.detail, statusOf(task), task.state, task.updatedAt, task.projectId, task.expiresAt, task.source?.blocker, task.source?.answer, task.source?.cancel_requested, (task.replies || []).map(r => `${r.id}:${r.read_at ? 1 : 0}`)], override, project && [project.name, project.color], looks, store.visibleProjects('board').map(p => p.id)]);
     if (!force && drawer.dataset.sig === sig) return;
     drawer.dataset.sig = sig;
     const scroller = drawerHost.querySelector('.tk-drawer-scroll');
@@ -635,7 +646,10 @@ export function mount(root, ctx) {
         h('div.tk-drawer-actions',
           canChat(task) ? button('Open chat', 'chat', () => navigate('chat', { agentId: task.agentId }), 'primary', 'chat') : null,
           movable ? (status === 'done' ? button('Reopen', 'refresh', () => setStatus(task, 'in-progress'), 'ghost', 'done') : button('Mark done', 'check', () => setStatus(task, 'done'), 'ghost', 'done')) : null,
-          task.type === 'request' ? h('a.btn.small.ghost', { href: 'classic.html', dataset: { fid: 'classic' } }, icon('external'), 'Open in Classic tools') : null),
+          task.type === 'request' ? button('Request details', 'file', () => ui.modal({ title: 'Request details', body: h('pre.cx-json', JSON.stringify(source, null, 2)), wide: true }), 'ghost', 'details') : null,
+          task.type === 'request' && !REQUEST_FINAL.has(source.state) ? [
+            button(source.cancel_requested ? 'Cancellation requested' : 'Cancel request', 'stop', event => cancelRequest(source, false, event.currentTarget), 'ghost', 'cancel'),
+            button('Stop request tree', 'stop', event => cancelRequest(source, true, event.currentTarget), 'danger', 'cancel-tree')] : null),
         h('dl.tk-facts',
           fact('Agent', h('span.tk-fact-agent', face(agent, 24, true), h('span', agent.name), agent.status ? h('span.muted', `· ${STATUS_LABEL[agent.status]}`) : null)),
           isMail && task.from ? fact('From', `${task.from} → ${task.to || agent.name}`) : task.from ? fact('From', task.from) : null,
@@ -669,7 +683,7 @@ export function mount(root, ctx) {
   /* ---------- New task ---------- */
   function openNewTask() {
     const agents = store.agents.filter(a => a.kind === 'mailbox');
-    if (!agents.length) { toast('No mailbox agents yet. Register an existing Claude or Codex chat in Classic tools, then send it tasks here.', { kind: 'error', timeout: 8000 }); return; }
+    if (!agents.length) { toast('No mailbox agents yet. Bring a Claude or Codex chat onto the board from Agent setup, then send it tasks here.', { kind: 'error', timeout: 8000 }); return; }
     const groups = [['claude', 'Claude'], ['codex', 'Codex'], ['other', 'Other agents']];
     const groupOf = a => (a.provider === 'claude' || a.provider === 'codex' ? a.provider : 'other');
     const agentSelect = h('select.select#tk-new-agent', groups.map(([provider, label]) => {

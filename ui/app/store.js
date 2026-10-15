@@ -133,6 +133,14 @@ class Store extends EventTarget {
     } catch (error) { this.setSync(false, error); }
   }
 
+  /** Directory only (cheap): Agent setup polls this while a new chat is joining. */
+  async refreshDirectory() {
+    const directory = await rpc('mailbox-directory', {});
+    const next = directory?.addresses || [];
+    if (JSON.stringify(next) !== JSON.stringify(this.addresses)) { this.addresses = next; this.emit('change'); }
+    return next;
+  }
+
   async refreshManifest() {
     try { const data = await desktop.loadManifest(); const next = data?.manifest || null; if (JSON.stringify(next) !== JSON.stringify(this.manifest)) { this.manifest = next; this.emit('change'); this.adoptManifest(); } }
     catch { /* optional file */ }
@@ -584,7 +592,7 @@ class Store extends EventTarget {
   deleteLiveThread(id) { this.updateDesktop(d => { delete d.chats.threads[id]; }); }
   async ensureGrant(thread) {
     const endpoint = this.board.endpoints.find(e => e.id === thread.endpointId);
-    if (!endpoint) throw new Error('This agent connection is no longer on the board. Reconnect it in Classic tools.');
+    if (!endpoint) throw new Error('This agent connection is no longer on the board. Reconnect it in Agent setup → Dedicated connections.');
     if (thread.grantId && thread.grantExpiresAt - Date.now() > 120e3 && thread.grantUsed < 15) return thread.grantId;
     const grant = await rpc('grant', { project: endpoint.workspace, allowed_paths: ['.'], targets: [endpoint.id], kinds: ['question'], expected_result: 'Reply to the owner in the CodaClauda live chat.', max_requests: 16, max_delegations: 0, max_hops: 0, timeout_seconds: 600, expires_seconds: 3600, compute: [] });
     this.updateDesktop(d => { Object.assign(d.chats.threads[thread.id], { grantId: grant.id, grantExpiresAt: toMs(grant.expires_at), grantUsed: 0 }); });

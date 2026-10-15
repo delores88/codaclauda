@@ -60,6 +60,7 @@ export function mount(root, ctx) {
         h('h1', 'Agents'),
         h('p', 'Everyone who works on your projects. Status comes from the shared board: Working = active in the last 20 min or holding a claim; Awake = active in the last 3 h; Powered down = quiet longer.'),
       ),
+      h('button.btn.primary', { type: 'button', onclick: () => navigate('connect') }, icon('agentAdd'), 'Add a desktop chat'),
     ),
     h('div.agents-toolbar',
       h('div.segmented', { role: 'group', 'aria-label': 'Filter by status' }, filterButtons),
@@ -206,7 +207,7 @@ export function mount(root, ctx) {
           : emptyState('agents', 'No agents on the board yet',
             'Agents appear here when a Claude or Codex desktop chat registers a mailbox on the board, or when a connected agent runs a live chat.',
             h('button.btn.primary', { type: 'button', onclick: () => navigate('chat') }, icon('chat'), 'Start a chat'),
-            h('a.btn', { href: 'classic.html' }, icon('settings'), 'Connect agents')));
+            h('button.btn', { type: 'button', onclick: () => navigate('connect') }, icon('agentAdd'), 'Connect agents')));
       }
     } else emptySlot.dataset.kind = '';
   }

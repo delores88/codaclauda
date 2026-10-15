@@ -29,15 +29,59 @@ messages[1].read_at = ago(100);
 const claims = [{ holder: 'claude-codaclauda', resource: 'codaclauda-ui', purpose: 'CodaClauda 0.3.0 desktop UI rebuild', created_at: ago(15), expires_at: ago(-105) }];
 
 const endpoints = [
-  { id: 'claude-claudacoda', agent: 'claude', label: 'Claude Code - CodaClauda', workspace: 'C:\\Users\\Benny\\OneDrive\\Desktop\\CodaClauda', auth_status: 'authenticated' },
-  { id: 'codex-claudacoda', agent: 'codex', label: 'Codex - CodaClauda', workspace: 'C:\\Users\\Benny\\OneDrive\\Desktop\\CodaClauda', auth_status: 'authenticated' },
+  { id: 'claude-claudacoda', agent: 'claude', label: 'Claude Code - CodaClauda', workspace: 'C:\\Users\\Benny\\OneDrive\\Desktop\\CodaClauda', auth_status: 'authenticated', version: '2.1.295 (Claude Code)', executable: 'C:\\mock\\bin\\claude.exe' },
+  { id: 'codex-claudacoda', agent: 'codex', label: 'Codex - CodaClauda', workspace: 'C:\\Users\\Benny\\OneDrive\\Desktop\\CodaClauda', auth_status: 'authenticated', version: 'codex-cli 0.162.0', executable: 'C:\\mock\\bin\\codex.exe' },
 ];
+const discovered = [
+  { agent: 'claude', executable: 'C:\\mock\\bin\\claude.exe', version: '2.1.295 (Claude Code)', supported: true, authenticated: true },
+  { agent: 'codex', executable: 'C:\\mock\\bin\\codex.exe', version: 'codex-cli 0.162.0', supported: true, authenticated: true },
+];
+function register(name, label) {
+  let entry = addresses.find(a => a.name === name);
+  if (entry) { if (label) entry.label = label; } else { entry = { name, label: label || name, created_at: now() }; addresses.push(entry); }
+  return entry;
+}
+/* Preview only: a copied join prompt "is pasted" into a pretend chat that registers ~5 s later,
+ * so Agent setup's "Waiting… → Joined ✓" can be seen. Also callable as codaMock.join(address, label). */
+function simulateJoins() {
+  globalThis.codaMock = { join: register };
+  const clip = globalThis.navigator?.clipboard;
+  if (!clip?.writeText || clip.writeText.mockJoins) return;
+  const write = clip.writeText.bind(clip);
+  const wrapped = text => {
+    const value = String(text);
+    const address = /^\$MailboxAddress = '([a-z0-9._-]+)'$/m.exec(value)?.[1];
+    const label = /mailbox register \$MailboxAddress --label '((?:[^']|'')*)'/.exec(value)?.[1]?.replaceAll("''", "'");
+    if (address) setTimeout(() => register(address, label), 5000);
+    return write(text);
+  };
+  wrapped.mockJoins = true;
+  try { clip.writeText = wrapped; } catch { /* clipboard object is read-only here; use codaMock.join */ }
+}
+/* Native updater walk-through: check → approve in browser → download → install. */
+const UPDATE_SIZE = 48e6;
+const updater = { phase: 'idle', current_version: '0.3.2-preview', available_version: null, message: '', approval_code: null, approval_url: null, progress_bytes: null, total_bytes: null, release_notes: null, busy: false, at: 0 };
+function updateOp({ op }) {
+  const u = updater, since = Date.now() - u.at;
+  if (u.phase === 'checking' && since > 1500) Object.assign(u, { phase: 'available', available_version: '0.3.3', total_bytes: UPDATE_SIZE, release_notes: 'CodaClauda 0.3.3 (preview data)\n\n- Agent setup page\n- Updates in Settings', message: '' });
+  if (u.phase === 'downloading') { u.progress_bytes = Math.min(UPDATE_SIZE, Math.round(since / 6000 * UPDATE_SIZE)); if (u.progress_bytes >= UPDATE_SIZE) Object.assign(u, { phase: 'ready', message: 'Installer verified. Install update opens ordinary Windows setup and closes CodaClauda after a safe handoff.' }); }
+  const begin = (phase, extra = {}) => Object.assign(u, { phase, at: Date.now(), message: '' }, extra);
+  if (op === 'check') begin('checking', { available_version: null, approval_code: null, approval_url: null, release_notes: null, message: 'Checking approved stable releases.' });
+  else if (op === 'authorize' && u.phase === 'available') begin('approval-pending', { approval_code: 'MOCK-CODE', approval_url: 'https://example.invalid/native-updates/preview', message: 'Compare your code.' });
+  else if (op === 'poll' && u.phase === 'approval-pending') begin('authorized', { approval_code: null, approval_url: null, message: 'Browser approval verified. Download the approved installer before authorization expires.' });
+  else if (op === 'download' && u.phase === 'authorized') begin('downloading', { progress_bytes: 0 });
+  else if (op === 'install' && u.phase === 'ready') begin('installing', { message: 'Preview: the real app closes here and Windows setup opens.' });
+  else if (op !== 'status') throw new Error(`Preview updater cannot ${op} from ${u.phase}.`);
+  return { ok: true, status: u.phase, ...u };
+}
 const requests = [
   { id: 'req-1', kind: 'question', origin: 'owner', target: 'codex-claudacoda', state: 'completed', prompt: 'Read README and list both endpoint labels.', expected_result: 'Labels and IDs.', created_at: ago(400), updated_at: ago(398), answer: 'Claude Code - CodaClauda and Codex - CodaClauda.' },
   { id: 'req-2', kind: 'review', origin: 'owner', target: 'claude-claudacoda', state: 'needs-owner', prompt: 'Review the installer manifest.', expected_result: 'Findings', created_at: ago(90), updated_at: ago(88), blocker: 'Grant expired before review completed.' },
+  { id: 'req-3', kind: 'question', origin: 'owner', target: 'codex-claudacoda', state: 'queued', prompt: 'List the files the installer bundles.', expected_result: 'A file list.', created_at: ago(6), updated_at: ago(6) },
 ];
-const grants = [];
+const grants = [{ id: 'grant-demo', project: endpoints[1].workspace, targets: ['codex-claudacoda'], kinds: ['question', 'review'], allowed_paths: ['README.md', 'ui/'], expected_result: 'Preview grant', expires_at: now() + 3600 }];
 const liveRequests = new Map();
+let boardPaused = false, sparkExecutable = 'C:\\mock\\sparkdev.exe';
 
 const repos = [
   ['codaclauda', 'Owner-scoped Claude Code and Codex coordination', 'Rust', 2400, 160, 0.2],
@@ -66,9 +110,19 @@ const sparkStatus = () => ({
   laptop_jobs: [sparkJob('j5', 'laptop', 'claude', 'rust', 6, 3), sparkJob('j6', 'laptop', 'codex', 'node', 2, 200, 180)],
 });
 const handlers = {
-  status: () => ({ endpoints, grants, requests: [...requests, ...liveRequests.values()], paused: false, state_dir: 'C:\\mock\\board', spark: { executable: 'C:\\mock\\sparkdev.exe' } }),
+  status: () => ({ endpoints, grants, requests: [...requests, ...liveRequests.values()], paused: boardPaused, state_dir: 'C:\\mock\\board', spark: { executable: sparkExecutable } }),
   spark: () => sparkStatus(),
-  'mailbox-directory': () => ({ addresses }),
+  'mailbox-directory': () => ({ addresses, identity: 'self-asserted-label' }),
+  'mailbox-register': ({ name, label }) => register(name, label),
+  discover: () => ({ agents: discovered }),
+  connect: ({ id, agent, label, executable, workspace, dedicated_session_consent }) => {
+    if (dedicated_session_consent !== true) throw new Error('Dedicated session consent is required.');
+    const record = { id, agent, label, workspace, executable, version: discovered.find(d => d.executable === executable)?.version || 'Version unavailable', auth_status: 'authenticated' };
+    const index = endpoints.findIndex(e => e.id === id);
+    if (index >= 0) endpoints[index] = record; else endpoints.push(record);
+    return record;
+  },
+  'rename-agent': ({ id, label }) => { const e = endpoints.find(x => x.id === id); if (!e) throw new Error('Unknown agent'); e.label = label; return e; },
   'mailbox-claims': () => ({ claims }),
   'mailbox-inbox': ({ addr, since = 0, limit = 20 }) => {
     const list = messages.filter(m => m.to === addr && m.sequence > since).slice(0, limit);
@@ -79,7 +133,16 @@ const handlers = {
   grant: args => { const g = { ...args, id: `grant-${grants.length + 1}`, expires_at: now() + 3600 }; grants.push(g); return g; },
   submit: ({ id, target, prompt }) => { const r = { id, target, kind: 'question', origin: 'owner', state: 'running', prompt, created_at: now(), updated_at: now() }; liveRequests.set(id, r); setTimeout(() => Object.assign(r, { state: 'completed', answer, updated_at: now(), session_id: 'mock-session' }), 4500); return r; },
   request: ({ id }) => liveRequests.get(id) || requests.find(r => r.id === id),
-  cancel: ({ id }) => { const r = liveRequests.get(id); if (r) r.state = 'cancelled'; return { ok: true }; },
+  cancel: ({ id, all }) => { // like coord-core: unfinished requests (or the whole root tree) become cancelled
+    const root = (liveRequests.get(id) || requests.find(r => r.id === id))?.root_id || id;
+    for (const r of [...requests, ...liveRequests.values()]) {
+      if ((r.id === id || (all && (r.root_id || r.id) === root)) && !['completed', 'failed', 'cancelled', 'needs-owner'].includes(r.state)) Object.assign(r, { state: 'cancelled', cancel_requested: true, updated_at: now() });
+    }
+    return { ok: true };
+  },
+  pause: ({ paused }) => { boardPaused = !!paused; return { paused: boardPaused }; },
+  reconnect: () => ({ message: 'Preview: no interrupted workers found; nothing was dispatched.' }),
+  'spark-config': ({ executable }) => { if (!executable) throw new Error('Enter the sparkdev executable path.'); sparkExecutable = executable; return { executable }; },
 };
 
 const desktopHandlers = {
@@ -104,10 +167,12 @@ const desktopHandlers = {
   dictation_start: () => ({ started: false, reason: 'Browser preview: use the desktop app for Windows voice typing.' }),
   window_attention: () => ({}),
   pick_workspace: () => ({ path: 'C:\\Users\\Ben\\Desktop\\NewProject' }),
-  preferences: () => ({ cli_path: 'C:\\mock\\claudacoda-cli.exe', state_dir: 'C:\\mock\\board', version: '0.3.0-preview' }),
+  preferences: () => ({ cli_path: 'C:\\mock\\claudacoda-cli.exe', state_dir: 'C:\\mock\\board', version: '0.3.2-preview' }),
+  update: updateOp,
 };
 
 export function createMock() {
+  simulateJoins();
   return {
     async invoke(command, args = {}) {
       await new Promise(r => setTimeout(r, 40));

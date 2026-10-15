@@ -697,7 +697,7 @@ export function mount(root, ctx) {
       h('span.hero-card-icon', icon(iconName)), h('span.hero-card-text', h('strong', title), h('span', text)), icon('arrowRight', 'hero-card-arrow'));
     const liveCard = (endpoint, provider) => card({
       iconName: 'bolt', tone: provider, title: `Start a live chat with ${providerName(provider)}`,
-      text: endpoint ? `Fresh ${provider === 'claude' ? 'Claude Code' : 'Codex'} session per message · ~30–90 s` : `Connect ${provider === 'claude' ? 'Claude Code' : 'Codex'} in Settings → Classic tools`,
+      text: endpoint ? `Fresh ${provider === 'claude' ? 'Claude Code' : 'Codex'} session per message · ~30–90 s` : `Connect ${provider === 'claude' ? 'Claude Code' : 'Codex'} in Agent setup → Dedicated connections`,
       run: () => (endpoint ? startLive(endpoint.id) : navigate('settings')),
     });
     return h('div.chat-hero',
@@ -830,7 +830,7 @@ export function mount(root, ctx) {
             `Fresh ${providerName(provider)} session per message, ~30–90 s${e.workspace ? ` · ${shownPath(e.workspace)}` : ''}`,
             needsAuth ? pill('Sign-in needed', 'warning') : providerPill(provider), () => startLive(e.id));
         }))
-        : h('div.newchat-empty', h('span', 'No live endpoints yet. Connect Claude Code or Codex in Classic tools to start live chats.'),
+        : h('div.newchat-empty', h('span', 'No live endpoints yet. Connect Claude Code or Codex in Agent setup → Dedicated connections to start live chats.'),
           h('button.btn.small', { type: 'button', onclick: () => { dialog?.close(); navigate('settings'); } }, icon('settings'), 'Open Settings')));
     const body = h('div.newchat', focus === 'live' ? [liveSectionNode, mailboxSection] : [mailboxSection, liveSectionNode]);
     dialog = modal({ title: 'New chat', body, actions: [{ label: 'Cancel', kind: 'ghost' }] });

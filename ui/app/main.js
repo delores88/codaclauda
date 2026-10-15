@@ -11,6 +11,7 @@ const VIEWS = [
   { id: 'tasks', label: 'Tasks', icon: 'tasks', load: () => import('./views/tasks.js') },
   { id: 'city', label: 'City', icon: 'city', load: () => import('./views/city.js') },
   { id: 'agents', label: 'Agents', icon: 'agents', load: () => import('./views/agents.js') },
+  { id: 'connect', label: 'Agent setup', icon: 'agentAdd', load: () => import('./views/connect.js') },
   { id: 'projects', label: 'Projects', icon: 'projects', load: () => import('./views/projects.js') },
   { id: 'approvals', label: 'Approvals', icon: 'shield', load: () => import('./views/approvals.js') },
 ];
