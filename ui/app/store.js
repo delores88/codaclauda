@@ -541,6 +541,22 @@ class Store extends EventTarget {
   setAgentPrefs(agentId, patch) { this.updateDesktop(d => { d.agents[agentId] = { ...d.agents[agentId], ...patch }; }); }
   setTaskOverride(taskId, patch) { this.updateDesktop(d => { d.tasks[taskId] = { ...d.tasks[taskId], ...patch }; }); }
   saveAvatar(spec) { this.updateDesktop(d => { d.avatar = normalizeAvatar(spec); }); }
+  /** Message-board threads filed under projects. Key = thread root message id.
+   *  { projectId: string|'none', pinned: boolean } — projectId overrides auto-detection. */
+  get threadPrefs() { return this.desktop.threadPrefs || {}; }
+  setThreadPrefs(rootId, patch) { this.updateDesktop(d => { d.threadPrefs = { ...(d.threadPrefs || {}) }; d.threadPrefs[rootId] = { ...d.threadPrefs[rootId], ...patch }; }); }
+  /** Project for a mailbox thread: owner override → [tag]/"Project:" or name mention in any message → the agent's home project. */
+  threadProject(rootId, messages) {
+    const pref = this.threadPrefs[rootId];
+    if (pref?.projectId === 'none') return null;
+    if (pref?.projectId) return this.project(pref.projectId) || null;
+    // Home project of the agents in this thread; a mention of it beats mentions of other projects.
+    let home = null;
+    for (const m of messages) { const agent = this.agents.find(a => a.address === m.from || a.address === m.to); home = agent?.homeProjectId && this.project(agent.homeProjectId); if (home) break; }
+    // The thread's first message (usually where the [Project] tag or topic is) decides first.
+    for (const m of messages) { const p = this.matchProject(`${m.subject}\n${m.body}`, this.projects, home?.id || null); if (p) return p; }
+    return home || null;
+  }
   /** City lot pins: { [projectId]: { i, j } } — a project created on a chosen plot stays there. */
   get cityLots() { return this.desktop.cityLots || {}; }
   setCityLot(projectId, lot) { this.updateDesktop(d => { d.cityLots = { ...(d.cityLots || {}) }; if (lot) d.cityLots[projectId] = { i: Number(lot.i), j: Number(lot.j) }; else delete d.cityLots[projectId]; }); }

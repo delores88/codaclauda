@@ -113,9 +113,27 @@ export const SPARK_MATERIALS = {
   winDark: sparkToon('#46705a', '#0e2a1c', 0.22),
 };
 export const SPARK_SPARKS = ['#b6ff3a', SPARK_GREEN, '#f3ffe0'];
+/* Spark offline: every shared Spark material turns a flat grey with its glow off (they are used
+ * by the Spark side only, so changing them in place greys the whole side at once). */
+let sparkOffline = false;
+const SPARK_ALL = [...new Set([...SPARK_BODIES, ...Object.values(SPARK_MATERIALS)])];
+export function setSparkOffline(on) {
+  on = Boolean(on);
+  if (on === sparkOffline) return false;
+  sparkOffline = on;
+  const hsl = {};
+  for (const m of SPARK_ALL) {
+    const keep = m.userData.online ||= { color: m.color.clone(), emissive: m.emissive.clone(), emissiveIntensity: m.emissiveIntensity };
+    if (on) { keep.color.getHSL(hsl); m.color.setHSL(hsl.h, 0.03, 0.24 + hsl.l * 0.5); m.emissive.set('#000000'); m.emissiveIntensity = 0; }
+    else { m.color.copy(keep.color); m.emissive.copy(keep.emissive); m.emissiveIntensity = keep.emissiveIntensity; }
+  }
+  return true;
+}
+export const sparkIsOffline = () => sparkOffline;
 /** Breathing glow for busy Spark buildings and the day/night glow of the Spark side (shared
  * materials: one update per frame for the whole side). */
 export function pulseSpark(elapsed, { reducedMotion = false, night = 0 } = {}) {
+  if (sparkOffline) return;   // greyed out: no glow, no breathing
   const k = reducedMotion ? 0.6 : 0.5 + 0.5 * Math.sin(elapsed * 2.6);
   const M = SPARK_MATERIALS;
   M.bodyActive.emissiveIntensity = 0.24 + k * 0.4 + night * 0.15;
