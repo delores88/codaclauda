@@ -574,7 +574,7 @@ export function mount(root, ctx) {
     lead,
     h('span.bd-agent-text', h('span.bd-agent-name', label)),
     unread ? h('span.bd-unread-pip', { title: `${unread} unread for you` }, String(unread)) : null,
-    h('span.bd-agent-count', { title: `${count} thread${count === 1 ? '' : 's'}` }, String(count)));
+    h('span.bd-agent-count', { title: state.tab === 'for-you' ? `${count} message${count === 1 ? '' : 's'} to you` : `${count} thread${count === 1 ? '' : 's'}` }, String(count)));
   }
 
   /* ---------- lanes (project sections) ---------- */
@@ -736,7 +736,7 @@ export function mount(root, ctx) {
       projectItems.push({ key: s.key, project: s.project, label: s.project?.name || laneLabel(s.key), count: s.count, unread: s.unread, active: state.project === s.key });
     }
     if (state.project && !laneStats.has(state.project)) projectItems.push({ key: state.project, project: state.project.startsWith('p:') ? store.project(state.project.slice(2)) : null, label: laneLabel(state.project), count: 0, unread: 0, active: true });
-    stable(filters, projectList, () => reconcile(projectList, caches.projects, projectItems.map(item => ({ ...item, sig: JSON.stringify([item.label, item.count, item.unread, item.active, item.project?.color]) })), projectRow, ''));
+    stable(filters, projectList, () => reconcile(projectList, caches.projects, projectItems.map(item => ({ ...item, sig: JSON.stringify([item.label, item.count, item.unread, item.active, item.project?.color, state.tab]) })), projectRow, ''));
 
     /* sidebar: agents + kinds */
     const counts = new Map();
