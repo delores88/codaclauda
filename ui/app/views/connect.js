@@ -320,12 +320,20 @@ export function mount(root, ctx) {
    *     Same validation, limits, peers, compute permissions and uncertain-outcome rule.
    * ===================================================================== */
   const KINDS = [{ id: 'question', label: 'Question', hint: 'Ask for an answer' }, { id: 'review', label: 'Review', hint: 'Get another perspective' }, { id: 'delegate', label: 'Delegate', hint: 'Create a scoped diff' }];
-  let pendingSubmission = null;
+  let pendingSubmission = null, gsInFlight = false;   // in flight: a grant/submit call is still running
   const gs = { kind: 'question' };
   const num = (name, min, max, value) => h('input.input', { type: 'number', name, min, max, value, required: true });
   const gsTarget = h('select.select', { required: true, onchange: () => { gsProject.value = store.board.endpoints.find(e => e.id === gsTarget.value)?.workspace || ''; renderPeers(true); } });
   const gsProject = h('input.input.mono', { type: 'text', required: true, spellcheck: 'false', autocomplete: 'off', onchange: () => renderPeers() });
-  const gsBrowse = h('button.btn', { type: 'button', onclick: async () => { try { const folder = await bridge.desktop.pickFolder(); if (folder) { gsProject.value = folder; renderPeers(); } } catch (error) { toast(error.message || String(error), { kind: 'error' }); } } }, 'Browse…');
+  const gsBrowse = h('button.btn', { type: 'button', onclick: async () => {
+    gsBrowse.disabled = true;
+    try {
+      const result = await bridge.desktop.pickFolder();
+      if (result?.cancelled === true) return;
+      if (typeof result?.path !== 'string' || !result.path) throw new Error('The folder picker did not return a workspace.');
+      gsProject.value = result.path; renderPeers();
+    } catch (error) { toast(error.message || String(error), { kind: 'error' }); } finally { gsBrowse.disabled = false; }
+  } }, icon('folder'), 'Browse…');
   const gsPeers = [0, 1, 2].map(() => h('select.select'));
   const gsPeerHint = h('span.field-hint');
   const gsPrompt = h('textarea.textarea', { rows: 4, required: true, placeholder: 'Describe the problem, context, and what you want the agent to do.' });
@@ -358,11 +366,13 @@ export function mount(root, ctx) {
     selectOptions(gsTarget, endpoints.map(e => ({ value: e.id, label: `${labelFor(e.id)} · ${e.workspace} · ${e.id}` })), endpoints.length ? null : 'Connect an agent under Dedicated connections first');
     if (endpoints.some(e => e.id === previous)) gsTarget.value = previous;
     if (!gsProject.value && gsTarget.value) gsProject.value = endpoints.find(e => e.id === gsTarget.value)?.workspace || '';
-    gsSend.disabled = !endpoints.length;
+    gsSend.disabled = gsInFlight || !endpoints.length;
     renderPeers(); renderScope();
   }
   const gsForm = h('form.cx-form', { oninput: () => { if (pendingSubmission) pendingSubmission.dirty = true; }, onsubmit: async event => {
-    event.preventDefault(); gsError.hidden = true; gsSend.disabled = true;
+    event.preventDefault();
+    if (gsInFlight) return;
+    gsInFlight = true; gsError.hidden = true; gsSend.disabled = true;
     try {
       if (!gsConsent.checked) throw new Error('Authorize the scope and limits before sending.');
       const values = { kind: gs.kind, target: gsTarget.value, project: gsProject.value, prompt: gsPrompt.value, expected_result: gsExpected.value, allowed_paths: gsPaths.value, compute: gsCompute.value, peers: gsPeers.map(s => s.value), ...Object.fromEntries(Object.entries(gsLimits).map(([k, input]) => [k, input.value])) };
@@ -396,7 +406,7 @@ export function mount(root, ctx) {
     } catch (error) {
       gsError.textContent = (error.message || String(error)) + (pendingSubmission ? ` Request ID: ${pendingSubmission.id}. Retrying unchanged uses the same ID; check Tasks before creating another request.` : '');
       gsError.hidden = false;
-    } finally { gsSend.disabled = !store.board.endpoints.length; }
+    } finally { gsInFlight = false; gsSend.disabled = !store.board.endpoints.length; }
   } },
     h('div.cx-wide', gsKind),
     h('label.field', h('span', 'Send to'), gsTarget),
