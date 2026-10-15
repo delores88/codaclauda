@@ -48,4 +48,6 @@ export const desktop = {
   openExternal: target => invoke('open_external', { target }),
   pickFolder: () => invoke('pick_workspace'),
   preferences: () => invoke('preferences'),
+  /** Native updater: op is check | status | authorize | poll | download | install (no other args). */
+  update: op => invoke('update', { op, args: {} }),
 };

@@ -168,8 +168,7 @@
 .city-split-key.spark { background: var(--spark-teal); }
 .city-split-legend { color: var(--muted); font-size: 11.5px; }
 .city-machines-last { margin: -4px 0 0; color: var(--muted); font-size: 11.5px; }
-.city-machines-chip { display: inline-flex; align-items: center; gap: 7px; justify-self: start; padding: 6px 11px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface-2); color: var(--muted); font-weight: 600; text-decoration: none; }
-.city-machines-chip:hover { border-color: var(--border-strong); color: var(--text); }
+.city-machines-chip { display: inline-flex; align-items: center; gap: 7px; justify-self: start; margin: 0; padding: 6px 11px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface-2); color: var(--muted); font-weight: 600; }
 .city-machines-chip .icon { width: 14px; height: 14px; }
 .city-machines-error { display: flex; align-items: flex-start; gap: 6px; margin: 0; color: var(--danger); font-size: 11.5px; overflow-wrap: anywhere; }
 .city-machines-error .icon { width: 14px; height: 14px; margin-top: 1px; }
@@ -272,3 +271,115 @@
 /* The app's own Reduce motion setting (toggled on the view root). */
 .city-view.reduce-motion .city-zoom-hint, .city-view.reduce-motion .city-bubble, .city-view.reduce-motion .city-help, .city-view.reduce-motion .city-panel, .city-view.reduce-motion .city-task-form, .city-view.reduce-motion .city-cluster-pop { animation: none; }
 .city-view.reduce-motion .city-toolbar, .city-view.reduce-motion .city-meter-fill, .city-view.reduce-motion .city-flip, .city-view.reduce-motion .city-cluster, .city-view.reduce-motion .city-side, .city-view.reduce-motion .city-findme, .city-view.reduce-motion .city-street-btn { transition: none; }
+
+/* Talk mode (click an agent): letterbox bars, the way out, what you both say over your heads and the
+   conversation docked on the right (a bottom sheet on narrow windows). The HUD and chrome step aside. */
+.city-root { --city-bar: #05060b; }
+[data-theme="light"] .city-root { --city-bar: #10121c; }
+.city-bar { position: absolute; left: 0; right: 0; z-index: 1; height: 8%; background: var(--city-bar); pointer-events: none; transform: scaleY(0); transition: transform 420ms var(--ease); }
+.city-bar.top { top: 0; transform-origin: top; }
+.city-bar.bottom { bottom: 0; transform-origin: bottom; }
+.city-root.is-talk .city-bar { transform: scaleY(1); }
+.city-root.is-talk .city-hud, .city-root.is-talk .city-legend, .city-root.is-talk .city-toolbar, .city-root.is-talk .city-machines, .city-root.is-talk .city-help,
+.city-root.is-talk .city-empty, .city-root.is-talk .city-panel, .city-root.is-talk .city-zoom-hint, .city-root.is-talk .city-street-hint, .city-root.is-talk .city-labels,
+.city-root.is-talk .city-chips, .city-root.is-talk .city-cluster-pop, .city-root.is-talk .city-offline-tag { display: none; }
+.city-root.is-talk .city-stage:not(.is-pointing) { cursor: default; }
+.city-talk-leave { position: absolute; top: 14px; left: 14px; z-index: 6; display: none; align-items: center; gap: 8px; height: 38px; padding: 0 10px 0 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: color-mix(in srgb, var(--surface) 90%, transparent); backdrop-filter: blur(12px) saturate(1.2); -webkit-backdrop-filter: blur(12px) saturate(1.2); color: var(--text); font-size: 13px; font-weight: 650; white-space: nowrap; box-shadow: var(--shadow); cursor: pointer; transition: border-color var(--fast), background var(--fast); }
+.city-root.is-talk .city-talk-leave { display: inline-flex; animation: city-pop var(--med) var(--ease); }
+.city-talk-leave:hover { border-color: var(--accent); background: var(--surface); }
+.city-talk-leave:focus-visible { outline: none; box-shadow: var(--focus); }
+.city-talk-leave .icon { width: 16px; height: 16px; color: var(--accent-2); }
+.city-talk-leave kbd { padding: 1px 6px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 6px; background: var(--surface-2); color: var(--muted); font: 600 10.5px/1.5 var(--font-mono); }
+
+/* What you and the agent say (in the 3D view) */
+.city-talk-say { max-width: 280px; }
+.city-talk-say.is-owner { border-color: transparent; background: var(--owner-bubble); color: var(--owner-text); }
+.city-talk-say.is-owner::after { border-color: transparent; background: #7b5cf0; }
+.city-talk-say.is-typing { --dot: var(--accent-2); padding: 11px 15px; }
+
+/* The conversation */
+.city-talk { position: absolute; top: 0; right: 0; bottom: 0; z-index: 5; display: flex; flex-direction: column; width: min(400px, 100%); border-left: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow-lg); animation: city-slide var(--med) var(--ease); }
+.city-talk[hidden] { display: none; }
+.city-talk-head { display: flex; align-items: center; gap: 12px; padding: 16px 12px 10px 16px; }
+.city-talk-title { flex: 1; min-width: 0; }
+.city-talk-title h2 { display: -webkit-box; margin: 0; overflow: hidden; font: 600 16px/1.25 var(--font-display); overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.city-talk-title p { margin: 2px 0 0; overflow: hidden; color: var(--muted); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.city-talk-actions { display: flex; align-items: center; gap: 4px; align-self: flex-start; }
+.city-talk-open { white-space: nowrap; }
+.city-talk-mode { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 16px 12px; border-bottom: 1px solid var(--border); }
+.city-talk-pill { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 10px; border-radius: var(--radius-pill); background: var(--surface-2); color: var(--text-2); font-size: 11.5px; white-space: nowrap; }
+.city-talk-pill .icon { width: 13px; height: 13px; }
+.city-talk-pill.live { background: var(--accent-soft); }
+.city-talk-pill.live .icon { color: var(--accent-2); }
+.city-talk-scroll { flex: 1; min-height: 0; padding: 14px 14px 8px; overflow-y: auto; overscroll-behavior: contain; }
+.city-talk-log { display: grid; gap: 12px; }
+.city-talk-msg { display: flex; gap: 8px; min-width: 0; }
+.city-talk-msg.owner { flex-direction: column; align-items: flex-end; }
+.city-talk-msg.agent > .portrait { flex: none; margin-top: 2px; }
+.city-talk-stack { flex: 1; min-width: 0; }
+.city-talk-bubble { max-width: 100%; padding: 8px 12px; overflow-wrap: anywhere; }
+.city-talk-bubble .md > :last-child { margin-bottom: 0; }
+.city-talk-msg.owner .city-talk-bubble { max-width: 88%; border-radius: 16px 16px 5px 16px; background: var(--owner-bubble); color: var(--owner-text); }
+/* Owner bubble: markdown on the gradient (as Chat's .bubble) */
+.city-talk-msg.owner .md a { color: inherit; text-decoration-color: rgba(255, 255, 255, .6); }
+.city-talk-msg.owner .md :not(pre) > code { border-color: rgba(255, 255, 255, .22); background: rgba(255, 255, 255, .18); color: inherit; }
+.city-talk-msg.owner .md blockquote { border-left-color: rgba(255, 255, 255, .6); background: rgba(255, 255, 255, .1); color: inherit; }
+.city-talk-msg.owner .md li::marker { color: rgba(255, 255, 255, .75); }
+.city-talk-msg.owner .md .code-block { color: var(--text); }
+.city-talk-msg.agent .city-talk-bubble { display: inline-block; border: 1px solid var(--border); border-radius: 5px 16px 16px 16px; background: var(--surface-2); color: var(--text); }
+.city-talk-meta { display: flex; align-items: center; gap: 8px; margin-top: 3px; color: var(--faint); font-size: 11px; }
+.city-talk-meta .pill { height: 18px; font-size: 10.5px; }
+.city-talk-receipt { display: inline-flex; align-items: center; gap: 4px; }
+.city-talk-receipt .icon { width: 12px; height: 12px; }
+.city-talk-receipt.seen { color: var(--success); }
+.city-talk-typing { --dot: var(--accent-2); display: inline-flex; flex-wrap: wrap; align-items: center; gap: 9px; padding: 5px 5px 5px 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-2); color: var(--text-2); font-size: 12.5px; font-weight: 600; }
+.city-talk-typing.claude { --dot: var(--claude); }
+.city-talk-typing.codex { --dot: var(--codex); }
+.city-talk-callout { display: flex; align-items: flex-start; gap: 8px; }
+.city-talk-callout > .icon { flex: none; width: 15px; height: 15px; margin-top: 3px; }
+.city-talk-callout.danger > .icon { color: var(--danger); }
+.city-talk-callout.warning > .icon { color: var(--warning); }
+.city-talk-muted { margin: 0; color: var(--muted); font-size: 12.5px; }
+.city-talk-system { color: var(--muted); font-size: 12px; text-align: center; }
+.city-talk-more { justify-self: center; padding: 3px 10px; border: 0; border-radius: var(--radius-pill); background: var(--surface-2); color: var(--accent-2); font-size: 12px; font-weight: 600; cursor: pointer; }
+.city-talk-more:hover { background: var(--surface-hover); }
+.city-talk-intro { display: grid; gap: 10px; padding: 4px 2px; color: var(--text-2); font-size: 13px; line-height: 1.5; }
+.city-talk-intro p { margin: 0; }
+.city-talk-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.city-talk-chip { padding: 6px 11px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: var(--surface-2); color: var(--text); font-size: 12.5px; text-align: left; cursor: pointer; transition: border-color var(--fast); }
+.city-talk-chip:hover, .city-talk-chip:focus-visible { border-color: var(--accent); }
+.city-talk-wait { display: flex; gap: 10px; margin-top: 12px; padding: 10px 12px; border: 1px dashed var(--border-strong); border-radius: 12px; color: var(--text-2); font-size: 12.5px; }
+.city-talk-wait > .icon { flex: none; width: 16px; height: 16px; margin-top: 1px; color: var(--warning); }
+.city-talk-wait.seen > .icon { color: var(--success); }
+.city-talk-wait strong { color: var(--text); font-weight: 650; }
+.city-talk-wait p { margin: 3px 0 0; color: var(--muted); }
+.city-talk-composer { display: grid; gap: 6px; padding: 10px 14px 14px; border-top: 1px solid var(--border); }
+.city-talk-box { display: flex; align-items: flex-end; gap: 8px; padding: 5px 5px 5px 12px; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--surface-2); transition: border-color var(--fast), box-shadow var(--fast); }
+.city-talk-box:focus-within { border-color: var(--accent); box-shadow: var(--focus); }
+.city-talk-input { flex: 1; min-width: 0; min-height: 34px; max-height: 150px; padding: 7px 0; border: 0; background: none; color: var(--text); font: inherit; font-size: 13.5px; line-height: 1.45; resize: none; outline: none; }
+.city-talk-input::placeholder { color: var(--faint); }
+.city-talk-send, .city-talk-stop { display: grid; flex: none; place-items: center; width: 34px; height: 34px; border: 0; border-radius: 11px; background: var(--accent); color: var(--accent-contrast); cursor: pointer; transition: background var(--fast); }
+.city-talk-send:disabled { background: var(--surface-3); color: var(--faint); cursor: default; }
+.city-talk-stop { background: var(--danger); }
+.city-talk-send[hidden], .city-talk-stop[hidden] { display: none; }
+.city-talk-send .icon, .city-talk-stop .icon { width: 17px; height: 17px; }
+.city-talk-stop .icon { fill: currentColor; }
+.city-talk-send .spinner { width: 15px; height: 15px; }
+.city-talk-note { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.city-talk-error { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 10px; border-radius: 10px; background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--text); font-size: 12.5px; }
+.city-talk-error[hidden] { display: none; }
+.city-talk-error > .icon { flex: none; width: 15px; height: 15px; color: var(--danger); }
+.city-talk-error-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+@keyframes city-rise { from { opacity: 0; transform: translateY(18px); } }
+@media (max-width: 760px) {
+  /* Narrow: the conversation is a bottom sheet; the agent is framed above it. */
+  .city-talk { top: auto; left: 0; width: auto; height: min(56%, 520px); border-top: 1px solid var(--border); border-left: 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0; animation-name: city-rise; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .city-bar, .city-talk-leave, .city-talk-chip, .city-talk-box { transition: none; }
+  .city-talk, .city-root.is-talk .city-talk-leave { animation: none; }
+  .city-talk-say .typing-dots i, .city-talk-typing .typing-dots i { animation: none; opacity: .75; }
+}
+.city-view.reduce-motion .city-bar, .city-view.reduce-motion .city-talk-leave, .city-view.reduce-motion .city-talk-chip, .city-view.reduce-motion .city-talk-box { transition: none; }
+.city-view.reduce-motion .city-talk, .city-view.reduce-motion .city-root.is-talk .city-talk-leave, .city-view.reduce-motion .city-talk-say { animation: none; }
+.city-view.reduce-motion .typing-dots i { animation: none; opacity: .75; }

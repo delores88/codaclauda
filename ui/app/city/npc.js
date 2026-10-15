@@ -75,8 +75,8 @@ class Npc {
   get pos() { return this.person.object.position; }
   setAction(action) { if (this.action !== action) { this.action = action; this.person.setAction(action); } }
   place(x, z) { this.pos.set(x, groundY(x, z), z); }
-  get moving() { return this.path.length > 0 && this.pause <= 0; }
-  get anchored() { return !this.path.length && this.goal && (this.goal.type === 'sit' || this.goal.type === 'work'); }
+  get moving() { return this.path.length > 0 && this.pause <= 0 && !this.held; }
+  get anchored() { return this.held || (!this.path.length && this.goal && (this.goal.type === 'sit' || this.goal.type === 'work')); }
 }
 
 export class NpcManager {
@@ -198,7 +198,7 @@ export class NpcManager {
         npc.path = planPath({ x: npc.pos.x, z: npc.pos.z }, goal.point, npc.lane);
         npc.roaming = goal.type === 'stroll';
         npc.wait = 0;
-        if (npc.pause <= 0) npc.setAction('walk');
+        if (npc.pause <= 0 && !npc.held) npc.setAction('walk');
         if (previous?.type === 'sit' || previous?.type === 'work') npc.pause = 0;
       }
       npc.fresh = false;
@@ -217,6 +217,7 @@ export class NpcManager {
   /* ---------- per-frame ---------- */
   update(dt, elapsed, env) {
     for (const npc of this.npcs.values()) {
+      if (npc.held) { npc.person.update(dt, elapsed); continue; }   // talk mode: stays put (see hold)
       if (npc.pause > 0) {
         npc.pause -= dt;
         if (npc.pause <= 0) { npc.pause = 0; if (npc.path.length) npc.setAction('walk'); else this.arrive(npc); }
@@ -246,8 +247,8 @@ export class NpcManager {
     if (this.owner) {
       const o = this.owner;
       if (o.path.length) {
-        this.step(o, o.path, SPEED.owner, dt);
-        if (!o.path.length) this.ownerAction('stand');
+        this.step(o, o.path, o.speed || SPEED.owner, dt);
+        if (!o.path.length) { o.speed = 0; this.ownerAction('stand'); }
       }
       o.person.update(dt, elapsed);
     }
@@ -290,7 +291,7 @@ export class NpcManager {
   }
   /** Idle agents who bump into each other stop for a wave and a chat. */
   socialize() {
-    const idle = [...this.npcs.values()].filter(n => n.goal?.type === 'stroll' && n.pause <= 0 && n.social <= 0);
+    const idle = [...this.npcs.values()].filter(n => n.goal?.type === 'stroll' && n.pause <= 0 && n.social <= 0 && !n.held);
     for (let a = 0; a < idle.length; a++) for (let b = a + 1; b < idle.length; b++) {
       const p = idle[a], q = idle[b];
       if (p.pause > 0 || q.pause > 0) continue;
@@ -332,16 +333,53 @@ export class NpcManager {
     clearTimeout(this.ownerWaveTimer);
     this.ownerWaveTimer = setTimeout(() => { if (this.owner && !this.owner.path.length) this.ownerAction('stand'); }, 2400);
   }
-  walkOwner(x, z) {
+  /** Walk your avatar to (x, z): straight there when close (or direct), else along the roads.
+   *  speed: units/s (talk mode walks briskly); marker: the ring where you'll stop (double-click walks). */
+  walkOwner(x, z, { speed = 0, marker = true, direct = false } = {}) {
     if (!this.owner) return;
     const pos = this.owner.person.object.position;
-    const direct = Math.hypot(x - pos.x, z - pos.z) < 7;
+    direct ||= Math.hypot(x - pos.x, z - pos.z) < 7;
     this.owner.path = direct ? [{ x, z }] : planPath({ x: pos.x, z: pos.z }, { x, z }, { x: 1, z: 1 });
+    this.owner.speed = speed;
     this.owner.person.lookAt(this.owner.path[0].x, this.owner.path[0].z);
     this.ownerAction('walk');
+    if (!marker) return;
     this.marker.position.set(x, groundY(x, z) + 0.03, z);
     this.marker.material.opacity = 0.9; this.marker.scale.setScalar(1);
   }
+  /** Talk mode: an agent stops where it is (no wandering, no chats with passers-by) until released;
+   *  then it carries on toward whatever it was doing. */
+  hold(id, on) {
+    const npc = this.npcs.get(id);
+    if (!npc || Boolean(npc.held) === Boolean(on)) return;
+    npc.held = Boolean(on);
+    if (on) { if (npc.action === 'walk' || npc.action === 'wave') npc.setAction('stand'); return; }
+    npc.pause = 0;
+    if (npc.path.length) npc.setAction('walk');
+    else if (npc.goal?.type === 'stroll') { npc.setAction('stand'); npc.wait = Math.min(npc.wait || 0, 1.2); }
+    else this.arrive(npc);
+  }
+  /** Is this agent sitting (on a bench)? Seated people are not turned around or animated. */
+  seated(id) { return this.npcs.get(id)?.action === 'sit'; }
+  /** Set a person's animation (talk mode: 'talk', 'wave', 'stand'); a seated agent stays seated. */
+  act(target, action) {
+    if (target?.kind === 'owner') { this.ownerAction(action); return; }
+    const npc = this.npcs.get(target?.id);
+    if (npc && npc.action !== 'sit') npc.setAction(action);
+  }
+  /** Turn a person toward (x, z) (island space). */
+  face(target, x, z) { this.personOf(target)?.lookAt(x, z); }
+  /** A person's facing (island-space yaw: forward is (sin, cos)). */
+  yaw(target) { return this.personOf(target)?.object.rotation.y || 0; }
+  /** Height of a person's face above the ground they stand on (lower when seated). */
+  faceHeight(target) {
+    const person = this.personOf(target), head = Number(person?.headCenterY), drop = Number(person?.body?.sitDrop);
+    const sitting = target?.kind === 'agent' && this.seated(target.id);
+    return (Number.isFinite(head) && head > 0.5 ? head : 1.35) + (sitting && Number.isFinite(drop) ? drop : 0);
+  }
+  /** Height of the top of a person's head (standing). */
+  topHeight(target) { const top = Number(this.personOf(target)?.topY); return Number.isFinite(top) && top > 0.5 ? top : 1.8; }
+  personOf(target) { return target?.kind === 'owner' ? this.owner?.person : this.npcs.get(target?.id)?.person; }
   /** Street view: put the owner at (x, z) (island space) facing `heading` (yaw: forward is
    *  (sin, cos)), walking at `speed` or standing. Cancels any double-click walk. */
   driveOwner(x, z, heading, moving, speed = 2.4) {

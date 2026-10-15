@@ -916,7 +916,7 @@ export function mount(root, ctx) {
   /* ---------- Post to board ---------- */
   function openPost({ to = state.agent, replyTo = null, subject = '', threadId = null, project = null } = {}) {
     const agents = store.addresses.filter(a => a.name !== OWNER);
-    if (!agents.length) { toast('No agents are registered on the board yet. Register an existing Claude or Codex chat in Classic tools first.', { kind: 'error' }); return; }
+    if (!agents.length) { toast('No agents are registered on the board yet. Bring a Claude or Codex chat onto the board from Agent setup first.', { kind: 'error' }); return; }
     let kind = replyTo ? 'reply' : 'question';
     const toSelect = h('select.select#bd-post-to', agents.map(a => h('option', { value: a.name }, `${person(a.name).name}  ·  ${a.name}`)));
     toSelect.value = agents.some(a => a.name === to) ? to : agents[0].name;

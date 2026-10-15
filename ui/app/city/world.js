@@ -22,7 +22,7 @@ import { DECK_Y } from './spark.js';
 /* ---------- turning the island over ---------- */
 /** Island-space height of the pivot: midway between the two faces, so either face rests at the same height. */
 export const PIVOT_Y = (GROUND_Y + DECK_Y) / 2;
-export const TILT_POLAR = 0.82;          // fixed camera elevation (polar angle) while the island can be turned
+export const TILT_POLAR = 0.82;          // the overview's camera pitch (polar angle); closer in, see polarForDistance
 const TILT_PX = 420;                     // vertical drag for a half turn
 const TILT_DEADZONE = 8;                 // px before a vertical drag starts tilting (clicks stay clicks)
 const FLIP_SECONDS = 0.9;
@@ -77,6 +77,24 @@ export function queueZoomLog(pending, log, distance, min, max) {
   return Math.max(Math.min(lo, 0), Math.min(Math.max(hi, 0), pending + log));
 }
 /* WHEEL-ZOOM-END */
+
+/* PITCH-BEGIN (pure: checked headless) */
+/** Zoom-linked pitch (polar angle from straight down; π/2 is level). far: the overview (TILT_POLAR) at
+ * farD and beyond; near: almost level at nearD (the closest zoom), so the view runs out across the
+ * island. eye: how far the orbit target rises above the ground at nearD (standing height), fading out
+ * by eyeD. up / down: how far a vertical drag may tilt away from the curve (Spark side off). */
+export const ZOOM_PITCH = { far: TILT_POLAR, near: 1.48, farD: 40, nearD: 3, eye: 1.6, eyeD: 14, min: 0.12, max: 1.52, up: 0.4, down: 0.2, ease: 3.5 };
+const smooth01 = t => { t = Math.min(1, Math.max(0, t)); return t * t * (3 - 2 * t); };
+/** Camera pitch for an orbit distance: smoothstep in log(distance) from near (nearD) to far (farD). Pure. */
+export function polarForDistance(d, p = ZOOM_PITCH) {
+  const u = Math.log(Math.max(1e-6, d) / p.nearD) / Math.log(p.farD / p.nearD);
+  return p.near + (p.far - p.near) * smooth01(u);
+}
+/** How far the orbit target sits above the ground at an orbit distance (0 from eyeD out). Pure. */
+export function eyeLiftForDistance(d, p = ZOOM_PITCH) {
+  return p.eye * (1 - smooth01(Math.log(Math.max(1e-6, d) / p.nearD) / Math.log(p.eyeD / p.nearD)));
+}
+/* PITCH-END */
 
 export function webglAvailable() {
   try { const canvas = document.createElement('canvas'); return Boolean(canvas.getContext('webgl2') || canvas.getContext('webgl')); }
@@ -171,11 +189,16 @@ export class World {
     this.rings = 0; this.half = islandHalf(1);
     this.setRings(1, { animate: false });
     this.setLots(new Map());
+    // Zoom-linked pitch (updatePitch): how far the pitch sits off the curve, how far the orbit target
+    // was raised toward eye height, and the distance it was last checked at.
+    this.pitchBias = 0; this.eyeRaise = 0; this._pitchD = 0;
+    this.shot = null;                      // talk mode's scripted camera (setShot)
 
     const controls = new OrbitControls(this.camera, renderer.domElement);
     // Wheel / touchpad scroll / pinch never reach OrbitControls: the City view catches every wheel
     // event over the stage and calls queueZoom (smooth, toward the pointer). enableZoom stays on for
-    // middle-drag dolly and touchscreen pinch. minDistance 3: close enough to read the rooftops.
+    // middle-drag dolly and touchscreen pinch. minDistance 3: standing height, looking across the island.
+    // The polar limits follow the zoom every frame (updatePitch).
     Object.assign(controls, { enableDamping: true, dampingFactor: 0.085, screenSpacePanning: false, minDistance: 3, maxPolarAngle: 1.3, minPolarAngle: 0.12, rotateSpeed: 0.55, enableZoom: true, zoomToCursor: true, zoomSpeed: 1.25, panSpeed: 0.95 });
     controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
     controls.addEventListener('start', () => { this.tween = null; this.pendingFlight = null; this.userMoved = true; });
@@ -219,8 +242,9 @@ export class World {
   }
   /* ---------- Spark side ---------- */
   /** Turn the island's second face on or off. On: the tapering rock makes room for the Spark city,
-   * the side emblems show, a soft fill comes on, the camera elevation is held (vertical drags turn
-   * the island instead). Off: the island snaps back to This PC side up and orbiting is as before. */
+   * the side emblems show, a soft fill comes on, the camera pitch is held on the zoom curve (vertical
+   * drags turn the island instead). Off: the island snaps back to This PC side up and a vertical drag
+   * tilts the view again (within a band around the curve). */
   setUnderside(on) {
     on = Boolean(on);
     if (on === this.underside) return false;
@@ -230,7 +254,8 @@ export class World {
     this.fitShadow();
     if (!on) this.settleNow('pc');
     this.applyPolarLimits();
-    if (on && Math.abs(this.polar - TILT_POLAR) > 0.01) this.flyTo({ target: this.controls.target.clone(), polar: TILT_POLAR }, { auto: true, duration: 0.6 });
+    const goal = polarForDistance(this.distance);
+    if (on && Math.abs(this.polar - goal) > 0.01 && !this.street && !this.shot) this.flyTo({ target: this.baseTarget(), polar: goal }, { auto: true, duration: 0.6 });
     return true;
   }
   applyTaper() {
@@ -249,12 +274,46 @@ export class World {
     this.controls.maxDistance = 70 + this.half * 1.9;
     this.applyPolarLimits();
   }
-  /** While the island can be turned the camera keeps one comfortable elevation (never below the island). */
+  /** Polar limits for the current distance: held where it is while the island can be turned, else
+   *  a band around the zoom curve (widened to the current pitch, so nothing snaps). updatePitch
+   *  moves them every frame. */
   applyPolarLimits() {
-    if (!this.controls) return;
-    this.controls.minPolarAngle = this.underside ? TILT_POLAR : 0.12;
-    this.controls.maxPolarAngle = this.underside ? TILT_POLAR : 1.3;
+    const c = this.controls;
+    if (!c) return;
+    const p = this.polar, curve = polarForDistance(this.distance);
+    c.minPolarAngle = this.underside ? p : Math.min(p, Math.max(ZOOM_PITCH.min, curve - ZOOM_PITCH.up));
+    c.maxPolarAngle = this.underside ? p : Math.max(p, Math.min(ZOOM_PITCH.max, curve + ZOOM_PITCH.down));
   }
+  /** Zoom-linked pitch, once a frame before OrbitControls updates (not during flights, street view or
+   *  talk shots). The farther out, the steeper (TILT_POLAR); the closer, the flatter, down to a
+   *  near-level look across the island at the closest zoom, where the orbit target also rises to eye
+   *  height so the view sits at standing height above the ground. A zoom (wheel, pinch, dolly) eases
+   *  any offset from the curve away; with the Spark side off a vertical drag may tilt within a band. */
+  updatePitch(dt) {
+    const c = this.controls, cam = this.camera.position, t = c.target, P = ZOOM_PITCH;
+    const off = (this._po ||= new THREE.Vector3()).subVectors(cam, t), s = (this._ps ||= new THREE.Spherical()).setFromVector3(off);
+    const d = s.radius;
+    if (d < 1e-6) return;
+    const curve = polarForDistance(d), zoomed = this._pitchD ? Math.abs(Math.log(d / this._pitchD)) : 0;
+    this._pitchD = d;
+    if (zoomed > 1e-6) this.pitchBias *= Math.exp(-zoomed * P.ease);
+    else if (!this.underside) this.pitchBias = s.phi - curve;   // an orbit drag (or a flight) put it here
+    this.pitchBias = this.underside ? Math.max(-0.5, Math.min(0.5, this.pitchBias)) : Math.max(-P.up, Math.min(P.down, this.pitchBias));
+    const goal = Math.max(P.min, Math.min(P.max, curve + this.pitchBias));
+    const k = this.reducedMotion() ? 1 : 1 - Math.exp(-Math.max(0, dt) * 12);
+    const phi = Math.abs(goal - s.phi) < 1e-4 ? goal : s.phi + (goal - s.phi) * k;
+    if (phi !== s.phi) { s.phi = phi; s.makeSafe(); cam.copy(t).add(off.setFromSpherical(s)); }
+    c.minPolarAngle = this.underside ? s.phi : Math.min(s.phi, Math.max(P.min, curve - P.up));
+    c.maxPolarAngle = this.underside ? s.phi : Math.max(s.phi, Math.min(P.max, curve + P.down));
+    // Eye height: raise a low orbit target as the camera closes in; lower it again (only what was raised) going out.
+    const lift = eyeLiftForDistance(d), want = lift > 1e-3 ? GROUND_Y + lift : -Infinity;
+    let dy = 0;
+    if (t.y < want - 1e-4) dy = want - t.y;
+    else if (this.eyeRaise > 1e-4 && t.y > want + 1e-4) dy = -Math.min(this.eyeRaise, t.y - want);
+    if (dy) { t.y += dy; cam.y += dy; this.eyeRaise = Math.max(0, this.eyeRaise + dy); }
+  }
+  /** The orbit target without the eye-height raise (where a flight from here should aim). */
+  baseTarget() { const t = this.controls.target.clone(); t.y -= this.eyeRaise || 0; return t; }
   /** Radius of the sphere the island (with its buildings) sweeps when it turns over. */
   sweepRadius() { return Math.hypot(Math.SQRT2 * this.half, SWEEP_RISE) + 2; }
   /** The sun's shadow box: the island's footprint, or the whole turning island while it can turn. */
@@ -287,7 +346,7 @@ export class World {
   }
   /** Start a drag tilt. Grabbing the island mid-turn keeps that turn's axis, so it stays flat on release. */
   beginTilt() {
-    if (!this.underside || this.street) return false;
+    if (!this.underside || this.street || this.shot) return false;
     const t = this.turn;
     if (t?.mode === 'drag') return true;
     const angle = t ? t.angle : 0;
@@ -317,7 +376,7 @@ export class World {
   }
   /** Roll the island a half turn to its other face (toolbar button, V, deep links). */
   flip() {
-    if (!this.underside || this.street || this.turn?.mode === 'drag') return false;
+    if (!this.underside || this.street || this.shot || this.turn?.mode === 'drag') return false;
     const t = this.turn;
     const from = t ? t.angle : 0, base = t ? (t.target ?? settleTarget(t.angle)) : 0;
     this.turn = { mode: 'flip', axis: t ? t.axis : this.tiltAxis(), from, angle: from, target: base - Math.PI, t: 0 };
@@ -379,7 +438,7 @@ export class World {
       if (pointers.size > 1) { end(); return; }
       end();   // a drag whose up never arrived must not leave the island held mid-turn
       const rotate = event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey;
-      drag = rotate && this.underside && !this.street && event.target === canvas ? { id: event.pointerId, x: event.clientX, y: event.clientY, tilting: false } : null;
+      drag = rotate && this.underside && !this.street && !this.shot && event.target === canvas ? { id: event.pointerId, x: event.clientX, y: event.clientY, tilting: false } : null;
       if (drag && !canvas.hasPointerCapture?.(event.pointerId)) { try { canvas.setPointerCapture(event.pointerId); } catch { /* not capturable */ } }
     });
     canvas.addEventListener('pointermove', event => {
@@ -463,7 +522,8 @@ export class World {
   /** The framed overview, from the front of whichever face is (or will be) up. */
   defaultView() {
     const x = this._pv.set(1, 0, 0).applyQuaternion(this.restQuaternion(this._qr)), yaw = Math.atan2(-x.z, x.x);
-    return { target: new THREE.Vector3(0, 0, 0), distance: Math.min(190, 34 + this.half * 1.75), polar: TILT_POLAR, azimuth: 0.62 + yaw };
+    const distance = Math.min(190, 34 + this.half * 1.75);
+    return { target: new THREE.Vector3(0, 0, 0), distance, polar: polarForDistance(distance), azimuth: 0.62 + yaw };
   }
   resetView(opts = {}) { this.flyTo(this.defaultView(), opts); }
   /** flyTo now, or once the island has finished turning: a flight during a flip would carry the
@@ -471,25 +531,42 @@ export class World {
    *  the owner grabbing the view drops it. */
   flyAfterTurn(view, opts) { if (this.turn) this.pendingFlight = [view, opts]; else this.flyTo(view, opts); }
   /** Ease the camera to { target, distance?, polar?, azimuth? }. Any flight that isn't the city's own
-   * auto-framing (auto: true) counts as the owner moving the camera, so auto-framing stops overriding them. */
-  flyTo({ target, distance, polar, azimuth }, { instant = false, duration = 0.95, auto = false } = {}) {
+   * auto-framing (auto: true) counts as the owner moving the camera, so auto-framing stops overriding them.
+   * No polar: the zoom curve at the new distance (an offset from it eases away with the zoom). An explicit
+   * polar is kept (and held until the next zoom). A low target is raised to eye height for a close
+   * landing. free: a scripted shot (talk mode), no distance / pitch limits and no eye-height raise. */
+  flyTo({ target, distance, polar, azimuth }, { instant = false, duration = 0.95, auto = false, free = false } = {}) {
     this.pendingFlight = null; this.zoomPending = 0;   // a flight replaces any wheel zoom still playing out
     if (!auto) this.userMoved = true;
     const offset = new THREE.Vector3().subVectors(this.camera.position, this.controls?.target || new THREE.Vector3());
     const from = new THREE.Spherical().setFromVector3(offset);
     if (!this.controls) { this.camera.position.copy(target).add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(distance, polar, azimuth))); return; }
-    const to = new THREE.Spherical(
-      Math.min(this.controls.maxDistance, Math.max(this.controls.minDistance, distance ?? from.radius)),
-      Math.min(this.controls.maxPolarAngle, Math.max(this.controls.minPolarAngle, polar ?? from.phi)),
-      azimuth ?? from.theta,
-    );
+    const P = ZOOM_PITCH, c = this.controls;
+    const radius = free ? Math.max(0.5, distance ?? from.radius) : Math.min(c.maxDistance, Math.max(c.minDistance, distance ?? from.radius));
+    let phi, bias = 0, raise = 0;
+    if (free) phi = Math.min(Math.PI - 0.05, Math.max(0.05, polar ?? from.phi));
+    else if (polar != null) { phi = Math.min(P.max, Math.max(P.min, polar)); bias = phi - polarForDistance(radius); }
+    else {
+      bias = (this.pitchBias || 0) * Math.exp(-Math.abs(Math.log(radius / Math.max(1e-6, from.radius))) * P.ease);
+      phi = Math.min(P.max, Math.max(P.min, polarForDistance(radius) + bias));
+    }
+    const to = new THREE.Spherical(radius, phi, azimuth ?? from.theta);
     let dTheta = to.theta - from.theta;
     while (dTheta > Math.PI) dTheta -= Math.PI * 2; while (dTheta < -Math.PI) dTheta += Math.PI * 2;
     to.theta = from.theta + dTheta;
+    const toTarget = target.clone();
+    if (!free) { const lift = eyeLiftForDistance(radius); if (lift > 1e-3 && toTarget.y < GROUND_Y + lift) { raise = GROUND_Y + lift - toTarget.y; toTarget.y += raise; } }
     this.resetControlMomentum();
-    const tween = { t: 0, duration, fromTarget: this.controls.target.clone(), toTarget: target.clone(), from, to };
-    if (instant || this.reducedMotion()) { this.applyTween(tween, 1); this.tween = null; }
+    this.eyeRaise = 0;   // the flight carries the target from its raised height (nothing left to lower if it is cut short)
+    const tween = { t: 0, duration, fromTarget: this.controls.target.clone(), toTarget, from, to, bias, raise, free };
+    if (instant || this.reducedMotion()) { this.tween = null; this.applyTween(tween, 1); this.endTween(tween); }
     else this.tween = tween;
+  }
+  /** A flight landed: its pitch offset holds until the next zoom; the eye-height raise is remembered. */
+  endTween(tw) {
+    if (this.tween === tw) this.tween = null;
+    if (tw.free) return;
+    this.pitchBias = tw.bias; this.eyeRaise = tw.raise; this._pitchD = 0;
   }
   applyTween(tw, t) {
     const e = easeInOut(t);
@@ -500,13 +577,13 @@ export class World {
   }
   resetControlMomentum() { this.controls?._sphericalDelta?.set(0, 0, 0); this.controls?._panOffset?.set(0, 0, 0); if (this.controls) this.controls._scale = 1; }
   get distance() { return this.camera.position.distanceTo(this.controls.target); }
-  zoomBy(factor) { this.zoomPending = 0; this.flyTo({ target: this.controls.target.clone(), distance: this.distance * factor }, { duration: 0.35 }); }
+  zoomBy(factor) { if (this.street || this.shot) return; this.zoomPending = 0; this.flyTo({ target: this.baseTarget(), distance: this.distance * factor }, { duration: 0.35 }); }
   /** Where the wheel zoom is heading (distance once the pending zoom has played out). */
   get zoomGoal() { return this.distance * Math.exp(this.zoomPending || 0); }
   /** Wheel / pinch: queue a multiplicative zoom (log units, + = out) toward a screen point; frame()
    *  plays it out smoothly (at once with reduced motion or while the loop is stopped). */
   queueZoom(log, clientX, clientY) {
-    if (this.street || !log) return;
+    if (this.street || this.shot || !log) return;
     const c = this.controls;
     this.zoomPending = queueZoomLog(this.zoomPending || 0, log, this.distance, c.minDistance, c.maxDistance);
     this.zoomAnchor = Number.isFinite(clientX) && Number.isFinite(clientY) ? { x: clientX, y: clientY } : null;
@@ -518,7 +595,7 @@ export class World {
     const log = (this.zoomPending || 0) * k;
     this.zoomPending = Math.abs(this.zoomPending - log) < 1e-4 ? 0 : this.zoomPending - log;
     this.zoomAt(Math.exp(log), this.zoomAnchor);
-    if (!this.raf) { this.controls.update(); this.renderOnce(); }
+    if (!this.raf) { this.updatePitch(1); this.controls.update(); this.renderOnce(); }
   }
   /** Scale the camera's distance by factor about the ground point under the anchor (the point under
    *  the pointer stays put, like a map); about the orbit target when the pointer is on the sky. */
@@ -534,8 +611,11 @@ export class World {
       const hit = this.raycaster.ray.intersectPlane((this._zplane ||= new THREE.Plane()).set(UP, -c.target.y), this._zq ||= new THREE.Vector3());
       if (hit && hit.distanceTo(cam) < d * 4) p.copy(hit);
     }
+    // Zooming in stops at a wall (collide: the City's buildings, island space) instead of diving inside.
+    const next = (this._zc ||= new THREE.Vector3()).copy(cam).sub(p).multiplyScalar(f).add(p);
+    if (f < 1 && this.collide?.(this.toLocal(next, this._zl ||= new THREE.Vector3()))) { this.zoomPending = 0; return; }
     c.target.sub(p).multiplyScalar(f).add(p);
-    cam.sub(p).multiplyScalar(f).add(p);
+    cam.copy(next);
   }
   rotateBy(angle) {
     const offset = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
@@ -557,7 +637,7 @@ export class World {
   setStreet(pose) {
     this.street = typeof pose === 'function' ? pose : null;
     this.zoomPending = 0;
-    this.controls.enabled = !this.street;
+    this.controls.enabled = !this.street && !this.shot;
     this.tween = null; this.pendingFlight = null;
     this.clearKeys(); this.resetControlMomentum();
     if (this.street) { this.userMoved = true; this.streetSnap = this.reducedMotion(); }
@@ -574,11 +654,24 @@ export class World {
     this.controls.target.lerp(look, k);
     this.camera.lookAt(this.controls.target);
   }
-  keyDown(code) { this.keys.add(code); if (this.tween) this.tween = null; }
+  /* ---------- talk mode ---------- */
+  /** A scripted camera for talk mode: view = { eye, look } (world space), eased there (a free flight)
+   *  and held still. Orbit controls, wheel zoom, keys, tilting and flips are off while it runs; null
+   *  hands the camera back (the caller flies it home). */
+  setShot(view, { duration = 1.15, instant = false } = {}) {
+    this.shot = view ? { eye: view.eye.clone(), look: view.look.clone() } : null;
+    this.zoomPending = 0; this.pendingFlight = null;
+    this.controls.enabled = !this.shot && !this.street;
+    this.clearKeys(); this.resetControlMomentum();
+    if (!view) { this._pitchD = 0; return; }
+    const s = new THREE.Spherical().setFromVector3(new THREE.Vector3().subVectors(view.eye, view.look));
+    this.flyTo({ target: view.look, distance: s.radius, polar: s.phi, azimuth: s.theta }, { duration, instant, free: true });
+  }
+  keyDown(code) { if (this.shot) return; this.keys.add(code); if (this.tween) this.tween = null; }
   keyUp(code) { this.keys.delete(code); }
   clearKeys() { this.keys.clear(); }
   applyKeys(dt) {
-    if (!this.keys.size) return;
+    if (!this.keys.size || this.shot) return;
     const k = this.keys, speed = this.distance * 0.75 * dt;
     const right = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
     const forward = (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0) - (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0);
@@ -608,18 +701,21 @@ export class World {
     if (this.pendingFlight && !this.turn && !this.street) { const [view, opts] = this.pendingFlight; this.flyTo(view, opts); }
     if (this.street) { this.tween = null; this.updateStreet(dt); }
     else if (this.tween) {
-      this.tween.t = Math.min(1, this.tween.t + dt / this.tween.duration);
-      this.applyTween(this.tween, this.tween.t);
-      if (this.tween.t >= 1) this.tween = null;
-    } else if (this.follow && !this.turn && this.side === 'pc') {
+      const tw = this.tween;
+      tw.t = Math.min(1, tw.t + dt / tw.duration);
+      this.applyTween(tw, tw.t);
+      if (tw.t >= 1) this.endTween(tw);
+    } else if (this.follow && !this.turn && this.side === 'pc' && !this.shot) {
       const p = this.follow();
       if (p) {
-        const goal = this.toWorld(this._g.set(p.x, 1, p.z), { out: this._g }), delta = goal.sub(this.controls.target).multiplyScalar(reduced ? 1 : Math.min(1, dt * 3));
+        const goal = this.toWorld(this._g.set(p.x, 1, p.z), { out: this._g });
+        goal.y += this.eyeRaise || 0;   // keep updatePitch's eye-height raise instead of undoing it every frame
+        const delta = goal.sub(this.controls.target).multiplyScalar(reduced ? 1 : Math.min(1, dt * 3));
         this.controls.target.add(delta); this.camera.position.add(delta);
       }
     }
-    if (this.zoomPending && !this.tween && !this.street) this.stepZoom(reduced ? 1 : 1 - Math.exp(-dt * 14));
-    if (!this.tween && !this.street) this.controls.update();
+    if (this.zoomPending && !this.tween && !this.street && !this.shot) this.stepZoom(reduced ? 1 : 1 - Math.exp(-dt * 14));
+    if (!this.tween && !this.street && !this.shot) { this.updatePitch(dt); this.controls.update(); }
     const env = { night: this.current.night, reducedMotion: reduced, particles: this.particles, quality: this.quality };
     if (this.islandAnim) {
       const a = this.islandAnim; a.t = Math.min(1, a.t + dt / 0.9);
