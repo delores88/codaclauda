@@ -11,10 +11,10 @@
  * island is turned over. Island space ↔ local: y = DECK_Y - local y, z = -local z. */
 import { THREE, toonMaterial, addOutline } from './toon.js';
 import { RoundedBoxGeometry } from '../../vendor/three/addons/RoundedBoxGeometry.js';
-import { BuildingManager, SPARK_MATERIALS, pulseSpark } from './buildings.js';
-import { mergeParts, placed, plaqueTexture, sideTexture, disposeAll, Particles } from './fx.js';
+import { BuildingManager, SPARK_MATERIALS, pulseSpark, setSparkOffline } from './buildings.js';
+import { mergeParts, placed, plaqueTexture, sideTexture, disposeAll, Particles, instancedOutline } from './fx.js';
 import { PITCH, LOT_HALF, islandHalf, cellCenter } from './layout.js';
-import { GROUND_Y, buildSideSign } from './scenery.js';
+import { GROUND_Y, buildSideSign, seeded, benchGeometry } from './scenery.js';
 import { agentAvatar, hash } from '../avatar/spec.js';
 
 export const DECK_Y = -7.2;          // island-space height of the Spark side's "ground"
@@ -83,7 +83,7 @@ function buildDeck(rings) {
   const sign = buildSideSign(sideTexture('spark'), { board: '#eef8e2', post: '#2f5a3c' });
   sign.position.set(0, 0, extent + 2.3);
   group.add(sign);
-  return { group, plate };
+  return { group, plate, sign, signZ: extent + 2.3 };
 }
 
 /* ---------- the Spark Foundry, on the other side of the HQ plaza ---------- */
@@ -114,6 +114,7 @@ function buildFoundry() {
   let active = null, spin = 0;
   return {
     group,
+    plaque,
     pickables: meshes,
     setActive(on) {
       if (on === active) return;
@@ -124,7 +125,7 @@ function buildFoundry() {
       crystal.material = on ? M.limeActive : M.lime;
     },
     update(dt, elapsed, env) {
-      if (env.reducedMotion) return;
+      if (env.reducedMotion || env.offline) return;
       spin += dt * (active ? 1.6 : 0.5);
       crystal.rotation.y = spin;
       crystal.position.y = 10.25 + Math.sin(elapsed * 1.4) * 0.15;
@@ -139,6 +140,153 @@ function foundrySpot(k) {
   const a = (index % n) / n * Math.PI * 2 + ring * 0.31 + 0.2;
   const x = Math.sin(a) * r, z = Math.cos(a) * r;
   return { x, z, fx: -Math.sin(a), fz: -Math.cos(a) };
+}
+
+/* ---------- Spark greenery: the top city's toybox plants in the Spark's own lime / green ---------- */
+const GREEN = {
+  leaf: toonMaterial('#6fd34e', { emissive: '#1d4a10', emissiveIntensity: 0.18, cache: false }),
+  lime: toonMaterial('#b4ee4c', { emissive: '#4a7a12', emissiveIntensity: 0.16, cache: false }),
+  pine: toonMaterial('#3fbf62', { emissive: '#0f3d1c', emissiveIntensity: 0.16, cache: false }),
+  trunk: toonMaterial('#5d4a33', { cache: false }),
+  planter: toonMaterial('#2c3b30', { cache: false }),
+  moss: toonMaterial('#9dff5a', { emissive: '#62d61e', emissiveIntensity: 0.6, cache: false }),
+};
+for (const m of Object.values(GREEN)) m.userData.shared = true;
+let greensOffline = false;
+/** Spark offline: the plants go the same flat grey as the rest of the Spark side (shared materials). */
+function setGreensOffline(on) {
+  on = Boolean(on);
+  if (on === greensOffline) return;
+  greensOffline = on;
+  const hsl = {};
+  for (const m of Object.values(GREEN)) {
+    const keep = m.userData.online ||= { color: m.color.clone(), emissive: m.emissive.clone(), emissiveIntensity: m.emissiveIntensity };
+    if (on) { keep.color.getHSL(hsl); m.color.setHSL(hsl.h, 0.03, 0.24 + hsl.l * 0.5); m.emissive.set('#000000'); m.emissiveIntensity = 0; }
+    else { m.color.copy(keep.color); m.emissive.copy(keep.emissive); m.emissiveIntensity = keep.emissiveIntensity; }
+  }
+}
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
+/** One InstancedMesh (plus ink outline) for a list of { x, y, z, s, ry } placements. */
+function plantMesh(group, geometry, material, items, { outline = 0.04, cast = true } = {}) {
+  if (!items.length) return;
+  const inst = new THREE.InstancedMesh(geometry, material, items.length);
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), s = new THREE.Vector3();
+  items.forEach((p, k) => { m4.compose(v.set(p.x, p.y, p.z), q.setFromAxisAngle(Y_AXIS, p.ry || 0), s.setScalar(p.s ?? 1)); inst.setMatrixAt(k, m4); });
+  inst.castShadow = cast; inst.receiveShadow = true; inst.userData.noOutline = true;
+  group.add(inst);
+  if (outline) group.add(instancedOutline(inst, outline));
+}
+/** Plants on the Spark face (local coordinates: +y points away from the deck, so they stand on
+ *  the Spark side only): little parks on lots without a Spark building, a bush or two behind the
+ *  narrower buildings, planter boxes of glowing moss along the traces, bushes round the Foundry plaza. */
+function buildGreenery(rings, buildings) {
+  const group = new THREE.Group(); group.name = 'spark-greenery';
+  const geo = {
+    bush: placed(new THREE.IcosahedronGeometry(0.62, 1), { y: 0.44, sy: 0.78 }),
+    trunk: placed(new THREE.CylinderGeometry(0.11, 0.16, 0.9, 6), { y: 0.45 }),
+    cone: mergeParts([placed(new THREE.ConeGeometry(0.82, 1.35, 7), { y: 1.3 }), placed(new THREE.ConeGeometry(0.6, 1.05, 7), { y: 1.95 })]),
+    planter: placed(new THREE.BoxGeometry(0.6, 0.36, 2.1), { y: 0.18 }),
+    moss: placed(new THREE.BoxGeometry(0.46, 0.1, 1.96), { y: 0.39 }),
+  };
+  const leaf = [], lime = [], trunks = [], cones = [], planters = [];
+  const byCell = new Map(buildings.map(b => [`${b.cell.i},${b.cell.j}`, b]));
+  for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
+    const c = cellCenter(i, j);
+    for (const sx of [-1, 1]) for (const dz of [-2.7, 2.7]) planters.push({ x: c.x + sx * 6.7, y: 0, z: c.z + dz });
+    if (!i && !j) continue;
+    const r = seeded(`spark-lot:${i},${j}`), b = byCell.get(`${i},${j}`);
+    if (!b) {
+      const spots = [], span = LOT_HALF * 2 - 2.2;
+      for (let n = 0, tries = 0; n < 7 && tries < 40; tries++) {
+        const x = (r() - 0.5) * span, z = (r() - 0.5) * span;
+        if (!spots.every(([px, pz]) => Math.hypot(px - x, pz - z) > 1.7)) continue;
+        spots.push([x, z]); n++;
+        const s = 0.7 + r() * 0.5, kind = r(), ry = r() * 6;
+        if (kind < 0.4) { trunks.push({ x: c.x + x, y: GROUND_Y, z: c.z + z, s, ry }); cones.push({ x: c.x + x, y: GROUND_Y, z: c.z + z, s, ry }); }
+        else (kind < 0.72 ? leaf : lime).push({ x: c.x + x, y: GROUND_Y, z: c.z + z, s: s * 1.1, ry });
+      }
+    } else if (b.size.W / 2 < LOT_HALF - 1.9) {
+      for (const sx of [-1, 1]) (r() < 0.5 ? leaf : lime).push({ x: c.x + sx * (LOT_HALF - 0.95), y: GROUND_Y, z: c.z - (LOT_HALF - 0.95), s: 0.75 + r() * 0.3, ry: r() * 6 });
+    }
+  }
+  // Round the Foundry plaza; the front (plaque, crew bench) stays open.
+  for (let k = 0; k < 18; k++) {
+    const a = (k + 0.5) / 18 * Math.PI * 2;
+    if (Math.abs(Math.atan2(Math.sin(a), Math.cos(a))) < 1.05) continue;
+    (k % 3 ? leaf : lime).push({ x: Math.sin(a) * 5.95, y: PLAZA_TOP, z: Math.cos(a) * 5.95, s: 0.62 + (k % 4) * 0.06, ry: a });
+  }
+  plantMesh(group, geo.bush, GREEN.leaf, leaf);
+  plantMesh(group, geo.bush, GREEN.lime, lime);
+  plantMesh(group, geo.trunk, GREEN.trunk, trunks, { outline: 0.03 });
+  plantMesh(group, geo.cone, GREEN.pine, cones);
+  plantMesh(group, geo.planter, GREEN.planter, planters, { outline: 0.03, cast: false });
+  plantMesh(group, geo.moss, GREEN.moss, planters, { outline: 0, cast: false });
+  return group;
+}
+
+/* ---------- Spark crew: idle bots resting at the Foundry while no Spark job runs ---------- */
+const CREW_BENCH = { a: 0.62, r: 5.85 }, CREW_STAND = { a: -0.62, r: 5.1 };
+/** A bench for the crew and three bonsai on the Foundry's base ring (built once; never rebuilt). */
+function buildFoundryGarden() {
+  const group = new THREE.Group(); group.name = 'spark-foundry-garden';
+  const { a, r } = CREW_BENCH;
+  const bench = new THREE.Mesh(benchGeometry(), SPARK_MATERIALS.dark);
+  bench.position.set(Math.sin(a) * r, PLAZA_TOP, Math.cos(a) * r); bench.rotation.y = a + Math.PI;
+  bench.castShadow = true; bench.receiveShadow = true; addOutline(bench, { thickness: 0.03 });
+  group.add(bench);
+  const pots = [], trunks = [], puffs = [], base = PLAZA_TOP + 0.5;
+  [-0.36, 0.36, Math.PI].forEach((ang, k) => {
+    const x = Math.sin(ang) * 2.75, z = Math.cos(ang) * 2.75, lean = k % 2 ? 1 : -1;
+    pots.push(placed(new THREE.CylinderGeometry(0.26, 0.2, 0.22, 10), { x, y: base + 0.11, z }));
+    trunks.push(placed(new THREE.CylinderGeometry(0.05, 0.08, 0.6, 6), { x, y: base + 0.5, z, rz: lean * 0.25 }));
+    puffs.push(placed(new THREE.IcosahedronGeometry(0.34, 1), { x: x - lean * 0.12, y: base + 0.86, z, sy: 0.6 }));
+    puffs.push(placed(new THREE.IcosahedronGeometry(0.24, 1), { x: x + lean * 0.16, y: base + 0.66, z: z + 0.05, sy: 0.6 }));
+  });
+  for (const [parts, material, outline] of [[pots, SPARK_MATERIALS.dark, 0.02], [trunks, GREEN.trunk, 0], [puffs, GREEN.lime, 0.03]]) {
+    const m = new THREE.Mesh(mergeParts(parts), material);
+    m.castShadow = true; m.receiveShadow = true;
+    if (outline) addOutline(m, { thickness: outline }); else m.userData.noOutline = true;
+    group.add(m);
+  }
+  return group;
+}
+/** Crew places (local): two on the bench, one standing on the other side of the plaque; all face the Foundry. */
+function crewSpots() {
+  const { a, r } = CREW_BENCH, ry = a + Math.PI, fx = Math.sin(ry), fz = Math.cos(ry);
+  const bx = Math.sin(a) * r, bz = Math.cos(a) * r, ox = Math.cos(ry) * 0.42, oz = -Math.sin(ry) * 0.42;
+  return [
+    { x: bx - ox, z: bz - oz, fx, fz, action: 'sit' },
+    { x: bx + ox, z: bz + oz, fx, fz, action: 'sit' },
+    { x: Math.sin(CREW_STAND.a) * CREW_STAND.r, z: Math.cos(CREW_STAND.a) * CREW_STAND.r, fx: -Math.sin(CREW_STAND.a), fz: -Math.cos(CREW_STAND.a), action: 'stand' },
+  ];
+}
+function crewLook(k) {
+  const spec = agentAvatar(`spark-crew:${k}`, 'other', 'Spark crew');
+  spec.top = { style: k === 1 ? 'sweater' : 'hoodie', color: ['#76b900', '#5fa800', '#8fd12a'][k % 3], accent: '#1d3a0c', emblem: 'bolt' };
+  spec.accessory = k === 1 ? 'cap' : 'headphones';
+  spec.accessoryColor = '#203b14';
+  return spec;
+}
+/** Turn a person to face (fx, fz) in its parent's space (people.js lookAt takes world coordinates). */
+function face(person, fx, fz) {
+  if ('_yawTarget' in person) { person._yawTarget = Math.atan2(fx, fz); person.object.rotation.y = person._yawTarget; }
+  else { const p = person.object.position, w = person.object.parent ? person.object.parent.localToWorld(new THREE.Vector3(p.x + fx * 4, p.y, p.z + fz * 4)) : null; if (w) person.lookAt(w.x, w.z); }
+}
+
+/** Spark job id → the agent most likely driving it from this PC: same provider and on the job's
+ *  project (awake first), else an active agent of that provider. Agents still free are preferred. */
+export function matchAgents(spark, agents, idMap = new Map(), projectOf = job => job.projectId || null) {
+  const out = new Map(), used = new Set();
+  const list = (Array.isArray(agents) ? agents : []).filter(a => a && a.provider);
+  const canon = id => (id && idMap.get(id)) || id || null;
+  for (const job of spark) {
+    const pid = projectOf(job), same = list.filter(a => a.provider === job.provider);
+    const onProject = same.filter(a => pid && canon(a.currentProjectId) === pid);
+    const ranked = [...onProject.filter(a => a.status !== 'offline'), ...onProject, ...same.filter(a => a.status === 'active')];
+    const pick = ranked.find(a => !used.has(a.id)) || ranked[0];
+    if (pick) { out.set(String(job.job), pick); used.add(pick.id); }
+  }
+  return out;
 }
 
 /* ---------- local-job gear badge (top city) ---------- */
@@ -171,6 +319,11 @@ export class SparkCity {
     this.group.add(this.particles.points);
     this.buildings = new BuildingManager(this.group, { mirror: true, deckY: DECK_Y, particles: this.particles, reducedMotion });
     this.foundry = buildFoundry(); this.group.add(this.foundry.group);
+    this.garden = buildFoundryGarden(); this.group.add(this.garden);
+    this.greenery = null; this.greenSig = '';
+    this.crew = new Map();      // 'crew:k' → { id, person, crew: true, job: null, status, quality }
+    this.agentFor = new Map();  // Spark job id → the agent most likely driving it (from this PC)
+    this.drivingAgents = 0;
     this.badges = new THREE.Group(); this.badges.name = 'local-job-gears'; world.city.add(this.badges);
     this.gears = new Map();     // anchor (project id | 'hq') → { mesh, jobs, phase }
     this.runners = new Map();   // job id → { id, job, person, anchor, spot, quality }
@@ -180,9 +333,11 @@ export class SparkCity {
     this._v = new THREE.Vector3(); this._cam = new THREE.Vector3();
   }
 
-  /** shown: Spark side visible; gears: show local-job gears on the top city. */
-  sync({ shown, projects, cells, rings, machines, quality = 'high', peopleReady = false, gears = true }) {
-    const jobs = Array.isArray(machines?.jobs) ? machines.jobs.filter(j => j && j.active) : [];
+  /** shown: Spark side visible; gears: show local-job gears on the top city; offline: the Spark
+   *  is configured but did not answer (side greyed out, no runners, no busy rigs). */
+  sync({ shown, projects, cells, rings, machines, quality = 'high', peopleReady = false, gears = true, offline = false, agents = [] }) {
+    this.offline = Boolean(offline);
+    const jobs = Array.isArray(machines?.jobs) ? machines.jobs.filter(j => j && j.active && !(this.offline && j.machine === 'spark')) : [];
     const idMap = new Map();
     for (const p of projects) for (const id of p.ids?.length ? p.ids : [p.id]) idMap.set(id, p.id);
     const projectOf = job => (job.projectId && idMap.get(job.projectId)) || null;
@@ -201,17 +356,100 @@ export class SparkCity {
       for (const [id, cell] of cells) under.set(id, { ...cell, j: -cell.j });
       const busy = new Set([...this.sparkByAnchor.keys()].filter(key => key !== FOUNDRY));
       this.buildings.sync(projects, under, busy, { animate: true });
+      this.syncGreenery(rings);
       this.foundry.setActive(this.sparkByAnchor.has(FOUNDRY));
-      if (peopleReady) this.syncRunners(spark, projectOf, quality);
-    } else { this.clearRunners(); this.particles.clear(); }
+      this.agentFor = this.offline ? new Map() : matchAgents(spark, agents, idMap, projectOf);
+      if (this.offline) { this.clearRunners(); this.particles.clear(); }
+      else if (peopleReady) this.syncRunners(spark, projectOf, quality);
+      // Never a dead side: with no Spark job running, the crew rests at the Foundry (asleep while offline).
+      if (peopleReady) { if (this.offline || !spark.length) this.syncCrew(quality); else this.clearCrew(); }
+    } else { this.clearRunners(); this.clearCrew(); this.particles.clear(); this.agentFor = new Map(); }
+    this.drivingAgents = new Set([...this.runners.values()].map(r => r.agent?.id).filter(Boolean)).size;
     this.syncGears(gears ? localByAnchor : new Map());
+    setSparkOffline(this.shown && this.offline);
+    setGreensOffline(this.shown && this.offline);
+    // Going offline: status first, so the grey copies are taken with the eyes shut and the offline gem;
+    // coming back: originals first, then the idle status (its gem) goes on top.
+    const crewStatus = this.offline ? 'offline' : 'idle';
+    const setCrewStatus = () => { for (const c of this.crew.values()) if (c.status !== crewStatus) { c.status = crewStatus; c.person.setStatus(crewStatus); } };
+    if (this.offline) setCrewStatus();
+    this.tintSigns(this.shown && this.offline);
+    setCrewStatus();
   }
+  /** Plants follow the lots: rebuilt only when the rings or the Spark buildings' footprints change. */
+  syncGreenery(rings) {
+    const list = this.buildings.list || [];
+    const sig = `${rings}|${list.map(b => `${b.cell.i},${b.cell.j},${b.size.W.toFixed(1)}`).sort().join(';')}`;
+    if (sig === this.greenSig && this.greenery) return;
+    this.greenSig = sig;
+    if (this.greenery) { this.greenery.removeFromParent(); disposeAll(this.greenery); }
+    this.greenery = buildGreenery(rings, list);
+    this.group.add(this.greenery);
+  }
+  syncCrew(quality) {
+    crewSpots().forEach((spot, k) => {
+      const id = `crew:${k}`;
+      let crew = this.crew.get(id);
+      if (crew && crew.quality !== quality) { this.dropCrew(crew); crew = null; }
+      if (crew) return;
+      let person;
+      try { person = this.makePerson(crewLook(k), { role: 'agent', provider: 'other', quality }); }
+      catch (error) { console.error('City: could not create the Spark crew', error); return; }
+      for (const mesh of person.pickable || []) { mesh.userData.person = person; mesh.userData.cityTarget = { kind: 'runner', id }; }
+      this.group.add(person.object);
+      person.object.position.set(spot.x, PLAZA_TOP + (spot.action === 'sit' ? 0.06 : 0.02), spot.z);
+      face(person, spot.fx, spot.fz);
+      person.setAction(spot.action);
+      this.crew.set(id, { id, person, quality, crew: true, job: null, status: null });
+    });
+  }
+  /** Back to its own materials before it goes (people's bodies are pooled and reused). */
+  dropCrew(crew) { crew.person.object.traverse(node => this.swapGrey(node, false)); crew.person.object.removeFromParent(); crew.person.dispose(); this.crew.delete(crew.id); }
+  clearCrew() { for (const crew of [...this.crew.values()]) this.dropCrew(crew); }
 
   buildDeck(rings) {
-    if (this.deck) { this.group.remove(this.deck.group); disposeAll(this.deck.group); }
+    if (this.deck) { this.tintSigns(false); this.dropGreys(); this.group.remove(this.deck.group); disposeAll(this.deck.group); }
     this.rings = rings;
     this.deck = buildDeck(rings);
     this.group.add(this.deck.group);
+  }
+  /** Offline: the DGX SPARK emblem and the Foundry plaque (their own, possibly cached, materials)
+   *  swap to grey copies; online they get their originals back. */
+  tintSigns(off) {
+    const swap = node => this.swapGrey(node, off);
+    this.deck?.sign.traverse(swap);
+    this.foundry.plaque.traverse(swap);
+    for (const crew of this.crew.values()) crew.person.object.traverse(swap);   // the crew sleeps grey too
+  }
+  swapGrey(node, off) {
+    this.greys ||= new Map();
+    if (!node.isMesh || node.userData.outline || !node.material) return;
+    if (off && !node.userData.onlineMaterial) {
+      const greyOf = material => {
+        let grey = this.greys.get(material);
+        if (!grey) {
+          grey = material.clone(); grey.userData = { shared: true };   // never disposed with the mesh (its map belongs to the original)
+          if (grey.map) grey.color?.set('#8e928e');
+          else if (grey.color) { const hsl = {}; grey.color.getHSL(hsl); grey.color.setHSL(hsl.h, 0.03, 0.24 + hsl.l * 0.5); }
+          if (grey.emissive) { grey.emissive.set('#000000'); grey.emissiveIntensity = 0; }
+          this.greys.set(material, grey);
+        }
+        return grey;
+      };
+      // People's heads use a material array (skin + face): grey every slot, not just single-material meshes.
+      node.userData.onlineMaterial = node.material;
+      node.material = Array.isArray(node.material) ? node.material.map(greyOf) : greyOf(node.material);
+    } else if (!off && node.userData.onlineMaterial) { node.material = node.userData.onlineMaterial; delete node.userData.onlineMaterial; }
+  }
+  dropGreys() { for (const grey of this.greys?.values() || []) grey.dispose(); this.greys?.clear(); }
+  /** Island-space point just above the DGX SPARK emblem (the HTML "Offline" tag hangs there). */
+  signPoint(out = new THREE.Vector3()) { return out.set(0, DECK_Y - 3.4, -(this.deck?.signZ || 0)); }
+  /** The latest Spark job for a project (finished or not), from the status history; null when none. */
+  lastSparkJob(machines, projectIds) {
+    const ids = new Set(projectIds);
+    const jobs = (Array.isArray(machines?.jobs) ? machines.jobs : []).filter(j => j && j.machine === 'spark' && ids.has(j.projectId));
+    const when = j => Number(j.finished_at) || Number(j.started_at) || 0;
+    return jobs.sort((a, b) => when(b) - when(a))[0] || null;
   }
 
   syncRunners(spark, projectOf, quality) {
@@ -230,29 +468,32 @@ export class SparkCity {
       const anchor = building ? pid : FOUNDRY;
       const k = slots.get(anchor) || 0; slots.set(anchor, k + 1);
       const spot = building ? building.workSpot(k) : foundrySpot(k);
+      // The runner wears the look of the agent most likely driving this job (from this PC), if any.
+      const agent = this.agentFor.get(id) || null;
+      const lookKey = agent ? `${agent.id}|${JSON.stringify(agent.look || null)}` : '';
       let runner = this.runners.get(id);
-      if (runner && runner.quality !== quality) { this.dropRunner(runner); runner = null; }
+      if (runner && (runner.quality !== quality || runner.lookKey !== lookKey)) { this.dropRunner(runner); runner = null; }
       if (!runner) {
         const provider = job.provider === 'claude' || job.provider === 'codex' ? job.provider : 'other';
         let person;
-        try { person = this.makePerson(agentAvatar(`spark:${id}`, provider, job.client || 'Spark runner'), { role: 'agent', provider, quality }); }
+        try { person = this.makePerson(agent?.look || agentAvatar(agent ? agent.id : `spark:${id}`, provider, agent?.name || job.client || 'Spark runner'), { role: 'agent', provider: agent?.provider || provider, quality }); }
         catch (error) { console.error('City: could not create a Spark runner', error); continue; }
         person.setStatus('active');
         person.setAction('work');
         for (const mesh of person.pickable || []) { mesh.userData.person = person; mesh.userData.cityTarget = { kind: 'runner', id }; }
         this.group.add(person.object);
-        runner = { id, person, quality, spot: null };
+        runner = { id, person, quality, lookKey, spot: null };
         this.runners.set(id, runner);
       }
       keep.add(id);
-      runner.job = job; runner.anchor = anchor;
+      runner.job = job; runner.anchor = anchor; runner.agent = agent;
       if (!runner.spot || runner.spot.x !== spot.x || runner.spot.z !== spot.z) {
         runner.spot = spot;
         // Feet on the surface: building work spots are on the lot (plot top), Foundry spots on its plaza.
         let y = PLAZA_TOP;
         if (building) { const c = cellCenter(building.cell.i, building.cell.j); y = Math.abs(spot.x - c.x) < LOT_HALF - 0.25 && Math.abs(spot.z - c.z) < LOT_HALF - 0.25 ? GROUND_Y : 0.05; }
         runner.person.object.position.set(spot.x, y, spot.z);
-        runner.person.lookAt(spot.x + spot.fx * 4, spot.z + spot.fz * 4);
+        face(runner.person, spot.fx, spot.fz);
       }
     }
     for (const runner of [...this.runners.values()]) if (!keep.has(runner.id)) this.dropRunner(runner);
@@ -282,10 +523,11 @@ export class SparkCity {
       const particles = this.particles;
       particles.enabled = !env.reducedMotion;
       particles.material.uniforms.uScale.value = this.world.particles.material.uniforms.uScale.value;
-      const local = { ...env, particles };
+      const local = { ...env, particles, offline: this.offline };
       this.buildings.update(dt, elapsed, local);
       this.foundry.update(dt, elapsed, local);
       for (const runner of this.runners.values()) runner.person.update(dt, elapsed);
+      for (const crew of this.crew.values()) crew.person.update(dt, elapsed);
       particles.update(dt);
       const s = this.world.island?.group.scale.x || 1;   // follow the island's grow wobble
       if (this.deck) this.deck.group.scale.set(s, 1, s);
@@ -311,7 +553,7 @@ export class SparkCity {
     const out = [];
     if (this.shown) {
       out.push(...this.buildings.pickables(), ...this.foundry.pickables);
-      for (const runner of this.runners.values()) out.push(...(runner.person.pickable || []));
+      for (const runner of this.runnerList) out.push(...(runner.person.pickable || []));
     }
     for (const gear of this.gears.values()) if (gear.mesh.visible) out.push(gear.mesh);
     return out;
@@ -319,8 +561,9 @@ export class SparkCity {
   occluders() { return this.shown && this.deck ? [this.deck.plate] : []; }
   setHover(id, on) { this.buildings.get(id)?.setHover(on); }
   job(id) { return this.jobIndex.get(String(id)) || null; }
-  runner(id) { return this.runners.get(String(id)) || null; }
-  get runnerList() { return [...this.runners.values()]; }
+  /** A Spark runner (job) or a crew bot ('crew:k', job: null). */
+  runner(id) { return this.runners.get(String(id)) || this.crew.get(String(id)) || null; }
+  get runnerList() { return [...this.runners.values(), ...this.crew.values()]; }
   /** Active Spark jobs hosted by a project's Spark building (or FOUNDRY). */
   sparkJobs(anchor) { return this.sparkByAnchor.get(anchor) || []; }
   gearJobs(key) { return this.gears.get(key)?.jobs || []; }
@@ -335,7 +578,8 @@ export class SparkCity {
   gearPoint(key) { const gear = this.gears.get(key); return gear?.mesh.visible ? gear.mesh.position.clone().add(new THREE.Vector3(0, 0.6, 0)) : null; }
 
   dispose() {
-    this.clearRunners();
+    this.clearRunners(); this.clearCrew();
+    this.tintSigns(false); this.dropGreys(); setSparkOffline(false);
     this.buildings.dispose();
     for (const gear of this.gears.values()) gear.mesh.removeFromParent();
     this.gears.clear();

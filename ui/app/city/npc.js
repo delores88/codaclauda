@@ -14,6 +14,26 @@ const SIDEWALK_Y = GROUND_Y + 0.06;
 
 export function groundY(x, z) { return Math.hypot(x, z) < 5.55 ? GROUND_Y + 0.14 : SIDEWALK_Y; }
 
+/* STREET-MOVE-BEGIN (pure: checked headless) */
+/** Street view walking: move (x, z) by (dx, dz) inside |x|, |z| <= limit and outside every box
+ * ({ x0, x1, z0, z1 }, already grown by the walker's radius). Each axis is tried on its own, so a
+ * walker pushing into a wall at an angle slides along it instead of stopping dead. A box the walker
+ * already stands inside never traps it (it can walk out). Returns { x, z, blocked }. */
+export function streetMove(x, z, dx, dz, { limit = Infinity, boxes = [] } = {}) {
+  const inside = (px, pz, b) => px > b.x0 && px < b.x1 && pz > b.z0 && pz < b.z1;
+  const solid = boxes.filter(b => !inside(x, z, b));
+  const clamp = v => Math.max(-limit, Math.min(limit, v));
+  const free = (px, pz) => !solid.some(b => inside(px, pz, b));
+  let nx = clamp(x + dx), nz = z;
+  if (!free(nx, nz)) nx = x;
+  let tz = clamp(z + dz);
+  if (!free(nx, tz)) tz = z;
+  nz = tz;
+  const blocked = Math.abs(nx - (x + dx)) > 1e-9 || Math.abs(nz - (z + dz)) > 1e-9;
+  return { x: nx, z: nz, blocked };
+}
+/* STREET-MOVE-END */
+
 let createPersonImpl = null;
 let peopleModule = {};
 /** Ground speed that matches one walk cycle per second in people.js (feet don't slide). */
@@ -322,6 +342,21 @@ export class NpcManager {
     this.marker.position.set(x, groundY(x, z) + 0.03, z);
     this.marker.material.opacity = 0.9; this.marker.scale.setScalar(1);
   }
+  /** Street view: put the owner at (x, z) (island space) facing `heading` (yaw: forward is
+   *  (sin, cos)), walking at `speed` or standing. Cancels any double-click walk. */
+  driveOwner(x, z, heading, moving, speed = 2.4) {
+    const o = this.owner;
+    if (!o) return;
+    o.path = [];
+    const person = o.person, pos = person.object.position;
+    pos.x = x; pos.z = z; pos.y = groundY(x, z);
+    if ('_yawTarget' in person) person._yawTarget = heading;   // people.js: parent-space yaw (island space here)
+    else person.lookAt(x + Math.sin(heading) * 4, z + Math.cos(heading) * 4);
+    if (moving && 'walkCadence' in person) person.walkCadence = Math.max(0.6, Math.min(3, speed / walkSpeed()));
+    this.ownerAction(moving ? 'walk' : 'stand');
+  }
+  /** The owner's facing (island-space yaw). */
+  get ownerHeading() { return this.owner ? this.owner.person.object.rotation.y : 0; }
   setHighlight(target, on) {
     const person = target?.kind === 'owner' ? this.owner?.person : this.npcs.get(target?.id)?.person;
     person?.setHighlight(on);

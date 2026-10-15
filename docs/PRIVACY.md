@@ -85,16 +85,21 @@ before storage, but the scan cannot recognize every secret: never post credentia
 
 The 0.3 desktop writes `<board>/desktop-ui/ui-state.json`, including UI chat
 copies, linked project metadata, agent display preferences, task overrides,
-avatar parameters, avatar-request references, City layout and preferences.
-It falls back to WebView localStorage if native UI-state access fails. State is
+avatar parameters, avatar-request references, City layout and preferences. It also
+stores thread filing and pins, permission scopes and agent addresses, stated
+limits, paste markers and notice references. Creating or revoking permission
+records requires a successful native save; other UI state can fall back to
+WebView localStorage if native UI-state access fails. State is
 limited to 8 MiB; the optional `desktop-ui/projects.manifest.json` is limited to
 2 MiB. The manifest can provide linked folders and a GitHub user for subsequent
 metadata discovery/refresh. Attachment copies, up to 25 MiB each, are stored
 under `desktop-ui/attachments/<date>/` with unique sanitized filenames.
 
 Desktop state, WebView localStorage and attachment copies have no automatic
-expiry. The mailbox's 30-day pruning does not purge those copies or the legacy
-request history. Deleting a Live chat from the UI removes that UI thread, not
+expiry, including permission records. Reported-use messages follow mailbox
+retention and do not form a complete audit history. The mailbox's 30-day pruning
+does not purge those copies or the legacy request history. Deleting a Live chat
+from the UI removes that UI thread, not
 its underlying requests or saved attachments. A board backup can therefore
 include private text and files that no longer appear in a mailbox inbox.
 

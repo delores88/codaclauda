@@ -2,6 +2,7 @@
 import { store } from './store.js';
 import * as ui from './ui.js';
 import * as bridge from './bridge.js';
+import { pendingRequests } from './approvals.js';
 const { h, icon, $, clear, portrait, toast, timeAgo } = ui;
 
 const VIEWS = [
@@ -11,6 +12,7 @@ const VIEWS = [
   { id: 'city', label: 'City', icon: 'city', load: () => import('./views/city.js') },
   { id: 'agents', label: 'Agents', icon: 'agents', load: () => import('./views/agents.js') },
   { id: 'projects', label: 'Projects', icon: 'projects', load: () => import('./views/projects.js') },
+  { id: 'approvals', label: 'Approvals', icon: 'shield', load: () => import('./views/approvals.js') },
 ];
 const FOOTER_VIEWS = [
   { id: 'avatar', label: 'My avatar', icon: 'avatar', load: () => import('./views/avatar.js') },
@@ -58,7 +60,8 @@ function renderTopbar() {
 function updateBadges() {
   const chatUnread = store.threads().reduce((n, t) => n + (t.unread || 0), 0);
   const needsYou = store.tasks.filter(t => t.status === 'needs-you').length;
-  const counts = { chat: chatUnread, tasks: needsYou };
+  const approvalRequests = pendingRequests(store.mailboxMessages, store.desktop.approvals || []).length;
+  const counts = { chat: chatUnread, tasks: needsYou, approvals: approvalRequests };
   for (const node of document.querySelectorAll('.rail-item')) {
     const badge = node.querySelector('.rail-badge'); const n = counts[node.dataset.view] || 0;
     badge.hidden = !n; badge.textContent = n > 99 ? '99+' : String(n);
@@ -147,7 +150,14 @@ async function boot() {
   await store.loadDesktop();
   applyTheme(store.prefs.theme || 'dark');
   store.emit('change');
-  store.start().catch(error => toast(`Could not reach the local board: ${error.message}`, { kind: 'error' }));
+  store.start().then(() => {
+    // First launch with agents but no approvals yet: offer the one-click standing approval once.
+    const agents = store.agents.filter(a => a.kind === 'mailbox');
+    if (!store.desktop.approvalsPrompted && !(store.desktop.approvals || []).length && agents.length) {
+      store.updateDesktop(d => { d.approvalsPrompted = true; });
+      toast(`Let your ${agents.length} agents do routine work while you're away? Set up standing permissions once and paste them into each chat.`, { kind: 'info', timeout: 15000, action: { label: 'Set up', run: () => navigate('approvals') } });
+    }
+  }).catch(error => toast(`Could not reach the local board: ${error.message}`, { kind: 'error' }));
 }
 
 boot();

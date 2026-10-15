@@ -314,6 +314,18 @@ behavior, not successful installed acceptance. Owner preview, upgrade preservati
 and final native workflows must have their own receipts. Publication requires
 Ben's explicit “ship it” in the release chat; a mailbox handoff is not approval.
 
+The Message board groups threads by inferred project, with local filing and pin
+overrides in `desktop.threadPrefs`. Approvals keeps editable records in
+`desktop.approvals`, distinct from immutable runtime grants. It prepares text
+that Ben must deliver directly in each recipient chat; mailbox notices and paste
+markers never establish authority. Reported uses derive from retained `USED <id>:`
+messages and remain unverified. The app does not enforce these records' scope,
+expiry or use limits. Creating or revoking a record requires successful native
+persistence before notices or a
+paste-ready result. Failed initial persistence restores the previous records.
+Revoking the UI record alone does not revoke a recipient's permission; Ben must
+also deliver the revocation directly in that chat.
+
 Chat has two separate modes. Mailbox mode posts to the durable passive board and
 waits for the existing recipient to check. Live mode starts a new dedicated
 question request for every send; it never attaches to an existing conversation.
