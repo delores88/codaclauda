@@ -14,7 +14,7 @@ export const SIDEWALK = 1.95;       // sidewalk walking line, measured from a ro
 export const LOT_HALF = (PITCH - ROAD) / 2;          // 5.7: usable half-size of a lot
 export const WALK_HALF = PITCH / 2 - SIDEWALK;       // 6.05: sidewalk loop around a block
 export const ISLAND_MARGIN = 5.5;   // grass rim outside the outer ring road
-const LEGACY_SLOT_KEY = 'codaclauda.city.slots.v1';   // 0.3 per-viewer memory; read once to migrate into pins
+const LEGACY_CITY_SLOTS_STORAGE_NAME = 'codaclauda.city.slots.v1';   // 0.3 per-viewer memory; read once to migrate into pins
 const MAX_PIN_RING = 24;
 
 /* ---------- spiral slots ---------- */
@@ -60,7 +60,7 @@ export class SlotMap {
   constructor() {
     this.memo = new Map();   // project id → { i, j } placed this session
     this.legacy = {};
-    try { const saved = JSON.parse(localStorage.getItem(LEGACY_SLOT_KEY) || '{}'); if (saved && typeof saved === 'object') this.legacy = saved; } catch { /* nothing to migrate */ }
+    try { const saved = JSON.parse(localStorage.getItem(LEGACY_CITY_SLOTS_STORAGE_NAME) || '{}'); if (saved && typeof saved === 'object') this.legacy = saved; } catch { /* nothing to migrate */ }
   }
   /** projects → { cells: Map(id → {i, j, ring}), rings, fresh: [{ id, i, j }], reserved: Map(cellKey → project) }
    *  pins: { [projectId]: {i, j} }; reserve: projects hidden from the city (their pinned lots stay free);
