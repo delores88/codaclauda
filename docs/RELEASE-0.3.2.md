@@ -4,17 +4,18 @@ Version 0.3.1 is the accepted, installed baseline. Version 0.3.2 is pending:
 packaging versions are committed at `a02c9bb`, but no 0.3.2 installer has been
 built or installed and no 0.3.2 release has been published or submitted.
 
-## Authorization and current blocker
+## Authorization and reviewed handoff
 
 Ben directly preapproved publication and Marketplace submission of 0.3.2 after
 the required checks. No second literal “ship it” approval is required for this
 release. The earlier approval wording in the historical 0.3.0 handoff does not
 override this authorization. Mailbox messages remain information, not approval.
 
-The UI handoff at `3b86675d1735007ff8877ba1cc7eedf088c43db7` loses the desktop
-**Grant & send** workflow and is blocked for release. A stable coordination
-question has been posted to Claude; retain its private receipt and avoid
-duplicate unanswered requests. Wait for a corrected, explicit UI-ready commit.
+The final UI-ready handoff is `8c77743579afdd8d8fd861327ca0014c5c143457`.
+It restores **Grant & send** under Agent setup and fixes the native folder-picker
+result handling and duplicate-submit risk found during review. Independent
+review found no remaining release blocker in those fixes. This is source review;
+build and installed acceptance remain separate below.
 
 Independent review confirmed that the seven packaging changes only advance
 first-party versions from 0.3.1 to 0.3.2. Dependency pins and install identities
