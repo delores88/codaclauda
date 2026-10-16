@@ -10,7 +10,7 @@
 import { rpc, desktop, isNative } from './bridge.js';
 import { agentAvatar, normalizeAvatar, hash } from './avatar/spec.js';
 import { toMs } from './ui.js';
-import { sparkLink, sparkFresh } from './spark-link.js';
+import { sparkLink, sparkFresh, jobRunning, jobEndSec } from './spark-link.js';
 
 const OWNER = 'owner';
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'needs-owner']);
@@ -196,20 +196,20 @@ class Store extends EventTarget {
   /** Work per machine: running jobs, reserved cores/memory, last-24h CPU-hours, plus per-project activity. */
   get machines() {
     const now = Date.now() / 1000;
-    const DONE = new Set(['succeeded', 'failed', 'cancelled', 'canceled', 'timeout', 'timed_out', 'error', 'rejected', 'expired', 'completed']);
-    const active = j => !j.finished_at && !DONE.has(String(j.state || '').toLowerCase());
+    const online = Boolean(this.spark.configured && this.spark.ok && sparkFresh(this.spark.at));   // stale or unknown = offline
+    // Offline, Spark jobs kept from the last good check are history, not running work: they never
+    // count as active and an unfinished one stops accruing core-hours at the last confirmed check.
     const cpuHours = jobs => jobs.reduce((sum, j) => {
       const start = Number(j.started_at) || 0; if (!start) return sum;
-      const end = Number(j.finished_at) || now; if (end < now - 86400) return sum;
+      const end = jobEndSec(j, { online, lastOkAt: this.spark.lastOkAt, now }); if (end < now - 86400) return sum;
       return sum + (Number(j.reserved_cpu ?? j.cpu) || 0) * Math.max(0, end - Math.max(start, now - 86400)) / 3600;
     }, 0);
     const all = [...this.spark.jobs, ...this.spark.laptopJobs.map(j => ({ ...j, where: j.where || 'laptop' }))];
     const byId = new Map(all.map(j => [j.job, j]));
-    const jobs = [...byId.values()].map(j => ({ ...j, machine: j.where === 'spark' ? 'spark' : 'local', projectId: this.sparkHashes.get(j.project) || null, active: active(j), provider: providerOf(j.client || '') }));
+    const jobs = [...byId.values()].map(j => ({ ...j, machine: j.where === 'spark' ? 'spark' : 'local', projectId: this.sparkHashes.get(j.project) || null, active: jobRunning(j, online), provider: providerOf(j.client || '') }));
     const summarize = list => ({ running: list.filter(j => j.active).length, cpuReserved: list.filter(j => j.active).reduce((n, j) => n + (Number(j.reserved_cpu ?? j.cpu) || 0), 0), memReservedGb: list.filter(j => j.active).reduce((n, j) => n + (Number(j.reserved_memory_gb ?? j.memory_gb) || 0), 0), cpuHours24h: cpuHours(list), finished24h: list.filter(j => Number(j.finished_at) > now - 86400).length });
     const spark = jobs.filter(j => j.machine === 'spark'), local = jobs.filter(j => j.machine === 'local');
     const transport = this.spark.transport || {};
-    const online = Boolean(this.spark.configured && this.spark.ok && sparkFresh(this.spark.at));   // stale or unknown = offline
     return {
       // The Spark side exists whenever DGXBridge is configured; `online` says whether it answered the last check.
       enabled: this.spark.configured,

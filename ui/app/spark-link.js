@@ -20,3 +20,21 @@ export function sparkLink(status) {
 export function sparkFresh(checkedAt, now = Date.now()) {
   return Number(checkedAt) > 0 && now - Number(checkedAt) < SPARK_STALE_MS;
 }
+
+const DONE = new Set(['succeeded', 'failed', 'cancelled', 'canceled', 'timeout', 'timed_out', 'error', 'rejected', 'expired', 'completed']);
+const onSpark = job => job?.where === 'spark' || job?.machine === 'spark';
+
+/** Running now? Unfinished, and a Spark job only while the Spark is online: offline (failed, stale or
+ *  remote-unavailable check), jobs kept from the last good check are history, not current work. */
+export function jobRunning(job, online) {
+  if (!job || job.finished_at || DONE.has(String(job.state || '').toLowerCase())) return false;
+  return !onSpark(job) || Boolean(online);
+}
+
+/** End (seconds) for core-hour accounting: finished_at, else now; an unfinished Spark job stops
+ *  accruing at the last confirmed check (lastOkAt, ms) while the Spark is offline. */
+export function jobEndSec(job, { online, lastOkAt = 0, now }) {
+  const finished = Number(job?.finished_at) || 0;
+  if (finished) return finished;
+  return onSpark(job) && !online ? (Number(lastOkAt) || 0) / 1000 : now;
+}

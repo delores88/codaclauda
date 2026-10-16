@@ -620,6 +620,7 @@ export class Building {
       }
     }
     if (env.reducedMotion) return true;
+    if (this.mirror && env.offline) return true;   // Spark offline: its twins stand still (no gear, flag, beacon or sparks)
     if (this.gear) this.gear.rotation.z -= dt * 0.8;
     if (this.flag) this.flag.rotation.y = Math.sin(elapsed * 2.2 + this.origin.x) * 0.3;
     if (this.beaconLight) this.beaconLight.material.emissiveIntensity = (elapsed * 1.4 + this.origin.z) % 1 < 0.5 ? 1.4 : 0.1;
