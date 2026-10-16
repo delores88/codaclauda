@@ -44,7 +44,7 @@ function register(name, label) {
 /* Preview only: a copied join prompt "is pasted" into a pretend chat that registers ~5 s later,
  * so Agent setup's "Waiting… → Joined ✓" can be seen. Also callable as codaMock.join(address, label). */
 function simulateJoins() {
-  globalThis.codaMock = { join: register, sparkOffline: on => { sparkRemoteDown = on === 'throw' ? 'throw' : Boolean(on); } };
+  globalThis.codaMock = { join: register, sparkOffline: on => { sparkRemoteDown = on === 'throw' ? 'throw' : Boolean(on); }, addCollaborator };
   const clip = globalThis.navigator?.clipboard;
   if (!clip?.writeText || clip.writeText.mockJoins) return;
   const write = clip.writeText.bind(clip);
@@ -91,6 +91,30 @@ const repos = [
   ['tuningspork', 'Audio tuning toy', 'JavaScript', 1200, 48, 40],
   ['dotfiles', 'Machine setup', 'Shell', 90, 12, 200],
 ].map(([name, description, language, size_kb, commit_count, days]) => ({ name, full_name: `delores88/${name}`, description, language, size_kb, commit_count, url: `https://github.com/delores88/${name}`, private: name === 'phaseforge', pushed_at: new Date(Date.now() - days * 86400e3).toISOString(), stars: Math.round(size_kb / 900), default_branch: 'main' }));
+
+/* Contributor islands: repos other owners added delores88 to (github_collab_repos). codaMock.addCollaborator() adds one more. */
+const collabRepo = ([login, type, name, language, size_kb, days, role = 'push', extra = {}]) => ({
+  full_name: `${login}/${name}`, owner: { login, type }, name, private: !!extra.private, archived: !!extra.archived, fork: !!extra.fork,
+  permissions: { admin: role === 'admin', maintain: ['admin', 'maintain'].includes(role), push: ['admin', 'maintain', 'push'].includes(role), triage: role !== 'pull', pull: true },
+  pushed_at: new Date(Date.now() - days * 86400e3).toISOString(), size_kb, language, html_url: `https://github.com/${login}/${name}`, default_branch: 'main', stargazers: Math.round(size_kb / 700),
+});
+const collabRepos = [
+  ['deloresai', 'Organization', 'marketplace-web', 'TypeScript', 42000, 0.5, 'maintain'],
+  ['deloresai', 'Organization', 'payments-api', 'Go', 18000, 4, 'push', { private: true }],
+  ['deloresai', 'Organization', 'design-system', 'CSS', 6400, 12],
+  ['deloresai', 'Organization', 'release-tools', 'Shell', 900, 60, 'triage'],
+  ['spark-labs', 'Organization', 'model-zoo', 'Python', 88000, 2, 'admin'],
+  ['spark-labs', 'Organization', 'dgx-kernels', 'C++', 26000, 9, 'push', { private: true }],
+  ['spark-labs', 'Organization', 'notebooks', 'Jupyter Notebook', 12000, 30, 'pull'],
+  ['mira-chen', 'User', 'tuning-lab', 'JavaScript', 3100, 1],
+].map(collabRepo);
+const NEW_COLLABS = [['nebula-works', 'Organization', 'orbit-engine', 'Rust', 15000, 0.1], ['deloresai', 'Organization', 'docs-site', 'HTML', 2200, 0.2], ['kai-okafor', 'User', 'synth-pad', 'Rust', 4800, 0.3]];
+function addCollaborator() {
+  const n = collabRepos.filter(r => r.mockAdded).length, base = NEW_COLLABS[n % NEW_COLLABS.length];
+  const repo = { ...collabRepo(n < NEW_COLLABS.length ? base : [base[0], base[1], `${base[2]}-${n}`, ...base.slice(3)]), mockAdded: true };
+  collabRepos.push(repo);
+  return repo.full_name;
+}
 
 const stats = (path, loc, files, commits, langs) => ({ path, name: path.split(/[\\/]/).pop(), files, bytes: loc * 38, loc, languages: langs.map(([name, share]) => ({ name, bytes: Math.round(loc * 38 * share) })), git: { commits, commits_7d: Math.min(commits, 14), last_commit_at: ago(30), branch: 'main', remote: '' }, truncated: false });
 
@@ -164,6 +188,7 @@ const desktopHandlers = {
   ] }),
   github_user: () => ({ login: 'delores88', source: 'mock' }),
   github_repos: ({ user }) => ({ user: user || 'delores88', source: 'mock', repos }),
+  github_collab_repos: () => ({ user: 'delores88', source: 'mock', repos: collabRepos.map(({ mockAdded, ...repo }) => repo), truncated: false }),
   attachment_save: ({ name }) => ({ path: `C:\\mock\\board\\desktop-ui\\attachments\\${name}`, name, bytes: 1234 }),
   dictation_start: () => ({ started: false, reason: 'Browser preview: use the desktop app for Windows voice typing.' }),
   window_attention: () => ({}),

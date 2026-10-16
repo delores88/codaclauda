@@ -37,6 +37,8 @@ export const desktop = {
   discoverDesktop: () => invoke('desktop_discover_projects'),
   githubUser: () => invoke('github_user'),
   githubRepos: user => invoke('github_repos', { user }),
+  /** Repos the signed-in gh account reaches as a collaborator / org member (never its own) → { user, repos, truncated }. */
+  githubCollabRepos: () => invoke('github_collab_repos'),
   /** Creates a repo (with a README) in the GitHub CLI's signed-in account and clones it into parentDir\name → { path, full_name, url }. */
   createRepo: ({ name, description = '', private: isPrivate = true, parentDir }) => invoke('github_create_repo', { name, description, private: isPrivate, parentDir }),
   /** Clones owner/name into parentDir\name with the GitHub CLI → { path, full_name, url }. */

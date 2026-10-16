@@ -40,6 +40,9 @@ const GH_CREATE_TIMEOUT: Duration = Duration::from_secs(90);
 const GH_CLONE_TIMEOUT: Duration = Duration::from_secs(180);
 const API_TIMEOUT: Duration = Duration::from_secs(20);
 const GH_PAGES: usize = 3;
+const COLLAB_PAGES: usize = 6;
+const COLLAB_LIMIT: usize = 500;
+const COLLAB_BUDGET: Duration = Duration::from_secs(90);
 const REPO_DESCRIPTION_LIMIT: usize = 350;
 const GH_SIGN_IN_HINT: &str = "Open a terminal and run gh auth login, then try again. CodaClauda never asks for your GitHub password or token.";
 const TOKEN_PREFIXES: &[&str] = &["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"];
@@ -1231,6 +1234,134 @@ pub(crate) async fn github_repos(user: String) -> Value {
     }
 }
 
+// ------------------------------------------------- GitHub: contributor islands
+
+/// One repository from `user/repos`, trimmed to what the City's islands map
+/// needs. Repositories the viewer owns and malformed names are dropped.
+fn collab_repo(repo: &Value, viewer: &str) -> Option<Value> {
+    let owner = repo.get("owner")?;
+    let login = owner.get("login")?.as_str()?;
+    let name = repo.get("name")?.as_str()?;
+    if !valid_login(login)
+        || login.starts_with('-')
+        || !valid_repo_folder(name)
+        || login.eq_ignore_ascii_case(viewer)
+    {
+        return None;
+    }
+    let kind = match owner.get("type").and_then(Value::as_str) {
+        Some("Organization") => "Organization",
+        _ => "User",
+    };
+    let flag = |key: &str| repo.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let can = |key: &str| {
+        repo.pointer(&format!("/permissions/{key}"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    let text = |key: &str, max: usize| {
+        repo.get(key)
+            .and_then(Value::as_str)
+            .map(|value| sanitize_line(value, max))
+            .filter(|value| !value.is_empty())
+    };
+    let full_name = format!("{login}/{name}");
+    Some(json!({
+        "full_name": full_name,
+        "owner": {"login": login, "type": kind},
+        "name": name,
+        "private": flag("private"),
+        "archived": flag("archived"),
+        "fork": flag("fork"),
+        "permissions": {
+            "push": can("push"),
+            "admin": can("admin"),
+            "maintain": can("maintain"),
+            "triage": can("triage"),
+            "pull": can("pull"),
+        },
+        "pushed_at": text("pushed_at", 40),
+        "size_kb": repo.get("size").and_then(Value::as_u64).unwrap_or(0),
+        "language": text("language", 60),
+        "html_url": format!("https://github.com/{full_name}"),
+        "default_branch": text("default_branch", 100),
+        "stargazers": repo.get("stargazers_count").and_then(Value::as_u64).unwrap_or(0),
+    }))
+}
+
+/// `user/repos` as a collaborator or organization member, most recently pushed
+/// first, page by page so neither the output nor the run time is unbounded.
+/// A later page that fails ends the list early (`truncated`); the first fails.
+async fn gh_collab_repos(viewer: &str) -> Result<(Vec<Value>, bool), Failure> {
+    let deadline = Instant::now() + COLLAB_BUDGET;
+    let mut repos = Vec::new();
+    let mut truncated = false;
+    for page in 1..=COLLAB_PAGES {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            truncated = true;
+            break;
+        }
+        let path = format!(
+            "user/repos?affiliation=collaborator,organization_member&sort=pushed&per_page=100&page={page}"
+        );
+        let stdout = match run_gh(&["api", path.as_str()], left.min(GH_GRAPHQL_TIMEOUT)).await {
+            Ok(stdout) => stdout,
+            Err(failure) if page == 1 => return Err(failure),
+            Err(_) => {
+                truncated = true;
+                break;
+            }
+        };
+        let response: Value = serde_json::from_slice(&stdout)
+            .map_err(|_| fail("GH_UNAVAILABLE", "GitHub CLI returned invalid JSON."))?;
+        let Some(list) = response.as_array() else {
+            return Err(fail(
+                "GH_UNAVAILABLE",
+                "GitHub CLI returned an unexpected response.",
+            ));
+        };
+        repos.extend(list.iter().filter_map(|repo| collab_repo(repo, viewer)));
+        if repos.len() >= COLLAB_LIMIT {
+            truncated = repos.len() > COLLAB_LIMIT || list.len() == 100;
+            repos.truncate(COLLAB_LIMIT);
+            break;
+        }
+        if list.len() < 100 {
+            break;
+        }
+        truncated = page == COLLAB_PAGES;
+    }
+    Ok((repos, truncated))
+}
+
+/// Repositories the GitHub CLI's signed-in account reaches as a collaborator or
+/// organization member, never its own (at most 500). Uses gh's own sign-in;
+/// there is no anonymous fallback because the public API cannot list another
+/// account's access. No token is read, passed or printed.
+#[tauri::command]
+pub(crate) async fn github_collab_repos() -> Value {
+    let viewer = match gh_login().await {
+        Ok(login) => login,
+        Err(failure) => {
+            let (code, message) = with_sign_in_hint(failure);
+            return error(code, message);
+        }
+    };
+    match gh_collab_repos(&viewer).await {
+        Ok((repos, truncated)) => ok(json!({
+            "user": viewer,
+            "source": "gh",
+            "repos": repos,
+            "truncated": truncated,
+        })),
+        Err(failure) => {
+            let (code, message) = with_sign_in_hint(failure);
+            error(code, message)
+        }
+    }
+}
+
 // ------------------------------------------------- GitHub: create and clone
 
 /// Repository names that are also safe Windows folder names. Names starting
@@ -1798,5 +1929,34 @@ pub(crate) async fn open_external(target: String) -> Value {
             "OPEN_UNAVAILABLE",
             format!("Open {resolved} from your file manager or browser on this platform."),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collab_repo_keeps_other_owners_and_trims_fields() {
+        let org = json!({
+            "name": "payments-api", "owner": {"login": "deloresai", "type": "Organization", "id": 7},
+            "private": true, "size": 1800, "language": "Go", "stargazers_count": 4,
+            "pushed_at": "2026-10-01T10:00:00Z", "default_branch": "main",
+            "permissions": {"admin": false, "maintain": false, "push": true, "triage": true, "pull": true},
+            "html_url": "https://example.invalid/elsewhere", "description": "not returned",
+        });
+        let repo = collab_repo(&org, "delores88").expect("an organization repository is kept");
+        assert_eq!(repo["full_name"], "deloresai/payments-api");
+        assert_eq!(repo["owner"], json!({"login": "deloresai", "type": "Organization"}));
+        assert_eq!(repo["html_url"], "https://github.com/deloresai/payments-api");
+        assert_eq!(repo["permissions"]["push"], true);
+        assert_eq!(repo["permissions"]["admin"], false);
+        assert_eq!(repo["size_kb"], 1800);
+        assert!(repo.get("description").is_none());
+
+        let own = json!({"name": "dotfiles", "owner": {"login": "Delores88", "type": "User"}});
+        assert!(collab_repo(&own, "delores88").is_none(), "the viewer's own repositories are excluded");
+        let bad = json!({"name": "../x", "owner": {"login": "someone", "type": "User"}});
+        assert!(collab_repo(&bad, "delores88").is_none(), "malformed names are dropped");
     }
 }
