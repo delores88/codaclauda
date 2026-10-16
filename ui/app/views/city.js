@@ -323,7 +323,7 @@ class CityView {
     this.persistLots(fresh);
     const ringsChanged = this.world.setRings(rings, { animate: Boolean(this.firstSyncDone) });
     // Until the owner moves the camera, keep the whole (growing) island framed.
-    if (ringsChanged && !this.world.userMoved && !this.pendingFocus) this.world.resetView({ instant: !this.firstSyncDone, auto: true });
+    if (ringsChanged && !this.world.userMoved && !this.pendingFocus && !this.talk) this.world.resetView({ instant: !this.firstSyncDone, auto: true });
     const agents = store.agents;
     const active = new Set(agents.filter(a => a.status === 'active' && a.currentProjectId).map(a => store.project(a.currentProjectId)?.id || a.currentProjectId));
     const lotsChanged = this.buildings.sync(projects, cells, active, { animate: true });
@@ -983,7 +983,7 @@ class CityView {
   /** show({ focusProject }) / show({ focusAgent }) once those exist in the scene. */
   tryPendingFocus() {
     const pending = this.pendingFocus;
-    if (!pending || !this.visible) return;
+    if (!pending || !this.visible || this.talk) return;   // talk mode holds its shot: the focus waits until the conversation ends
     if (performance.now() - pending.at > (pending.ttl || 15000)) { this.pendingFocus = null; return; }
     let target = null;
     if (pending.kind === 'building') { const id = this.store.project(pending.id)?.id || pending.id; if (this.buildings.get(id)) target = { kind: 'building', id }; }
