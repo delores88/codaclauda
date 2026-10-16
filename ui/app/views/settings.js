@@ -2,6 +2,7 @@
  * Updates port the 0.2 Updates view: the same native update ops, phase actions
  * (view-model updatePresentation), install confirmation and bounded status polling. */
 import { updatePresentation } from '../../view-model.js';
+import { weatherSettings } from './settings-weather.js';
 
 const UPDATE_LABELS = { check: 'Check for updates', status: 'Read updater status', authorize: 'Approve in browser', poll: 'Check approval', download: 'Download update', install: 'Install update' };
 const UPDATE_MESSAGES = {
@@ -26,6 +27,7 @@ export function mount(root, ctx) {
     return h('div.setting-row', h('div.setting-text', h('strong', label), hint ? h('span.field-hint', hint) : null), h('label.switch', { 'aria-label': label }, input, h('span')));
   };
   const info = (label, value) => h('div.info-row', h('dt', label), h('dd.mono', { title: value || '' }, value || '—'));
+  const weatherCard = weatherSettings(ctx);   // persistent: keeps its search box and results
 
   /* ---------- Updates (persistent node; survives page re-renders) ---------- */
   const upd = { data: updatePresentation(), updating: false, reading: false, generation: 0, pollStarted: null, pollStopped: false, error: '' };
@@ -123,6 +125,7 @@ export function mount(root, ctx) {
         h('div.setting-row', h('div.setting-text', h('strong', 'City graphics'), h('span.field-hint', 'Low turns off shadows for slower PCs.')),
           h('div.segmented', ['high', 'low'].map(q => h('button', { type: 'button', 'aria-pressed': String(store.prefs.cityQuality === q), onclick: () => { store.setPref('cityQuality', q); render(); } }, q === 'high' ? 'High' : 'Low')))),
       ),
+      weatherCard.node,
       updatesCard,
       h('section.card.settings-card',
         h('h2.panel-title', 'Agent setup'),

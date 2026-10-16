@@ -1,0 +1,10 @@
+[
+  { "place_id": 1, "licence": "Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright", "osm_type": "relation", "lat": "39.7392364", "lon": "-104.984862", "category": "boundary", "type": "administrative", "place_rank": 16, "importance": 0.72, "addresstype": "city", "name": "Denver", "display_name": "Denver, Colorado, United States", "boundingbox": ["39.6143", "39.9142", "-105.1099", "-104.5996"] },
+  { "place_id": 2, "lat": "-33.8698439", "lon": "151.2082848", "addresstype": "city", "name": "", "display_name": "Sydney, Council of the City of Sydney, New South Wales, 2000, Australia" },
+  { "place_id": 3, "lat": "not-a-number", "lon": "0", "name": "Broken", "display_name": "Broken" },
+  { "place_id": 4, "lat": "95.0", "lon": "0", "name": "Too far north", "display_name": "Too far north" },
+  { "place_id": 5, "lat": "59.9133301", "lon": "10.7389701", "name": "Oslo", "display_name": "Oslo,\u0007 Norway" },
+  { "place_id": 6, "lat": "35.6768601", "lon": "139.7638947", "name": "Tokyo", "display_name": "Tokyo, Japan" },
+  { "place_id": 7, "lat": "51.5074456", "lon": "-0.1277653", "name": "London", "display_name": "London, Greater London, England, United Kingdom" },
+  { "place_id": 8, "lat": "64.145981", "lon": "-21.9422367", "name": "Reykjavík", "display_name": "Reykjavík, Capital Region, Iceland" }
+]

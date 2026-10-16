@@ -44,7 +44,7 @@ function register(name, label) {
 /* Preview only: a copied join prompt "is pasted" into a pretend chat that registers ~5 s later,
  * so Agent setup's "Waiting… → Joined ✓" can be seen. Also callable as codaMock.join(address, label). */
 function simulateJoins() {
-  globalThis.codaMock = { join: register, sparkOffline: on => { sparkRemoteDown = on === 'throw' ? 'throw' : Boolean(on); }, addCollaborator };
+  globalThis.codaMock = { join: register, sparkOffline: on => { sparkRemoteDown = on === 'throw' ? 'throw' : Boolean(on); }, addCollaborator, weather: code => { weatherForced = code || null; }, weatherFail: on => { weatherFails = Boolean(on); } };
   const clip = globalThis.navigator?.clipboard;
   if (!clip?.writeText || clip.writeText.mockJoins) return;
   const write = clip.writeText.bind(clip);
@@ -170,6 +170,37 @@ const handlers = {
   'spark-config': ({ executable }) => { if (!executable) throw new Error('Enter the sparkdev executable path.'); sparkExecutable = executable; return { executable }; },
 };
 
+/* City weather: canned MET-style readings (picked by coordinates) and places. codaMock.weather('snow')
+ * forces a symbol code, codaMock.weatherFail(true) makes live weather fail. */
+const WEATHER = [
+  { symbol_code: 'rain', air_temperature: 12.3, wind_speed: 4.2, cloud_area_fraction: 92, precipitation_amount: 1.1 },
+  { symbol_code: 'clearsky_day', air_temperature: 21.4, wind_speed: 1.8, cloud_area_fraction: 3, precipitation_amount: 0 },
+  { symbol_code: 'heavysnowshowers_night', air_temperature: -4.6, wind_speed: 9.5, cloud_area_fraction: 85, precipitation_amount: 2.4 },
+  { symbol_code: 'fog', air_temperature: 6.1, wind_speed: 0.8, cloud_area_fraction: 100, precipitation_amount: 0 },
+  { symbol_code: 'rainshowersandthunder_day', air_temperature: 24.9, wind_speed: 7.4, cloud_area_fraction: 78, precipitation_amount: 3.8 },
+  { symbol_code: 'partlycloudy_day', air_temperature: 16.2, wind_speed: 3.1, cloud_area_fraction: 48, precipitation_amount: 0 },
+];
+const PLACES = [
+  ['Denver', 'Denver, Colorado, United States', 39.74, -104.98], ['Oslo', 'Oslo, Norway', 59.91, 10.74], ['Tokyo', 'Tokyo, Japan', 35.68, 139.76],
+  ['London', 'London, Greater London, England, United Kingdom', 51.51, -0.13], ['Sydney', 'Sydney, New South Wales, Australia', -33.87, 151.21],
+  ['Reykjavík', 'Reykjavík, Capital Region, Iceland', 64.15, -21.94], ['Springfield', 'Springfield, Illinois, United States', 39.8, -89.64],
+  ['Springfield', 'Springfield, Massachusetts, United States', 42.1, -72.59], ['Springfield', 'Springfield, Missouri, United States', 37.21, -93.29],
+].map(([name, display_name, lat, lon]) => ({ name, display_name, lat, lon }));
+let weatherForced = null, weatherFails = false;
+function weatherNow({ lat, lon }) {
+  if (typeof lat !== 'number' || typeof lon !== 'number' || !(Math.abs(lat) <= 90) || !(Math.abs(lon) <= 180)) throw new Error('The latitude must be a number from -90 to 90.');
+  if (weatherFails) throw new Error('MET Norway could not be reached (mock).');
+  const r2 = n => Math.round(n * 100) / 100 || 0;
+  const pick = WEATHER[Math.abs(Math.round(r2(lat) * 100) * 31 + Math.round(r2(lon) * 100)) % WEATHER.length];
+  const reading = weatherForced ? { ...pick, symbol_code: weatherForced } : pick;
+  return { ...reading, updated_at: new Date(Date.now() - 20 * 60e3).toISOString(), expires: new Date(Date.now() + 30 * 60e3).toISOString(), lat: r2(lat), lon: r2(lon) };
+}
+function geocodePlace({ query }) {
+  const q = String(query || '').trim();
+  if (/[\u0000-\u001f\u007f]/.test(q) || q.length < 2 || q.length > 100) throw new Error('Enter 2 to 100 characters to search for a place.');
+  return PLACES.filter(p => p.display_name.toLowerCase().includes(q.toLowerCase())).slice(0, 5);
+}
+
 const desktopHandlers = {
   desktop_paths: () => ({ state_dir: 'C:\\mock\\board', ui_dir: 'C:\\mock\\board\\desktop-ui', attachments_dir: 'C:\\mock\\board\\desktop-ui\\attachments', manifest_path: 'C:\\mock\\board\\desktop-ui\\projects.manifest.json', desktop_dir: 'C:\\Users\\Ben\\Desktop' }),
   desktop_state_load: () => ({ state: JSON.parse(localStorage.getItem('mock.desktop') || 'null') }),
@@ -195,6 +226,8 @@ const desktopHandlers = {
   pick_workspace: () => ({ path: 'C:\\Users\\Ben\\Desktop\\NewProject' }),
   preferences: () => ({ cli_path: 'C:\\mock\\claudacoda-cli.exe', state_dir: 'C:\\mock\\board', version: '0.3.2-preview' }),
   update: updateOp,
+  weather_now: weatherNow,
+  geocode_place: geocodePlace,
 };
 
 export function createMock() {

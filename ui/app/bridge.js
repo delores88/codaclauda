@@ -52,4 +52,8 @@ export const desktop = {
   preferences: () => invoke('preferences'),
   /** Native updater: op is check | status | authorize | poll | download | install (no other args). */
   update: op => invoke('update', { op, args: {} }),
+  /** MET Norway current weather; coordinates are rounded to 2 decimals natively → { symbol_code, air_temperature, wind_speed, cloud_area_fraction, precipitation_amount, updated_at, expires, lat, lon }. */
+  weatherNow: (lat, lon) => invoke('weather_now', { lat, lon }),
+  /** OpenStreetMap Nominatim search, on an explicit search only → [{ name, display_name, lat, lon }]. */
+  geocodePlace: query => invoke('geocode_place', { query, language: globalThis.navigator?.language || 'en' }),
 };

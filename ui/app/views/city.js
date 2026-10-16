@@ -12,6 +12,7 @@ import { buildPlotMarker, GROUND_Y } from '../city/scenery.js';
 import { SparkCity, FOUNDRY, jobLabel } from '../city/spark.js';
 import { TalkPanel, talkSpot, talkShot, sayLine, STAGE } from '../city/talk.js';
 import { IslandMode } from '../city/portal.js';
+import { CityWeather } from '../city/weather-hud.js';
 
 registerIcons({
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.6 2.4c-.8.4-1.2.9-1.2 1.7v.4M12 17h.01"/>',
@@ -195,7 +196,7 @@ class CityView {
     this.sideChip = h('span.city-side.is-pc', { hidden: true, role: 'status' });
     this.hud = h('header.city-hud',
       h('div.city-hud-title', h('span.eyebrow', 'Project city'), this.sideChip, this.stats),
-      h('div.city-hud-row', this.timeChip, this.jump));
+      h('div.city-hud-row', this.timeChip, this.weatherSlot = h('div.city-weather-slot'), this.jump));   // weather chip: city/weather-hud.js
 
     this.legendSideText = h('span', 'Other side = DGX Spark');
     this.legendOffline = h('div.city-legend-row', { hidden: true }, h('span.city-gem.offline'), 'Grey Spark side = Spark offline');
@@ -262,6 +263,7 @@ class CityView {
 
   fail(message) {
     this.failed = true;
+    this.weather?.hide();
     this.talk = null;
     this.cityRoot.classList.remove('is-talk');
     for (const node of [this.hud, this.legend, this.toolbar, this.help, this.panel, this.empty, this.overlay, this.machinesCard, this.leaveBtn, this.talkPanel.node, ...this.bars]) node.hidden = true;
@@ -289,6 +291,9 @@ class CityView {
     this.plotMarker = buildPlotMarker();
     this.world.city.add(this.plotMarker.group);
     this.world.onFrame((dt, elapsed, env) => this.frame(dt, elapsed, env));
+    // Weather (This PC side only): effects, HUD chip + quick picker, live feed while the City is shown.
+    this.weather = new CityWeather(this.world, { store: this.store, bridge: this.ctx.bridge, reducedMotion: () => this.reduced(), navigate: (view, params) => this.ctx.navigate(view, params) });
+    this.weatherSlot.append(this.weather.node);
     this.bindInput();
   }
 
@@ -358,6 +363,7 @@ class CityView {
     this.renderMachines(machines, mode);
     this.firstSyncDone = true;
     this.syncLabels(agents);
+    this.weather?.setHome(!this.islands?.current);   // contributor islands (city/portal.js) have no weather; IslandMode.apply syncs after each switch
     this.renderHud(projects, agents);
     this.renderEmpty(projects);
     this.renderToolbarState();
@@ -1903,6 +1909,7 @@ class CityView {
     this.sync();
     this.world.resize();
     this.world.start();
+    this.weather?.show();
     // Deep link #city?side=spark (or side=pc) turns the island to that face once the Spark side exists.
     if (params.side === 'spark' || params.side === 'pc') {
       const side = params.side;
@@ -1920,6 +1927,7 @@ class CityView {
     this.runnerLabels.clear();
     clearTimeout(this.checkTimer);
     this.islands?.dispose();
+    this.weather?.dispose();
     this.spark?.dispose(); this.npcs?.dispose(); this.buildings?.dispose(); this.world?.dispose();
     this.root.replaceChildren();
   }
@@ -1931,6 +1939,7 @@ class CityView {
     this.world.releaseTilt?.();
     this.islands?.hide();
     this.world.stop();
+    this.weather?.hide();
     document.removeEventListener('keydown', this.onKeyDown);
     document.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('blur', this.onBlur);
