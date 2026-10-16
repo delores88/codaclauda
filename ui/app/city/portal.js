@@ -16,6 +16,7 @@ registerIcons({ route: '<circle cx="5.5" cy="18" r="2.3"/><circle cx="18.5" cy="
 const NO_MACHINES = Object.freeze({ enabled: false, configured: false, online: false, offlineSince: null, error: '', jobs: [] });
 const ACCESS_NOTE = { Admin: 'Admin: full control', Maintain: 'Maintain: manage without admin', Write: 'Write: push to branches', Triage: 'Triage: issues and pull requests', Read: 'Read: view and clone' };
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const noAccess = () => Promise.reject(new Error('Access levels are set on home projects, not contributor islands.'));
 
 /** The real store, seen from a contributor island (functions stay bound to the real store). */
 function islandStore(store, mode) {
@@ -27,6 +28,8 @@ function islandStore(store, mode) {
     agent: id => mode.agents().find(a => a.id === id) || null,
     cityLots: {},
     setCityLot: undefined,   // island layouts are hashed per island, never pinned into the home city's lots
+    // Access levels belong to home projects: an island repo never writes one (or a home clone's).
+    setProjectAccess: noAccess, setProjectAccessMany: noAccess,
     get machines() { return NO_MACHINES; },
   };
   return new Proxy(store, {
@@ -86,8 +89,9 @@ export class IslandMode {
     const diff = await this.routes.refresh({ force });
     this.loading = false;
     if (this.map.open) this.renderMap();
-    // New routes open the map once; a first-ever check with many routes only badges the button.
-    if (diff?.added.length && (!diff.firstEver || diff.added.length <= QUIET_FIRST)) this.autoOpen();
+    // New routes open the map once; a first-ever check with many routes, or a cut-short list (an old
+    // repo pushed into the top 500 looks new), only badges the button.
+    if (diff?.added.length && !this.routes.truncated && (!diff.firstEver || diff.added.length <= QUIET_FIRST)) this.autoOpen();
   }
   autoOpen() {
     const v = this.view;
@@ -100,8 +104,9 @@ export class IslandMode {
     const v = this.view;
     v.dirty = true;
     this.renderButton();
-    if (this.current && !this.island()) {   // removed as a collaborator: back home
-      toast('That contributor island is gone: you no longer have access to its repos.', { kind: 'info' });
+    if (this.current && !this.island()) {   // gone from the list: back home (a cut-short list keeps what it lacks, so only past 500)
+      toast(this.routes.truncated ? 'GitHub returned a partial list (500 repos at most) without that contributor island, so you are back home.'
+        : 'That contributor island is gone: you no longer have access to its repos.', { kind: 'info' });
       this.apply(null);
     } else if (this.current) this.renderChip();
   }
@@ -113,7 +118,7 @@ export class IslandMode {
     const v = this.view;
     if (v.talk) v.exitTalk({ instant: true });
     if (v.street || v.streetPending) v.exitStreet();
-    v.closeCluster(); v.setHover(null);
+    v.closeCluster(); v.closeAccess?.(); v.setHover(null);
     this.map.show(this.mapData());
     if (!this.routes.checked && !this.routes.pending) this.poll();
   }
@@ -148,7 +153,7 @@ export class IslandMode {
     if (v.talk) v.exitTalk({ instant: true });
     if (v.street || v.streetPending) v.exitStreet({ fly: false, instant: true });
     if (v.following) v.toggleFollow(false);
-    v.closeCluster(); v.setHover(null); v.select(null);
+    v.closeCluster(); v.closeAccess?.(); v.setHover(null); v.select(null);
     this.fxText.textContent = target ? `Flying to ${target.owner} island…` : 'Flying home…';
     this.fx.className = `city-portal ${reduced ? 'is-plain' : 'is-swirl'} is-in`;
     this.fx.hidden = false;

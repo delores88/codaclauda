@@ -180,7 +180,7 @@ export class RouteMap {
     clear(this.foot,
       h('span.city-routes-legend', h('i.city-routes-key'), 'Route', h('i.city-routes-key.is-new'), 'New route'),
       offMap > 0 ? h('span', `${plural(offMap, 'more island')} in the list`) : null,
-      data.truncated ? h('span', 'Showing the 500 most recently pushed repos') : null,
+      data.truncated ? h('span', `Partial list from GitHub: showing ${plural(data.islands.reduce((n, i) => n + i.repos.length, 0), 'repo')}, some may be missing`) : null,
       data.error && data.islands.length ? h('span.city-routes-error', icon('alert'), `Last check failed: ${String(data.error).slice(0, 160)}`) : null,
       h('span.city-routes-spacer'),
       data.checkedAt ? h('span.muted', `Checked ${timeAgo(data.checkedAt)}`) : null,

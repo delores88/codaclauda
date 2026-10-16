@@ -9,6 +9,7 @@ export const POLL_MS = 30 * 60e3;
 export const QUIET_FIRST = 6;    // first-ever check: more new routes than this → quiet badge, no auto-open
 const SHOW_GAP_MS = 10e3;        // City show polls at most this often
 const REPO_LIMIT = 500;
+const KNOWN_LIMIT = 5000;        // names kept across cut-short checks
 
 export const islandId = login => `gh-owner:${String(login || '').toLowerCase()}`;
 export const repoKey = repo => String(repo?.full_name || '').toLowerCase();
@@ -128,9 +129,14 @@ export class IslandRoutes {
     this.pending = (async () => {
       try {
         const data = await this.fetch();
-        const repos = cleanRepos(data?.repos), st = this.state;
-        const diff = diffRoutes(repos, Array.isArray(st.known) ? st.known : null, Array.isArray(st.fresh) ? st.fresh : []);
-        Object.assign(this, { repos, islands: groupIslands(repos), error: '', truncated: Boolean(data?.truncated), checked: true });
+        // A cut-short list (over 500, a later page failed, the time ran out) only adds: names it
+        // lacks stay shown and known until a complete check says they are gone.
+        const st = this.state, cut = Boolean(data?.truncated), before = Array.isArray(st.known) ? st.known : null;
+        const got = Array.isArray(data?.repos) ? data.repos : [];
+        const repos = cleanRepos(cut ? [...got, ...this.repos] : got);
+        const diff = diffRoutes(repos, before, Array.isArray(st.fresh) ? st.fresh : []);
+        if (cut && before) diff.known = [...new Set([...diff.known, ...before])].slice(0, KNOWN_LIMIT);
+        Object.assign(this, { repos, islands: groupIslands(repos), error: '', truncated: cut, checked: true });
         if (JSON.stringify([st.known, st.fresh, st.repos]) !== JSON.stringify([diff.known, diff.fresh, repos])) this.store.updateDesktop(d => { d.islands = { ...d.islands, known: diff.known, fresh: diff.fresh, repos }; });
         return diff;
       } catch (error) { this.error = error?.message || String(error); return null; }
