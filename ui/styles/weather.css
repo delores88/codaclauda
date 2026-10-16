@@ -1,0 +1,69 @@
+/* City weather: the HUD chip and quick picker (city/weather-hud.js) and the Settings card (views/settings-weather.js). */
+.city-hud-row { flex-wrap: wrap; }
+.city-weather-slot { display: contents; }
+/* Open picker: lift the HUD over the machine card and legend (they share z-index 3). */
+.city-hud:has(.city-weather-pick:not([hidden])) { z-index: 5; }
+.city-weather { position: relative; display: inline-flex; min-width: 0; }
+.city-weather-chip { max-width: 260px; cursor: pointer; transition: border-color var(--fast), background var(--fast); }
+.city-weather-chip:hover, .city-weather-chip[aria-expanded="true"] { border-color: var(--accent); background: var(--surface); color: var(--text); }
+.city-weather-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.city-weather-chip.is-off, .city-weather-chip.is-quiet { color: var(--muted); font-weight: 550; }
+.city-weather-pick { position: absolute; top: calc(100% + 8px); left: 0; z-index: 5; display: grid; gap: 8px; width: 292px; max-width: calc(100vw - 48px); padding: 10px; box-shadow: var(--shadow-lg); animation: city-pop var(--med) var(--ease); }
+.city-weather-row { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.city-weather-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.city-weather-opt { display: flex; align-items: center; gap: 7px; min-width: 0; height: 32px; padding: 0 9px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-2); color: var(--text-2); font-size: 12.5px; font-weight: 600; text-align: left; cursor: pointer; transition: background var(--fast), border-color var(--fast); }
+.city-weather-opt span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.city-weather-opt .icon { width: 16px; height: 16px; }
+.city-weather-opt:hover { background: var(--surface-hover); color: var(--text); }
+.city-weather-opt[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 60%, transparent); background: var(--accent-soft); color: var(--text); }
+.city-weather-opt[aria-pressed="true"] .icon { color: var(--accent-2); }
+.city-weather-label { margin-top: 2px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.city-weather-note { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+.city-weather-windy { display: inline-flex; align-items: center; gap: 7px; color: var(--text-2); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.city-weather-windy:has(input:disabled) { opacity: .55; cursor: default; }
+.city-weather-windy input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
+.city-weather-more { justify-self: start; padding: 2px 0; border: 0; background: none; color: var(--accent-2); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.city-weather-more:hover { text-decoration: underline; }
+.city-view.reduce-motion .city-weather-pick { animation: none; }
+.city-view.reduce-motion .city-weather-chip, .city-view.reduce-motion .city-weather-opt { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .city-weather-pick { animation: none; }
+  .city-weather-chip, .city-weather-opt { transition: none; }
+}
+@media (max-width: 760px) {
+  .city-weather-chip { max-width: 190px; }
+}
+
+/* Settings → City weather */
+.wx-live, .wx-manual, .wx-search { display: grid; gap: 10px; }
+.wx-sources { display: grid; gap: 6px; }
+.wx-radio { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
+.wx-radio:has(input:checked) { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: var(--accent-soft); }
+.wx-radio input { margin: 3px 0 0; accent-color: var(--accent); }
+.wx-radio-text { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.wx-search-row { display: flex; gap: 8px; }
+.wx-search-row .input { flex: 1; min-width: 0; }
+.wx-search-status { margin: 0; color: var(--text-2); font-size: 12.5px; }
+.wx-search-status.is-error { color: var(--danger); }
+.wx-results { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.wx-result { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); color: var(--text); text-align: left; cursor: pointer; }
+.wx-result:hover { background: var(--surface-hover); border-color: var(--border-strong); }
+.wx-result > span { display: grid; min-width: 0; }
+.wx-result .muted, .wx-chosen .muted { overflow-wrap: anywhere; font-size: 12px; }
+.wx-result .icon, .wx-chosen .icon { color: var(--accent-2); }
+.wx-chosen { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; }
+.wx-privacy { display: flex; align-items: flex-start; gap: 8px; margin: 0; }
+.wx-privacy .icon { width: 16px; height: 16px; margin-top: 1px; color: var(--success); }
+.wx-choices { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; }
+.wx-choice { display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); color: var(--text-2); font-weight: 600; font-size: 13px; cursor: pointer; transition: background var(--fast), border-color var(--fast); }
+.wx-choice:hover { background: var(--surface-hover); color: var(--text); }
+.wx-choice[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 60%, transparent); background: var(--accent-soft); color: var(--text); }
+.wx-choice[aria-pressed="true"] .icon { color: var(--accent-2); }
+.wx-attribution { margin: 0; }
+.wx-settings .setting-row { flex-wrap: wrap; }
+@media (max-width: 600px) {
+  .wx-search-row { flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wx-choice { transition: none; }
+}
