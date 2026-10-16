@@ -44,7 +44,7 @@ function register(name, label) {
 /* Preview only: a copied join prompt "is pasted" into a pretend chat that registers ~5 s later,
  * so Agent setup's "Waiting… → Joined ✓" can be seen. Also callable as codaMock.join(address, label). */
 function simulateJoins() {
-  globalThis.codaMock = { join: register };
+  globalThis.codaMock = { join: register, sparkOffline: on => { sparkRemoteDown = on === 'throw' ? 'throw' : Boolean(on); } };
   const clip = globalThis.navigator?.clipboard;
   if (!clip?.writeText || clip.writeText.mockJoins) return;
   const write = clip.writeText.bind(clip);
@@ -103,7 +103,8 @@ function mockReply(to, subject) {
 const answer = `Here's a quick example.\n\n## Fibonacci in Rust\n\n\`\`\`rust\nfn fib(n: u64) -> u64 {\n    match n { 0 => 0, 1 => 1, _ => fib(n - 1) + fib(n - 2) }\n}\n\`\`\`\n\nThe closed form is $$F_n = \\frac{\\varphi^n - \\psi^n}{\\sqrt 5}$$ where $\\varphi = \\tfrac{1+\\sqrt5}{2}$.\n\n| n | F(n) |\n|---|------|\n| 10 | 55 |\n| 20 | 6765 |\n\n> Tip: memoize for large \`n\`.`;
 
 const sparkJob = (job, where, client, runtime, cpu, minutesAgo, done = null) => ({ job, where, client, runtime, cpu, reserved_cpu: cpu, memory_gb: cpu * 2, reserved_memory_gb: cpu * 2, project: `mock-${job}`, state: done ? 'succeeded' : 'running', created_at: ago(minutesAgo), started_at: ago(minutesAgo), finished_at: done ? ago(done) : null, exit_code: done ? 0 : null });
-const sparkStatus = () => ({
+let sparkRemoteDown = false;   // codaMock.sparkOffline(true): the real offline reply (local sparkdev ok, remote unavailable)
+const sparkStatus = () => sparkRemoteDown === 'throw' ? (() => { throw new Error('sparkdev did not answer (mock).'); })() : sparkRemoteDown ? { ok: true, laptop_jobs: [], remote_available: false, remote_error: { code: 4, message: 'Authenticated remote sidecar unavailable, busy or not paired; retry the same request ID' } } : ({
   ok: true, hardware: { cpu_count: 20, memory_gb: 119 }, limits: { cpu_total: 18, memory_gb_total: 80, cpu_per_job: 16 },
   scheduler: { healthy: true, last_heartbeat: now() }, transport: { authenticated: true, route: 'lan_ssh' },
   jobs: [sparkJob('j1', 'spark', 'codex', 'rust', 8, 12), sparkJob('j2', 'spark', 'claude', 'python', 4, 5), sparkJob('j3', 'spark', 'codex', 'node', 2, 300, 260), sparkJob('j4', 'spark', 'claude', 'rust', 16, 600, 540)],
