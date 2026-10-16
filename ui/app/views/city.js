@@ -11,6 +11,7 @@ import { SlotMap, cellCenter, cellOf, cellKey, LOT_HALF } from '../city/layout.j
 import { buildPlotMarker, GROUND_Y } from '../city/scenery.js';
 import { SparkCity, FOUNDRY, jobLabel } from '../city/spark.js';
 import { TalkPanel, talkSpot, talkShot, sayLine, STAGE } from '../city/talk.js';
+import { IslandMode } from '../city/portal.js';
 
 registerIcons({
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.6 2.4c-.8.4-1.2.9-1.2 1.7v.4M12 17h.01"/>',
@@ -167,6 +168,7 @@ class CityView {
     if (!webglAvailable()) { this.fail('This computer could not start 3D graphics (WebGL is unavailable).'); return; }
     try { this.initWorld(); }
     catch (error) { console.error(error); this.fail(`The 3D view could not start: ${error.message}`); return; }
+    this.islands = new IslandMode(this);   // contributor islands: route map, portal, current island (city/portal.js)
     this.store.on('change', () => { this.dirty = true; if (this.visible && !this.world.running) this.sync(); });
     loadPeople().then(create => { this.npcs.setCreate(create); this.peopleReady = true; this.dirty = true; if (this.visible) this.sync(); });
   }
@@ -675,7 +677,7 @@ class CityView {
   bindWheel() {
     const root = this.cityRoot;
     root.addEventListener('wheel', event => {
-      if (!this.visible || this.failed || !this.world) return;
+      if (!this.visible || this.failed || !this.world || this.islands?.blocking) return;
       const scroller = event.target instanceof Element ? event.target.closest('.city-panel, .city-help, .city-cluster-pop, .city-talk') : null;
       if (scroller && !event.ctrlKey) return;
       event.preventDefault(); event.stopPropagation();
@@ -747,7 +749,7 @@ class CityView {
   /** An unoccupied lot of the top city under the pointer (roads, sidewalks and the HQ plaza excluded).
    *  Only while This PC side is up and the island is still. */
   plotAt(clientX, clientY) {
-    if (!this.world.settled || this.world.side !== 'pc') return null;
+    if (!this.world.settled || this.world.side !== 'pc' || this.islands?.current) return null;   // no new projects on a contributor island
     const ground = this.world.groundAt(this.world.ndc(clientX, clientY));
     if (!ground) return null;
     const { i, j } = cellOf(ground.x, ground.z);
@@ -807,7 +809,7 @@ class CityView {
       const floors = this.buildings.get(target.id)?.size.floors || project.metrics.floors;
       return { title: project.name, sub: `${floors} floor${floors === 1 ? '' : 's'} · ${project.primaryLanguage}` };
     }
-    if (target.kind === 'hq') return { title: 'CodaClauda HQ', sub: 'Town hall and plaza' };
+    if (target.kind === 'hq') return this.islands?.hqInfo() || { title: 'CodaClauda HQ', sub: 'Town hall and plaza' };
     if (target.kind === 'plot') {
       if (!target.reservedBy) return { title: 'Empty plot', sub: 'Click to start a project here' };
       const owner = this.store.project(target.reservedBy);
@@ -877,7 +879,7 @@ class CityView {
   }
 
   keyDown(event) {
-    if (!this.visible || this.failed) return;
+    if (!this.visible || this.failed || this.islands?.blocking) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     const t = event.target;
     if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
@@ -1010,7 +1012,9 @@ class CityView {
     const s = this.selection;
     if (!s) { this.panel.hidden = true; this.root.classList.remove('city-has-panel'); this.panelSig = ''; return; }
     let sig, render;
-    if (s.kind === 'agent') {
+    const island = this.islands?.panelFor(s);   // contributor island: repo and town-hall cards
+    if (island) ({ sig, render } = island);
+    else if (s.kind === 'agent') {
       const agent = this.store.agent(s.id);
       if (!agent) { this.select(null); return; }
       sig = JSON.stringify(['agent', agent.id, agent.name, agent.label, agent.status, agent.activity, agent.currentProjectId, agent.homeProjectId, agent.visiting, Math.floor((Date.now() - agent.lastSeenAt) / 60000), agent.unreadForOwner, agent.look, this.store.projects.map(p => [p.id, p.name])]);
@@ -1892,6 +1896,7 @@ class CityView {
     if (this.failed) return;
     if (params.focusProject) this.pendingFocus = { kind: 'building', id: params.focusProject, at: performance.now() };
     if (params.focusAgent) this.pendingFocus = { kind: 'agent', id: params.focusAgent, at: performance.now() };
+    this.islands?.show(params);
     document.addEventListener('keydown', this.onKeyDown);
     document.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('blur', this.onBlur);
@@ -1914,6 +1919,7 @@ class CityView {
     for (const label of this.runnerLabels.values()) label.node.remove();
     this.runnerLabels.clear();
     clearTimeout(this.checkTimer);
+    this.islands?.dispose();
     this.spark?.dispose(); this.npcs?.dispose(); this.buildings?.dispose(); this.world?.dispose();
     this.root.replaceChildren();
   }
@@ -1923,6 +1929,7 @@ class CityView {
     this.exitTalk({ instant: true });
     this.exitStreet({ instant: true });   // coming back to the City starts from the overview
     this.world.releaseTilt?.();
+    this.islands?.hide();
     this.world.stop();
     document.removeEventListener('keydown', this.onKeyDown);
     document.removeEventListener('keyup', this.onKeyUp);
