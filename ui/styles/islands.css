@@ -173,3 +173,4 @@
 .city-view.reduce-motion .city-routes, .city-view.reduce-motion .city-routes-panel, .city-view.reduce-motion .city-routes-arc.is-new, .city-view.reduce-motion .city-routes-pulse { animation: none; }
 .city-view.reduce-motion .city-routes-pulse { opacity: .8; }
 .city-view.reduce-motion .city-islands-btn, .city-view.reduce-motion .city-routes-item, .city-view.reduce-motion .city-routes-arc { transition: none; }
+.city-routes-foot .btn[aria-disabled="true"] { opacity: .6; cursor: progress; }

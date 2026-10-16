@@ -95,6 +95,11 @@ export class RouteMap {
   render(data = this.data) {
     if (!data) return;
     this.data = data;
+    // A re-render (a check finished) keeps keyboard focus on the same island, list row or button.
+    const at = this.node.contains(document.activeElement) ? document.activeElement : null, id = at?.dataset?.id;
+    const refocus = !at ? null : at.closest('.city-routes-foot') ? '.city-routes-foot .btn'
+      : id && at.matches('.city-routes-item') ? `.city-routes-item[data-id="${CSS.escape(id)}"]`
+        : id && at.matches('.city-routes-island, .city-routes-home') ? `.city-routes-island[data-id="${CSS.escape(id)}"], .city-routes-home[data-id="${CSS.escape(id)}"]` : null;
     const { islands, fresh, current } = data;
     const freshOf = island => island.repos.filter(r => fresh.has(repoKey(r))).length;
     const { home, spots } = layoutIslands(islands);
@@ -149,6 +154,7 @@ export class RouteMap {
     this.renderNote(data);
     this.renderFoot(data, islands.length - spots.size);
     if (this.hot) this.hover(this.hot);
+    if (refocus) this.node.querySelector(refocus)?.focus({ preventScroll: true });
   }
   renderList(islands, freshOf, current) {
     const order = [...islands].sort((a, b) => (freshOf(b) > 0) - (freshOf(a) > 0));
@@ -178,7 +184,7 @@ export class RouteMap {
       data.error && data.islands.length ? h('span.city-routes-error', icon('alert'), `Last check failed: ${String(data.error).slice(0, 160)}`) : null,
       h('span.city-routes-spacer'),
       data.checkedAt ? h('span.muted', `Checked ${timeAgo(data.checkedAt)}`) : null,
-      h('button.btn.small.ghost', { type: 'button', disabled: Boolean(data.loading), onclick: () => this.onRefresh?.() }, icon('refresh'), data.loading ? 'Checking…' : 'Check now'));
+      h('button.btn.small.ghost', { type: 'button', 'aria-disabled': data.loading ? 'true' : null, onclick: () => { if (!this.data?.loading) this.onRefresh?.(); } }, icon('refresh'), data.loading ? 'Checking…' : 'Check now'));   // stays focusable while checking
   }
   bindTarget(node, id) {
     node.addEventListener('pointerenter', () => this.hover(id));

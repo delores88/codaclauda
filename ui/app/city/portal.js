@@ -91,7 +91,8 @@ export class IslandMode {
   }
   autoOpen() {
     const v = this.view;
-    if (v.visible && !this.blocking && !v.talk && !v.street && !v.streetPending) this.openMap();
+    const typing = document.activeElement?.matches?.('input, textarea, select, [contenteditable="true"]');
+    if (v.visible && !this.blocking && !v.talk && !v.street && !v.streetPending && !typing) this.openMap();
     else this.pendingOpen = true;
   }
   changed() {
