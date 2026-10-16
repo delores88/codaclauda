@@ -93,7 +93,7 @@ export class WeatherFx {
     this.world = world;
     this.reduced = reducedMotion;
     this.look = NO_WEATHER;
-    this.mix = 0; this.on = false; this.time = 0;
+    this.mix = 0; this.on = false; this.time = 0; this.home = true;
     this.precip = buildPrecip(CAP.high);
     world.land.add(this.precip.points);
     this.extra = null; this.extraSig = '';
@@ -107,8 +107,10 @@ export class WeatherFx {
   }
   /** A look from weather.js weatherLook, or null for no weather. Lighting blends to it. */
   set(look) { this.look = look || NO_WEATHER; this.flash.next = Math.min(this.flash.next, 2.5); this.world.refreshLighting(); }
-  /** Weather shows only with This PC side up (or on its way up). */
-  get active() { return this.look !== NO_WEATHER && this.world.restSide === 'pc'; }
+  /** Home city (true) or a contributor island (false, city/portal.js): islands get no weather. Leaving drops it at once (the portal hides the cut). */
+  setHome(on) { if (this.home === on) return; this.home = on; if (!on) this.mix = 0; this.world.refreshLighting(); }
+  /** Weather shows only in the home city with This PC side up (or on its way up). */
+  get active() { return this.look !== NO_WEATHER && this.home && this.world.restSide === 'pc'; }
 
   /** Palette modifier: grey and dim the sky, weaken the sun, flatten the light; snow brightens the sky light. */
   modPalette(p) {

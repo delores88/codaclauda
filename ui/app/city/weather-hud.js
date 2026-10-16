@@ -95,6 +95,8 @@ export class CityWeather {
     this.timer = this.visible && this.now.mode === 'live' ? setTimeout(() => { this.timer = 0; this.poll(); }, ms) : 0;
   }
   show() { this.visible = true; this.refresh(true); }
+  /** A contributor island (city/portal.js) shows no weather and no chip; the live feed keeps the home reading fresh. */
+  setHome(on) { this.fx.setHome(on); this.node.hidden = !on; if (!on) this.togglePicker(false); }
   hide() { this.visible = false; clearTimeout(this.timer); this.timer = 0; this.togglePicker(false); this.sig = ''; }
 
   /* ---------- chip ---------- */

@@ -361,6 +361,7 @@ class CityView {
     this.renderMachines(machines, mode);
     this.firstSyncDone = true;
     this.syncLabels(agents);
+    this.weather?.setHome(!this.islands?.current);   // contributor islands (city/portal.js) have no weather; IslandMode.apply syncs after each switch
     this.renderHud(projects, agents);
     this.renderEmpty(projects);
     this.renderToolbarState();
