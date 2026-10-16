@@ -10,6 +10,7 @@
 import { rpc, desktop, isNative } from './bridge.js';
 import { agentAvatar, normalizeAvatar, hash } from './avatar/spec.js';
 import { toMs } from './ui.js';
+import { sparkLink, sparkFresh } from './spark-link.js';
 
 const OWNER = 'owner';
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'needs-owner']);
@@ -169,10 +170,11 @@ class Store extends EventTarget {
     }
     try {
       const d = await rpc('spark', { operation: 'status', arguments: {} });
+      const link = sparkLink(d);   // only an authenticated remote answer counts; unknown fails closed
       this.spark = {
-        configured: true, ok: d.ok !== false, at: Date.now(), error: '',
-        lastOkAt: d.ok !== false && d.transport?.authenticated !== false ? Date.now() : this.spark.lastOkAt || 0,
-        jobs: Array.isArray(d.jobs) ? d.jobs : [], laptopJobs: Array.isArray(d.laptop_jobs) ? d.laptop_jobs : [],
+        configured: true, ok: link.reachable, at: Date.now(), error: link.error,
+        lastOkAt: link.reachable ? Date.now() : this.spark.lastOkAt || 0,
+        jobs: link.reachable && Array.isArray(d.jobs) ? d.jobs : [], laptopJobs: Array.isArray(d.laptop_jobs) ? d.laptop_jobs : [],
         limits: d.limits || null, hardware: d.hardware || null, scheduler: d.scheduler || null, transport: d.transport || null,
       };
       await this.mapSparkProjects();
@@ -207,14 +209,15 @@ class Store extends EventTarget {
     const summarize = list => ({ running: list.filter(j => j.active).length, cpuReserved: list.filter(j => j.active).reduce((n, j) => n + (Number(j.reserved_cpu ?? j.cpu) || 0), 0), memReservedGb: list.filter(j => j.active).reduce((n, j) => n + (Number(j.reserved_memory_gb ?? j.memory_gb) || 0), 0), cpuHours24h: cpuHours(list), finished24h: list.filter(j => Number(j.finished_at) > now - 86400).length });
     const spark = jobs.filter(j => j.machine === 'spark'), local = jobs.filter(j => j.machine === 'local');
     const transport = this.spark.transport || {};
+    const online = Boolean(this.spark.configured && this.spark.ok && sparkFresh(this.spark.at));   // stale or unknown = offline
     return {
       // The Spark side exists whenever DGXBridge is configured; `online` says whether it answered the last check.
       enabled: this.spark.configured,
-      online: this.spark.configured && this.spark.ok && transport.authenticated !== false,
-      offlineSince: this.spark.configured && !(this.spark.ok && transport.authenticated !== false) ? (this.spark.lastOkAt || null) : null,
+      online,
+      offlineSince: this.spark.configured && !online ? (this.spark.lastOkAt || null) : null,
       configured: this.spark.configured, error: this.spark.error, checkedAt: this.spark.at,
       local: { name: 'This PC', ...summarize(local) },
-      spark: { name: 'DGX Spark', ...summarize(spark), reachable: transport.authenticated === true, route: transport.route || '', healthy: this.spark.scheduler?.healthy === true, cpuTotal: this.spark.limits?.cpu_total ?? null, memTotalGb: this.spark.limits?.memory_gb_total ?? null, hardware: this.spark.hardware },
+      spark: { name: 'DGX Spark', ...summarize(spark), reachable: online, route: transport.route || '', healthy: this.spark.scheduler?.healthy === true, cpuTotal: this.spark.limits?.cpu_total ?? null, memTotalGb: this.spark.limits?.memory_gb_total ?? null, hardware: this.spark.hardware },
       jobs, // [{ job, machine:'spark'|'local', projectId|null, active, provider, client, runtime, state, cpu, memory_gb, started_at, finished_at, exit_code }]
     };
   }
