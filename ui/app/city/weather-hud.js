@@ -26,7 +26,7 @@ export class CityWeather {
   constructor(world, { store, bridge, reducedMotion, navigate }) {
     this.store = store; this.bridge = bridge; this.navigate = navigate;
     this.fx = new WeatherFx(world, { reducedMotion });
-    this.visible = false; this.live = null; this.status = 'off'; this.error = ''; this.timer = 0; this.seq = 0; this.pending = null;
+    this.visible = false; this.live = null; this.status = 'off'; this.error = ''; this.timer = 0; this.seq = 0; this.pending = null; this.retry = null;
     this.text = h('span.city-weather-text');
     this.chip = h('button.city-chip.city-weather-chip', { type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false', onclick: () => this.togglePicker() }, icon('wx-off'), this.text);
     this.picker = h('div.city-weather-pick.card', { hidden: true, role: 'dialog', 'aria-label': 'City weather', onkeydown: event => { if (event.key === 'Escape') { event.stopPropagation(); this.togglePicker(false); this.chip.focus(); } } });
@@ -49,7 +49,11 @@ export class CityWeather {
     clearTimeout(this.timer); this.timer = 0;
     if (prefs.mode !== 'live') this.status = prefs.mode;
     else if (!loc) this.status = 'noplace';
-    else { if (this.status !== 'error' || !this.live) this.status = this.live ? 'ok' : 'loading'; if (this.visible) this.poll(); }
+    else {
+      const waiting = this.retry && sameSpot(this.retry.loc, loc) && Date.now() < this.retry.at;   // a failed check is still backing off
+      this.status = waiting ? 'error' : this.live ? 'ok' : 'loading';
+      if (this.visible) this.poll();
+    }
     this.apply();
   }
   apply() {
@@ -65,6 +69,8 @@ export class CityWeather {
     const now = Date.now();
     if (this.live && sameSpot(this.live.loc, loc) && now < this.live.expiresAt) { this.schedule(nextPollDelay(now, this.live.expiresAt)); return; }
     if (this.pending && sameSpot(this.pending, loc)) return;
+    // After a failure (MET may have asked us to back off) the retry waits, even across hide/show.
+    if (this.retry && sameSpot(this.retry.loc, loc) && now < this.retry.at) { this.schedule(this.retry.at - now); return; }
     const seq = ++this.seq;
     this.pending = loc;
     try {
@@ -72,13 +78,15 @@ export class CityWeather {
       if (seq !== this.seq) return;
       const expires = Date.parse(data?.expires);
       this.live = { data, loc, at: Date.now(), expiresAt: Number.isFinite(expires) ? expires : Date.now() + 30 * 60e3 };
-      this.status = 'ok'; this.error = '';
+      this.status = 'ok'; this.error = ''; this.retry = null;
       this.schedule(nextPollDelay(Date.now(), this.live.expiresAt));
     } catch (error) {
       if (seq !== this.seq) return;
       this.status = 'error'; this.error = error?.message || String(error);
       if (this.live && Date.now() - this.live.at > STALE_MS) this.live = null;
-      this.schedule(retryDelay(error?.code));
+      const wait = retryDelay(error?.code);
+      this.retry = { loc, at: Date.now() + wait };
+      this.schedule(wait);
     } finally { if (seq === this.seq) this.pending = null; }
     this.apply();
   }
