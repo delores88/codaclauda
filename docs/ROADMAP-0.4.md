@@ -93,27 +93,70 @@ Hello) are planned for 0.4" line in the Approvals view.
 - **Projects view:** the same level selector and toggles per project, for anyone who prefers not to
   use the 3D world.
 
-### Island portals to repos you contribute to
-- **Discovery:** repos where the user is a collaborator or org member but not the owner
-  (`gh api user/repos?affiliation=collaborator,organization_member`). Each owner or org becomes its own
-  island. Its buildings are the repos you can contribute to, sized from GitHub data (languages
-  bytes, commit counts); no clone is needed.
-- **Route map:** a "Delta route map" style pop-up shows the home island and each contributor island,
-  joined by flight arcs. It opens automatically when GitHub shows you were added to a new repo
-  (a new arc pulses). Clicking an island plays a portal transition into that island city; a
-  Home button returns. Agents working in a local clone of that repo appear there.
+### Unified chat: a full chat app for people who skip the 3D world (Ben, 2026-10-16)
+Goal: Chat on its own should feel like the Claude Code and Codex desktop apps, a complete,
+standard chat that unifies both providers' agents around **projects**.
+- **Project dropdown** at the top of Chat, as in Claude Code and Codex. It uses the same project
+  model as the City and Projects views (local folders plus GitHub repos), and filters the conversation list to that project.
+- **New chat in a project:** pick the agent (Claude Code or Codex), plus model and effort where the CLI
+  supports them. CodaClauda starts a session in the project folder (item 1). Existing mailbox
+  desktop chats show in the same list, clearly labelled "desktop chat (replies when it checks in)".
+- **Connected resources panel** for the active chat:
+  - workspace folder;
+  - git branch and dirty state;
+  - GitHub repo link;
+  - the project's access level;
+  - attached MCP tools (for example Playwright or Windows-MCP, below);
+  - Spark/DGXBridge availability;
+  - attached files.
+  It is the equivalent of Claude's connectors and Codex's environment indicator.
+- **Parity checklist (what users expect from those apps):**
+  - streaming replies with stop;
+  - edit-and-resend and regenerate;
+  - collapsible tool-call activity;
+  - inline diff/patch previews of agent changes;
+  - inline approval buttons for "Ask me";
+  - attachments;
+  - mic;
+  - markdown, math and code with copy (all three exist today).
+- **Chat-first layout option:** a setting hides the City and other 3D entry points from the rail
+  for people who never want them. The City stays one click away.
+- **Depends on sessions** (item 1) for real-time replies and on project access levels for the
+  resources panel. Most of the UI is new, but it reuses the Chat view's renderer and composer.
+
+### Computer use for CodaClauda-started agents (Ben, 2026-10-16)
+Background (see [SESSIONS-RESEARCH.md](SESSIONS-RESEARCH.md)): the Claude Code CLI has computer use
+only as a macOS preview, and Codex has it only in its desktop app. Both CLIs accept MCP servers
+(Claude `--mcp-config` / `claude mcp add`; Codex `codex mcp add` / config.toml), so one tool can
+give both agents desktop or browser control.
+
+| Tool | What it gives | Checked 2026-10-16 |
+|---|---|---|
+| Playwright MCP (Microsoft) | Browser automation through the page structure; reliable for web tasks | Apache-2.0, ~38k stars |
+| Windows-MCP (CursorTouch) | Windows desktop control: UI Automation, screenshots, mouse and keyboard | MIT, ~9.2k stars, active; third-party |
+| Chrome DevTools MCP (Chrome team) | Drive and debug Chrome | Apache-2.0, ~54k stars |
+| CodaClauda's own guarded tool | Desktop control with built-in guardrails | Estimate: 1-2 days; consider after the above prove out |
+
+Plan:
+1. Attach **Playwright MCP by default** to sessions CodaClauda starts.
+2. Make **Windows-MCP opt-in per project, Full access level only**, with a visible stop control.
+3. Pin versions and vet updates; this is third-party code running with the user's rights.
+4. Treat on-screen text as untrusted (prompt-injection risk).
+5. Windows-MCP takes over the mouse and keyboard while it runs.
+6. Keep the desktop apps for heavy desktop work until this has proven itself.
+
+### Moved to 0.3.3 (Ben, 2026-10-16)
+These were planned here but ship early in 0.3.3:
+- island portals to repos you contribute to (route map plus portal);
+- City weather: Off, Live (MET Norway, free) or Pick your own;
+- the talk-view fixes and board fixes;
+- the non-affiliation line in Settings (the README line is Codex's).
 
 ### Also in 0.4 (deferred from the 0.3.x work)
 - **Zero-config City:** show existing Claude Code and Codex sessions without setup. This was the
   research's top differentiator. macOS support is a follow-on.
-- **Non-affiliation line** in the README and listing: "Coordinates OpenAI Codex and Claude Code
-  agents. Not affiliated with or endorsed by Anthropic or OpenAI."
 - **Decide on Conversation setup** (registered chats, private MCP) and the old request-history
-  board, which 0.3.2 did not port: rebuild or retire.
-- **Talk-view fixes:**
-  - a pending plot focus can steal the camera mid-conversation;
-  - the composer stays locked after switching agents mid-send.
-- **Board fixes:** the "All projects" tooltip count; the dimmed-row style when selected.
+  board, which 0.3.2 did not port: rebuild or retire. The unified chat above may replace both.
 - **Signed installers:** the Microsoft Store (free) or Azure Artifact Signing (about $10 a month).
 - **Dependency advisory:** glib 0.18.5 GHSA-wrw7-89jp-8q8g (Codex maintenance).
 
