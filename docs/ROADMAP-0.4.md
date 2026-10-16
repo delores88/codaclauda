@@ -124,6 +124,40 @@ standard chat that unifies both providers' agents around **projects**.
 - **Depends on sessions** (item 1) for real-time replies and on project access levels for the
   resources panel. Most of the UI is new, but it reuses the Chat view's renderer and composer.
 
+### Desktop-app parity: scheduled tasks and the rest (Ben, 2026-10-16)
+Ben wants the features people know from the Claude Code and Codex apps, including ones he hasn't
+named. Each provider's exact feature names and behaviour must be checked against the current apps
+before implementation. Items marked † need sessions (item 1).
+- **Scheduled tasks / automations†:**
+  - a Schedules view with runs per project (agent, prompt, cron or interval, access level);
+  - next run time, a run history with status and links to transcripts;
+  - pause, resume and run-now.
+  CodaClauda's own scheduler launches the CLI session, and the access level applies to each run.
+  Show the provider's native schedules too where they are readable.
+- **Background work†:**
+  - a live list of running agents and their tasks, with stop;
+  - a to-do/plan view per run;
+  - notifications on finish, failure or needs-you (row 5).
+- **Conversation management:**
+  - pin, archive, rename and search transcripts across both providers;
+  - group by project, with sections;
+  - fork a conversation at any message†;
+  - hand off to the other provider with a summary†.
+- **Code work†:**
+  - an isolated git worktree per chat, so parallel agents don't collide;
+  - a diff viewer with accept or discard;
+  - "create PR", with PR status, CI checks and an auto-fix suggestion;
+  - a review mode (`codex exec review`, or a Claude review prompt).
+- **Agent configuration:**
+  - model and effort per agent† and plan mode†;
+  - view and edit project instructions (CLAUDE.md / AGENTS.md);
+  - memory on or off per provider (see SESSIONS-RESEARCH.md);
+  - MCP tools, skills and plugins per project, shown in the connected-resources panel.
+- **Context and cost:**
+  - context-window fill per chat, with a compact-now button† (both CLIs compact natively);
+  - usage and cost meters per agent and provider (row 4).
+- **Remote:** phone notifications (row 5); remote control of a running session (later).
+
 ### Computer use for CodaClauda-started agents (Ben, 2026-10-16)
 Background (see [SESSIONS-RESEARCH.md](SESSIONS-RESEARCH.md)): the Claude Code CLI has computer use
 only as a macOS preview, and Codex has it only in its desktop app. Both CLIs accept MCP servers
