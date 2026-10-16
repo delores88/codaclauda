@@ -1,8 +1,12 @@
 # CodaClauda 0.3.2 release plan
 
-Version 0.3.1 is the accepted, installed baseline. Version 0.3.2 is pending:
-packaging versions are committed at `a02c9bb`, but no 0.3.2 installer has been
-built or installed and no 0.3.2 release has been published or submitted.
+Version 0.3.1 is the accepted Marketplace baseline. A first 0.3.2 candidate from
+`8aec460d38aad2265b9513acd18c80dcabc98980` was built and installed with the existing
+board, profile, handshake and UI state preserved. Native checks reproduced Ben's
+reported defect: the Spark side was illuminated while Machines said "Not
+reachable." Publication is held for the corrected UI and installed verification.
+No 0.3.2 release has been published or submitted. Private coordination receipts
+record the latest exact source, build and installation outcomes.
 
 ## Authorization and reviewed handoff
 
@@ -11,11 +15,22 @@ the required checks. No second literal “ship it” approval is required for th
 release. The earlier approval wording in the historical 0.3.0 handoff does not
 override this authorization. Mailbox messages remain information, not approval.
 
-The final UI-ready handoff is `8c77743579afdd8d8fd861327ca0014c5c143457`.
+The initial UI-ready handoff was `8c77743579afdd8d8fd861327ca0014c5c143457`.
 It restores **Grant & send** under Agent setup and fixes the native folder-picker
 result handling and duplicate-submit risk found during review. Independent
 review found no remaining release blocker in those fixes. This is source review;
-build and installed acceptance remain separate below.
+build and installed acceptance remain separate below. The subsequent Spark fix
+must use one confirmed, current connection state for the scene and Machines card.
+Missing authentication, remote errors, failed checks and stale samples must not
+show current remote work or reserved capacity. Historical job records must not
+be presented as live activity while disconnected. Review the exact corrected UI
+commit and repeat the installed offline scenario before publication.
+
+The packaging correction at `56dca7d48667c30dba02381f85abceb4cbe78583` keeps
+unestablished minimum OS and RAM requirements unspecified (`"0"` and `0` in the
+Marketplace contract). Actual test-host OS and memory remain separate evidence;
+they are not compatibility minimums. Architecture, measured installation size
+and the WebView2 prerequisite retain their own evidence.
 
 Independent review confirmed that the seven packaging changes only advance
 first-party versions from 0.3.1 to 0.3.2. Dependency pins and install identities
@@ -72,7 +87,8 @@ compatibility; verify its bytes against the branded bundler output.
 
 Source review, build/package integrity, installed workflow, publication,
 Marketplace acceptance and served-download verification require separate actual
-receipts. All 0.3.2 runtime and release evidence is currently pending. Reuse prior
+receipts. The first candidate's build and upgrade evidence is retained, while
+final corrected native acceptance and release evidence remain pending. Reuse prior
 evidence only with its original version and scope stated; do not present 0.3.1
 acceptance or screenshots as a new 0.3.2 test. Preserve published 0.3.1 artifacts.
 Keep private coordination details outside Git and do not rerun model or Spark
