@@ -272,7 +272,7 @@ export function addTrees(group, trees) {
     if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
   }
   trunks.count = trees.length;
-  for (const inst of [trunks, ballMesh, coneMesh]) { inst.castShadow = true; inst.receiveShadow = true; inst.userData.noOutline = true; group.add(inst, instancedOutline(inst, 0.045)); }
+  for (const inst of [trunks, ballMesh, coneMesh]) { inst.castShadow = true; inst.receiveShadow = true; inst.userData.noOutline = true; inst.userData.tree = true; group.add(inst, instancedOutline(inst, 0.045)); }   // tree: wind sway (city/weather.js)
 }
 const petalGeo = new THREE.IcosahedronGeometry(0.14, 0); petalGeo.userData.shared = true;
 const moundGeo = placed(new THREE.SphereGeometry(0.75, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2), { sy: 0.35 }); moundGeo.userData.shared = true;
@@ -411,14 +411,15 @@ let cloudGeos = null;   // shared by every rebuild (rings change)
  * island centre (0, center, 0). They drift along +x, so that distance is measured in the y-z plane:
  * low clouds sit far below the centre, side clouds far out along ±z. A cloud shrinks away near the
  * wrap edges (no popping), and while it is close to the camera or in front of the island on screen.
- * `island` is the radius treated as "the island" for that screen test. */
-export function buildClouds(half, quality = 'high', { center = 0, clear = half * 1.8, island = half * 1.3 } = {}) {
+ * `island` is the radius treated as "the island" for that screen test. `seed` / `total`: a second,
+ * different set (the weather's extra clouds). */
+export function buildClouds(half, quality = 'high', { center = 0, clear = half * 1.8, island = half * 1.3, seed = 'clouds', total: count } = {}) {
   const group = new THREE.Group(); group.name = 'clouds';
-  const r = seeded('clouds');
+  const r = seeded(seed);
   const geos = cloudGeos ||= [cloudGeometry('a'), cloudGeometry('b'), cloudGeometry('c')];
   const radii = geos.map(g => (g.boundingSphere ? g.boundingSphere.center.length() + g.boundingSphere.radius : 7));
   const material = toonMaterial('#ffffff', { cache: false });
-  const total = quality === 'low' ? 12 : 22;
+  const total = count ?? (quality === 'low' ? 12 : 22);
   const wrap = Math.max(half * 2.6, clear + 48);
   const clouds = [];
   for (let k = 0; k < total; k++) {

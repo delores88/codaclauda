@@ -44,7 +44,7 @@ function register(name, label) {
 /* Preview only: a copied join prompt "is pasted" into a pretend chat that registers ~5 s later,
  * so Agent setup's "Waiting… → Joined ✓" can be seen. Also callable as codaMock.join(address, label). */
 function simulateJoins() {
-  globalThis.codaMock = { join: register, sparkOffline: on => { sparkRemoteDown = on === 'throw' ? 'throw' : Boolean(on); } };
+  globalThis.codaMock = { join: register, sparkOffline: on => { sparkRemoteDown = on === 'throw' ? 'throw' : Boolean(on); }, addCollaborator, weather: code => { weatherForced = code || null; }, weatherFail: on => { weatherFails = Boolean(on); } };
   const clip = globalThis.navigator?.clipboard;
   if (!clip?.writeText || clip.writeText.mockJoins) return;
   const write = clip.writeText.bind(clip);
@@ -91,6 +91,30 @@ const repos = [
   ['tuningspork', 'Audio tuning toy', 'JavaScript', 1200, 48, 40],
   ['dotfiles', 'Machine setup', 'Shell', 90, 12, 200],
 ].map(([name, description, language, size_kb, commit_count, days]) => ({ name, full_name: `delores88/${name}`, description, language, size_kb, commit_count, url: `https://github.com/delores88/${name}`, private: name === 'phaseforge', pushed_at: new Date(Date.now() - days * 86400e3).toISOString(), stars: Math.round(size_kb / 900), default_branch: 'main' }));
+
+/* Contributor islands: repos other owners added delores88 to (github_collab_repos). codaMock.addCollaborator() adds one more. */
+const collabRepo = ([login, type, name, language, size_kb, days, role = 'push', extra = {}]) => ({
+  full_name: `${login}/${name}`, owner: { login, type }, name, private: !!extra.private, archived: !!extra.archived, fork: !!extra.fork,
+  permissions: { admin: role === 'admin', maintain: ['admin', 'maintain'].includes(role), push: ['admin', 'maintain', 'push'].includes(role), triage: role !== 'pull', pull: true },
+  pushed_at: new Date(Date.now() - days * 86400e3).toISOString(), size_kb, language, html_url: `https://github.com/${login}/${name}`, default_branch: 'main', stargazers: Math.round(size_kb / 700),
+});
+const collabRepos = [
+  ['deloresai', 'Organization', 'marketplace-web', 'TypeScript', 42000, 0.5, 'maintain'],
+  ['deloresai', 'Organization', 'payments-api', 'Go', 18000, 4, 'push', { private: true }],
+  ['deloresai', 'Organization', 'design-system', 'CSS', 6400, 12],
+  ['deloresai', 'Organization', 'release-tools', 'Shell', 900, 60, 'triage'],
+  ['spark-labs', 'Organization', 'model-zoo', 'Python', 88000, 2, 'admin'],
+  ['spark-labs', 'Organization', 'dgx-kernels', 'C++', 26000, 9, 'push', { private: true }],
+  ['spark-labs', 'Organization', 'notebooks', 'Jupyter Notebook', 12000, 30, 'pull'],
+  ['mira-chen', 'User', 'tuning-lab', 'JavaScript', 3100, 1],
+].map(collabRepo);
+const NEW_COLLABS = [['nebula-works', 'Organization', 'orbit-engine', 'Rust', 15000, 0.1], ['deloresai', 'Organization', 'docs-site', 'HTML', 2200, 0.2], ['kai-okafor', 'User', 'synth-pad', 'Rust', 4800, 0.3]];
+function addCollaborator() {
+  const n = collabRepos.filter(r => r.mockAdded).length, base = NEW_COLLABS[n % NEW_COLLABS.length];
+  const repo = { ...collabRepo(n < NEW_COLLABS.length ? base : [base[0], base[1], `${base[2]}-${n}`, ...base.slice(3)]), mockAdded: true };
+  collabRepos.push(repo);
+  return repo.full_name;
+}
 
 const stats = (path, loc, files, commits, langs) => ({ path, name: path.split(/[\\/]/).pop(), files, bytes: loc * 38, loc, languages: langs.map(([name, share]) => ({ name, bytes: Math.round(loc * 38 * share) })), git: { commits, commits_7d: Math.min(commits, 14), last_commit_at: ago(30), branch: 'main', remote: '' }, truncated: false });
 
@@ -146,6 +170,37 @@ const handlers = {
   'spark-config': ({ executable }) => { if (!executable) throw new Error('Enter the sparkdev executable path.'); sparkExecutable = executable; return { executable }; },
 };
 
+/* City weather: canned MET-style readings (picked by coordinates) and places. codaMock.weather('snow')
+ * forces a symbol code, codaMock.weatherFail(true) makes live weather fail. */
+const WEATHER = [
+  { symbol_code: 'rain', air_temperature: 12.3, wind_speed: 4.2, cloud_area_fraction: 92, precipitation_amount: 1.1 },
+  { symbol_code: 'clearsky_day', air_temperature: 21.4, wind_speed: 1.8, cloud_area_fraction: 3, precipitation_amount: 0 },
+  { symbol_code: 'heavysnowshowers_night', air_temperature: -4.6, wind_speed: 9.5, cloud_area_fraction: 85, precipitation_amount: 2.4 },
+  { symbol_code: 'fog', air_temperature: 6.1, wind_speed: 0.8, cloud_area_fraction: 100, precipitation_amount: 0 },
+  { symbol_code: 'rainshowersandthunder_day', air_temperature: 24.9, wind_speed: 7.4, cloud_area_fraction: 78, precipitation_amount: 3.8 },
+  { symbol_code: 'partlycloudy_day', air_temperature: 16.2, wind_speed: 3.1, cloud_area_fraction: 48, precipitation_amount: 0 },
+];
+const PLACES = [
+  ['Denver', 'Denver, Colorado, United States', 39.74, -104.98], ['Oslo', 'Oslo, Norway', 59.91, 10.74], ['Tokyo', 'Tokyo, Japan', 35.68, 139.76],
+  ['London', 'London, Greater London, England, United Kingdom', 51.51, -0.13], ['Sydney', 'Sydney, New South Wales, Australia', -33.87, 151.21],
+  ['Reykjavík', 'Reykjavík, Capital Region, Iceland', 64.15, -21.94], ['Springfield', 'Springfield, Illinois, United States', 39.8, -89.64],
+  ['Springfield', 'Springfield, Massachusetts, United States', 42.1, -72.59], ['Springfield', 'Springfield, Missouri, United States', 37.21, -93.29],
+].map(([name, display_name, lat, lon]) => ({ name, display_name, lat, lon }));
+let weatherForced = null, weatherFails = false;
+function weatherNow({ lat, lon }) {
+  if (typeof lat !== 'number' || typeof lon !== 'number' || !(Math.abs(lat) <= 90) || !(Math.abs(lon) <= 180)) throw new Error('The latitude must be a number from -90 to 90.');
+  if (weatherFails) throw new Error('MET Norway could not be reached (mock).');
+  const r2 = n => Math.round(n * 100) / 100 || 0;
+  const pick = WEATHER[Math.abs(Math.round(r2(lat) * 100) * 31 + Math.round(r2(lon) * 100)) % WEATHER.length];
+  const reading = weatherForced ? { ...pick, symbol_code: weatherForced } : pick;
+  return { ...reading, updated_at: new Date(Date.now() - 20 * 60e3).toISOString(), expires: new Date(Date.now() + 30 * 60e3).toISOString(), lat: r2(lat), lon: r2(lon) };
+}
+function geocodePlace({ query }) {
+  const q = String(query || '').trim();
+  if (/[\u0000-\u001f\u007f]/.test(q) || q.length < 2 || q.length > 100) throw new Error('Enter 2 to 100 characters to search for a place.');
+  return PLACES.filter(p => p.display_name.toLowerCase().includes(q.toLowerCase())).slice(0, 5);
+}
+
 const desktopHandlers = {
   desktop_paths: () => ({ state_dir: 'C:\\mock\\board', ui_dir: 'C:\\mock\\board\\desktop-ui', attachments_dir: 'C:\\mock\\board\\desktop-ui\\attachments', manifest_path: 'C:\\mock\\board\\desktop-ui\\projects.manifest.json', desktop_dir: 'C:\\Users\\Ben\\Desktop' }),
   desktop_state_load: () => ({ state: JSON.parse(localStorage.getItem('mock.desktop') || 'null') }),
@@ -164,12 +219,15 @@ const desktopHandlers = {
   ] }),
   github_user: () => ({ login: 'delores88', source: 'mock' }),
   github_repos: ({ user }) => ({ user: user || 'delores88', source: 'mock', repos }),
+  github_collab_repos: () => ({ user: 'delores88', source: 'mock', repos: collabRepos.map(({ mockAdded, ...repo }) => repo), truncated: false }),
   attachment_save: ({ name }) => ({ path: `C:\\mock\\board\\desktop-ui\\attachments\\${name}`, name, bytes: 1234 }),
   dictation_start: () => ({ started: false, reason: 'Browser preview: use the desktop app for Windows voice typing.' }),
   window_attention: () => ({}),
   pick_workspace: () => ({ path: 'C:\\Users\\Ben\\Desktop\\NewProject' }),
   preferences: () => ({ cli_path: 'C:\\mock\\claudacoda-cli.exe', state_dir: 'C:\\mock\\board', version: '0.3.2-preview' }),
   update: updateOp,
+  weather_now: weatherNow,
+  geocode_place: geocodePlace,
 };
 
 export function createMock() {

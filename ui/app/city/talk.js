@@ -79,10 +79,9 @@ export class TalkPanel {
   constructor({ store, navigate, onLeave, onSent, onAgentLine, onThinking }) {
     Object.assign(this, { store, navigate, onLeave, onSent, onAgentLine, onThinking });
     this.agent = null;
-    this.drafts = new Map();   // agent id -> { text, error, pending, longFile, longSaved }
+    this.drafts = new Map();   // agent id -> { text, error, pending, sending, longFile, longSaved }
     this.cache = new Map();    // message id -> { node, sig }
     this.heard = new Set();
-    this.sending = false;
     this.head = h('header.city-talk-head');
     this.mode = h('div.city-talk-mode');
     this.log = h('div.city-talk-log');
@@ -154,7 +153,7 @@ export class TalkPanel {
   draft() {
     const who = this.agent?.id || '';
     let d = this.drafts.get(who);
-    if (!d) { d = { text: '', error: null, pending: null }; this.drafts.set(who, d); }
+    if (!d) { d = { text: '', error: null, pending: null, sending: false }; this.drafts.set(who, d); }
     return d;
   }
 
@@ -264,14 +263,15 @@ export class TalkPanel {
   }
   renderComposer(info) {
     const d = this.draft(), run = info.kind === 'live' ? this.activeRun(info.id) : null;
+    const sending = Boolean(d.sending);   // per agent: a send still finishing for another agent never locks this composer
     this.input.placeholder = `Message ${info.name}…`;
-    this.input.readOnly = this.sending;
+    this.input.readOnly = sending;
     this.sendBtn.hidden = Boolean(run);
     this.stopBtn.hidden = !run;
     if (run && this.stopBtn.dataset.request !== run.requestId) { this.stopBtn.dataset.request = run.requestId; this.stopBtn.disabled = false; }
-    this.sendBtn.disabled = this.sending || !d.text.trim();
-    const mode = this.sending ? 'sending' : 'idle';
-    if (this.sendBtn.dataset.mode !== mode) { this.sendBtn.dataset.mode = mode; this.sendBtn.replaceChildren(this.sending ? h('span.spinner') : icon('send')); this.sendBtn.setAttribute('aria-label', this.sending ? 'Sending…' : 'Send message'); }
+    this.sendBtn.disabled = sending || !d.text.trim();
+    const mode = sending ? 'sending' : 'idle';
+    if (this.sendBtn.dataset.mode !== mode) { this.sendBtn.dataset.mode = mode; this.sendBtn.replaceChildren(sending ? h('span.spinner') : icon('send')); this.sendBtn.setAttribute('aria-label', sending ? 'Sending…' : 'Send message'); }
     const who = info.provider === 'other' ? info.name : providerName(info.provider);
     const note = info.kind === 'mailbox'
       ? `Saved to the shared board — ${info.name} reads it at their next inbox check. A message is information, not permission.`
@@ -317,7 +317,7 @@ export class TalkPanel {
     d.text = this.input.value;
     d.longFile = undefined; d.longSaved = undefined;
     this.autoGrow();
-    this.sendBtn.disabled = this.sending || !d.text.trim();
+    this.sendBtn.disabled = Boolean(d.sending) || !d.text.trim();
   }
   onKey(event) {
     if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.isComposing) {
@@ -341,11 +341,11 @@ export class TalkPanel {
   }
   async send() {
     const info = this.info(), d = this.draft(), agentId = this.agent?.id;
-    if (!info || this.sending) return;
+    if (!info || d.sending) return;
     const text = d.text.trim();
     if (!text) { this.focus(); return; }
     if (info.kind === 'live' && info.id && this.activeRun(info.id)) { toast('A reply is still in progress — wait for it or press Stop.'); return; }
-    this.sending = true; d.error = null; this.error.dataset.msg = '';
+    d.sending = true; d.error = null; this.error.dataset.msg = '';
     this.renderComposer(info);
     let ok = false;
     try {
@@ -353,7 +353,7 @@ export class TalkPanel {
       else await this.sendLive(info, d, text);
       ok = true;
     } catch (error) { d.error = { message: error?.message || String(error || 'Unknown error') }; }
-    finally { this.sending = false; }
+    finally { d.sending = false; }
     if (ok) Object.assign(d, { text: '', pending: null, longFile: undefined, longSaved: undefined });
     if (this.agent?.id !== agentId) return;   // left (or switched) while it was sending
     if (ok) { this.input.value = ''; this.autoGrow(); this.forceBottom = true; this.onSent?.(text); }

@@ -59,5 +59,72 @@ Constraints to respect:
   already launches dedicated CLI sessions; the gap is keeping one alive and resumable
   per agent.
 
+## 0.4 scope decided by Ben (2026-10-16)
+
+### Project access levels replace Windows Hello approvals
+Ben's decision: no Windows Hello. The app owns approval state. Access is set **per
+project** and applies to every agent that works on that project, so individual agents
+need no separate approval. This replaces the "Signed one-click approvals (Windows
+Hello) are planned for 0.4" line in the Approvals view.
+
+- **Levels**, each with its own colour (flags verified 2026-10-16 on codex-cli 0.162.0-alpha.17.2 and Claude Code 2.1.295; re-check at implementation time, because both CLIs change often):
+  - **Read only:** Codex `exec -s read-only`; Claude `--permission-mode plan`.
+  - **Ask me:** the agent's approval requests appear in CodaClauda's Approvals view.
+    - Codex: approval events from `app-server`, or `-a on-request` interactively. `codex exec` cannot ask.
+    - Claude: `--permission-mode manual`, with requests routed to CodaClauda.
+  - **Work freely in the project:** Codex `exec -s workspace-write --approve-for-me`; Claude `--permission-mode acceptEdits` (or `auto`) plus a project allowed-tools list.
+  - **Full access**, like Codex's own full-access mode: Codex `--dangerously-bypass-approvals-and-sandbox` (or `-s danger-full-access`); Claude `--permission-mode bypassPermissions`.
+- **Optional action toggles:** build/test, deploy, publish releases, Marketplace submit/retry.
+  Spending is never included.
+- **Enforcement is real only for sessions CodaClauda launches** (item 1): the level becomes
+  the CLI launch flags and tool allow/deny lists. Release and deploy toggles map to tool
+  patterns where the CLI supports them (Claude `--allowedTools` / `--disallowedTools`, e.g.
+  `Bash(gh release:*)`); otherwise they are standing instructions in the session.
+  Desktop chats that CodaClauda did not start keep their own app's permissions; for them the
+  level stays advisory paste text, as today.
+- **Policy file.** The policy lives in CodaClauda's app data, outside every workspace, and only
+  changes from CodaClauda's own UI. A sandboxed agent (read-only, or workspace-write) cannot
+  edit it. An agent already on Full access could, but it can already do anything. Mailbox
+  messages never change it.
+- **3D ticker:** a full-colour, smooth (not pixelated) ticker band wraps all four sides near the top of
+  each building. It scrolls the project's access level, active agents and toggles in the
+  level's colour. Clicking it opens an access popover for the project. Twin buildings on the
+  Spark side show the same ticker, greyed out while the Spark is offline.
+- **Projects view:** the same level selector and toggles per project, for anyone who prefers not to
+  use the 3D world.
+
+### Island portals to repos you contribute to
+- **Discovery:** repos where the user is a collaborator or org member but not the owner
+  (`gh api user/repos?affiliation=collaborator,organization_member`). Each owner or org becomes its own
+  island. Its buildings are the repos you can contribute to, sized from GitHub data (languages
+  bytes, commit counts); no clone is needed.
+- **Route map:** a "Delta route map" style pop-up shows the home island and each contributor island,
+  joined by flight arcs. It opens automatically when GitHub shows you were added to a new repo
+  (a new arc pulses). Clicking an island plays a portal transition into that island city; a
+  Home button returns. Agents working in a local clone of that repo appear there.
+
+### Also in 0.4 (deferred from the 0.3.x work)
+- **Zero-config City:** show existing Claude Code and Codex sessions without setup. This was the
+  research's top differentiator. macOS support is a follow-on.
+- **Non-affiliation line** in the README and listing: "Coordinates OpenAI Codex and Claude Code
+  agents. Not affiliated with or endorsed by Anthropic or OpenAI."
+- **Decide on Conversation setup** (registered chats, private MCP) and the old request-history
+  board, which 0.3.2 did not port: rebuild or retire.
+- **Talk-view fixes:**
+  - a pending plot focus can steal the camera mid-conversation;
+  - the composer stays locked after switching agents mid-send.
+- **Board fixes:** the "All projects" tooltip count; the dimmed-row style when selected.
+- **Signed installers:** the Microsoft Store (free) or Azure Artifact Signing (about $10 a month).
+- **Dependency advisory:** glib 0.18.5 GHSA-wrw7-89jp-8q8g (Codex maintenance).
+
+### Not doing now
+- **Rename:** Ben keeps the CodaClauda name for now (2026-10-16). The trademark risk around
+  "Clauda" is acknowledged; revisit before any public promotion.
+- **Windows Hello signed approvals:** replaced by app-managed project access levels.
+
+### Later (0.5)
+Rows 2-8 above: City control surface, explicit agent status, cost meters, notifications,
+60-second onboarding, ambient signals and agent-built avatars end to end. Row 9 stays parked.
+
 Release rule unchanged: Codex builds installers and runs Marketplace submission;
 Claude owns UI. Nothing publishes without Ben's explicit "ship it".

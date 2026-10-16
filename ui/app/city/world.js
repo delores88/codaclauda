@@ -486,6 +486,8 @@ export class World {
     this.resize();
   }
   setTimeMode(mode) { this.timeMode = mode; this.blending = true; this.timeTick = 0; }
+  /** Weather hook: paletteMod(target) adjusts each target palette in place (city/weather.js); refreshLighting blends to the new look. */
+  refreshLighting() { this.blending = true; this.timeTick = 0; }
   timeInfo() { const hour = hourFor(this.timeMode); return { mode: this.timeMode, phase: phaseName(hour), night: this.current.night }; }
   applyLighting(p) {
     const u = this.sky.uniforms;
@@ -508,6 +510,7 @@ export class World {
     if (this.timeTick > 0 && !this.blending) return;
     this.timeTick = 1;
     const target = paletteAt(hourFor(this.timeMode));
+    this.paletteMod?.(target);
     const k = this.blending && !this.reducedMotion() ? Math.min(1, dt * 2.5) : 1;
     const c = this.current;
     let delta = 0;
@@ -723,7 +726,7 @@ export class World {
       for (const g of [this.island.group, this.roads.group, this.decor]) g.scale.set(s, 1, s);
       if (a.t >= 1) { for (const g of [this.island.group, this.roads.group, this.decor]) g.scale.set(1, 1, 1); this.islandAnim = null; }
     }
-    this.clouds.update(reduced ? 0 : dt, this.camera.position, reduced);
+    this.clouds.update(reduced ? 0 : dt * (this.cloudSpeed || 1), this.camera.position, reduced);   // cloudSpeed: weather wind
     this.hq.update(dt, this.elapsed, env);
     for (const fn of this.listeners) fn(dt, this.elapsed, env);
     this.particles.update(dt);
@@ -731,6 +734,7 @@ export class World {
     const d = this.distance;
     this.scene.fog.near = d * 1.1 + 20; this.scene.fog.far = d * 2.6 + 160;
     this.sky.group.position.copy(this.camera.position);
+    this.beforeRender?.(dt, reduced);   // weather: fog, flashes, precipitation (after lighting and fog are set)
     this.renderer.render(this.scene, this.camera);
   }
 

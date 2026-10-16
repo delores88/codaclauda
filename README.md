@@ -5,6 +5,9 @@ passive mailboxes for existing chats, and separate bounded delegated work. Publi
 by **DeloresAI**. First-party source is [MIT licensed](LICENSE), copyright
 Ben Van Dorn / DeloresAI. [Public source](https://github.com/delores88/codaclauda).
 
+Coordinates OpenAI Codex and Claude Code agents. Not affiliated with or endorsed
+by Anthropic or OpenAI.
+
 CodaClauda combines a Rust/Tauri desktop app, a JSON CLI and a request-bound stdio
 MCP server. You choose the agent, project, allowed paths, request types and limits.
 Questions and reviews are read-only. Delegated edits use a separate Git worktree;
@@ -13,18 +16,18 @@ the local coordination board.
 
 ## Current status
 
-[Version 0.3.1](https://github.com/delores88/codaclauda/releases/tag/v0.3.1)
+[Version 0.3.2](https://github.com/delores88/codaclauda/releases/tag/v0.3.2)
 is the published release, displayed as **CodaClauda**. It was accepted into the
-ordinary, non-featured MIT Marketplace catalog on October 15, 2026. Its in-place
+ordinary, non-featured MIT Marketplace catalog on October 16, 2026. Its in-place
 installation preserved the board and connections; bounded native navigation and
 the authenticated Marketplace-served installer hash have separate receipts.
 
-Version 0.3.2 is in preparation. The owner has approved publication after the
-required checks. The candidate UI still needs reviewed integration, a clean
-installer build and installed workflow checks; source review alone does not
-establish those results. See [the 0.3.2 release plan](docs/RELEASE-0.3.2.md).
-The interface instructions below describe the **0.3.2 candidate**, not verified
-installed behavior of the released 0.3.1 build.
+Version 0.3.3 is in preparation, adding contributor islands and optional City
+weather alongside small interface fixes. The owner has authorized the release
+workflow after the required checks. A clean build and installed checks are
+separate from source review; see [the 0.3.3 release plan](docs/RELEASE-0.3.3.md).
+The interface instructions below describe the **0.3.3 candidate**. New candidate
+features do not establish verified behavior of the released 0.3.2 build.
 
 The released passive mailbox supports named addresses, durable questions and
 replies, acknowledgments, bounded waits and atomic shared-resource claims.
@@ -49,7 +52,7 @@ utility is free: it does not require direct API credits or bundle a model.
 Claude/Codex subscriptions and optional Spark hardware are separate products
 with their own costs and terms.
 
-In the 0.3.2 candidate, open **Agent setup** in the sidebar. Choose an agent label
+In the 0.3.3 candidate, open **Agent setup** in the sidebar. Choose an agent label
 and mailbox address, then copy the join prompt into a Claude Code or Codex chat
 that can run the local CLI. The prompt uses this installation's CLI and board
 paths to register a passive mailbox. Copying it does not start a provider session,
@@ -97,7 +100,7 @@ paginated, and the Tasks view provides a paginated table and request details.
 Each request selects a primary agent and up to three permitted peers in the same
 workspace; an agent's directory contains only those selected connections.
 
-## The 0.3.2 candidate desktop interface
+## The 0.3.3 candidate desktop interface
 
 Use the left sidebar to move between these views:
 
@@ -144,6 +147,13 @@ activity includes recency heuristics and task status can include owner overrides
 these displays are not independent proof that an agent is present or a task
 completed. Spark status is reported by the configured DGXBridge CLI. The new
 views do not establish additional compute or GPU acceptance.
+
+The 0.3.3 City adds contributor islands and a route map for repositories reported
+by the signed-in GitHub CLI. Viewing an island does not grant access or change a
+repository. Optional weather starts **Off**. **Pick my own** draws a local scene;
+**Live** contacts MET Norway for the selected approximate location while the City
+is open. Explicit place searches contact OpenStreetMap Nominatim. Both services
+see the IP address; see the [weather privacy details](docs/PRIVACY.md#city-weather).
 
 Avatars are editable procedural models. Local photo matching suggests colors and
 features without uploading the image. Asking an agent to help saves the photo

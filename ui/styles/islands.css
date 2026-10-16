@@ -1,0 +1,176 @@
+/* Contributor islands (City): the Islands toolbar button, the airline-style route map, the island
+   chip in the HUD and the portal transition. Colours come from tokens.css; dark and light themes. */
+.city-root {
+  --routes-sea-a: #17345f; --routes-sea-b: #081327; --routes-grid: rgba(150, 190, 255, .08); --routes-wave: rgba(170, 205, 255, .22);
+  --routes-land: #e6d6a8; --routes-shore: #f7eccb; --routes-hill: #8fc28a; --routes-ink: #f1f4ff; --routes-ink-2: #b3bfdc; --routes-halo: #0a1730;
+  --routes-arc: #a597ff; --routes-new: #ff9b6e; --routes-org: #3fc7a4; --routes-user: #ff9b6e;
+}
+[data-theme="light"] .city-root {
+  --routes-sea-a: #d6ebff; --routes-sea-b: #a9cdf2; --routes-grid: rgba(30, 70, 140, .09); --routes-wave: rgba(30, 80, 150, .22);
+  --routes-land: #f6ecd0; --routes-shore: #fffaf0; --routes-hill: #9ccf8f; --routes-ink: #16203a; --routes-ink-2: #4a5878; --routes-halo: #eaf4ff;
+  --routes-arc: #6c5cf0; --routes-new: #e0663a; --routes-org: #0f9a78; --routes-user: #d9653b;
+}
+
+/* Toolbar button (sits with Find me / Street view) */
+.city-islands-btn { position: relative; display: inline-flex; align-items: center; gap: 6px; height: 34px; margin-right: 2px; padding: 0 12px 0 9px; border: 0; border-radius: 10px; background: color-mix(in srgb, var(--routes-arc) 16%, transparent); color: var(--text); font-size: 12.5px; font-weight: 650; white-space: nowrap; cursor: pointer; transition: background var(--fast); }
+.city-islands-btn:hover { background: color-mix(in srgb, var(--routes-arc) 28%, transparent); }
+.city-islands-btn .icon { width: 16px; height: 16px; color: var(--routes-arc); }
+.city-islands-badge { position: absolute; top: -5px; right: -4px; min-width: 17px; height: 17px; padding: 0 5px; border: 2px solid var(--surface); border-radius: var(--radius-pill); background: var(--routes-new); color: #fff; font-size: 10px; font-weight: 800; line-height: 13px; text-align: center; }
+.city-islands-badge[hidden] { display: none; }
+.city-root.is-street .city-islands-btn { display: none; }
+.city-has-panel .city-islands-btn > span:not(.city-islands-badge) { display: none; }   /* icon only beside a side card */
+.city-has-panel .city-islands-btn { padding: 0 8px; }
+
+/* On a contributor island: no Spark side, the HUD says where you are and how to get home */
+.city-root.is-island .city-machines, .city-root.is-island .city-legend-extra { display: none; }
+.city-island-chip { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 6px 6px 10px; border: 1px solid color-mix(in srgb, var(--routes-arc) 45%, transparent); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--routes-arc) 12%, transparent); }
+.city-island-chip[hidden] { display: none; }
+.city-island-name { display: inline-flex; align-items: center; gap: 7px; min-width: 0; font-size: 13px; }
+.city-island-name .icon { flex: none; width: 16px; height: 16px; color: var(--routes-arc); }
+.city-island-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.city-island-name .muted { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.city-island-repos { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.city-island-repos .city-link { display: inline-flex; align-items: center; gap: 6px; }
+
+/* Route map overlay */
+.city-routes { position: absolute; inset: 0; z-index: 8; display: grid; place-items: center; padding: 18px; background: var(--scrim); animation: city-routes-fade var(--med) var(--ease); }
+.city-routes[hidden] { display: none; }
+.city-routes-panel { display: flex; flex-direction: column; gap: 12px; width: min(1180px, 100%); max-height: 100%; padding: 16px 18px 14px; overflow: auto; box-shadow: var(--shadow-lg); animation: city-routes-pop var(--med) var(--ease); }
+.city-routes-panel:focus { outline: none; }
+.city-routes-head { display: flex; align-items: flex-start; gap: 12px; }
+.city-routes-logo { display: grid; flex: none; place-items: center; width: 38px; height: 38px; border-radius: 12px; background: color-mix(in srgb, var(--routes-arc) 18%, transparent); color: var(--routes-arc); }
+.city-routes-logo .icon { width: 20px; height: 20px; }
+.city-routes-titles { flex: 1; min-width: 0; }
+.city-routes-titles h2 { margin: 0; font: 650 18px var(--font-display); }
+.city-routes-titles p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+.city-routes-body { display: grid; grid-template-columns: minmax(0, 1fr) 230px; gap: 14px; min-height: 0; }
+.city-routes-map { position: relative; aspect-ratio: 1000 / 600; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--routes-sea-b); }
+.city-routes-svg { display: block; width: 100%; height: 100%; user-select: none; }
+.city-routes-svg .sea-a { stop-color: var(--routes-sea-a); }
+.city-routes-svg .sea-b { stop-color: var(--routes-sea-b); }
+.city-routes-grid line { stroke: var(--routes-grid); stroke-width: 1; }
+.city-routes-waves path { fill: none; stroke: var(--routes-wave); stroke-width: 1.4; stroke-linecap: round; }
+.city-routes-compass circle { fill: none; stroke: var(--routes-wave); stroke-width: 1.2; }
+.city-routes-compass path { fill: var(--routes-ink-2); opacity: .55; }
+.city-routes-compass text { fill: var(--routes-ink-2); font: 700 11px var(--font-ui); }
+.city-routes-arc { fill: none; stroke: var(--routes-arc); stroke-width: 2.2; stroke-linecap: round; opacity: .62; transition: opacity var(--fast), stroke-width var(--fast); }
+.city-routes-arc.is-new { stroke: var(--routes-new); opacity: .95; stroke-dasharray: 7 7; animation: city-routes-flow 1.1s linear infinite; }
+.city-routes-arc.is-here { stroke-width: 2.6; opacity: .95; }
+.city-routes-arc.is-hot { stroke-width: 3; opacity: 1; }
+.city-routes-land { fill: var(--routes-land); stroke: var(--routes-shore); stroke-width: 3; }
+.city-routes-hill { fill: var(--routes-hill); opacity: .85; pointer-events: none; }
+.city-routes-dot { fill: var(--routes-ink); stroke: var(--routes-halo); stroke-width: 2; }
+.city-routes-island.is-org .city-routes-dot { fill: var(--routes-org); }
+.city-routes-island.is-user .city-routes-dot { fill: var(--routes-user); }
+.city-routes-island, .city-routes-home.is-link { cursor: pointer; outline: none; }
+.city-routes-island .city-routes-land, .city-routes-home .city-routes-land { transition: stroke var(--fast), stroke-width var(--fast); }
+.city-routes-island.is-hot .city-routes-land, .city-routes-home.is-hot .city-routes-land, .city-routes-island:focus-visible .city-routes-land, .city-routes-home:focus-visible .city-routes-land { stroke: var(--routes-arc); stroke-width: 4; }
+.city-routes-island.is-here .city-routes-land { stroke: var(--routes-arc); stroke-width: 4; }
+.city-routes-home .city-routes-land { fill: color-mix(in srgb, var(--routes-land) 82%, var(--routes-arc)); }
+.city-routes-skyline rect { fill: var(--routes-arc); stroke: var(--routes-halo); stroke-width: 1; }
+.city-routes-pulse { fill: none; stroke: var(--routes-new); stroke-width: 2.5; transform-box: fill-box; transform-origin: center; animation: city-routes-pulse 1.8s ease-out infinite; pointer-events: none; }
+.city-routes-label { pointer-events: none; }
+.city-routes-label text { paint-order: stroke; stroke: var(--routes-halo); stroke-width: 5px; stroke-linejoin: round; }
+.city-routes-label .owner { fill: var(--routes-ink); font: 700 20px var(--font-ui); }
+.city-routes-label .count { fill: var(--routes-ink-2); font: 600 15px var(--font-ui); }
+.city-routes-label.is-hot .owner { fill: var(--routes-arc); }
+.city-routes-badge rect { fill: var(--routes-new); }
+.city-routes-badge text { fill: #fff; font: 800 13px var(--font-ui); letter-spacing: .06em; paint-order: normal; stroke: none; }
+.city-routes-note { position: absolute; left: 50%; bottom: 14%; display: grid; gap: 4px; width: min(440px, calc(100% - 32px)); padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in srgb, var(--surface) 90%, transparent); color: var(--text-2); font-size: 13px; text-align: center; transform: translateX(-50%); box-shadow: var(--shadow); }
+.city-routes-note[hidden] { display: none; }
+.city-routes-note strong { color: var(--text); font-weight: 600; }
+.city-routes-note span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+
+/* Hover card: the island's repos */
+.city-routes-card { position: absolute; z-index: 1; display: grid; gap: 8px; width: 250px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: var(--shadow-lg); font-size: 12.5px; pointer-events: none; }
+.city-routes-card[hidden] { display: none; }
+.city-routes-card-head { display: grid; }
+.city-routes-card-head strong { font-size: 14px; overflow-wrap: anywhere; }
+.city-routes-card-head span, .city-routes-more, .city-routes-card-hint { color: var(--muted); font-size: 11.5px; }
+.city-routes-card-hint { color: var(--routes-arc); font-weight: 650; }
+.city-routes-repos { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.city-routes-repos li { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.city-routes-repo-name { flex: 1; min-width: 0; overflow: hidden; color: var(--text); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.city-routes-lock { flex: none; width: 13px; height: 13px; color: var(--warning); }
+.city-routes-access { flex: none; padding: 1px 6px; border-radius: var(--radius-pill); background: var(--surface-3); color: var(--text-2); font-size: 10.5px; font-weight: 650; }
+.city-routes-new { flex: none; padding: 1px 6px; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--routes-new) 20%, transparent); color: var(--routes-new); font-size: 10px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+
+/* Island list (also the narrow-window way in) */
+.city-routes-side { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.city-routes-side[hidden] { display: none; }
+.city-routes-body:has(> .city-routes-side[hidden]) { grid-template-columns: minmax(0, 1fr); }
+.city-routes-side-label { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.city-routes-list { display: grid; align-content: start; gap: 4px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.city-routes-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "art name extra" "art count extra"; align-items: center; column-gap: 9px; width: 100%; padding: 7px 9px; border: 1px solid transparent; border-radius: var(--radius-sm); background: none; color: var(--text); text-align: left; cursor: pointer; transition: background var(--fast), border-color var(--fast); }
+.city-routes-item:hover, .city-routes-item.is-hot { background: var(--surface-hover); border-color: var(--border); }
+.city-routes-item:focus-visible { outline: none; box-shadow: var(--focus); }
+.city-routes-item.is-here { border-color: color-mix(in srgb, var(--routes-arc) 50%, transparent); }
+.city-routes-item-art { grid-area: art; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 9px; background: var(--surface-3); color: var(--text-2); }
+.city-routes-item.is-new .city-routes-item-art { background: color-mix(in srgb, var(--routes-new) 20%, transparent); color: var(--routes-new); }
+.city-routes-item.is-home .city-routes-item-art { background: var(--accent-soft); color: var(--accent-2); }
+.city-routes-item-art .icon { width: 15px; height: 15px; }
+.city-routes-item-name { grid-area: name; overflow: hidden; font-weight: 650; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.city-routes-item-count { grid-area: count; color: var(--muted); font-size: 11.5px; }
+.city-routes-item > .city-routes-new, .city-routes-item > .city-routes-here { grid-area: extra; }
+.city-routes-here { padding: 1px 6px; border-radius: var(--radius-pill); background: var(--accent-soft); color: var(--accent-2); font-size: 10px; font-weight: 800; text-transform: uppercase; }
+
+.city-routes-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; color: var(--text-2); font-size: 12px; }
+.city-routes-spacer { flex: 1; }
+.city-routes-legend { display: inline-flex; align-items: center; gap: 6px; }
+.city-routes-key { display: inline-block; width: 22px; height: 0; margin-left: 4px; border-top: 2px solid var(--routes-arc); }
+.city-routes-key.is-new { border-top: 2px dashed var(--routes-new); }
+.city-routes-error { display: inline-flex; align-items: center; gap: 5px; color: var(--warning); }
+.city-routes-error .icon { width: 14px; height: 14px; }
+
+/* Portal: a swirl closes in with a flash, the new island rises, the swirl opens out.
+   Reduced motion: a plain crossfade through the background colour. */
+.city-portal { position: absolute; inset: 0; z-index: 9; display: grid; place-items: center; overflow: hidden; pointer-events: auto; }
+.city-portal[hidden] { display: none; }
+.city-portal-swirl, .city-portal-flash { position: absolute; inset: 0; margin: auto; pointer-events: none; }
+.city-portal-swirl { width: 150vmax; height: 150vmax; border-radius: 50%;
+  background: radial-gradient(circle, transparent 0 5%, color-mix(in srgb, var(--routes-arc) 70%, transparent) 15%, transparent 36%),
+    repeating-conic-gradient(from 0deg, color-mix(in srgb, var(--routes-arc) 88%, transparent) 0deg, color-mix(in srgb, var(--codex) 70%, transparent) 20deg, color-mix(in srgb, var(--claude) 76%, transparent) 40deg, color-mix(in srgb, var(--routes-arc) 88%, transparent) 60deg);
+  -webkit-mask: radial-gradient(circle, transparent 0 4%, #000 20%, #000 64%, transparent 72%); mask: radial-gradient(circle, transparent 0 4%, #000 20%, #000 64%, transparent 72%); }
+.city-portal-flash { background: radial-gradient(circle at center, rgba(255, 255, 255, .95) 0, rgba(255, 255, 255, .5) 22%, transparent 60%); opacity: 0; }
+.city-portal-text { position: relative; padding: 8px 16px; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--surface) 80%, transparent); color: var(--text); font-size: 13.5px; font-weight: 650; box-shadow: var(--shadow); }
+.city-portal.is-swirl.is-in .city-portal-swirl { animation: city-portal-close 560ms cubic-bezier(.5, 0, .75, 0) forwards, city-portal-spin 1.4s linear infinite; }
+.city-portal.is-swirl.is-in .city-portal-flash { animation: city-portal-flash 560ms ease-in forwards; }
+.city-portal.is-swirl.is-out .city-portal-swirl { animation: city-portal-open 680ms cubic-bezier(.2, .8, .2, 1) forwards, city-portal-spin 1.4s linear infinite; }
+.city-portal.is-swirl.is-out .city-portal-flash { opacity: 1; animation: city-portal-unflash 520ms ease-out forwards; }
+.city-portal.is-swirl.is-out .city-portal-text { animation: city-routes-fade 300ms ease-in reverse forwards; }
+.city-portal.is-plain { background: var(--bg); }
+.city-portal.is-plain .city-portal-swirl, .city-portal.is-plain .city-portal-flash { display: none; }
+.city-portal.is-plain.is-in { animation: city-routes-fade 200ms ease-out forwards; }
+.city-portal.is-plain.is-out { animation: city-portal-fadeout 260ms ease-in forwards; }
+
+@keyframes city-routes-fade { from { opacity: 0; } }
+@keyframes city-routes-pop { from { opacity: 0; transform: translateY(10px) scale(.985); } }
+@keyframes city-routes-flow { to { stroke-dashoffset: -28; } }
+@keyframes city-routes-pulse { 0% { opacity: .95; transform: scale(.75); } 100% { opacity: 0; transform: scale(1.6); } }
+@keyframes city-portal-spin { to { rotate: 360deg; } }
+@keyframes city-portal-close { from { transform: scale(2.6); opacity: 0; } 40% { opacity: .9; } to { transform: scale(1); opacity: 1; } }
+@keyframes city-portal-open { from { transform: scale(1); opacity: 1; } to { transform: scale(2.4); opacity: 0; } }
+@keyframes city-portal-flash { 0%, 55% { opacity: 0; } 100% { opacity: 1; } }
+@keyframes city-portal-unflash { to { opacity: 0; } }
+@keyframes city-portal-fadeout { from { opacity: 1; } to { opacity: 0; } }
+
+@media (max-width: 860px) {
+  .city-routes { padding: 10px; }
+  .city-routes-body { grid-template-columns: minmax(0, 1fr); }
+  .city-routes-list { max-height: 210px; }
+  .city-islands-btn > span:not(.city-islands-badge) { display: none; }
+  .city-islands-btn { padding: 0 8px; }
+}
+@media (max-width: 560px) {
+  .city-routes-label, .city-routes-card, .city-routes-compass { display: none; }   /* too small to read: the list names every island */
+  .city-routes-titles p { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .city-routes, .city-routes-panel, .city-routes-arc.is-new, .city-routes-pulse { animation: none; }
+  .city-routes-pulse { opacity: .8; }
+  .city-islands-btn, .city-routes-item, .city-routes-arc { transition: none; }
+}
+.city-view.reduce-motion .city-routes, .city-view.reduce-motion .city-routes-panel, .city-view.reduce-motion .city-routes-arc.is-new, .city-view.reduce-motion .city-routes-pulse { animation: none; }
+.city-view.reduce-motion .city-routes-pulse { opacity: .8; }
+.city-view.reduce-motion .city-islands-btn, .city-view.reduce-motion .city-routes-item, .city-view.reduce-motion .city-routes-arc { transition: none; }
+.city-routes-foot .btn[aria-disabled="true"] { opacity: .6; cursor: progress; }

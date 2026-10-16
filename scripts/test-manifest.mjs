@@ -68,7 +68,7 @@ test('disclosures separate passive delivery, dedicated chat, local copies and ex
   assert.equal(manifest.offline, true);
   assert.deepEqual(manifest.integrations.filter(({ required }) => required).map(({ name }) => name), ['Microsoft Edge WebView2']);
   assert.equal(manifest.updater.mode, 'coordinated');
-  assert.deepEqual(manifest.permissions.domains, ['deloresai.com', 'api.github.com', 'github.com']);
+  assert.deepEqual(manifest.permissions.domains, ['deloresai.com', 'api.github.com', 'github.com', 'api.met.no', 'nominatim.openstreetmap.org']);
   assert.match(manifest.description, /3D project city/);
   assert.match(manifest.privacy.dataLeavesDevice, /Local photo matching.*explicit avatar-help request saves the photo and shares its local path/);
   assert.doesNotMatch(manifest.description, /Claude push requires|Codex push requires/);

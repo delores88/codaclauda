@@ -6,6 +6,7 @@ mod update_helper;
 mod update_storage;
 mod update_verify;
 mod updates;
+mod weather;
 
 use serde_json::{Value, json};
 use std::{
@@ -426,12 +427,15 @@ fn main() {
             desktop::desktop_discover_projects,
             desktop::github_user,
             desktop::github_repos,
+            desktop::github_collab_repos,
             desktop::github_create_repo,
             desktop::github_clone_repo,
             desktop::attachment_save,
             desktop::dictation_start,
             desktop::window_attention,
-            desktop::open_external
+            desktop::open_external,
+            weather::weather_now,
+            weather::geocode_place
         ])
         .run(tauri::generate_context!());
     if let Err(error) = result {

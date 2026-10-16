@@ -570,13 +570,14 @@ export function mount(root, ctx) {
     const forYou = state.tab === 'for-you';
     // On For you, a project with board traffic but nothing addressed to you stays listed (dimmed) and opens Everything.
     const elsewhereOnly = forYou && !all && count === 0 && boardCount > 0;
+    const jump = elsewhereOnly && !active;   // selected already: a click only clears the filter
     const lead = all ? h('span.bd-agent-all', icon('projects')) : key === 'hidden' ? h('span.bd-agent-all', icon('eyeOff')) : h('span.bd-project-mark', projectDot(project));
     const countTitle = forYou
       ? `${count} message${count === 1 ? '' : 's'} to you · ${boardCount} thread${boardCount === 1 ? '' : 's'} on the board`
       : `${count} thread${count === 1 ? '' : 's'}`;
     return h(`button.bd-agent.bd-project-row${active ? '.active' : ''}${elsewhereOnly ? '.bd-elsewhere' : ''}`, { type: 'button', 'aria-pressed': String(active), dataset: { fid: 'project' },
       title: all ? 'Show every project' : active ? 'Show all projects' : elsewhereOnly ? `Nothing addressed to you — open ${boardCount} ${label} thread${boardCount === 1 ? '' : 's'} in Everything` : (LANE_HINT[key] || `Show only ${label}`),
-      onclick: () => { state.project = all || active ? null : key; resetPaging(); if (elsewhereOnly) setTab('everything'); else renderNow(); } },
+      onclick: () => { state.project = all || active ? null : key; resetPaging(); if (jump) setTab('everything'); else renderNow(); } },
     lead,
     h('span.bd-agent-text', h('span.bd-agent-name', label)),
     unread ? h('span.bd-unread-pip', { title: `${unread} unread for you` }, String(unread)) : null,
@@ -740,11 +741,11 @@ export function mount(root, ctx) {
     for (const t of threads.values()) { boardCounts.set(t.lane, (boardCounts.get(t.lane) || 0) + 1); bump(t.lane, t.project, 0, 0, toMs(t.last.created_at) || 0); }
     if (forYouTab) for (const m of mineAllForCounts) { const t = threadOfMsg.get(m.id); if (t) bump(t.lane, t.project, 1, m.read_at ? 0 : 1, toMs(m.created_at) || 0); }
     else for (const t of threads.values()) bump(t.lane, t.project, 1, t.unreadMine.length, 0);
-    const projectItems = [{ key: '*', label: 'All projects', count: forYouTab ? mineAllForCounts.length : threads.size, unread: 0, active: !state.project }];
+    const projectItems = [{ key: '*', label: 'All projects', count: forYouTab ? mineAllForCounts.length : threads.size, unread: 0, active: !state.project, boardCount: threads.size }];
     for (const s of [...laneStats.values()].sort((a, b) => laneRank(a.key) - laneRank(b.key) || b.latest - a.latest)) {
       projectItems.push({ key: s.key, project: s.project, label: s.project?.name || laneLabel(s.key), count: s.count, unread: s.unread, active: state.project === s.key, boardCount: boardCounts.get(s.key) || 0 });
     }
-    if (state.project && !laneStats.has(state.project)) projectItems.push({ key: state.project, project: state.project.startsWith('p:') ? store.project(state.project.slice(2)) : null, label: laneLabel(state.project), count: 0, unread: 0, active: true });
+    if (state.project && !laneStats.has(state.project)) projectItems.push({ key: state.project, project: state.project.startsWith('p:') ? store.project(state.project.slice(2)) : null, label: laneLabel(state.project), count: 0, unread: 0, active: true, boardCount: boardCounts.get(state.project) || 0 });
     stable(filters, projectList, () => reconcile(projectList, caches.projects, projectItems.map(item => ({ ...item, sig: JSON.stringify([item.label, item.count, item.unread, item.active, item.project?.color, state.tab, item.boardCount || 0]) })), projectRow, ''));
 
     /* sidebar: agents + kinds */

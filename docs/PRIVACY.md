@@ -158,6 +158,34 @@ a network. Provider work, GitHub operations, update acquisition and some speech
 services require network access. There is no guarantee that all app features or
 their external dependencies operate offline.
 
+## City weather
+
+Weather is off by default. **Pick my own** renders a local weather scene without
+contacting a weather service. **Live** sends the selected approximate location
+(city coordinates rounded to two decimal places, about 1 km or coarser) to MET Norway's
+Locationforecast service at `api.met.no`. It refreshes periodically while the
+City view is open in a visible window. Cache expiry, failure backoff and reopening the
+City affect the timing; requests are not made on a fixed interval. Both
+switching away from the City and hiding the app stop scheduled
+refreshes. A request already in progress can still finish. Contributor islands
+hide the weather display; Live checks for the selected city can continue while
+visiting an island within the visible City view.
+
+Searching for a place is explicit: the typed search text goes to OpenStreetMap
+Nominatim at `nominatim.openstreetmap.org`, along with the requested language.
+There is no search-as-you-type request.
+Both services receive the IP address and ordinary HTTPS request information.
+The app identifies itself in these requests. It does not send board messages,
+provider credentials or project files to either service. The initial suggested
+city comes from the device's time zone, not GPS or an IP-location lookup.
+
+The chosen city, coordinates, weather mode and display preferences are saved in
+local desktop UI state and follow its retention rules above. Weather response
+and place-search caches stay in memory. External services have their own data
+policies. Weather data is credited to MET Norway (CC BY 4.0); search data is
+credited to OpenStreetMap contributors (ODbL). Attribution is also shown in the
+City and Weather settings. Live weather and place search need network access.
+
 ## Credentials and local transport
 
 Provider CLIs keep their own subscription authentication. CodaClauda probes their

@@ -37,6 +37,8 @@ export const desktop = {
   discoverDesktop: () => invoke('desktop_discover_projects'),
   githubUser: () => invoke('github_user'),
   githubRepos: user => invoke('github_repos', { user }),
+  /** Repos the signed-in gh account reaches as a collaborator / org member (never its own) → { user, repos, truncated }. */
+  githubCollabRepos: () => invoke('github_collab_repos'),
   /** Creates a repo (with a README) in the GitHub CLI's signed-in account and clones it into parentDir\name → { path, full_name, url }. */
   createRepo: ({ name, description = '', private: isPrivate = true, parentDir }) => invoke('github_create_repo', { name, description, private: isPrivate, parentDir }),
   /** Clones owner/name into parentDir\name with the GitHub CLI → { path, full_name, url }. */
@@ -50,4 +52,8 @@ export const desktop = {
   preferences: () => invoke('preferences'),
   /** Native updater: op is check | status | authorize | poll | download | install (no other args). */
   update: op => invoke('update', { op, args: {} }),
+  /** MET Norway current weather; coordinates are rounded to 2 decimals natively → { symbol_code, air_temperature, wind_speed, cloud_area_fraction, precipitation_amount, updated_at, expires, lat, lon }. */
+  weatherNow: (lat, lon) => invoke('weather_now', { lat, lon }),
+  /** OpenStreetMap Nominatim search, on an explicit search only → [{ name, display_name, lat, lon }]. */
+  geocodePlace: query => invoke('geocode_place', { query, language: globalThis.navigator?.language || 'en' }),
 };

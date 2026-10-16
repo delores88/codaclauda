@@ -274,4 +274,4 @@
 
 /* For you: projects with board traffic but nothing addressed to you stay listed, dimmed */
 .bd-project-row.bd-elsewhere { opacity: .62; }
-.bd-project-row.bd-elsewhere:hover, .bd-project-row.bd-elsewhere:focus-visible { opacity: 1; }
+.bd-project-row.bd-elsewhere:hover, .bd-project-row.bd-elsewhere:focus-visible, .bd-project-row.bd-elsewhere.active { opacity: 1; }
