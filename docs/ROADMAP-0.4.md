@@ -199,9 +199,47 @@ These were planned here but ship early in 0.3.3:
   "Clauda" is acknowledged; revisit before any public promotion.
 - **Windows Hello signed approvals:** replaced by app-managed project access levels.
 
-### Later (0.5)
-Rows 2-8 above: City control surface, explicit agent status, cost meters, notifications,
-60-second onboarding, ambient signals and agent-built avatars end to end. Row 9 stays parked.
+## Release split (Ben asked for an explicit list, 2026-10-16)
+
+**0.4 — "agents run from CodaClauda".** Everything here depends on sessions or makes them usable.
+1. **Sessions** (item 1 plus the notes):
+   - Start agent (Claude Code or Codex, project, task), resume, stop, and stream into Chat;
+   - wake on mail, with hop, rate and per-agent caps;
+   - a controlled launch environment (no stray API keys; see SESSIONS-RESEARCH.md).
+2. **Project access levels, enforced** through launch flags:
+   - Read only, Work freely and Full access, plus the action toggles;
+   - building tickers and the Projects toggles (already built, unreviewed, on `claude/033-access-ticker`);
+   - "Ask me" inline approvals are the riskiest piece. If they slip, they go to 0.4.1 rather than holding the release.
+3. **Unified chat:**
+   - project dropdown and new chat per project;
+   - connected-resources panel;
+   - streaming with stop;
+   - chat-first layout option;
+   - desktop chats listed alongside, labelled honestly.
+4. **Scheduled tasks:** a Schedules view, runs per project at that project's access level, history, pause and run-now.
+5. **Computer use through MCP:** Playwright by default, and Windows-MCP opt-in at Full access only.
+6. **Retire the old Conversation setup and request-history screens**, because the unified chat replaces them.
+
+**0.5 — "power features and polish".**
+1. **Background work view** (running agents, plan view) and **notifications**: Windows toasts, plus optional phone push.
+2. **Conversations:** fork from any message, hand off to the other provider with a summary, search across both providers, and sections.
+3. **Code work:** a git worktree per chat, a diff viewer with accept or discard, create PR with CI status and auto-fix suggestions, and a review mode.
+4. **Agent configuration UI:**
+   - model and effort pickers beyond 0.4's basic choice;
+   - a CLAUDE.md / AGENTS.md editor;
+   - memory toggles;
+   - skills and plugins per project.
+5. **Context and cost:** context-fill gauge with compact-now, and usage and cost meters per agent and provider.
+6. **City:**
+   - zero-config City (show existing sessions without setup);
+   - City as a control surface (drag an agent onto a building);
+   - explicit agent status;
+   - ambient CI signals (rain on failing CI, fireworks on merge).
+7. **Onboarding and identity:** 60-second onboarding, and agent-built avatars end to end.
+8. **Launch prep:** signed installers (Microsoft Store or Artifact Signing), plus a rename decision before any public promotion.
+
+**Later or parked:** remote control of a running session, a shared world for teams (row 9),
+and CodaClauda's own guarded desktop-control tool (only if the MCP tools fall short).
 
 Release rule unchanged: Codex builds installers and runs Marketplace submission;
 Claude owns UI. Nothing publishes without Ben's explicit "ship it".
