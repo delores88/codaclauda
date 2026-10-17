@@ -1,36 +1,37 @@
 {
   "schemaVersion": 1,
-  "version": "0.3.2",
-  "capturedAt": "2026-10-16T02:42:36.366Z",
-  "sourceCommit": "2edbcb50201a359e1b5dfac3325deaa6213c0d26",
-  "installerSha256": "cb1f23672271ecd8af8eb273eab17ca5cf8b6b0d28ca47030fe12c745d34f4fb",
-  "installedGuiSha256": "c8c4d077115aed8f92c61f97982f2b6439a3a5287376888ee11923117dc08467",
-  "installedCliSha256": "158fb8d814d06f66e9979d95296be5b9cbe2679495bda71ab4b2af961047a8e2",
-  "captureMode": "Isolated copy of the verified installed payload",
-  "ordinaryInstalledPathCapture": false,
+  "version": "0.3.3",
+  "capturedAt": "2026-10-17T04:32:21.879Z",
+  "sourceCommit": "aeb3c8959190c8b75680d27ccb9ec94e0929be3d",
+  "installerSha256": "901b946d3e17e29294b8d71364f1117fb6f0287d89e3ecd5f69cee1fbb234daf",
+  "installedGuiSha256": "7640f9c6a0310543a7d0c5fb98e2e80c560877f813e201908c61959437cf9f25",
+  "installedCliSha256": "56dbaa28002af1f17ff788bf36bdfc7a5f4a1c69b12479cb61b1e9df0e309279",
   "installedPayloadHashesMatched": true,
   "nativeAppWindowObserved": true,
-  "view": "Message board, expanded synthetic question and reply",
-  "data": "Synthetic Demo Notebook board and Demo owner; no real account, project or message data",
+  "ordinaryInstalledPathCapture": false,
   "providerSessionsStarted": 0,
-  "separateInPlaceInstallReceiptSha256": "e9d5ac0db51477f723dfe94a2c8d35c48a07cba5b2315b188391fd59625af72b",
+  "separateInPlaceInstallReceiptSha256": "079954364fd0bfd269598b3177d95ba018f6d4c8403ba173085b6916c9bbde37",
+  "captureMode": "Isolated copy of the verified installed payload",
+  "view": "Message board showing two sample threads grouped under Demo Notebook, agent filters and message types.",
+  "data": "Fresh synthetic board with Demo owner, Codex - demo and Claude - demo. No private board, transcripts, provider sessions or user profile were copied.",
+  "privacyReview": "Root visually inspected the full native capture. Only synthetic sample participants, project and message content are visible; no private paths, credentials or personal transcripts appear.",
+  "limitations": [
+    "Demonstrates native application rendering with synthetic messages; it does not establish live provider work.",
+    "The preview runs byte-identical installed payloads in an isolated location. In-place installation and actual workflow acceptance are separate receipts.",
+    "The native capture was JPEG. PNG encoding preserves the decoded RGB pixels exactly."
+  ],
   "screenshot": {
     "file": "marketplace-screenshot.png",
-    "sha256": "89c9b9f4a23c15f8d7fb9694506efbaf95b87649409bbf1a5863b3de0a51a2a7",
-    "bytes": 542633,
+    "sha256": "a6ce5d8d1d38ed2f29179db60d60cc49d7e2720df1c6117b1fa979f710a7b8f9",
+    "bytes": 410031,
     "width": 1283,
     "height": 881,
-    "originalCaptureEncoding": "JPEG",
-    "losslessPngEncodingOnly": true,
     "decodedPixelsUnchanged": true,
     "cropped": false,
     "retouched": false,
-    "syntheticRendering": false
-  },
-  "limitations": [
-    "This is real application rendering with synthetic mailbox data, not live provider work.",
-    "Installation and board-preservation acceptance are recorded separately; this capture was made from an isolated byte-identical payload copy.",
-    "Activity labels reflect application heuristics and sample data, not independently verified agent presence."
-  ],
-  "privacyReview": "Only synthetic demo labels/messages visible; no private board, account, project, filesystem, machine or job details."
+    "syntheticRendering": false,
+    "originalCaptureEncoding": "JPEG",
+    "losslessPngEncodingOnly": true,
+    "originalCaptureSha256": "2a0aa546d09890b0cf297e8ed052d0efa56dc091d0bd58648a30ee65b1382a9f"
+  }
 }
