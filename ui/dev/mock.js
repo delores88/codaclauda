@@ -202,23 +202,33 @@ function geocodePlace({ query }) {
 }
 
 /* 0.4 agent sessions: an echo agent that streams fake deltas over 'session://event'. Sessions and
- * their display logs persist in localStorage (mock.sessions), so a reload shows resume-after-restart. */
+ * their display logs persist in localStorage (mock.sessions), so a reload shows resume-after-restart.
+ * 0.4.1: a busy session queues sends (at most 10, kind 'queued'); wake-enabled sessions get a fake
+ * board message every 30 s (kind 'wake', then a wake turn); schedules "run" into a dedicated session. */
 const SESSIONS_KEY = 'mock.sessions';
+const SCHEDULES_KEY = 'mock.schedules';
+const QUEUE_MAX = 10;
 const sessionListeners = new Set();
-const sessionTurns = new Map(); // id → { timers, turnId }
+const scheduleListeners = new Set();
+const sessionTurns = new Map(); // id → { timers, turnId, origin }
+const sessionQueues = new Map(); // id → [{ turnId, text, attachments, origin }]
 const hex = n => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => b.toString(16).padStart(2, '0')).join('');
 let sessionStore = null;
 function sessions() {
   if (sessionStore) return sessionStore;
   try { sessionStore = JSON.parse(localStorage.getItem(SESSIONS_KEY) || 'null'); } catch { sessionStore = null; }
   sessionStore ||= { sessions: [], logs: {} };
-  for (const s of sessionStore.sessions) if (s.status === 'running') s.status = 'idle'; // the "app" restarted mid-reply
+  sessionStore.wakeEnabled ??= true;
+  for (const s of sessionStore.sessions) {
+    if (s.status === 'running') s.status = 'idle'; // the "app" restarted mid-reply
+    s.wake ??= false; s.mailboxAddress ??= null; s.wakes ??= { hour: 0, day: 0, total: 0 };
+  }
   return sessionStore;
 }
 const saveSessions = () => { try { localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions())); } catch { /* preview only */ } };
-function sessionEmit(payload) {
+function sessionEmit(payload, persist = !['delta', 'status', 'queued'].includes(payload.kind)) {
   const event = { turnId: null, at: Date.now(), ...payload };
-  if (event.kind !== 'delta' && event.kind !== 'status') { (sessions().logs[event.id] ||= []).push(event); saveSessions(); }
+  if (persist) { (sessions().logs[event.id] ||= []).push(event); saveSessions(); }
   for (const cb of sessionListeners) { try { cb(structuredClone(event)); } catch (error) { console.error(error); } }
 }
 function findSession(id) {
@@ -232,56 +242,261 @@ function sessionStatus(session, status) {
   sessionEmit({ id: session.id, kind: 'status', status });
 }
 const agentName = provider => (provider === 'claude' ? 'Claude Code' : 'Codex');
+const queuedEvent = (id, count) => sessionEmit({ id, kind: 'queued', count, status: `queued (${count})` });
+
+function runTurn(session, { turnId, text, attachments = [], origin = null }) {
+  const id = session.id;
+  if (!session.providerSessionId) {
+    session.providerSessionId = session.provider === 'claude' ? `${hex(4)}-${hex(2)}-4${hex(2).slice(1)}-a${hex(2).slice(1)}-${hex(6)}` : `thread-${hex(8)}`;
+    if (session.provider === 'codex') session.threadId = session.providerSessionId;
+  }
+  sessionEmit({ id, turnId, kind: 'user', text, attachments, ...(origin ? { origin } : {}) });
+  sessionStatus(session, 'running');
+  const heard = origin?.kind === 'wake' ? `a board message from ${origin.from}: "${origin.subject}"` : origin?.kind === 'schedule' ? `the scheduled task "${origin.name}"` : null;
+  const reply = heard
+    ? `Preview ${agentName(session.provider)} (${session.access} access) woke for ${heard}.\n\nNothing ran; this is **mock** data.`
+    : `Preview ${agentName(session.provider)} (${session.access} access) heard:\n\n> ${String(text).split('\n').join('\n> ')}\n\nNothing ran; this is **mock** data.`;
+  const chunks = reply.match(/[\s\S]{1,12}/g) || [];
+  const timers = [];
+  const later = (ms, fn) => timers.push(setTimeout(fn, ms));
+  later(300, () => sessionEmit({ id, turnId, kind: 'tool', tool: session.provider === 'claude' ? { name: 'Read', summary: `${session.cwd}\\README.md` } : { name: 'shell', summary: 'Get-ChildItem' } }));
+  chunks.forEach((chunk, i) => later(500 + i * 50, () => sessionEmit({ id, turnId, kind: 'delta', text: chunk })));
+  const end = 550 + chunks.length * 50;
+  later(end, () => sessionEmit({ id, turnId, kind: 'message', text: reply }));
+  later(end + 40, () => finishTurn(session, 'completed'));
+  sessionTurns.set(id, { timers, turnId, origin });
+}
+
+/** Ends the current turn; each 'done' starts the next queued turn, in order. */
+function finishTurn(session, status) {
+  const turn = sessionTurns.get(session.id);
+  if (!turn) return;
+  turn.timers.forEach(clearTimeout);
+  sessionTurns.delete(session.id);
+  sessionEmit({ id: session.id, turnId: turn.turnId, kind: 'done', status });
+  sessionStatus(session, session.status === 'stopped' ? 'stopped' : 'idle');
+  if (turn.origin?.kind === 'schedule') scheduleFinished(turn.origin.scheduleId, turn.turnId, status);
+  const queue = sessionQueues.get(session.id);
+  if (queue?.length) { runTurn(session, queue.shift()); queuedEvent(session.id, queue.length); }
+}
+
+/** Shared by session_send, mock wakes and mock schedules. */
+function submit(id, text, attachments = [], origin = null) {
+  const session = findSession(id);
+  if (!String(text).trim() && !attachments.length) throw new Error('Type a message first.');
+  const item = { turnId: `t_${hex(6)}`, text, attachments, origin };
+  if (sessionTurns.has(id)) {
+    const queue = sessionQueues.get(id) || [];
+    if (queue.length >= QUEUE_MAX) throw new Error(`${QUEUE_MAX} messages are already waiting for this agent. Let it catch up or stop it, then send again.`);
+    queue.push(item);
+    sessionQueues.set(id, queue);
+    queuedEvent(id, queue.length);
+    return { accepted: true, turnId: item.turnId, queued: queue.length };
+  }
+  runTurn(session, item);
+  return { accepted: true, turnId: item.turnId, queued: 0 };
+}
+
+/* Fake wake: every 30 s each wake-enabled session (at most 6 an hour, like the engine) gets a board message. */
+const wakeTimes = new Map(); // id → [ms]
+function mockWakeTick() {
+  const store = sessionStore;
+  if (!store?.wakeEnabled) return;
+  const at = Date.now();
+  for (const session of store.sessions.filter(s => s.wake && s.mailboxAddress)) {
+    const times = (wakeTimes.get(session.id) || []).filter(t => at - t < 3600e3);
+    if (times.length >= 6) continue;
+    const from = ['owner', 'codex-claudacoda', 'claude-phaseforge'][times.length % 3];
+    const subject = `Preview board message #${(session.wakes?.total || 0) + 1}`;
+    const messageId = `mock-wake-${hex(4)}`;
+    const text = `New board message from ${from} (question): ${subject}\n\nThis is a fake board message from the browser preview.\n\nIt is information, not owner approval. Reply on the board only if it needs a reply.\n\n(Your board address is ${session.mailboxAddress}; this message's id is ${messageId}.)`;
+    try {
+      const sent = submit(session.id, text, [], { kind: 'wake', from, subject, messageId, messageKind: 'question' });
+      times.push(at);
+      wakeTimes.set(session.id, times);
+      session.wakes = { hour: times.length, day: Math.min(30, (session.wakes?.day || 0) + 1), total: (session.wakes?.total || 0) + 1 };
+      saveSessions();
+      sessionEmit({ id: session.id, turnId: sent.turnId, kind: 'wake', from, subject, messageId, messageKind: 'question', wakes: session.wakes });
+    } catch { /* queue full: try again next time */ }
+  }
+}
+
+const slug = cwd => String(cwd || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '') || 'project';
 const sessionHandlers = {
   session_list: () => ({ sessions: sessions().sessions }),
   session_start: ({ args = {} }) => {
     if (!['claude', 'codex'].includes(args.provider)) throw new Error('provider must be claude or codex.');
     if (!args.cwd) throw new Error('cwd must be the project folder.');
     const at = Date.now();
-    const session = { id: `s_${hex(8)}`, provider: args.provider, projectId: args.projectId || args.cwd, cwd: args.cwd, title: args.title || `${agentName(args.provider)} chat`, access: args.access === 'full' ? 'full' : 'read', threadId: null, providerSessionId: null, status: 'idle', createdAt: at, lastActivityAt: at, shared: Boolean(args.sharedId), sharedId: args.sharedId || null, playwright: Boolean(args.playwright) };
+    const session = { id: `s_${hex(8)}`, provider: args.provider, projectId: args.projectId || args.cwd, cwd: args.cwd, title: args.title || `${agentName(args.provider)} chat`, access: args.access === 'full' ? 'full' : 'read', threadId: null, providerSessionId: null, status: 'idle', createdAt: at, lastActivityAt: at, shared: Boolean(args.sharedId), sharedId: args.sharedId || null, playwright: Boolean(args.playwright), wake: false, mailboxAddress: null, wakes: { hour: 0, day: 0, total: 0 } };
     sessions().sessions.push(session);
     saveSessions();
     return { session };
   },
-  session_send: ({ id, text = '', attachments = [] }) => {
-    const session = findSession(id);
-    if (sessionTurns.has(id)) throw new Error('This agent is still replying. Stop it or wait for it to finish.');
-    if (!String(text).trim() && !attachments.length) throw new Error('Type a message first.');
-    const turnId = `t_${hex(6)}`;
-    if (!session.providerSessionId) {
-      session.providerSessionId = session.provider === 'claude' ? `${hex(4)}-${hex(2)}-4${hex(2).slice(1)}-a${hex(2).slice(1)}-${hex(6)}` : `thread-${hex(8)}`;
-      if (session.provider === 'codex') session.threadId = session.providerSessionId;
-    }
-    sessionEmit({ id, turnId, kind: 'user', text, attachments });
-    sessionStatus(session, 'running');
-    const reply = `Preview ${agentName(session.provider)} (${session.access} access) heard:\n\n> ${String(text).split('\n').join('\n> ')}\n\nNothing ran; this is **mock** data.`;
-    const chunks = reply.match(/[\s\S]{1,12}/g) || [];
-    const timers = [];
-    const later = (ms, fn) => timers.push(setTimeout(fn, ms));
-    later(300, () => sessionEmit({ id, turnId, kind: 'tool', tool: session.provider === 'claude' ? { name: 'Read', summary: `${session.cwd}\\README.md` } : { name: 'shell', summary: 'Get-ChildItem' } }));
-    chunks.forEach((chunk, i) => later(500 + i * 50, () => sessionEmit({ id, turnId, kind: 'delta', text: chunk })));
-    const end = 550 + chunks.length * 50;
-    later(end, () => sessionEmit({ id, turnId, kind: 'message', text: reply }));
-    later(end + 40, () => { sessionTurns.delete(id); sessionEmit({ id, turnId, kind: 'done', status: 'completed' }); sessionStatus(session, 'idle'); });
-    sessionTurns.set(id, { timers, turnId });
-    return { accepted: true, turnId };
-  },
+  session_send: ({ id, text = '', attachments = [] }) => submit(id, text, attachments),
   session_stop: ({ id }) => {
-    const session = findSession(id), turn = sessionTurns.get(id);
-    if (turn) {
-      turn.timers.forEach(clearTimeout);
-      sessionTurns.delete(id);
-      sessionEmit({ id, turnId: turn.turnId, kind: 'done', status: 'interrupted' });
-      sessionStatus(session, 'idle');
-    }
+    const session = findSession(id);
+    if (sessionTurns.has(id)) finishTurn(session, 'interrupted');
     return { stopped: true };
   },
-  session_close: ({ id }) => { sessionHandlers.session_stop({ id }); sessionStatus(findSession(id), 'stopped'); return { closed: true }; },
+  session_close: ({ id }) => {
+    const session = findSession(id);
+    const dropped = sessionQueues.get(id) || [];
+    sessionQueues.delete(id);
+    session.status = 'stopped';
+    if (sessionTurns.has(id)) finishTurn(session, 'interrupted');
+    for (const item of dropped) {
+      sessionEmit({ id, turnId: item.turnId, kind: 'done', status: 'cancelled' }, false);
+      if (item.origin?.kind === 'schedule') scheduleFinished(item.origin.scheduleId, item.turnId, 'cancelled');
+    }
+    if (dropped.length) queuedEvent(id, 0);
+    sessionStatus(session, 'stopped');
+    return { closed: true };
+  },
   session_history: ({ id, limit = 500 }) => { findSession(id); return { events: (sessions().logs[id] || []).slice(-limit) }; },
+  session_set_wake: ({ id, on }) => {
+    const session = findSession(id);
+    if (on && sessions().sessions.filter(s => s.wake && s.id !== id).length >= 5) throw new Error('At most 5 sessions can wake on mail. Turn it off in another session first.');
+    if (on && !session.mailboxAddress) session.mailboxAddress = `${session.provider}-${slug(session.cwd)}-${hex(2)}`;
+    session.wake = Boolean(on);
+    saveSessions();
+    sessionEmit({ id, kind: 'status', status: session.status });
+    return { session };
+  },
+  wake_settings_get: () => ({ enabled: sessions().wakeEnabled !== false }),
+  wake_settings_set: ({ enabled }) => { sessions().wakeEnabled = Boolean(enabled); saveSessions(); return { enabled: Boolean(enabled) }; },
+};
+
+/* Mock schedules (localStorage mock.schedules). Due checks run every 10 s; a run reuses one dedicated session. */
+let scheduleStore = null;
+function schedules() {
+  if (scheduleStore) return scheduleStore;
+  try { scheduleStore = JSON.parse(localStorage.getItem(SCHEDULES_KEY) || 'null'); } catch { scheduleStore = null; }
+  scheduleStore ||= { schedules: [], runs: {} };
+  // A run missed while the preview was closed: catchUp runs it once on the next tick, otherwise skip it.
+  const at = Date.now();
+  for (const s of scheduleStore.schedules) if (s.enabled && s.nextRunAt && s.nextRunAt <= at && !s.catchUp) s.nextRunAt = nextRun(s.cadence, at);
+  return scheduleStore;
+}
+const saveSchedules = () => { try { localStorage.setItem(SCHEDULES_KEY, JSON.stringify(schedules())); } catch { /* preview only */ } };
+const scheduleEmit = (id, kind, run) => { for (const cb of scheduleListeners) { try { cb(structuredClone({ id, kind, run })); } catch (error) { console.error(error); } } };
+function findSchedule(id) {
+  const schedule = schedules().schedules.find(s => s.id === id);
+  if (!schedule) throw new Error('That schedule no longer exists.');
+  return schedule;
+}
+function nextRun(cadence, after) {
+  if (cadence.kind === 'interval') return after + cadence.minutes * 60e3;
+  const [h, m] = cadence.time.split(':').map(Number);
+  for (let offset = 0; offset <= 7; offset++) {
+    const d = new Date(after);
+    d.setDate(d.getDate() + offset);
+    d.setHours(h, m, 0, 0);
+    if ((!cadence.days.length || cadence.days.includes(d.getDay())) && d.getTime() > after) return d.getTime();
+  }
+  return null;
+}
+function parseCadence(c = {}) {
+  if (c.kind === 'interval') {
+    const minutes = Number(c.minutes);
+    if (!Number.isInteger(minutes) || minutes < 15 || minutes > 10080) throw new Error('An interval must be 15 to 10080 minutes.');
+    return { kind: 'interval', minutes };
+  }
+  if (c.kind === 'daily') {
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(c.time || ''))) throw new Error('A daily time must be HH:MM (24-hour).');
+    const days = [...new Set(Array.isArray(c.days) ? c.days : [])];
+    if (days.some(d => !Number.isInteger(d) || d < 0 || d > 6)) throw new Error('Days must be 0 (Sunday) to 6 (Saturday).');
+    return { kind: 'daily', time: c.time, days: days.sort((a, b) => a - b) };
+  }
+  throw new Error('cadence.kind must be interval or daily.');
+}
+function appendRun(id, run) {
+  const runs = (schedules().runs[id] ||= []);
+  runs.push(run);
+  if (runs.length > 500) runs.splice(0, runs.length - 500);
+  saveSchedules();
+}
+function scheduleFinished(id, turnId, status) {
+  const run = (schedules().runs[id] || []).findLast(r => r.turnId === turnId);
+  if (!run) return;
+  Object.assign(run, { status: status === 'completed' ? 'done' : 'error', endedAt: Date.now(), ...(status === 'completed' ? {} : { error: `The turn ended: ${status}.` }) });
+  saveSchedules();
+  scheduleEmit(id, run.status === 'done' ? 'run' : 'error', run);
+}
+function fireSchedule(id, trigger) {
+  const schedule = findSchedule(id), at = Date.now();
+  schedule.lastRunAt = at;
+  if (trigger !== 'manual' || !schedule.nextRunAt) schedule.nextRunAt = schedule.enabled ? nextRun(schedule.cadence, at) : null;
+  if (!schedule.sessionId || !sessions().sessions.some(s => s.id === schedule.sessionId)) {
+    schedule.sessionId = sessionHandlers.session_start({ args: { provider: schedule.provider, projectId: schedule.projectId, cwd: schedule.cwd, access: schedule.access || 'full', title: `${schedule.name} (scheduled)` } }).session.id;
+  }
+  saveSchedules();
+  // Record the run before the turn can end, as the engine does.
+  const origin = { kind: 'schedule', scheduleId: id, name: schedule.name, trigger };
+  let run;
+  try {
+    if (trigger !== 'manual' && (sessionTurns.has(schedule.sessionId) || sessionQueues.get(schedule.sessionId)?.length)) throw new Error('Skipped: the session was still working on an earlier turn.');
+    const sent = submit(schedule.sessionId, schedule.prompt, [], origin);
+    run = { at, status: 'sent', sessionId: schedule.sessionId, turnId: sent.turnId, trigger };
+  } catch (error) {
+    run = { at, status: 'error', sessionId: schedule.sessionId, turnId: null, trigger, error: error.message };
+  }
+  appendRun(id, run);
+  scheduleEmit(id, run.status === 'error' ? 'error' : 'run', run);
+  return run;
+}
+function mockScheduleTick() {
+  if (!scheduleStore) return;
+  const at = Date.now();
+  for (const s of scheduleStore.schedules) if (s.enabled && s.nextRunAt && s.nextRunAt <= at) fireSchedule(s.id, at - s.nextRunAt > 20e3 ? 'catch-up' : 'timer');
+}
+let mockTimers = false;
+/** Fake wakes every 30 s and schedule due checks every 10 s, started once by createMock(). */
+function startMockTimers() {
+  if (mockTimers) return;
+  mockTimers = true;
+  setInterval(mockWakeTick, 30e3);
+  setInterval(mockScheduleTick, 10e3);
+}
+const scheduleHandlers = {
+  schedule_list: () => ({ schedules: schedules().schedules }),
+  schedule_save: ({ schedule: input = {} }) => {
+    const name = String(input.name || '').trim();
+    if (!name) throw new Error('Give the schedule a name.');
+    if (!['claude', 'codex'].includes(input.provider)) throw new Error('provider must be claude or codex.');
+    if (!String(input.cwd || '').trim()) throw new Error('cwd must be the project folder.');
+    if (!String(input.prompt || '').trim()) throw new Error('Write the prompt the schedule sends.');
+    const cadence = parseCadence(input.cadence), enabled = input.enabled !== false, at = Date.now();
+    const fields = { name, provider: input.provider, cwd: input.cwd, projectId: input.projectId || input.cwd, prompt: input.prompt, cadence, enabled, catchUp: Boolean(input.catchUp), ...(input.access === 'read' || input.access === 'full' ? { access: input.access } : {}) };
+    if (input.id) {
+      const existing = findSchedule(input.id);
+      if (existing.provider !== fields.provider || existing.cwd !== fields.cwd) existing.sessionId = null;
+      const retime = JSON.stringify(existing.cadence) !== JSON.stringify(cadence) || !existing.enabled || !existing.nextRunAt;
+      Object.assign(existing, fields);
+      existing.nextRunAt = !enabled ? null : retime ? nextRun(cadence, at) : existing.nextRunAt;
+      saveSchedules();
+      return { schedule: existing };
+    }
+    if (schedules().schedules.length >= 50) throw new Error('CodaClauda keeps at most 50 schedules.');
+    const schedule = { id: `sch_${hex(4)}`, ...fields, lastRunAt: null, nextRunAt: enabled ? nextRun(cadence, at) : null, sessionId: null, createdAt: at };
+    schedules().schedules.push(schedule);
+    saveSchedules();
+    return { schedule };
+  },
+  schedule_delete: ({ id }) => {
+    findSchedule(id);
+    schedules().schedules = schedules().schedules.filter(s => s.id !== id);
+    delete schedules().runs[id];
+    saveSchedules();
+    return { deleted: true };
+  },
+  schedule_run_now: ({ id }) => ({ run: fireSchedule(id, 'manual') }),
+  schedule_runs: ({ id, limit = 50 }) => { findSchedule(id); return { runs: (schedules().runs[id] || []).slice(-Math.min(500, Math.max(1, limit))).reverse() }; },
 };
 
 const desktopHandlers = {
   ...sessionHandlers,
+  ...scheduleHandlers,
   desktop_paths:() => ({ state_dir: 'C:\\mock\\board', ui_dir: 'C:\\mock\\board\\desktop-ui', attachments_dir: 'C:\\mock\\board\\desktop-ui\\attachments', manifest_path: 'C:\\mock\\board\\desktop-ui\\projects.manifest.json', desktop_dir: 'C:\\Users\\Ben\\Desktop' }),
   desktop_state_load: () => ({ state: JSON.parse(localStorage.getItem('mock.desktop') || 'null') }),
   desktop_state_save: ({ state }) => { localStorage.setItem('mock.desktop', JSON.stringify(state)); return { saved_at: now() }; },
@@ -312,6 +527,7 @@ const desktopHandlers = {
 
 export function createMock() {
   simulateJoins();
+  startMockTimers();
   return {
     async invoke(command, args = {}) {
       await new Promise(r => setTimeout(r, 40));
@@ -326,11 +542,14 @@ export function createMock() {
         return { ok: true, data: structuredClone(fn(args)) };
       } catch (error) { return { ok: false, error: { code: 'MOCK_ERROR', message: error.message } }; }
     },
-    /** Mirrors Tauri's event listen for 'session://event'; returns an unlisten function. */
+    /** Mirrors Tauri's event listen for 'session://event' and 'schedule://event'; returns an unlisten function. */
     listen(event, cb) {
-      if (event !== 'session://event') return () => {};
-      sessionListeners.add(cb);
-      return () => sessionListeners.delete(cb);
+      const listeners = event === 'session://event' ? sessionListeners : event === 'schedule://event' ? scheduleListeners : null;
+      if (!listeners) return () => {};
+      if (event === 'session://event') sessions(); // loads the store, so fake wakes can start
+      else schedules(); // loads the store, so due schedules run
+      listeners.add(cb);
+      return () => listeners.delete(cb);
     },
   };
 }

@@ -5,6 +5,13 @@
 //! (`sessions/<id>.jsonl`) next to `ui-state.json`. API-key variables are
 //! stripped from every launch so billing stays on the subscriptions, and no
 //! credential is read, printed or written.
+//!
+//! 0.4.1 adds a per-session send queue (owner turns, wakes and scheduled runs
+//! wait their turn), wake on mail (`wake.rs`) and in-app schedules
+//! (`schedule.rs`); both reuse the one send path below.
+
+pub(crate) mod schedule;
+pub(crate) mod wake;
 
 use crate::session_parse::{self, Out};
 use crate::{board, error};
@@ -12,13 +19,13 @@ use coord_core::adapters::{self, OwnedProcess};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -41,6 +48,8 @@ const TEXT_LIMIT: usize = 256 * 1024;
 const STDERR_TAIL: usize = 4096;
 const HISTORY_DEFAULT: u64 = 500;
 const HISTORY_MAX: u64 = 5000;
+/// Turns that may wait behind the current one, per session.
+const QUEUE_MAX: usize = 10;
 /// Registry `latest` on 2026-10-20 (GET registry.npmjs.org/@playwright/mcp/latest).
 const PLAYWRIGHT_MCP: &str = "@playwright/mcp@0.0.83";
 /// Removed from every launch environment (coord-core already strips these and more).
@@ -182,6 +191,23 @@ struct Record {
     effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     turn_id: Option<String>,
+    /// Wake on mail (0.4.1): opt-in, off by default.
+    #[serde(default)]
+    wake: bool,
+    /// This session's own board address, kept once assigned.
+    #[serde(default)]
+    mailbox_address: Option<String>,
+    #[serde(default)]
+    wakes: Wakes,
+}
+
+/// Wake counters shown in the UI: rolling hour and day, and all time.
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(default)]
+struct Wakes {
+    hour: u32,
+    day: u32,
+    total: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -242,6 +268,34 @@ struct Turn {
     id: String,
     provider_turn: Option<String>,
     stopping: bool,
+    /// Null for an owner turn; {kind:'wake'|'schedule', ...} otherwise.
+    origin: Value,
+}
+
+/// A turn waiting in a session's send queue (or about to start).
+struct Queued {
+    turn_id: String,
+    text: String,
+    attachments: Vec<Attachment>,
+    origin: Value,
+}
+
+impl Queued {
+    fn new(text: String, attachments: Vec<Attachment>, origin: Value) -> Self {
+        Self {
+            turn_id: format!("t_{}", random_hex(6)),
+            text,
+            attachments,
+            origin,
+        }
+    }
+}
+
+/// A turn taken from the queue, ready to be delivered.
+struct Started {
+    record: Record,
+    proc: Option<Arc<Proc>>,
+    item: Queued,
 }
 
 #[derive(Default)]
@@ -249,15 +303,21 @@ struct State {
     records: Vec<Record>,
     live: HashMap<String, Live>,
     turns: HashMap<String, Turn>,
+    queues: HashMap<String, VecDeque<Queued>>,
 }
 
 struct Inner {
+    me: Weak<Inner>,
     app: tauri::AppHandle,
     dir: PathBuf,
+    board_dir: PathBuf,
     state: Mutex<State>,
     executables: Mutex<HashMap<Provider, PathBuf>>,
     log_lock: Mutex<()>,
     generation: AtomicU64,
+    wake: Mutex<wake::Book>,
+    schedules: Mutex<Vec<schedule::Schedule>>,
+    run_lock: Mutex<()>,
 }
 
 /// Tauri-managed handle to the session engine.
@@ -267,15 +327,22 @@ pub(crate) struct SessionHost {
 
 impl SessionHost {
     pub(crate) fn new(app: tauri::AppHandle, board: &board::BoardBinding) -> Self {
-        let inner = Arc::new(Inner {
+        let inner = Arc::new_cyclic(|me| Inner {
+            me: me.clone(),
             app,
             dir: crate::desktop::ui_dir(board),
+            board_dir: board.state_dir().to_owned(),
             state: Mutex::new(State::default()),
             executables: Mutex::new(HashMap::new()),
             log_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
+            wake: Mutex::new(wake::Book::default()),
+            schedules: Mutex::new(Vec::new()),
+            run_lock: Mutex::new(()),
         });
         inner.load();
+        inner.load_wake();
+        inner.load_schedules();
         let reaper = inner.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -283,6 +350,8 @@ impl SessionHost {
                 reaper.reap_idle();
             }
         });
+        wake::spawn_watcher(inner.clone());
+        schedule::spawn_ticker(inner.clone());
         Self { inner }
     }
 }
@@ -472,7 +541,8 @@ impl Inner {
             self.save(&state);
             (turn, status.to_owned(), shown)
         };
-        if let Some(message) = failure.filter(|_| status != "interrupted") {
+        let failure = failure.filter(|_| status != "interrupted");
+        if let Some(message) = &failure {
             self.publish(
                 event(id, Some(&turn.id), "error", json!({"error": message})),
                 true,
@@ -483,6 +553,13 @@ impl Inner {
             true,
         );
         self.publish(event(id, None, "status", json!({"status": shown})), false);
+        if turn.origin["kind"] == "schedule" {
+            self.schedule_finished(&turn.origin, &turn.id, &status, failure.as_deref());
+        }
+        // Each 'done' releases the next queued turn, in order.
+        if let Some(me) = self.me.upgrade() {
+            me.start_next(id);
+        }
         true
     }
 
@@ -922,6 +999,9 @@ impl Inner {
             model,
             effort,
             turn_id: None,
+            wake: false,
+            mailbox_address: None,
+            wakes: Wakes::default(),
         };
         {
             let mut state = lock(&self.state);
@@ -931,79 +1011,139 @@ impl Inner {
         Ok(json!({"session": record}))
     }
 
-    fn send(
-        self: &Arc<Self>,
-        id: String,
-        text: String,
-        attachments: Vec<Attachment>,
-    ) -> Result<Value, Failure> {
-        if text.trim().is_empty() && attachments.is_empty() {
+    /// Owner sends, wakes and scheduled runs all come through here. A busy
+    /// session queues the turn (at most QUEUE_MAX waiting) instead of refusing.
+    fn submit(self: &Arc<Self>, id: &str, item: Queued) -> Result<Value, Failure> {
+        if item.text.trim().is_empty() && item.attachments.is_empty() {
             return Err(("INVALID_ARGUMENTS", "Type a message first.".into()));
         }
-        if text.len() > TEXT_LIMIT || attachments.len() > 20 {
+        if item.text.len() > TEXT_LIMIT || item.attachments.len() > 20 {
             return Err((
                 "INPUT_TOO_LARGE",
                 "The message or its attachment list is too large.".into(),
             ));
         }
-        if attachments.iter().any(|a| !Path::new(&a.path).is_absolute()) {
+        if item.attachments.iter().any(|a| !Path::new(&a.path).is_absolute()) {
             return Err(("INVALID_ARGUMENTS", "Attachments need absolute paths.".into()));
         }
-        let turn_id = format!("t_{}", random_hex(6));
-        let (record, proc) = {
+        let turn_id = item.turn_id.clone();
+        let (started, waiting) = {
             let mut state = lock(&self.state);
-            if state.turns.contains_key(&id) {
+            if !state.records.iter().any(|r| r.id == id) {
+                return Err(("SESSION_NOT_FOUND", "That chat no longer exists.".into()));
+            }
+            let queue = state.queues.entry(id.to_owned()).or_default();
+            if queue.len() >= QUEUE_MAX {
                 return Err((
-                    "SESSION_BUSY",
-                    "This agent is still replying. Stop it or wait for it to finish.".into(),
+                    "QUEUE_FULL",
+                    format!("{QUEUE_MAX} messages are already waiting for this agent. Let it catch up or stop it, then send again."),
                 ));
             }
-            let Some(record) = state.records.iter_mut().find(|r| r.id == id) else {
-                return Err(("SESSION_NOT_FOUND", "That chat no longer exists.".into()));
-            };
-            record.status = "running".into();
-            record.turn_id = Some(turn_id.clone());
-            record.last_activity_at = now_ms();
-            let record = record.clone();
-            state.turns.insert(
-                id.clone(),
-                Turn {
-                    id: turn_id.clone(),
-                    provider_turn: None,
-                    stopping: false,
-                },
-            );
-            let proc = state.live.get_mut(&id).map(|live| {
-                live.last_used = Instant::now();
-                live.proc.clone()
-            });
-            self.save(&state);
-            (record, proc)
+            queue.push_back(item);
+            let started = self.take_next(&mut state, id);
+            (started, self.waiting(&mut state, id))
         };
+        let queued = started.is_none();
+        if let Some(started) = started {
+            self.run_turn(started);
+        }
+        if queued {
+            self.publish_queued(id, waiting);
+        }
+        Ok(json!({"accepted": true, "turnId": turn_id, "queued": waiting}))
+    }
+
+    /// Turns still waiting for this session (and forgets an empty queue).
+    fn waiting(&self, state: &mut State, id: &str) -> usize {
+        let count = state.queues.get(id).map_or(0, VecDeque::len);
+        if count == 0 {
+            state.queues.remove(id);
+        }
+        count
+    }
+
+    fn publish_queued(&self, id: &str, count: usize) {
         self.publish(
             event(
-                &id,
-                Some(&turn_id),
-                "user",
-                json!({"text": text, "attachments": attachments}),
+                id,
+                None,
+                "queued",
+                json!({"count": count, "status": format!("queued ({count})")}),
             ),
-            true,
+            false,
         );
+    }
+
+    /// Moves the next queued turn to running when the session is free.
+    fn take_next(&self, state: &mut State, id: &str) -> Option<Started> {
+        if state.turns.contains_key(id) {
+            return None;
+        }
+        let item = state.queues.get_mut(id)?.pop_front()?;
+        let Some(record) = state.records.iter_mut().find(|r| r.id == id) else {
+            state.queues.remove(id);
+            return None;
+        };
+        record.status = "running".into();
+        record.turn_id = Some(item.turn_id.clone());
+        record.last_activity_at = now_ms();
+        let record = record.clone();
+        state.turns.insert(
+            id.to_owned(),
+            Turn {
+                id: item.turn_id.clone(),
+                provider_turn: None,
+                stopping: false,
+                origin: item.origin.clone(),
+            },
+        );
+        let proc = state.live.get_mut(id).map(|live| {
+            live.last_used = Instant::now();
+            live.proc.clone()
+        });
+        self.save(state);
+        Some(Started { record, proc, item })
+    }
+
+    /// Called after every 'done': starts the next queued turn, if any.
+    fn start_next(self: &Arc<Self>, id: &str) {
+        let (started, waiting) = {
+            let mut state = lock(&self.state);
+            let started = self.take_next(&mut state, id);
+            (started, self.waiting(&mut state, id))
+        };
+        if let Some(started) = started {
+            self.run_turn(started);
+            self.publish_queued(id, waiting);
+        }
+    }
+
+    fn run_turn(self: &Arc<Self>, started: Started) {
+        let Started { record, proc, item } = started;
+        let Queued {
+            turn_id,
+            text,
+            attachments,
+            origin,
+        } = item;
+        let mut user = json!({"text": text, "attachments": attachments});
+        if !origin.is_null() {
+            user["origin"] = origin;
+        }
+        self.publish(event(&record.id, Some(&turn_id), "user", user), true);
         self.publish(
-            event(&id, Some(&turn_id), "status", json!({"status": "running"})),
+            event(&record.id, Some(&turn_id), "status", json!({"status": "running"})),
             false,
         );
         let inner = self.clone();
-        let turn = turn_id.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(message) = inner
-                .deliver(&record, proc, &turn, &text, &attachments)
+                .deliver(&record, proc, &turn_id, &text, &attachments)
                 .await
             {
-                inner.finish_turn(&record.id, Some(&turn), "failed", Some(message), "error");
+                inner.finish_turn(&record.id, Some(&turn_id), "failed", Some(message), "error");
             }
         });
-        Ok(json!({"accepted": true, "turnId": turn_id}))
     }
 
     async fn deliver(
@@ -1118,7 +1258,7 @@ impl Inner {
     }
 
     fn close(&self, id: &str) -> Result<Value, Failure> {
-        let (live, turn) = {
+        let (live, turn, dropped) = {
             let mut state = lock(&self.state);
             let Some(record) = state.records.iter_mut().find(|r| r.id == id) else {
                 return Err(("SESSION_NOT_FOUND", "That chat no longer exists.".into()));
@@ -1127,14 +1267,31 @@ impl Inner {
             record.turn_id = None;
             let live = state.live.remove(id);
             let turn = state.turns.remove(id);
+            let dropped = state.queues.remove(id).unwrap_or_default();
             self.save(&state);
-            (live, turn)
+            (live, turn, dropped)
         };
         if let Some(turn) = turn {
             self.publish(
                 event(id, Some(&turn.id), "done", json!({"status": "interrupted"})),
                 true,
             );
+            if turn.origin["kind"] == "schedule" {
+                self.schedule_finished(&turn.origin, &turn.id, "interrupted", None);
+            }
+        }
+        if !dropped.is_empty() {
+            // Queued turns never started: tell the UI so their pending bubbles settle.
+            for item in &dropped {
+                self.publish(
+                    event(id, Some(&item.turn_id), "done", json!({"status": "cancelled"})),
+                    false,
+                );
+                if item.origin["kind"] == "schedule" {
+                    self.schedule_finished(&item.origin, &item.turn_id, "cancelled", None);
+                }
+            }
+            self.publish_queued(id, 0);
         }
         self.publish(event(id, None, "status", json!({"status": "stopped"})), false);
         if let Some(live) = live {
@@ -1503,7 +1660,8 @@ pub(crate) async fn session_send(
     attachments: Option<Vec<Attachment>>,
 ) -> Value {
     let inner = host(&app);
-    reply(inner.send(id, text, attachments.unwrap_or_default()))
+    let item = Queued::new(text, attachments.unwrap_or_default(), Value::Null);
+    reply(inner.submit(&id, item))
 }
 
 #[tauri::command]
@@ -1549,6 +1707,9 @@ mod tests {
             model: None,
             effort: None,
             turn_id: None,
+            wake: false,
+            mailbox_address: None,
+            wakes: Wakes::default(),
         }
     }
 

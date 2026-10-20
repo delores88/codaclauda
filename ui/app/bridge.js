@@ -65,7 +65,9 @@ export const desktop = {
   sessionList: () => invoke('session_list'),
   /** { provider:'claude'|'codex', projectId, cwd, access:'full'|'read', title, playwright, model?, effort?, sharedId? } → { session } */
   sessionStart: options => invoke('session_start', { args: options || {} }),
-  /** → { accepted: true, turnId }. Replies stream on desktop.onSessionEvent. */
+  /** → { accepted: true, turnId, queued }. A busy session queues the turn (at most 10 waiting; queued = how many wait,
+   *  0 when it started now) and emits kind 'queued' { count }. The 'user' event arrives when the turn starts.
+   *  Replies stream on desktop.onSessionEvent. */
   sessionSend: ({ id, text = '', attachments = [] }) => invoke('session_send', { id, text, attachments }),
   /** Interrupts the current turn; the session stays resumable → { stopped: true } */
   sessionStop: arg => invoke('session_stop', { id: sessionId(arg) }),
@@ -73,11 +75,40 @@ export const desktop = {
   sessionClose: arg => invoke('session_close', { id: sessionId(arg) }),
   /** Display log → { events: [...] } */
   sessionHistory: arg => invoke('session_history', arg?.limit == null ? { id: sessionId(arg) } : { id: sessionId(arg), limit: arg.limit }),
-  /** cb(payload) for every 'session://event' ({ id, turnId, kind, text?, tool?, status?, error?, at }). Resolves to an unlisten function. */
-  onSessionEvent: async cb => {
-    const events = window.__TAURI__?.event;
-    if (tauri() && events?.listen) return events.listen('session://event', event => cb(event.payload));
-    const api = await backend();
-    return api.listen ? api.listen('session://event', cb) : () => {};
-  },
+  /** cb(payload) for every 'session://event' ({ id, turnId, kind, text?, tool?, status?, error?, at }). Resolves to an unlisten function.
+   *  0.4.1 kinds: 'wake' { from, subject, messageId, messageKind, wakes } and 'queued' { count, status: 'queued (n)' }.
+   *  A 'user' event for a wake or scheduled turn carries origin { kind: 'wake'|'schedule', ... }; owner turns have none. */
+  onSessionEvent: cb => listenTo('session://event', cb),
+
+  /* 0.4.1 wake on mail (src-tauri/src/session_host/wake.rs). Records gain wake, mailboxAddress|null, wakes { hour, day, total }. */
+  /** Turns wake on mail on or off for one session (on: registers its board address) → { session } */
+  sessionSetWake: ({ id, on }) => invoke('session_set_wake', { id, on: Boolean(on) }),
+  /** Global kill switch → { enabled } */
+  wakeSettingsGet: () => invoke('wake_settings_get'),
+  /** Accepts { enabled } or a boolean → { enabled } */
+  wakeSettingsSet: arg => invoke('wake_settings_set', { enabled: Boolean(arg && typeof arg === 'object' ? arg.enabled : arg) }),
+
+  /* 0.4.1 scheduled tasks (src-tauri/src/session_host/schedule.rs); they run only while the app is open.
+   * Schedule: { id, name, projectId, cwd, provider, prompt, cadence, enabled, catchUp, lastRunAt, nextRunAt, sessionId, access? }
+   * cadence: { kind:'interval', minutes >= 15 } | { kind:'daily', time:'HH:MM', days:[0-6] } (0 = Sunday; [] = every day).
+   * Run: { at, status:'sent'|'done'|'error', sessionId, turnId, trigger:'timer'|'catch-up'|'manual', endedAt?, error? } */
+  /** → { schedules: [...] } */
+  scheduleList: () => invoke('schedule_list'),
+  /** Creates when there is no id, else updates → { schedule } */
+  scheduleSave: schedule => invoke('schedule_save', { schedule: schedule || {} }),
+  /** → { deleted: true } */
+  scheduleDelete: arg => invoke('schedule_delete', { id: sessionId(arg) }),
+  /** Runs once now, whatever the cadence → { run } */
+  scheduleRunNow: arg => invoke('schedule_run_now', { id: sessionId(arg) }),
+  /** Newest first → { runs: [...] } */
+  scheduleRuns: arg => invoke('schedule_runs', arg?.limit == null ? { id: sessionId(arg) } : { id: sessionId(arg), limit: arg.limit }),
+  /** cb(payload) for every 'schedule://event' ({ id, kind: 'run'|'error', run }). Resolves to an unlisten function. */
+  onScheduleEvent: cb => listenTo('schedule://event', cb),
 };
+
+async function listenTo(name, cb) {
+  const events = window.__TAURI__?.event;
+  if (tauri() && events?.listen) return events.listen(name, event => cb(event.payload));
+  const api = await backend();
+  return api.listen ? api.listen(name, cb) : () => {};
+}

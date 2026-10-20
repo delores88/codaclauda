@@ -445,7 +445,15 @@ fn main() {
             session_host::session_send,
             session_host::session_stop,
             session_host::session_close,
-            session_host::session_history
+            session_host::session_history,
+            session_host::wake::session_set_wake,
+            session_host::wake::wake_settings_get,
+            session_host::wake::wake_settings_set,
+            session_host::schedule::schedule_list,
+            session_host::schedule::schedule_save,
+            session_host::schedule::schedule_delete,
+            session_host::schedule::schedule_run_now,
+            session_host::schedule::schedule_runs
         ])
         .run(tauri::generate_context!());
     if let Err(error) = result {
