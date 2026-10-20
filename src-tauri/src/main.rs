@@ -2,6 +2,8 @@
 
 mod board;
 mod desktop;
+mod session_host;
+mod session_parse;
 mod update_helper;
 mod update_storage;
 mod update_verify;
@@ -400,7 +402,9 @@ fn main() {
             })
             .map_err(std::io::Error::other)?;
             update_storage::initialize(&binding).map_err(std::io::Error::other)?;
+            let sessions = session_host::SessionHost::new(app.handle().clone(), &binding);
             app.manage(binding);
+            app.manage(sessions);
             update_helper::confirm_launch();
             #[cfg(windows)]
             {
@@ -435,7 +439,13 @@ fn main() {
             desktop::window_attention,
             desktop::open_external,
             weather::weather_now,
-            weather::geocode_place
+            weather::geocode_place,
+            session_host::session_list,
+            session_host::session_start,
+            session_host::session_send,
+            session_host::session_stop,
+            session_host::session_close,
+            session_host::session_history
         ])
         .run(tauri::generate_context!());
     if let Err(error) = result {

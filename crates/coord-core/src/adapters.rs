@@ -88,7 +88,7 @@ pub fn spawn_worker(
     }
 }
 
-fn subscription_environment() -> BTreeMap<OsString, OsString> {
+pub fn subscription_environment() -> BTreeMap<OsString, OsString> {
     // Never inspect credential values. Provider-owned saved authentication stays in place.
     std::env::vars_os()
         .filter(|(key, _)| {
@@ -964,7 +964,7 @@ fn capture(exe: &Path, args: &[OsString], cwd: &Path, timeout: u64) -> Result<Ca
 }
 
 #[cfg(windows)]
-use win::OwnedProcess;
+pub use win::OwnedProcess;
 
 #[cfg(windows)]
 mod win {
@@ -1114,15 +1114,18 @@ mod win {
         }
     }
 
-    pub(super) struct OwnedProcess {
+    /// A provider process contained in its own kill-on-close job object.
+    pub struct OwnedProcess {
         process: Handle,
         job: Handle,
-        pub(super) stdin: Option<File>,
-        pub(super) stdout: Option<File>,
-        pub(super) stderr: Option<File>,
+        pub stdin: Option<File>,
+        pub stdout: Option<File>,
+        pub stderr: Option<File>,
     }
+    // Plain owned kernel handles; moving them between threads is sound.
+    unsafe impl Send for OwnedProcess {}
     impl OwnedProcess {
-        pub(super) fn spawn(
+        pub fn spawn(
             exe: &Path,
             args: &[OsString],
             cwd: &Path,
@@ -1248,7 +1251,7 @@ mod win {
                 })
             }
         }
-        pub(super) fn try_wait(&mut self) -> Result<Option<i32>> {
+        pub fn try_wait(&mut self) -> Result<Option<i32>> {
             unsafe {
                 match WaitForSingleObject(self.process.0, 0) {
                     WAIT_TIMEOUT => Ok(None),
@@ -1264,7 +1267,7 @@ mod win {
                 }
             }
         }
-        pub(super) fn terminate(&mut self) -> Result<()> {
+        pub fn terminate(&mut self) -> Result<()> {
             unsafe {
                 if TerminateJobObject(self.job.0, 1) == 0 {
                     return Err(std::io::Error::last_os_error()).context("stop owned request job");
@@ -1473,20 +1476,25 @@ mod win {
 
 // Containment is a supported Windows capability; fail closed on other hosts.
 #[cfg(not(windows))]
-struct OwnedProcess {
-    stdin: Option<File>,
-    stdout: Option<File>,
-    stderr: Option<File>,
+pub struct OwnedProcess {
+    pub stdin: Option<File>,
+    pub stdout: Option<File>,
+    pub stderr: Option<File>,
 }
 #[cfg(not(windows))]
 impl OwnedProcess {
-    fn spawn(_: &Path, _: &[OsString], _: &Path, _: &BTreeMap<OsString, OsString>) -> Result<Self> {
+    pub fn spawn(
+        _: &Path,
+        _: &[OsString],
+        _: &Path,
+        _: &BTreeMap<OsString, OsString>,
+    ) -> Result<Self> {
         bail!("new-session-v1 process containment is supported on Windows only");
     }
-    fn try_wait(&mut self) -> Result<Option<i32>> {
+    pub fn try_wait(&mut self) -> Result<Option<i32>> {
         bail!("unsupported host");
     }
-    fn terminate(&mut self) -> Result<()> {
+    pub fn terminate(&mut self) -> Result<()> {
         bail!("unsupported host");
     }
 }

@@ -149,7 +149,7 @@ fn unix_seconds() -> u64 {
         .unwrap_or(0)
 }
 
-fn ui_dir(board: &board::BoardBinding) -> PathBuf {
+pub(crate) fn ui_dir(board: &board::BoardBinding) -> PathBuf {
     board.state_dir().join(UI_DIR)
 }
 

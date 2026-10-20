@@ -27,6 +27,9 @@ export async function invoke(command, args = {}) {
 /** Coordination board operation through the bundled CLI (JSON in, JSON out). */
 export const rpc = (op, args = {}) => invoke('rpc', { op, args });
 
+/* Session commands accept { id } or a bare id. */
+const sessionId = arg => (arg && typeof arg === 'object' ? arg.id : arg);
+
 /** Desktop-only helpers implemented in src-tauri/src/desktop.rs. */
 export const desktop = {
   paths: () => invoke('desktop_paths'),
@@ -56,4 +59,25 @@ export const desktop = {
   weatherNow: (lat, lon) => invoke('weather_now', { lat, lon }),
   /** OpenStreetMap Nominatim search, on an explicit search only → [{ name, display_name, lat, lon }]. */
   geocodePlace: query => invoke('geocode_place', { query, language: globalThis.navigator?.language || 'en' }),
+
+  /* 0.4 agent sessions (src-tauri/src/session_host.rs). Times are epoch milliseconds. */
+  /** → { sessions: [{ id, provider, projectId, cwd, title, access, threadId, providerSessionId, status, createdAt, lastActivityAt, shared, sharedId }] } */
+  sessionList: () => invoke('session_list'),
+  /** { provider:'claude'|'codex', projectId, cwd, access:'full'|'read', title, playwright, model?, effort?, sharedId? } → { session } */
+  sessionStart: options => invoke('session_start', { args: options || {} }),
+  /** → { accepted: true, turnId }. Replies stream on desktop.onSessionEvent. */
+  sessionSend: ({ id, text = '', attachments = [] }) => invoke('session_send', { id, text, attachments }),
+  /** Interrupts the current turn; the session stays resumable → { stopped: true } */
+  sessionStop: arg => invoke('session_stop', { id: sessionId(arg) }),
+  /** Ends the provider process and keeps the history → { closed: true } */
+  sessionClose: arg => invoke('session_close', { id: sessionId(arg) }),
+  /** Display log → { events: [...] } */
+  sessionHistory: arg => invoke('session_history', arg?.limit == null ? { id: sessionId(arg) } : { id: sessionId(arg), limit: arg.limit }),
+  /** cb(payload) for every 'session://event' ({ id, turnId, kind, text?, tool?, status?, error?, at }). Resolves to an unlisten function. */
+  onSessionEvent: async cb => {
+    const events = window.__TAURI__?.event;
+    if (tauri() && events?.listen) return events.listen('session://event', event => cb(event.payload));
+    const api = await backend();
+    return api.listen ? api.listen('session://event', cb) : () => {};
+  },
 };

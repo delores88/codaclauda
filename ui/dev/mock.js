@@ -201,8 +201,88 @@ function geocodePlace({ query }) {
   return PLACES.filter(p => p.display_name.toLowerCase().includes(q.toLowerCase())).slice(0, 5);
 }
 
+/* 0.4 agent sessions: an echo agent that streams fake deltas over 'session://event'. Sessions and
+ * their display logs persist in localStorage (mock.sessions), so a reload shows resume-after-restart. */
+const SESSIONS_KEY = 'mock.sessions';
+const sessionListeners = new Set();
+const sessionTurns = new Map(); // id → { timers, turnId }
+const hex = n => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => b.toString(16).padStart(2, '0')).join('');
+let sessionStore = null;
+function sessions() {
+  if (sessionStore) return sessionStore;
+  try { sessionStore = JSON.parse(localStorage.getItem(SESSIONS_KEY) || 'null'); } catch { sessionStore = null; }
+  sessionStore ||= { sessions: [], logs: {} };
+  for (const s of sessionStore.sessions) if (s.status === 'running') s.status = 'idle'; // the "app" restarted mid-reply
+  return sessionStore;
+}
+const saveSessions = () => { try { localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions())); } catch { /* preview only */ } };
+function sessionEmit(payload) {
+  const event = { turnId: null, at: Date.now(), ...payload };
+  if (event.kind !== 'delta' && event.kind !== 'status') { (sessions().logs[event.id] ||= []).push(event); saveSessions(); }
+  for (const cb of sessionListeners) { try { cb(structuredClone(event)); } catch (error) { console.error(error); } }
+}
+function findSession(id) {
+  const session = sessions().sessions.find(s => s.id === id);
+  if (!session) throw new Error('That chat no longer exists.');
+  return session;
+}
+function sessionStatus(session, status) {
+  Object.assign(session, { status, lastActivityAt: Date.now() });
+  saveSessions();
+  sessionEmit({ id: session.id, kind: 'status', status });
+}
+const agentName = provider => (provider === 'claude' ? 'Claude Code' : 'Codex');
+const sessionHandlers = {
+  session_list: () => ({ sessions: sessions().sessions }),
+  session_start: ({ args = {} }) => {
+    if (!['claude', 'codex'].includes(args.provider)) throw new Error('provider must be claude or codex.');
+    if (!args.cwd) throw new Error('cwd must be the project folder.');
+    const at = Date.now();
+    const session = { id: `s_${hex(8)}`, provider: args.provider, projectId: args.projectId || args.cwd, cwd: args.cwd, title: args.title || `${agentName(args.provider)} chat`, access: args.access === 'full' ? 'full' : 'read', threadId: null, providerSessionId: null, status: 'idle', createdAt: at, lastActivityAt: at, shared: Boolean(args.sharedId), sharedId: args.sharedId || null, playwright: Boolean(args.playwright) };
+    sessions().sessions.push(session);
+    saveSessions();
+    return { session };
+  },
+  session_send: ({ id, text = '', attachments = [] }) => {
+    const session = findSession(id);
+    if (sessionTurns.has(id)) throw new Error('This agent is still replying. Stop it or wait for it to finish.');
+    if (!String(text).trim() && !attachments.length) throw new Error('Type a message first.');
+    const turnId = `t_${hex(6)}`;
+    if (!session.providerSessionId) {
+      session.providerSessionId = session.provider === 'claude' ? `${hex(4)}-${hex(2)}-4${hex(2).slice(1)}-a${hex(2).slice(1)}-${hex(6)}` : `thread-${hex(8)}`;
+      if (session.provider === 'codex') session.threadId = session.providerSessionId;
+    }
+    sessionEmit({ id, turnId, kind: 'user', text, attachments });
+    sessionStatus(session, 'running');
+    const reply = `Preview ${agentName(session.provider)} (${session.access} access) heard:\n\n> ${String(text).split('\n').join('\n> ')}\n\nNothing ran; this is **mock** data.`;
+    const chunks = reply.match(/[\s\S]{1,12}/g) || [];
+    const timers = [];
+    const later = (ms, fn) => timers.push(setTimeout(fn, ms));
+    later(300, () => sessionEmit({ id, turnId, kind: 'tool', tool: session.provider === 'claude' ? { name: 'Read', summary: `${session.cwd}\\README.md` } : { name: 'shell', summary: 'Get-ChildItem' } }));
+    chunks.forEach((chunk, i) => later(500 + i * 50, () => sessionEmit({ id, turnId, kind: 'delta', text: chunk })));
+    const end = 550 + chunks.length * 50;
+    later(end, () => sessionEmit({ id, turnId, kind: 'message', text: reply }));
+    later(end + 40, () => { sessionTurns.delete(id); sessionEmit({ id, turnId, kind: 'done', status: 'completed' }); sessionStatus(session, 'idle'); });
+    sessionTurns.set(id, { timers, turnId });
+    return { accepted: true, turnId };
+  },
+  session_stop: ({ id }) => {
+    const session = findSession(id), turn = sessionTurns.get(id);
+    if (turn) {
+      turn.timers.forEach(clearTimeout);
+      sessionTurns.delete(id);
+      sessionEmit({ id, turnId: turn.turnId, kind: 'done', status: 'interrupted' });
+      sessionStatus(session, 'idle');
+    }
+    return { stopped: true };
+  },
+  session_close: ({ id }) => { sessionHandlers.session_stop({ id }); sessionStatus(findSession(id), 'stopped'); return { closed: true }; },
+  session_history: ({ id, limit = 500 }) => { findSession(id); return { events: (sessions().logs[id] || []).slice(-limit) }; },
+};
+
 const desktopHandlers = {
-  desktop_paths: () => ({ state_dir: 'C:\\mock\\board', ui_dir: 'C:\\mock\\board\\desktop-ui', attachments_dir: 'C:\\mock\\board\\desktop-ui\\attachments', manifest_path: 'C:\\mock\\board\\desktop-ui\\projects.manifest.json', desktop_dir: 'C:\\Users\\Ben\\Desktop' }),
+  ...sessionHandlers,
+  desktop_paths:() => ({ state_dir: 'C:\\mock\\board', ui_dir: 'C:\\mock\\board\\desktop-ui', attachments_dir: 'C:\\mock\\board\\desktop-ui\\attachments', manifest_path: 'C:\\mock\\board\\desktop-ui\\projects.manifest.json', desktop_dir: 'C:\\Users\\Ben\\Desktop' }),
   desktop_state_load: () => ({ state: JSON.parse(localStorage.getItem('mock.desktop') || 'null') }),
   desktop_state_save: ({ state }) => { localStorage.setItem('mock.desktop', JSON.stringify(state)); return { saved_at: now() }; },
   desktop_manifest_load: () => ({ path: 'C:\\mock\\manifest.json', manifest: { schema: 'codaclauda.projects/1', github_user: 'delores88', projects: [
@@ -245,6 +325,12 @@ export function createMock() {
         if (!fn) return { ok: false, error: { code: 'MOCK_UNSUPPORTED', message: `Preview has no mock for ${command}` } };
         return { ok: true, data: structuredClone(fn(args)) };
       } catch (error) { return { ok: false, error: { code: 'MOCK_ERROR', message: error.message } }; }
+    },
+    /** Mirrors Tauri's event listen for 'session://event'; returns an unlisten function. */
+    listen(event, cb) {
+      if (event !== 'session://event') return () => {};
+      sessionListeners.add(cb);
+      return () => sessionListeners.delete(cb);
     },
   };
 }
