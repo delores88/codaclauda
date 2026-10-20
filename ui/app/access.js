@@ -8,6 +8,7 @@
  * own app's permissions. A mailbox message never grants or changes a level.
  *
  * Record (desktop.projectAccess[projectId]): { level: 'full'|'read', playwright: boolean, updatedAt }.
+ * A saved playwright preference is inactive: browser control is unavailable in 0.4.0.
  * Pure helpers (no DOM, no imports) so node can test them. Adapted, simplified to two levels,
  * from the claude/033-access-ticker access model. */
 
@@ -17,7 +18,8 @@ export const LEVELS = [
   { id: 'read', label: 'Read only', long: 'Read only', color: '#4f8cff', rule: 'Agents can read, search and explain, but not change files, commit or push.' },
 ];
 export const LEVEL_IDS = LEVELS.map(l => l.id);
-export const ACCESS_NOTE = "Access is enforced for sessions CodaClauda starts. Desktop chats and sessions you open in a terminal follow their own app's permissions. Spending is never allowed.";
+export const ACCESS_NOTE = "These access controls apply to sessions CodaClauda starts. Desktop chats and terminal sessions follow their own app's permissions. Spending still requires your explicit authorization.";
+export const BROWSER_UNAVAILABLE = 'Browser control is not available in 0.4.0.';
 export const levelInfo = id => LEVELS.find(l => l.id === id) || LEVELS[1];
 
 /** 'full' | 'read' for a stored value (older 'read-only' reads as 'read'); anything else → null. */
@@ -49,5 +51,6 @@ export function accessFor(project, map) {
   const record = ids.map(own).find(r => r && typeof r === 'object') || null;
   const stored = normalizeLevel(record?.level);
   const at = Number(record?.updatedAt);
-  return { level: stored || defaultLevel(project), playwright: record?.playwright === true, explicit: Boolean(stored), updatedAt: Number.isFinite(at) && at > 0 ? at : 0 };
+  const level = stored || defaultLevel(project);
+  return { level, playwright: false, explicit: Boolean(stored), updatedAt: Number.isFinite(at) && at > 0 ? at : 0 };
 }

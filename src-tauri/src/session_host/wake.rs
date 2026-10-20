@@ -13,7 +13,7 @@
 
 use super::{
     Failure, Inner, Queued, Wakes, ensure_dirs, event, host, lock, now_ms, random_hex, reply,
-    write_atomic,
+    require_browser_disabled, write_atomic,
 };
 use coord_core::{mailbox, store::Store};
 use serde::{Deserialize, Serialize};
@@ -170,14 +170,14 @@ impl Inner {
                 .validate()
                 .map_err(|message| ("BOARD_UNAVAILABLE", message))?;
         }
-        if !self.board_dir.is_dir() {
+        if !self.board.is_dir() {
             return Err((
                 "BOARD_UNAVAILABLE",
                 "The coordination board is not available.".into(),
             ));
         }
         Ok(Store {
-            root: self.board_dir.clone(),
+            root: self.board.clone(),
         })
     }
 
@@ -229,6 +229,11 @@ impl Inner {
         let Some(record) = lock(&self.state).records.iter().find(|r| r.id == id).cloned() else {
             return Err(("SESSION_NOT_FOUND", "That chat no longer exists.".into()));
         };
+        // A saved browser-control session can never be dispatched (0.4.0), so it cannot wake.
+        if on {
+            require_browser_disabled(record.playwright)
+                .map_err(|message| ("BROWSER_UNAVAILABLE", message))?;
+        }
         let too_many = || {
             (
                 "WAKE_LIMIT",
@@ -250,10 +255,16 @@ impl Inner {
         let Some(record) = state.records.iter_mut().find(|r| r.id == id) else {
             return Err(("SESSION_NOT_FOUND", "That chat no longer exists.".into()));
         };
+        let previous = record.clone();
         record.wake = on;
         record.mailbox_address = address;
         let session = record.clone();
-        self.save(&state);
+        if let Err(message) = self.save(&state) {
+            if let Some(current) = state.records.iter_mut().find(|r| r.id == id) {
+                *current = previous;
+            }
+            return Err(("STORAGE_FAILED", message));
+        }
         drop(state);
         self.publish(event(id, None, "status", json!({"status": session.status})), false);
         Ok(json!({"session": session}))
@@ -286,6 +297,8 @@ impl Inner {
             r.wakes = counts(&times, r.wakes.total + 1, now);
             r.wakes
         })
+        .ok()
+        .flatten()
         .unwrap_or_default()
     }
 
@@ -306,7 +319,8 @@ impl Inner {
             }
         }
         if changed {
-            self.save(&state);
+            // A failed save is recorded as the host's storage failure.
+            let _ = self.save(&state);
         }
     }
 

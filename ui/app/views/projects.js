@@ -5,7 +5,7 @@
  * Each row also shows the project's access level for sessions CodaClauda starts (access.js:
  * Full or Read only), and the toolbar can apply one level to every matching project. */
 import { openNewProjectDialog } from '../newproject.js';
-import { LEVELS, ACCESS_NOTE, levelInfo } from '../access.js';
+import { LEVELS, ACCESS_NOTE, BROWSER_UNAVAILABLE, levelInfo } from '../access.js';
 
 const FILTERS = [
   { id: 'all', label: 'All', test: () => true },
@@ -442,7 +442,7 @@ export function mount(root, ctx) {
       m.loc, m.files, m.commits, m.commits7d, m.floors, m.footprint, m.glow, m.lastActivityAt ? timeAgo(m.lastActivityAt) : '',
       p.scannedAt || 0, Boolean(p.stats?.git), info.linked, info.manifest, info.scanning,
       info.agents.map(a => [a.id, a.name, a.provider, a.look]),
-      info.access.level, info.access.explicit, info.access.playwright,
+      info.access.level, info.access.explicit,
     ]);
   }
 
@@ -567,7 +567,7 @@ export function mount(root, ctx) {
     return h('div.proj-access', { role: 'cell', 'aria-label': `Access for ${p.name}: ${levelInfo(a.level).long}` },
       h('span.proj-access-label', icon('shield'), 'Access'), levels,
       h('span.proj-access-hint', a.explicit ? levelInfo(a.level).rule : `${levelInfo(a.level).rule} Default for ${a.level === 'full' ? 'your own projects' : "projects you don't own"}.`),
-      a.playwright ? h('span.pill.proj-tag', { title: 'Playwright MCP browser control is on for new sessions here' }, 'Browser control on') : null,
+      h('span.proj-access-hint', BROWSER_UNAVAILABLE),
       p.path ? null : h('span.proj-access-hint', 'No local folder: clone it to run sessions.'));
   }
 

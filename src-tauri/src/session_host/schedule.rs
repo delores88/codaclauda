@@ -274,7 +274,8 @@ impl Inner {
 
     /// The project's saved level from the desktop state, else the schedule's
     /// fallback, else 'full' (a local project folder is Ben's own; access.js).
-    fn project_access(&self, schedule: &Schedule) -> (String, bool) {
+    /// A saved browser-control preference is ignored: it is unavailable (0.4.0).
+    fn project_access(&self, schedule: &Schedule) -> String {
         let saved = fs::File::open(self.dir.join(UI_STATE))
             .ok()
             .filter(|f| f.metadata().is_ok_and(|m| m.len() <= UI_STATE_LIMIT))
@@ -289,7 +290,7 @@ impl Inner {
                 _ => "full",
             },
         };
-        (level.to_owned(), saved["playwright"] == true)
+        level.to_owned()
     }
 
     fn schedule_list(&self) -> Value {
@@ -451,14 +452,13 @@ impl Inner {
         let session_id = match existing {
             Some(sid) => sid,
             None => {
-                let (access, playwright) = self.project_access(&schedule);
+                let access = self.project_access(&schedule);
                 let created = self
                     .start(json!({
                         "provider": schedule.provider,
                         "projectId": schedule.project_id,
                         "cwd": schedule.cwd,
                         "access": access,
-                        "playwright": playwright,
                         "title": format!("{} (scheduled)", schedule.name),
                     }))
                     .await;

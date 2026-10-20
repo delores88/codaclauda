@@ -18,7 +18,7 @@ import { renderMarkdown, plainText } from '../markdown.js';
 import { agentAvatar } from '../avatar/spec.js';
 import { sessions, UNAVAILABLE_TEXT, QUEUE_LIMIT } from '../sessions.js';
 import { mergeShared, routeMessage, sharedContext, resumeCommand, providerLabel, toMs as eventMs } from '../session-model.js';
-import { LEVELS, ACCESS_NOTE, levelInfo } from '../access.js';
+import { LEVELS, ACCESS_NOTE, BROWSER_UNAVAILABLE, levelInfo } from '../access.js';
 import { wake, wakeCounts, WAKE_LIMITS, WAKE_UNAVAILABLE_TEXT } from '../wake.js';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'needs-owner']);
@@ -693,9 +693,9 @@ export function mount(root, ctx) {
     if (!show) { state.resSig = ''; return; }
     const project = info.project;
     const access = project ? store.projectAccess(project.id) : null;
-    const sig = JSON.stringify([info.id, project?.id, project?.name, project?.path, project?.url, access?.level, access?.playwright, info.access,
+    const sig = JSON.stringify([info.id, project?.id, project?.name, project?.path, project?.url, access?.level, info.access,
       wake.enabled, wake.sessionSupported(), wake.count(), [...state.wakeBusy],
-      info.sessions.map(s => [s.id, s.provider, s.status, s.access, s.playwright, s.providerSessionId, s.threadId, s.cwd, sessions.running(s.id), s.wake, s.mailboxAddress, s.wakes])]);
+      info.sessions.map(s => [s.id, s.provider, s.status, s.access, s.providerSessionId, s.threadId, s.cwd, sessions.running(s.id), s.wake, s.mailboxAddress, s.wakes])]);
     if (sig === state.resSig) return;
     state.resSig = sig;
     const block = (iconName, title, ...body) => h('section.res-block', h('h4', icon(iconName), title), ...body);
@@ -705,10 +705,6 @@ export function mount(root, ctx) {
       type: 'button', 'aria-pressed': String(access.level === l.id), title: l.rule,
       onclick: () => { if (store.projectAccess(project.id).level !== l.id) saveAccess(project, { level: l.id }, `${project.name}: ${l.long}. Applies to the next session started there.`); },
     }, l.label))) : null;
-    const playwright = project ? h('label.switch', { title: 'Playwright MCP browser control' },
-      h('input', { type: 'checkbox', checked: access.playwright, 'aria-label': `Browser control (Playwright) for ${project.name}`,
-        onchange: event => saveAccess(project, { playwright: event.currentTarget.checked }, `Browser control ${event.currentTarget.checked ? 'on' : 'off'} for ${project.name}. Applies to the next session started there.`) }),
-      h('span')) : null;
     const sessionCard = s => {
       const command = resumeCommand(s);
       const providerId = s.provider === 'claude' ? s.providerSessionId : s.threadId || s.providerSessionId;
@@ -718,7 +714,7 @@ export function mount(root, ctx) {
           h('dt', 'Session ID'),
           h('dd', providerId ? h('code.res-id', { title: String(providerId) }, String(providerId)) : h('span.muted', 'Known after the first reply')),
           h('dt', 'Access'), h('dd', levelInfo(s.access).long),
-          h('dt', 'Browser'), h('dd', s.playwright ? 'Playwright on' : 'Off')),
+          h('dt', 'Browser'), h('dd', 'Unavailable in 0.4.0')),
         h('div.res-actions',
           h('button.btn.small', { type: 'button', disabled: !command, title: command || 'Available after the first reply', onclick: () => copyText(command, 'Resume command copied') }, icon('terminal'), 'Copy resume command')),
         wakeBlock(s));
@@ -729,15 +725,13 @@ export function mount(root, ctx) {
         cwd ? h('code.res-path', { title: shownPath(cwd) }, shownPath(cwd)) : h('p.muted', 'No folder recorded'),
         cwd ? h('div.res-actions', h('button.btn.small', { type: 'button', onclick: () => bridge.desktop.openExternal(cwd).catch(() => copyText(cwd, 'Path copied')) }, icon('folder'), 'Open folder'),
           h('button.btn.small.ghost', { type: 'button', onclick: () => copyText(shownPath(cwd), 'Path copied') }, icon('copy'), 'Copy path')) : null),
-      project?.url || project?.repo ? block('github', 'GitHub',
-        h('a.res-link', { href: project.url || `https://github.com/${project.repo.full_name}`, title: project.url || '' }, project.repo?.full_name || project.url)) : null,
+      ...(project?.url || project?.repo ? [block('github', 'GitHub',
+        h('a.res-link', { href: project.url || `https://github.com/${project.repo.full_name}`, title: project.url || '' }, project.repo?.full_name || project.url))] : []),
       block('shield', 'Access',
         levelPicker || h('p', level.long),
         h('p.field-hint', `This chat runs with ${level.long.toLowerCase()} (${level.rule.toLowerCase().replace(/\.$/, '')}).`,
           project && access.level !== info.access ? h('strong.res-pending', ` ${project.name} is now ${levelInfo(access.level).long}: applies to the next session started there.`) : ' A change applies to the next session started in this project, not to this one.')),
-      project ? block('external', 'Browser control',
-        h('div.res-row', h('span', 'Playwright MCP'), playwright),
-        h('p.field-hint', 'Lets agents drive a browser. Off by default; applies to the next session started in this project.')) : null,
+      block('external', 'Browser control', h('p.field-hint', BROWSER_UNAVAILABLE)),
       ...info.sessions.map(sessionCard),
       h('p.res-note', icon('alert'), h('span', "A session you open in a terminal with the resume command runs outside CodaClauda's access level and its stop and memory limits.")),
       h('div.res-actions.res-end', h('button.btn.small.ghost', { type: 'button', onclick: () => confirmClose(info) }, icon('power'), info.shared ? 'Close both sessions' : 'Close session'))));
@@ -1310,7 +1304,7 @@ export function mount(root, ctx) {
       const access = project ? store.projectAccess(project.id) : null;
       const level = levelInfo(access?.level);
       accessLine.replaceChildren(...(project
-        ? [h(`span.acc-tag.${level.id}`, level.long), h('span', ` ${level.rule} Browser control (Playwright) ${access.playwright ? 'on' : 'off'}. Change both in the chat's resources panel or in Projects; a change applies to the next session.`)]
+        ? [h(`span.acc-tag.${level.id}`, level.long), h('span', ` ${level.rule} Change access in the chat's resources panel or in Projects; a change applies to the next session. ${BROWSER_UNAVAILABLE}`)]
         : [h('span', 'Pick a project with a local folder.')]));
       startBtn.disabled = starting || sessions.available !== true || !project?.path;
     }
@@ -1365,7 +1359,7 @@ export function mount(root, ctx) {
   /** Starts one session, or two with one sharedId for "Both"; returns the thread id to open. */
   async function startConversation(agent, project, title) {
     const access = store.projectAccess(project.id);
-    const base = { projectId: project.id, cwd: project.path, access: access.level, playwright: access.playwright };
+    const base = { projectId: project.id, cwd: project.path, access: access.level, playwright: false };
     if (agent !== 'both') {
       const s = await sessions.start({ ...base, provider: agent, title: title || `${providerLabel(agent, true)} · ${project.name}` });
       return threadIdFor(s);
@@ -1790,7 +1784,7 @@ export function mount(root, ctx) {
   }
 
   /** Sends to a session, or routes a shared-thread message (@claude / @codex / @both) and gives each
-   *  target a short block of what the other agent said since it last spoke. */
+   *  target a short block of what the other agent said since its last prompt. */
   async function sendSession(info, text, saved) {
     const attachments = saved.map(a => ({ path: a.path, name: a.name }));
     const filesNote = saved.length ? `Please take a look at the attached file${saved.length > 1 ? 's' : ''}: ${saved.map(a => a.name).join(', ')}` : '';
@@ -1800,7 +1794,8 @@ export function mount(root, ctx) {
     if (!body) throw new Error('Write a message after the @mention.');
     const targets = info.sessions.filter(s => route.targets.includes(s.provider));
     if (!targets.length) throw new Error(`${providerLabel(route.mention)} isn't in this thread.`);
-    const transcript = mergeShared(info.sessions.map(s => sessions.transcript(s.id).items));
+    const histories = await Promise.all(info.sessions.map(s => sessions.loadedTranscript(s.id)));
+    const transcript = mergeShared(histories.map(history => history.items));
     const results = await Promise.allSettled(targets.map(s => {
       const context = sharedContext(transcript, s.provider);
       return sessions.send(s.id, context ? `${context}\n\n${body}` : body, attachments);

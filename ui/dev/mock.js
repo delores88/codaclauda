@@ -328,7 +328,7 @@ const sessionHandlers = {
     if (!['claude', 'codex'].includes(args.provider)) throw new Error('provider must be claude or codex.');
     if (!args.cwd) throw new Error('cwd must be the project folder.');
     const at = Date.now();
-    const session = { id: `s_${hex(8)}`, provider: args.provider, projectId: args.projectId || args.cwd, cwd: args.cwd, title: args.title || `${agentName(args.provider)} chat`, access: args.access === 'full' ? 'full' : 'read', threadId: null, providerSessionId: null, status: 'idle', createdAt: at, lastActivityAt: at, shared: Boolean(args.sharedId), sharedId: args.sharedId || null, playwright: Boolean(args.playwright), wake: false, mailboxAddress: null, wakes: { hour: 0, day: 0, total: 0 } };
+    const session = { id: `s_${hex(8)}`, provider: args.provider, projectId: args.projectId || args.cwd, cwd: args.cwd, title: args.title || `${agentName(args.provider)} chat`, access: args.access === 'full' ? 'full' : 'read', threadId: null, providerSessionId: null, status: 'idle', createdAt: at, lastActivityAt: at, shared: Boolean(args.sharedId), sharedId: args.sharedId || null, playwright: false, wake: false, mailboxAddress: null, wakes: { hour: 0, day: 0, total: 0 } };
     sessions().sessions.push(session);
     saveSessions();
     return { session };
