@@ -3,6 +3,7 @@
  * (view-model updatePresentation), install confirmation and bounded status polling. */
 import { updatePresentation } from '../../view-model.js';
 import { weatherSettings } from './settings-weather.js';
+import { wake, WAKE_CAPS_TEXT, WAKE_UNAVAILABLE_TEXT } from '../wake.js';
 
 const UPDATE_LABELS = { check: 'Check for updates', status: 'Read updater status', authorize: 'Approve in browser', poll: 'Check approval', download: 'Download update', install: 'Install update' };
 const UPDATE_MESSAGES = {
@@ -28,6 +29,31 @@ export function mount(root, ctx) {
   };
   const info = (label, value) => h('div.info-row', h('dt', label), h('dd.mono', { title: value || '' }, value || '—'));
   const weatherCard = weatherSettings(ctx);   // persistent: keeps its search box and results
+
+  /* ---------- Wake on mail (global switch; each session also has its own, off by default) ---------- */
+  let wakeSaving = false;
+  const wakeInput = h('input', { type: 'checkbox', 'aria-label': 'Wake on mail', onchange: event => setWake(event.currentTarget.checked) });
+  const wakeHint = h('span.field-hint');
+  const wakeCard = h('section.card.settings-card.wake-card',
+    h('h2.panel-title', 'Wake on mail'),
+    h('div.setting-row', h('div.setting-text', h('strong', 'Wake sessions on board messages'), wakeHint), h('label.switch', wakeInput, h('span'))),
+    h('p.field-hint', WAKE_CAPS_TEXT));
+  function renderWake() {
+    const supported = wake.supported();
+    wakeInput.disabled = !supported || wakeSaving || wake.enabled === null;
+    wakeInput.checked = wake.enabled === true;
+    wakeHint.textContent = !supported ? `${WAKE_UNAVAILABLE_TEXT}.`
+      : wake.enabled === null ? (wake.error ? `Couldn't read the setting: ${wake.error}` : 'Reading…')
+        : wake.enabled ? "On: a session you turned it on for (in the chat's resources panel) gets a turn for each new board message to its address. Each session starts with it off."
+          : 'Off: no session is woken, whatever its own switch says. Mail waits on the board.';
+  }
+  async function setWake(enabled) {
+    wakeSaving = true; renderWake();
+    try { await wake.setEnabled(enabled); ui.toast(enabled ? 'Wake on mail is on' : 'Wake on mail is off for every session', { kind: 'success', timeout: 3200 }); }
+    catch (error) { ui.toast(`Couldn't change Wake on mail: ${error?.message || error}`, { kind: 'error', timeout: 8000 }); }
+    finally { wakeSaving = false; renderWake(); }
+  }
+  wake.on('change', renderWake);
 
   /* ---------- Updates (persistent node; survives page re-renders) ---------- */
   const upd = { data: updatePresentation(), updating: false, reading: false, generation: 0, pollStarted: null, pollStopped: false, error: '' };
@@ -126,6 +152,7 @@ export function mount(root, ctx) {
         h('div.setting-row', h('div.setting-text', h('strong', 'City graphics'), h('span.field-hint', 'Low turns off shadows for slower PCs.')),
           h('div.segmented', ['high', 'low'].map(q => h('button', { type: 'button', 'aria-pressed': String(store.prefs.cityQuality === q), onclick: () => { store.setPref('cityQuality', q); render(); } }, q === 'high' ? 'High' : 'Low')))),
       ),
+      wakeCard,
       weatherCard.node,
       updatesCard,
       h('section.card.settings-card',
@@ -148,10 +175,11 @@ export function mount(root, ctx) {
       ),
     ));
     renderUpdates();
+    renderWake();
   }
   render();
   return {
-    show() { visible = true; render(); updateOperation('status'); },
+    show() { visible = true; render(); updateOperation('status'); wake.load(); },
     hide() { visible = false; },
   };
 }

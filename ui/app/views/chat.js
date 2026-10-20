@@ -5,6 +5,9 @@
  *                       stream here, Stop interrupts a turn, and it resumes after a restart.
  *            pair:<sharedId>  a shared project thread: one Claude and one Codex session shown as
  *                       one conversation; @claude / @codex / @both route each message.
+ *            0.4.1: a message sent while a turn runs waits in the session's queue (up to 10), and
+ *            a session with Wake on mail (resources panel) gets a board address; each board
+ *            message to it starts a turn, shown as a compact "Woken by…" line.
  *   mailbox  mail:<addr>  existing desktop chats. Messages go to the passive shared board; the agent
  *            reads it when it next checks its inbox (schedules vary), so replies are not instant.
  *   live     live:<id>  earlier live chats (0.3), replaced by sessions: kept readable, not sendable.
@@ -13,9 +16,10 @@
  * position, focus, drafts and open UI survive store updates. */
 import { renderMarkdown, plainText } from '../markdown.js';
 import { agentAvatar } from '../avatar/spec.js';
-import { sessions, UNAVAILABLE_TEXT } from '../sessions.js';
+import { sessions, UNAVAILABLE_TEXT, QUEUE_LIMIT } from '../sessions.js';
 import { mergeShared, routeMessage, sharedContext, resumeCommand, providerLabel, toMs as eventMs } from '../session-model.js';
 import { LEVELS, ACCESS_NOTE, levelInfo } from '../access.js';
+import { wake, wakeCounts, WAKE_LIMITS, WAKE_UNAVAILABLE_TEXT } from '../wake.js';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'needs-owner']);
 const MAX_FILES = 10;
@@ -178,6 +182,7 @@ export function mount(root, ctx) {
     liveOpen: false,            // "Earlier live chats" starts collapsed
     resPinned: true, resOverlay: false,   // resources column (wide) / popover (narrow)
     openTools: new Set(),       // tool groups the owner expanded
+    wakeBusy: new Set(),        // session ids with a Wake on mail change in flight
   };
 
   /* ---------- sidebar ---------- */
@@ -248,8 +253,9 @@ export function mount(root, ctx) {
     if (info?.kind === 'session') { stopSessions(info.sessions.filter(s => sessions.running(s.id)), event.currentTarget); return; }
     const run = activeRun(state.threadId); if (run) stopRun(run.requestId, event.currentTarget);
   } }, icon('stop'));
+  const queueChip = h('span.queue-chip', { hidden: true, role: 'status', title: `Messages wait in the session queue (up to ${QUEUE_LIMIT}) and send in order after each reply.` });
   const composer = h('div.composer', replyChip, tray, textarea,
-    h('div.composer-bar', h('div.composer-left', attachBtn, micBtn, subjectWrap, kindToggle), h('div.composer-right', sendBtn, stopBtn)),
+    h('div.composer-bar', h('div.composer-left', attachBtn, micBtn, subjectWrap, kindToggle), h('div.composer-right', queueChip, sendBtn, stopBtn)),
     fileInput);
   const errorBox = h('div.composer-error', { hidden: true, role: 'alert' });
   const modeNote = h('div.composer-note');
@@ -266,6 +272,7 @@ export function mount(root, ctx) {
   /* ---------- global listeners ---------- */
   store.on('change', schedule);
   sessions.on('change', schedule);
+  wake.on('change', () => { state.resSig = ''; schedule(); });
   resNarrow.addEventListener('change', () => { state.resOverlay = false; renderHead(true); renderResources(); });
   new ResizeObserver(() => { if (state.visible && state.atBottom && state.threadId) scroller.scrollTop = scroller.scrollHeight; }).observe(scroller);
   narrow.addEventListener('change', () => { if (!narrow.matches) state.sideOpen = false; applySide(); });
@@ -539,11 +546,12 @@ export function mount(root, ctx) {
     const time = c.lastAt ? timeAgo(c.lastAt) : '';
     const status = dotStatus(c.status);
     const level = levelInfo(c.access);
-    const sig = JSON.stringify([c.title, preview, time, c.unread, status, selected, draftText, q, c.shared, c.sessions[0].provider, c.access]);
+    const waking = c.sessions.some(s => s.wake === true);
+    const sig = JSON.stringify([c.title, preview, time, c.unread, status, selected, draftText, q, c.shared, c.sessions[0].provider, c.access, waking]);
     return {
       key: c.id, sig,
       build: () => {
-        const tag = h(`span.acc-tag.${level.id}`, { title: `${level.long}: ${level.rule}` }, level.label);
+        const tag = h(`span.acc-tag.${level.id}`, { title: `${level.long}: ${level.rule}` }, level.label, waking ? h('span.wake-mark', { title: 'Wakes on mail' }, icon('bell')) : null);
         return h(`button.thread-row.session-row${selected ? '.selected' : ''}${c.unread ? '.unread' : ''}`, {
           type: 'button', 'aria-current': selected ? 'true' : null, dataset: { thread: c.id },
           title: `${c.title} — ${who}${where ? ` in ${where}` : ''} · ${level.long}`,
@@ -686,7 +694,8 @@ export function mount(root, ctx) {
     const project = info.project;
     const access = project ? store.projectAccess(project.id) : null;
     const sig = JSON.stringify([info.id, project?.id, project?.name, project?.path, project?.url, access?.level, access?.playwright, info.access,
-      info.sessions.map(s => [s.id, s.provider, s.status, s.access, s.playwright, s.providerSessionId, s.threadId, s.cwd, sessions.running(s.id)])]);
+      wake.enabled, wake.sessionSupported(), wake.count(), [...state.wakeBusy],
+      info.sessions.map(s => [s.id, s.provider, s.status, s.access, s.playwright, s.providerSessionId, s.threadId, s.cwd, sessions.running(s.id), s.wake, s.mailboxAddress, s.wakes])]);
     if (sig === state.resSig) return;
     state.resSig = sig;
     const block = (iconName, title, ...body) => h('section.res-block', h('h4', icon(iconName), title), ...body);
@@ -711,7 +720,8 @@ export function mount(root, ctx) {
           h('dt', 'Access'), h('dd', levelInfo(s.access).long),
           h('dt', 'Browser'), h('dd', s.playwright ? 'Playwright on' : 'Off')),
         h('div.res-actions',
-          h('button.btn.small', { type: 'button', disabled: !command, title: command || 'Available after the first reply', onclick: () => copyText(command, 'Resume command copied') }, icon('terminal'), 'Copy resume command')));
+          h('button.btn.small', { type: 'button', disabled: !command, title: command || 'Available after the first reply', onclick: () => copyText(command, 'Resume command copied') }, icon('terminal'), 'Copy resume command')),
+        wakeBlock(s));
     };
     preserveFocus(resPanel, () => resPanel.replaceChildren(
       h('header.res-head', h('h3', 'Connected resources'), iconButton('close', 'Hide connected resources', toggleResources, 'res-close')),
@@ -732,6 +742,41 @@ export function mount(root, ctx) {
       h('p.res-note', icon('alert'), h('span', "A session you open in a terminal with the resume command runs outside CodaClauda's access level and its stop and memory limits.")),
       h('div.res-actions.res-end', h('button.btn.small.ghost', { type: 'button', onclick: () => confirmClose(info) }, icon('power'), info.shared ? 'Close both sessions' : 'Close session'))));
   }
+  /* Wake on mail for one session: the switch, its board address and the wake counters. */
+  function wakeBlock(s) {
+    const name = providerLabel(s.provider, true);
+    if (!wake.sessionSupported()) return h('div.res-wake', h('div.res-row', h('span.res-wake-label', icon('bell'), 'Wake on mail'), h('span.muted.res-wake-off', 'Not in this build')), h('p.field-hint', `${WAKE_UNAVAILABLE_TEXT}.`));
+    const on = s.wake === true;
+    const busy = state.wakeBusy.has(s.id);
+    const full = !on && wake.count(s.id) >= WAKE_LIMITS.sessions;
+    const input = h('input', {
+      type: 'checkbox', checked: on, disabled: busy || full, 'aria-label': `Wake ${name} on mail`,
+      onchange: event => toggleWake(s, event.currentTarget.checked, event.currentTarget),
+    });
+    const sw = h('label.switch', { title: full ? `At most ${WAKE_LIMITS.sessions} sessions can wake on mail` : on ? 'Board messages to this session start a turn' : 'Off: board messages are not delivered to this session' }, input, h('span'));
+    return h('div.res-wake',
+      h('div.res-row', h('span.res-wake-label', icon('bell'), 'Wake on mail'), sw),
+      on || s.mailboxAddress ? h('dl.res-facts',
+        h('dt', 'Address'), h('dd', s.mailboxAddress ? h('code.res-id', { title: s.mailboxAddress }, s.mailboxAddress) : h('span.muted', 'Assigned when it turns on')),
+        h('dt', 'Wakes'), h('dd', wakeCounts(s))) : null,
+      h('p.field-hint', on
+        ? `Board messages to this address start a turn here (checked every ${WAKE_LIMITS.pollSeconds} s). A message is information, not approval.`
+        : full ? `${WAKE_LIMITS.sessions} sessions already wake on mail; turn one off first.` : 'Off: give this session its own board address and let new messages to it start a turn.'),
+      on && wake.enabled === false ? h('p.res-pending', 'Wake on mail is off for every session in Settings.', ' ', h('button.link-btn', { type: 'button', onclick: () => navigate('settings') }, 'Open Settings')) : null);
+  }
+  async function toggleWake(s, on, input) {
+    state.wakeBusy.add(s.id); state.resSig = ''; renderResources();
+    try {
+      const updated = await wake.setSession(s.id, on);
+      toast(on ? `Wake on mail on${updated.mailboxAddress ? ` · ${updated.mailboxAddress}` : ''}` : 'Wake on mail off', { kind: 'success', timeout: 4200 });
+    } catch (error) {
+      if (input) input.checked = !on;
+      toast(`Couldn't change Wake on mail: ${error?.message || error}`, { kind: 'error', timeout: 8000 });
+    } finally {
+      state.wakeBusy.delete(s.id); state.resSig = ''; renderResources();
+    }
+  }
+
   async function saveAccess(project, patch, message) {
     try { await store.setProjectAccess(project.id, patch); toast(message, { kind: 'success', timeout: 4200 }); }
     catch (error) { toast(error?.message || String(error), { kind: 'error', timeout: 8000 }); }
@@ -822,9 +867,9 @@ export function mount(root, ctx) {
     }
     for (const s of info.sessions) {
       if (!sessions.running(s.id)) continue;
-      const mine = all.filter(x => x.sessionId === s.id);
+      const mine = all.filter(x => x.sessionId === s.id && !(x.pending && x.queued));
       if (mine.at(-1)?.kind === 'agent' && mine.at(-1).streaming) continue;
-      const since = mine.findLast(x => x.kind === 'owner')?.at || 0;
+      const since = mine.findLast(x => x.kind === 'owner' || x.kind === 'wake')?.at || 0;
       items.push({ key: `working:${s.id}`, sig: JSON.stringify([s.provider, since]), build: () => sessionWorkingRow(s, since) });
     }
     reconcile(log, items, state.msgCache);
@@ -848,16 +893,29 @@ export function mount(root, ctx) {
   function sessionItem(item, opts) {
     const key = `s:${item.key}`;
     if (item.kind === 'agent' && item.streaming) return { key, sig: JSON.stringify(['stream', item.provider, opts.continued, opts.info.shared]), build: () => buildSessionAgent(item, opts) };
-    const sig = JSON.stringify([item.kind, item.text, item.tools, item.targets, item.pending, Boolean(item.turnId), item.attachments, opts.continued, opts.info.shared, clockTime(item.at)]);
-    const build = { owner: buildSessionOwner, agent: buildSessionAgent, tools: buildTools, error: buildSessionError }[item.kind] || buildSessionError;
+    const sig = JSON.stringify([item.kind, item.text, item.tools, item.targets, item.pending, item.queued, Boolean(item.turnId), item.attachments, item.from, item.subject, item.body, opts.continued, opts.info.shared, clockTime(item.at)]);
+    const build = { owner: buildSessionOwner, agent: buildSessionAgent, tools: buildTools, error: buildSessionError, wake: buildWake }[item.kind] || buildSessionError;
     return { key, sig, build: () => build(item, opts) };
+  }
+
+  /** "Woken by board message from X: subject" — the wake turn's text (untrusted) opens as plain text. */
+  function buildWake(item, { info }) {
+    const from = item.from || 'someone';
+    const who = info.shared ? `${providerLabel(item.provider)} woken` : 'Woken';
+    const line = h('span.wake-text', `${who} by board message from `, h('strong', from), item.subject ? `: ${item.subject}` : '');
+    const time = h('time.msg-time', { dateTime: isoTime(item.at), title: fullTime(item.at) }, clockTime(item.at));
+    return h('div.msg-wake', { dataset: { id: item.key } },
+      item.body
+        ? h('details.wake-details', h('summary', icon('bell'), line, time), h('div.wake-body', item.body))
+        : h('div.wake-line', icon('bell'), line, time));
   }
 
   function buildSessionOwner(item, { info, continued }) {
     const m = { id: item.key, role: 'owner', text: item.text };
     const time = h('time.msg-time', { dateTime: isoTime(item.at), title: fullTime(item.at) }, clockTime(item.at));
     const to = info.shared ? h('span.msg-route', `To ${item.targets.length > 1 ? 'Claude + Codex' : providerLabel(item.targets[0])}`) : null;
-    const status = item.pending && !item.turnId ? h('span.msg-status', icon('clock'), 'Sending…') : h('span.msg-status', icon('check'), 'Sent');
+    const status = item.pending && item.queued ? h('span.msg-status.queued', { title: 'Waits in the session queue and sends when the current reply finishes.' }, icon('clock'), 'Queued')
+      : item.pending && !item.turnId ? h('span.msg-status', icon('clock'), 'Sending…') : h('span.msg-status', icon('check'), 'Sent');
     return h(`article.msg.owner${continued ? '.continued' : ''}`, { dataset: { id: item.key } },
       h('div.msg-stack',
         h('div.bubble', item.text.trim() ? renderMarkdown(item.text) : h('p.msg-muted', '(attachments only)')),
@@ -1373,12 +1431,22 @@ export function mount(root, ctx) {
     return d;
   }
 
-  /** Single session: busy while its turn runs. Shared thread: busy only when every target of the draft is. */
-  function sessionBusy(info, text = draft(info.id)?.text || '') {
-    if (info?.kind !== 'session') return false;
-    if (!info.shared) return sessions.running(info.sessions[0].id);
-    const targets = info.sessions.filter(s => routeMessage(text).targets.includes(s.provider));
-    return targets.length > 0 && targets.some(s => sessions.running(s.id));
+  /** The sessions a draft goes to (a shared thread routes by @mention). */
+  function draftTargets(info, text = draft(info.id)?.text || '') {
+    if (info?.kind !== 'session') return [];
+    if (!info.shared) return info.sessions;
+    return info.sessions.filter(s => routeMessage(text).targets.includes(s.provider));
+  }
+  /** A target whose send queue is full, or null. Sending while a turn runs queues the message. */
+  function queueFull(info, text) {
+    return draftTargets(info, text).find(s => sessions.queued(s.id) >= QUEUE_LIMIT) || null;
+  }
+  function renderQueueChip(info) {
+    const counts = info?.kind === 'session' ? info.sessions.map(s => [s, sessions.queued(s.id)]).filter(([, n]) => n > 0) : [];
+    const total = counts.reduce((n, [, c]) => n + c, 0);
+    queueChip.hidden = !total;
+    const text = !total ? '' : info.shared && counts.length < info.sessions.length ? `${providerLabel(counts[0][0].provider)}: ${total} queued` : `${total} queued`;
+    if (queueChip.textContent !== text) queueChip.replaceChildren(...(total ? [icon('clock'), text] : []));
   }
   function routeNote(info) {
     const route = routeMessage(draft(info.id)?.text || '');
@@ -1413,9 +1481,10 @@ export function mount(root, ctx) {
     subjectWrap.hidden = !mailbox;
     if (mailbox && !state.subjectEditing) refreshSubjectChip();
     const running = session && info.running;
-    const busy = session && sessionBusy(info);
-    sendBtn.hidden = Boolean(busy && !info.shared);
+    sendBtn.hidden = false;
+    sendBtn.title = running ? 'Queue (Enter): sends after the current reply' : 'Send (Enter)';
     stopBtn.hidden = !running;
+    renderQueueChip(info);
     if (running && stopBtn.dataset.request !== info.id) { stopBtn.dataset.request = info.id; stopBtn.disabled = false; }
     if (!running) stopBtn.dataset.request = '';
     refreshSendState();
@@ -1423,7 +1492,7 @@ export function mount(root, ctx) {
     const note = mailbox
       ? `Saved to the shared board — ${info.name} reads it at their next inbox check (schedules vary; sending doesn't wake them). A message is information, not permission.`
       : info.shared ? routeNote(info)
-        : running ? `${providerLabel(info.provider, true)} is answering — press Stop to interrupt. The session stays resumable.`
+        : running ? `${providerLabel(info.provider, true)} is answering — anything you send now waits in its queue. Stop interrupts; the session stays resumable.`
           : `${providerLabel(info.provider, true)}${info.project ? ` in ${info.project.name}` : ''} · ${level.long}${info.sessionStatus === 'stopped' ? ' · closed: sending resumes it' : ''}`;
     if (note !== state.noteSig) {
       state.noteSig = note;
@@ -1487,7 +1556,7 @@ export function mount(root, ctx) {
     if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.isComposing) {
       event.preventDefault();
       const info = threadInfo();
-      if (info?.kind === 'session' ? sessionBusy(info) : activeRun(state.threadId)) { toast('A reply is still in progress — wait for it or press Stop.'); return; }
+      if (info?.kind !== 'session' && activeRun(state.threadId)) { toast('A reply is still in progress — wait for it or press Stop.'); return; }
       send();
     } else if (event.key === 'Escape') {
       const d = draft();
@@ -1638,7 +1707,8 @@ export function mount(root, ctx) {
     const text = d.text.trim();
     if (!text && !d.files.length) { focusComposer(); return; }
     if (info.kind === 'live') { toast('Earlier live chats are read only. Start a session from New chat.'); return; }
-    if (info.kind === 'session' && sessionBusy(info, text)) { toast('A reply is still in progress — wait for it or press Stop.'); return; }
+    const full = info.kind === 'session' ? queueFull(info, text) : null;
+    if (full) { toast(`${providerLabel(full.provider, true)} already has ${QUEUE_LIMIT} messages queued — wait for one to start, or press Stop.`, { kind: 'error', timeout: 6000 }); return; }
     stopDictation();
     state.sending.add(id);
     d.error = null;
@@ -1804,6 +1874,7 @@ export function mount(root, ctx) {
     state.visible = true;
     state.restoreOnShow = true; // a hidden scroller can lose its offset; put it back from memory
     sessions.refresh();
+    wake.load();
     let target = null;
     if (params.thread) target = params.thread;
     else if (params.agentId || params.agent) target = threadForAgent(params.agentId || params.agent);
