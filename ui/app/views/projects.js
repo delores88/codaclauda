@@ -3,9 +3,13 @@
  * project id and rebuilt only when their content changes; the Board/City
  * switches are updated in place so long lists stay fast and focus is kept.
  * Each row also shows the project's access level for sessions CodaClauda starts (access.js:
- * Full or Read only), and the toolbar can apply one level to every matching project. */
+ * Full or Read only), and the toolbar can apply one level to every matching project.
+ * 0.5: each project with a folder opens its MCP tools (Full access only) and its CLAUDE.md / AGENTS.md
+ * editor (project-tools.js) from the access line or the row menu. */
 import { openNewProjectDialog } from '../newproject.js';
 import { LEVELS, ACCESS_NOTE, BROWSER_UNAVAILABLE, levelInfo } from '../access.js';
+import { openInstructions, openMcpTools, MCP_NOTE } from '../project-tools.js';
+import { has as hasFeature } from '../features.js';
 
 const FILTERS = [
   { id: 'all', label: 'All', test: () => true },
@@ -564,11 +568,15 @@ export function mount(root, ctx) {
       title: a.level === level.id ? `${level.long} (current): ${level.rule}` : `Set ${p.name} to ${level.long}: ${level.rule}`,
       onclick: () => { if (store.projectAccess(p.id).level !== level.id) saveAccess([p], { level: level.id }, `${p.name}: ${level.long}`); },
     }, h('span.acc-dot', { 'aria-hidden': 'true' }), h('span', level.label))));
+    const tools = hasFeature('mcpGet') || hasFeature('instructionsRead');
     return h('div.proj-access', { role: 'cell', 'aria-label': `Access for ${p.name}: ${levelInfo(a.level).long}` },
       h('span.proj-access-label', icon('shield'), 'Access'), levels,
       h('span.proj-access-hint', a.explicit ? levelInfo(a.level).rule : `${levelInfo(a.level).rule} Default for ${a.level === 'full' ? 'your own projects' : "projects you don't own"}.`),
-      h('span.proj-access-hint', BROWSER_UNAVAILABLE),
-      p.path ? null : h('span.proj-access-hint', 'No local folder: clone it to run sessions.'));
+      tools ? null : h('span.proj-access-hint', BROWSER_UNAVAILABLE),
+      p.path ? null : h('span.proj-access-hint', 'No local folder: clone it to run sessions.'),
+      tools && p.path ? h('span.proj-tools',
+        hasFeature('mcpGet') ? h('button.btn.small.ghost', { type: 'button', dataset: { fk: 'mcp' }, title: MCP_NOTE, onclick: () => openMcpTools(ctx, currentProject(p.id) || p) }, icon('plug'), 'MCP tools') : null,
+        hasFeature('instructionsRead') ? h('button.btn.small.ghost', { type: 'button', dataset: { fk: 'instructions' }, title: 'Edit CLAUDE.md and AGENTS.md at the project root', onclick: () => openInstructions(ctx, currentProject(p.id) || p) }, icon('file'), 'Instructions') : null) : null);
   }
 
   function openAccessMenu(anchor) {
@@ -609,6 +617,8 @@ export function mount(root, ctx) {
       p.path ? { icon: 'folder', label: 'Open folder', run: () => openExternal(p.path) } : null,
       p.url || p.repo || pendingGithub(p) ? { icon: 'external', label: 'Open on GitHub', run: () => openExternal(p.url || `https://github.com/${p.repo?.full_name || pendingGithub(p)}`) } : null,
       { icon: 'tag', label: 'Rename & aliases', run: () => renameProject(p) },
+      p.path ? { icon: 'file', label: 'Edit CLAUDE.md / AGENTS.md', run: () => openInstructions(ctx, p) } : null,
+      { icon: 'plug', label: 'MCP tools (Full access only)', run: () => openMcpTools(ctx, p) },
       store.prefs.chatFirst ? null : { icon: 'city', label: 'Show in City', disabled: !p.visible.city, title: p.visible.city ? '' : 'Hidden from the City', run: () => navigate('city', { focusProject: p.id }) },
       'sep',
       { icon: 'unlink', label: 'Unlink…', danger: true, run: () => unlinkProject(p) },

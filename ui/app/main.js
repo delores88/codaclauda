@@ -12,6 +12,7 @@ const VIEWS = [
   { id: 'board', label: 'Message board', icon: 'board', load: () => import('./views/board.js') },
   { id: 'tasks', label: 'Tasks', icon: 'tasks', load: () => import('./views/tasks.js') },
   { id: 'schedules', label: 'Schedules', icon: 'clock', load: () => import('./views/schedules.js') },
+  { id: 'running', label: 'Running', icon: 'bolt', load: () => import('./views/running.js') },
   { id: 'city', label: 'City', icon: 'city', load: () => import('./views/city.js') },
   { id: 'agents', label: 'Agents', icon: 'agents', load: () => import('./views/agents.js') },
   { id: 'connect', label: 'Agent setup', icon: 'agentAdd', load: () => import('./views/connect.js') },

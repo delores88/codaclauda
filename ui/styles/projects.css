@@ -205,3 +205,36 @@
 @media (max-width: 1100px) {
   .proj-search { max-width: none; }
 }
+
+/* 0.5 project tools: MCP servers and CLAUDE.md / AGENTS.md (modals, also opened from Chat) */
+.proj-tools { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+.pt-body { display: grid; gap: 12px; }
+.pt-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.pt-spacer { flex: 1; }
+.pt-size { color: var(--muted); font-size: 12px; }
+.pt-size.over { color: var(--danger); font-weight: 650; }
+.pt-text { min-height: 320px; max-height: 60vh; resize: vertical; font: 12.5px/1.55 var(--font-mono); white-space: pre; overflow-wrap: normal; }
+.pt-foot { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px; font-size: 12px; }
+.pt-status { color: var(--text-2); }
+.pt-status.bad { color: var(--danger); }
+.pt-path { color: var(--muted); }
+.pt-where { font: 11.5px var(--font-mono); overflow-wrap: anywhere; }
+.mcp-note { display: flex; gap: 8px; margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, #ff6b3d 35%, transparent); border-radius: 12px; background: color-mix(in srgb, #ff6b3d 8%, transparent); color: var(--text-2); font-size: 12.5px; line-height: 1.45; }
+.mcp-note .icon { flex: none; width: 16px; height: 16px; color: #ff6b3d; }
+.mcp-rows { display: grid; gap: 10px; }
+.mcp-row { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
+.mcp-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mcp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.mcp-grid .input { font-family: var(--font-mono); font-size: 12.5px; }
+.mcp-grid textarea.input { resize: vertical; }
+.mcp-empty { margin: 0; }
+.mcp-presets-title { margin: 6px 0 0; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+.mcp-presets { display: grid; gap: 10px; }
+.mcp-preset { display: grid; gap: 6px; padding: 12px; border: 1px dashed var(--border-strong); border-radius: 12px; }
+.mcp-preset header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mcp-preset header .btn { margin-left: auto; }
+.mcp-preset .field-hint { margin: 0; line-height: 1.45; }
+.mcp-install { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.mcp-install .icon { width: 14px; height: 14px; }
+.mcp-install code { padding: 2px 7px; border-radius: 6px; background: var(--code-bg); color: var(--text); font: 12px var(--font-mono); }
+@media (max-width: 720px) { .mcp-grid { grid-template-columns: 1fr; } }
