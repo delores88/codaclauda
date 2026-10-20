@@ -111,6 +111,8 @@ fn fixture() -> (tempfile::TempDir, Store, Grant) {
         timeout_seconds: 60,
         expires_at: now() + 300,
         compute: vec![],
+        max_turns: 200,
+        revoked_at: None,
     };
     store
         .transaction(|state| {
@@ -682,4 +684,224 @@ fn scoped_label_directory_maps_real_session_fields_and_routes_only_by_id() {
             .as_deref(),
         Some("Reviewer")
     );
+}
+
+fn question_grant(store: &Store, project: &str, extra: Value) -> Result<Value> {
+    let mut spec = json!({"project":project,"allowed_paths":["src"],"targets":["codex-fixture"],
+        "kinds":["question"],"expected_result":"Unit fixture only"});
+    spec.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    create_grant(store, &spec)
+}
+
+#[test]
+fn grant_defaults_suit_long_work_and_upper_bounds_are_accepted() {
+    let (_temp, store, grant) = fixture();
+    let made = question_grant(&store, &grant.project, json!({})).unwrap();
+    assert_eq!(made["max_requests"], 100);
+    assert_eq!(made["max_delegations"], 20);
+    assert_eq!(made["max_hops"], 2);
+    assert_eq!(made["timeout_seconds"], 28_800);
+    assert_eq!(made["max_turns"], 200);
+    assert!(made["expires_at"].as_u64().unwrap() >= now() + 604_800 - 5);
+    let top = json!({"max_requests":100_000,"max_delegations":10_000,"max_hops":16,
+        "timeout_seconds":2_592_000,"expires_seconds":31_536_000,"max_turns":10_000});
+    assert_eq!(
+        question_grant(&store, &grant.project, top).unwrap()["max_turns"],
+        10_000
+    );
+    let error = question_grant(&store, &grant.project, json!({"max_turns":10_001})).unwrap_err();
+    assert!(error.to_string().contains("max_turns"));
+    // Grants saved before max_turns existed read with the default.
+    let mut saved = serde_json::to_value(&grant).unwrap();
+    saved.as_object_mut().unwrap().remove("max_turns");
+    saved.as_object_mut().unwrap().remove("revoked_at");
+    let legacy: Grant = serde_json::from_value(saved).unwrap();
+    assert_eq!((legacy.max_turns, legacy.revoked_at), (200, None));
+}
+
+#[test]
+fn grant_revoke_stops_queued_work_and_new_requests() {
+    let (_temp, store, grant) = fixture();
+    let cli = Path::new("must-never-be-launched.exe");
+    submit(&store, &input("revoked-queued", &grant), None).unwrap();
+    submit(&store, &input("revoked-running", &grant), None).unwrap();
+    store
+        .transaction(|state| {
+            state.spark = Some("unlaunched-unit-fixture.exe".into());
+            let r = state.requests.get_mut("revoked-running").unwrap();
+            r.worker_claim = Some("unit-fixture-claim".into());
+            r.state = "running".into();
+            // Unknown submission outcome: cancellation records it without invoking Spark.
+            r.spark_jobs.push(json!({"request_id":"build","provider_request_id":"provider-build","job":null,"state":"unknown"}));
+            Ok(())
+        })
+        .unwrap();
+    let revoked = owner_api(&store, "grant-revoke", &json!({"id":grant.id}), cli).unwrap();
+    assert!(revoked["revoked_at"].is_u64());
+    assert!(revoked["expires_at"].as_u64().unwrap() <= now());
+    dispatch(&store, cli).unwrap();
+    let state = store.read().unwrap();
+    let request = &state.requests["revoked-queued"];
+    assert_eq!(request.state, "needs-owner");
+    assert_eq!(request.blocker.as_deref(), Some(EXPIRED));
+    assert!(request.events.iter().all(|e| e.kind != "dispatch-claimed"));
+    // Running work and its detached Spark jobs stop as with an owner cancel.
+    let running = &state.requests["revoked-running"];
+    assert!(running.cancel_requested);
+    assert!(running.events.iter().any(|e| e.kind == "cancel-requested" && e.data["scope"] == "revoked"));
+    assert_eq!(running.spark_jobs[0]["cancellation"]["cancel_pending"], true);
+    let error = submit(&store, &input("after-revoke", &grant), None).unwrap_err();
+    assert!(error.to_string().contains("expired or revoked"));
+    let again = owner_api(&store, "grant-revoke", &json!({"id":grant.id}), cli).unwrap();
+    assert_eq!(again["revoked_at"], revoked["revoked_at"]);
+    let missing = owner_api(&store, "grant-revoke", &json!({"id":"unknown"}), cli).unwrap_err();
+    assert!(missing.to_string().contains("Owner grant not found"));
+}
+
+#[test]
+fn wait_omits_the_growing_event_log() {
+    let (_temp, store, grant) = fixture();
+    submit(&store, &input("waited", &grant), None).unwrap();
+    let waited = wait(&store, "waited", 0).unwrap();
+    assert_eq!(waited["timed_out"], true);
+    assert!(waited["request"].get("events").is_none());
+    assert_eq!(waited["request"]["events_total"], 1);
+    assert_eq!(waited["request"]["state"], "queued");
+}
+
+#[test]
+fn owner_concurrency_setting_gates_dispatch() {
+    let (_temp, store, grant) = fixture();
+    let cli = Path::new("must-never-be-launched.exe");
+    assert_eq!(
+        owner_api(&store, "limits", &json!({}), cli).unwrap()["concurrent"],
+        4
+    );
+    owner_api(&store, "limits-set", &json!({"concurrent":2}), cli).unwrap();
+    for id in ["active-one", "active-two"] {
+        submit(&store, &input(id, &grant), None).unwrap();
+    }
+    store
+        .transaction(|state| {
+            for id in ["active-one", "active-two"] {
+                let r = state.requests.get_mut(id).unwrap();
+                r.worker_claim = Some("unit-fixture-claim".into());
+                r.state = "running".into();
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mut waiting = input("waiting", &grant);
+    waiting["target"] = json!("claude-fixture");
+    submit(&store, &waiting, None).unwrap();
+    dispatch(&store, cli).unwrap();
+    assert_eq!(store.read().unwrap().requests["waiting"].state, "queued");
+    let raised = owner_api(&store, "limits-set", &json!({"concurrent":3}), cli).unwrap();
+    assert_eq!(raised["concurrent"], 3);
+    // The fixture CLI cannot launch, so the claimed request records that and stops.
+    let state = store.read().unwrap();
+    assert!(
+        state.requests["waiting"]
+            .events
+            .iter()
+            .any(|e| e.kind == "dispatch-claimed")
+    );
+    let status = owner_api(&store, "status", &json!({}), cli).unwrap();
+    assert_eq!(status["limits"]["concurrent"], 3);
+    assert!(owner_api(&store, "limits-set", &json!({"concurrent":65}), cli).is_err());
+}
+
+fn running_reader(store: &Store, grant: &Grant, capability: &str) -> String {
+    let request = submit(store, &input("window-reader", grant), None).unwrap();
+    store
+        .transaction(|state| {
+            let r = state.requests.get_mut(&request.id).unwrap();
+            r.capability_hash = hash(capability);
+            r.workspace = Some(grant.project.clone());
+            r.state = "running".into();
+            Ok(())
+        })
+        .unwrap();
+    request.id
+}
+
+#[test]
+fn read_file_windows_end_on_lines_and_characters_and_stay_redacted() {
+    let (_temp, store, grant) = fixture();
+    let source = Path::new(&grant.project).join("src");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("text.txt"), "one\n\u{20ac}\u{20ac}x").unwrap();
+    fs::write(source.join("notes.txt"), "x sk-ant-abcdefghijklmnopqrst y").unwrap();
+    let request = running_reader(&store, &grant, "unit-window-capability");
+    let read = |path: &str, offset: u64, max_bytes: u64| {
+        mcp::call(
+            &store,
+            &request,
+            "unit-window-capability",
+            Path::new("unused"),
+            "read_file",
+            &json!({"path":path,"offset":offset,"max_bytes":max_bytes}),
+        )
+    };
+    let mut windows = vec![];
+    for (offset, max_bytes) in [(0, 6), (4, 4), (7, 1), (10, 5)] {
+        let window = read("src/text.txt", offset, max_bytes).unwrap();
+        assert_eq!(window["offset"], offset);
+        let content = window["content"].as_str().unwrap().to_owned();
+        windows.push((content, window["next_offset"].clone()));
+    }
+    // A line break ends the first window; the others back off to, or complete, a character.
+    let euro = "\u{20ac}".to_owned();
+    assert_eq!(
+        windows,
+        [
+            ("one\n".to_owned(), json!(4)),
+            (euro.clone(), json!(7)),
+            (euro, json!(10)),
+            ("x".to_owned(), Value::Null)
+        ]
+    );
+    let last = read("src/text.txt", 10, 5).unwrap();
+    assert_eq!((&last["eof"], &last["size"]), (&json!(true), &json!(11)));
+    let inside = read("src/text.txt", 5, 4).unwrap_err().to_string();
+    assert!(inside.contains("inside a UTF-8 character"));
+    assert!(read("src/text.txt", 12, 4).unwrap_err().to_string().contains("size 11"));
+    // Neither half of a credential split across two windows is returned.
+    let first = read("src/notes.txt", 0, 12).unwrap();
+    let second = read("src/notes.txt", 12, 64).unwrap();
+    assert_eq!(first["content"], "x [REDACTED]");
+    let second = second["content"].as_str().unwrap();
+    assert!(!second.contains("defghijk") && second.ends_with(" y"));
+}
+
+#[test]
+fn list_files_pages_through_the_allowed_scope() {
+    let (_temp, store, grant) = fixture();
+    let project = Path::new(&grant.project);
+    git(project, &["init", "--quiet"]).unwrap();
+    fs::create_dir(project.join("src")).unwrap();
+    for name in ["src/a.txt", "src/b.txt", "src/c.txt", "outside.txt"] {
+        fs::write(project.join(name), "fixture").unwrap();
+    }
+    let request = running_reader(&store, &grant, "unit-list-capability");
+    let list = |args: Value| {
+        mcp::call(
+            &store,
+            &request,
+            "unit-list-capability",
+            Path::new("unused"),
+            "list_files",
+            &args,
+        )
+        .unwrap()
+    };
+    let first = list(json!({"limit":2}));
+    assert_eq!(first["files"], json!(["src/a.txt", "src/b.txt"]));
+    assert_eq!((&first["total"], &first["next_offset"]), (&json!(3), &json!(2)));
+    let rest = list(json!({"offset":2,"limit":2}));
+    assert_eq!(rest["files"], json!(["src/c.txt"]));
+    assert!(rest["next_offset"].is_null());
+    assert_eq!(list(json!({}))["limit"], 1000);
 }

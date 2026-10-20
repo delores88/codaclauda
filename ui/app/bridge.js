@@ -65,7 +65,7 @@ export const desktop = {
   sessionList: () => invoke('session_list'),
   /** { provider:'claude'|'codex', projectId, cwd, access:'full'|'read', title, playwright, model?, effort?, sharedId?, worktree? } → { session } */
   sessionStart: options => invoke('session_start', { args: options || {} }),
-  /** → { accepted: true, turnId, queued }. A busy session queues the turn (at most 10 waiting; queued = how many wait,
+  /** → { accepted: true, turnId, queued }. A busy session queues the turn (up to 50 waiting; queued = how many wait,
    *  0 when it started now) and emits kind 'queued' { count }. The 'user' event arrives when the turn starts.
    *  Replies stream on desktop.onSessionEvent. */
   sessionSend: ({ id, text = '', attachments = [] }) => invoke('session_send', { id, text, attachments }),
@@ -140,6 +140,10 @@ export const desktop = {
   notifySettingsGet: () => invoke('notify_settings_get'),
   /** ntfyUrl must be https (null or '' turns push off) → { ntfyUrl, onFinish, onError } */
   notifySettingsSet: ({ ntfyUrl = null, onFinish = false, onError = false } = {}) => invoke('notify_settings_set', { ntfyUrl: ntfyUrl || null, onFinish: Boolean(onFinish), onError: Boolean(onError) }),
+  /** Owner setting: CodaClauda sessions working at once (Settings → Limits) → { maxLive, queueMax } */
+  sessionLimitsGet: () => invoke('session_limits_get'),
+  /** maxLive is a whole number 1-32 (default 6) → { maxLive, queueMax } */
+  sessionLimitsSet: ({ maxLive } = {}) => invoke('session_limits_set', { maxLive: Number(maxLive) }),
   /** file: 'CLAUDE.md' | 'AGENTS.md' at the project root (≤ 200 KB) → { text, exists } */
   projectInstructionsRead: ({ projectId = null, cwd, file }) => invoke('project_instructions_read', { projectId, cwd, file }),
   /** → { ok: true } */

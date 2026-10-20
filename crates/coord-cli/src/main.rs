@@ -307,6 +307,12 @@ mod boundary_tests {
             Action::Api {
                 op: "session-register".into(),
             },
+            Action::Api {
+                op: "grant-revoke".into(),
+            },
+            Action::Api {
+                op: "limits-set".into(),
+            },
             Action::Worker {
                 id: "x".into(),
                 claim: "y".into(),

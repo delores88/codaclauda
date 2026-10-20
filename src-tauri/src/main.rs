@@ -35,6 +35,9 @@ const OPERATIONS: &[&str] = &[
     "connect",
     "rename-agent",
     "grant",
+    "grant-revoke",
+    "limits",
+    "limits-set",
     "submit",
     "messages",
     "request",
@@ -471,6 +474,8 @@ fn main() {
             session_host::mcp::mcp_servers_set,
             session_host::notify::notify_settings_get,
             session_host::notify::notify_settings_set,
+            session_host::limits::session_limits_get,
+            session_host::limits::session_limits_set,
             project_tools::project_instructions_read,
             project_tools::project_instructions_write,
             project_tools::ci_status

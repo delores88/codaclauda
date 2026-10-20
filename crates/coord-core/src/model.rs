@@ -30,6 +30,35 @@ pub struct Grant {
     pub expires_at: u64,
     #[serde(default)]
     pub compute: Vec<ComputePermission>,
+    /// Provider turns per run. Grants saved before 0.5 read as the default.
+    #[serde(default = "default_max_turns")]
+    pub max_turns: u32,
+    /// Owner revocation time. Revocation also moves `expires_at` to that time.
+    #[serde(default)]
+    pub revoked_at: Option<u64>,
+}
+
+pub const DEFAULT_MAX_TURNS: u32 = 200;
+fn default_max_turns() -> u32 {
+    DEFAULT_MAX_TURNS
+}
+
+/// Owner-set board limits. Missing in boards saved before 0.5.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct BoardLimits {
+    #[serde(default = "default_concurrent")]
+    pub concurrent: u32,
+}
+pub const DEFAULT_CONCURRENT: u32 = 4;
+fn default_concurrent() -> u32 {
+    DEFAULT_CONCURRENT
+}
+impl Default for BoardLimits {
+    fn default() -> Self {
+        Self {
+            concurrent: DEFAULT_CONCURRENT,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
@@ -106,6 +135,8 @@ pub struct State {
     pub requests: BTreeMap<String, Request>,
     pub paused: bool,
     pub spark: Option<String>,
+    #[serde(default)]
+    pub limits: BoardLimits,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub registrations: BTreeMap<String, SessionRegistration>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -122,6 +153,7 @@ impl Default for State {
             requests: BTreeMap::new(),
             paused: false,
             spark: None,
+            limits: BoardLimits::default(),
             registrations: BTreeMap::new(),
             conversations: BTreeMap::new(),
             session_messages: BTreeMap::new(),

@@ -45,6 +45,8 @@ fn fixture() -> (tempfile::TempDir, Store, String) {
         timeout_seconds: 20,
         expires_at: now() + 600,
         compute: vec![],
+        max_turns: 200,
+        revoked_at: None,
     };
     store
         .transaction(|s| {

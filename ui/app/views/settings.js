@@ -3,6 +3,7 @@
  * (view-model updatePresentation), install confirmation and bounded status polling. */
 import { updatePresentation } from '../../view-model.js';
 import { weatherSettings } from './settings-weather.js';
+import { limitsSettings } from './settings-limits.js';
 import { wake, WAKE_CAPS_TEXT, WAKE_UNAVAILABLE_TEXT } from '../wake.js';
 import { has as hasFeature, call as callFeature, validNtfyUrl, UNSUPPORTED_TEXT } from '../features.js';
 
@@ -30,6 +31,7 @@ export function mount(root, ctx) {
   };
   const info = (label, value) => h('div.info-row', h('dt', label), h('dd.mono', { title: value || '' }, value || '—'));
   const weatherCard = weatherSettings(ctx);   // persistent: keeps its search box and results
+  const limitsCard = limitsSettings(ctx);     // persistent: Agents at once, Board requests at once
 
   /* ---------- Wake on mail (global switch; each session also has its own, off by default) ---------- */
   let wakeSaving = false;
@@ -228,6 +230,7 @@ export function mount(root, ctx) {
         h('div.setting-row', h('div.setting-text', h('strong', 'City graphics'), h('span.field-hint', 'Low turns off shadows for slower PCs.')),
           h('div.segmented', ['high', 'low'].map(q => h('button', { type: 'button', 'aria-pressed': String(store.prefs.cityQuality === q), onclick: () => { store.setPref('cityQuality', q); render(); } }, q === 'high' ? 'High' : 'Low')))),
       ),
+      limitsCard.node,
       notifyCard,
       wakeCard,
       weatherCard.node,
@@ -257,7 +260,7 @@ export function mount(root, ctx) {
   }
   render();
   return {
-    show() { visible = true; render(); updateOperation('status'); wake.load(); if (note.state !== 'loaded') loadNotify(); },
+    show() { visible = true; render(); updateOperation('status'); wake.load(); limitsCard.load(); if (note.state !== 'loaded') loadNotify(); },
     hide() { visible = false; },
   };
 }

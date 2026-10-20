@@ -18,7 +18,7 @@ const NEEDED = ['sessionList', 'sessionStart', 'sessionSend', 'sessionStop', 'se
 const HISTORY_LIMIT = 4000;
 const MAX_EVENTS = 8000;
 export const UNAVAILABLE_TEXT = 'Sessions need CodaClauda 0.4 desktop';
-export const QUEUE_LIMIT = 10;
+export const QUEUE_LIMIT = 50;   // matches the engine's QUEUE_MAX (session_limits_get → queueMax)
 const QUEUED_STATUS = /^queued\s*\((\d+)\)$/i;   // "queued (n)" status text, read as a count
 
 const eventSig = e => `${e.kind}|${e.turnId ?? ''}|${e.at ?? ''}|${String(e.text ?? '').length}|${e.tool?.name ?? ''}|${e.status ?? ''}`;

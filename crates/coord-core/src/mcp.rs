@@ -1,5 +1,15 @@
 use super::*;
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead, Read, Seek, SeekFrom};
+
+const READ_DEFAULT: u64 = 1 << 20;
+const READ_MAX: u64 = 8 << 20;
+const WRITE_MAX: usize = 16 << 20;
+const LIST_DEFAULT: u64 = 1000;
+const LIST_MAX: u64 = 10_000;
+// Neighbouring text examined so a credential split across windows is still redacted.
+const REDACTION_CONTEXT: u64 = 64 << 10;
+// One JSON-RPC line must hold a full write_file body after JSON escaping.
+const FRAME_LIMIT: usize = 64 << 20;
 
 fn tools_list() -> Value {
     let definitions = [
@@ -10,17 +20,17 @@ fn tools_list() -> Value {
         ),
         (
             "list_files",
-            "List files within the owner's allowed project paths. No secret/internal paths.",
-            json!({}),
+            "List files within the owner's allowed project paths, one page at a time: offset (default 0) and limit (default 1000, at most 10000). Continue from next_offset until it is null. No secret/internal paths.",
+            json!({"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":LIST_MAX}}),
         ),
         (
             "read_file",
-            "Read a UTF-8 project file in the allowed scope, at most 256 KiB.",
-            json!({"path":{"type":"string"}}),
+            "Read a UTF-8 project file in the allowed scope, any size, one window at a time. offset is in bytes (default 0); max_bytes defaults to 1048576 (at most 8388608). A window that does not reach the end stops after its last line break. Continue from next_offset until eof is true. Use a smaller max_bytes when large output is unhelpful.",
+            json!({"path":{"type":"string"},"offset":{"type":"integer","minimum":0},"max_bytes":{"type":"integer","minimum":1,"maximum":READ_MAX}}),
         ),
         (
             "write_file",
-            "Write an allowed UTF-8 file in this delegated request's isolated worktree only. Never merges.",
+            "Write an allowed UTF-8 file of at most 16 MiB in this delegated request's isolated worktree only. Never merges.",
             json!({"path":{"type":"string"},"content":{"type":"string"}}),
         ),
         (
@@ -40,7 +50,7 @@ fn tools_list() -> Value {
         ),
         (
             "wait",
-            "Wait up to 60 seconds for a request in the same owner grant. Timeout does not mean failure.",
+            "Wait up to 60 seconds for a request in the same owner grant. Timeout does not mean failure. Returns state, answer and receipt with events_total; read events with messages.",
             json!({"id":{"type":"string"},"timeout":{"type":"integer","minimum":0,"maximum":60}}),
         ),
         (
@@ -125,11 +135,7 @@ fn authorize(store: &Store, request: &str, capability: &str) -> Result<(Request,
         "Request is no longer active"
     );
     let g = &s.grants[&r.grant_id];
-    ensure!(g.expires_at > now(), "Owner grant expired");
-    ensure!(
-        r.events.iter().filter(|e| e.kind == "mcp-call").count() < 128,
-        "Owner tool-call budget reached; stop and report remaining work"
-    );
+    ensure!(g.expires_at > now(), EXPIRED);
     Ok((r.clone(), g.clone()))
 }
 fn same_grant(store: &Store, r: &Request, other: &str) -> Result<Request> {
@@ -193,22 +199,24 @@ pub fn call(
                 workspace,
                 &["ls-files", "--cached", "--others", "--exclude-standard"],
             )?;
+            let offset = bound(a, "offset", 0, 0, u64::MAX)? as usize;
+            let limit = bound(a, "limit", LIST_DEFAULT, 1, LIST_MAX)? as usize;
             let files: Vec<_> = listing
                 .lines()
                 .filter(|f| paths::authorized(workspace, f, &g.allowed_paths, false).is_ok())
-                .take(1000)
                 .collect();
-            Ok(json!({"files":files,"limit":1000}))
+            let page: Vec<_> = files.iter().skip(offset).take(limit).collect();
+            let next = offset.saturating_add(page.len());
+            Ok(json!({"files":page,"offset":offset,"limit":limit,"total":files.len(),"next_offset":if next < files.len() {json!(next)} else {Value::Null}}))
         }
         "read_file" => {
             let path = paths::authorized(workspace, field(a, "path")?, &g.allowed_paths, false)?;
-            ensure!(
-                path.is_file() && fs::metadata(&path)?.len() <= 262144,
-                "Read requires a UTF-8 file of at most 256 KiB"
-            );
-            let bytes = fs::read(&path)?;
-            let text = String::from_utf8(bytes).context("File is not UTF-8")?;
-            Ok(json!({"path":a["path"],"content":redact(&text)}))
+            ensure!(path.is_file(), "Read requires a UTF-8 file");
+            let offset = bound(a, "offset", 0, 0, u64::MAX)?;
+            let max_bytes = bound(a, "max_bytes", READ_DEFAULT, 1, READ_MAX)?;
+            let mut window = read_window(&path, offset, max_bytes)?;
+            window["path"] = a["path"].clone();
+            Ok(window)
         }
         "write_file" => {
             ensure!(
@@ -217,8 +225,13 @@ pub fn call(
             );
             let content = a["content"].as_str().context("content must be text")?;
             ensure!(
-                content.len() <= 262144 && redact(content) == content,
-                "File too large or contains a recognizable credential"
+                content.len() <= WRITE_MAX,
+                "write_file content is {} bytes; the limit is 16 MiB ({WRITE_MAX} bytes)",
+                content.len()
+            );
+            ensure!(
+                redact(content) == content,
+                "File contains a recognizable credential"
             );
             let path = paths::authorized(workspace, field(a, "path")?, &g.allowed_paths, true)?;
             // Serialize against cancellation and expiry so a cancelled request cannot start another write.
@@ -305,7 +318,6 @@ pub fn call(
                         ensure!(existing["digest"]==digest,"Spark request ID has different content");
                         return Ok(Some(existing.clone()))
                     }
-                    ensure!(rr.spark_jobs.len()<2,"Spark job budget reached");
                     rr.spark_jobs.push(json!({"request_id":requested,"provider_request_id":provider_id,"arguments":provider_args,"digest":digest,"state":"submitting","job":null}));
                     Ok(None)
                 })?;
@@ -423,10 +435,65 @@ fn mailbox_call(store: &Store, request: &str, capability: &str, name: &str, a: &
     }
 }
 
+/// One UTF-8 window of a file, read without loading the rest. Before EOF the
+/// window ends after its last line break, else on a character boundary, and it
+/// always advances. Redaction sees the neighbouring text on both sides.
+fn read_window(path: &Path, offset: u64, max_bytes: u64) -> Result<Value> {
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    ensure!(
+        offset <= size,
+        "offset {offset} is beyond the end of the file (size {size} bytes)"
+    );
+    let start = offset.saturating_sub(REDACTION_CONTEXT);
+    file.seek(SeekFrom::Start(start))?;
+    let want = max_bytes.min(size - offset);
+    let mut buffer = Vec::new();
+    // Three spare bytes complete a character that straddles a tiny window.
+    file.take(offset - start + want + 3 + REDACTION_CONTEXT)
+        .read_to_end(&mut buffer)?;
+    let from = ((offset - start) as usize).min(buffer.len());
+    let continuation = |i: usize| buffer.get(i).is_some_and(|b| b & 0xC0 == 0x80);
+    ensure!(
+        offset == 0 || !continuation(from),
+        "offset {offset} is inside a UTF-8 character; continue from a returned next_offset"
+    );
+    let mut end = (from + want as usize).min(buffer.len());
+    if offset + ((end - from) as u64) < size {
+        if let Some(newline) = buffer[from..end].iter().rposition(|b| *b == b'\n') {
+            end = from + newline + 1;
+        } else {
+            let mut boundary = end;
+            while boundary > from && continuation(boundary) {
+                boundary -= 1;
+            }
+            if boundary == from {
+                boundary = end;
+                while continuation(boundary) {
+                    boundary += 1;
+                }
+            }
+            end = boundary;
+        }
+    }
+    let text = std::str::from_utf8(&buffer[from..end])
+        .ok()
+        .context("File is not UTF-8")?;
+    let next = offset + (end - from) as u64;
+    let eof = next >= size;
+    let content = redact_in_context(
+        &String::from_utf8_lossy(&buffer[..from]),
+        text,
+        &String::from_utf8_lossy(&buffer[end..]),
+    );
+    Ok(json!({"content":content,"offset":offset,"next_offset":if eof {Value::Null} else {json!(next)},"size":size,"eof":eof}))
+}
+
 fn is_descendant(store: &Store, child: &Request, parent: &str) -> Result<bool> {
     let s = store.read()?;
     let mut p = child.parent_id.as_deref();
-    for _ in 0..4 {
+    // Bounded by the deepest hop chain an owner can authorize.
+    for _ in 0..64 {
         match p {
             Some(id) if id == parent => return Ok(true),
             Some(id) => p = s.requests.get(id).and_then(|r| r.parent_id.as_deref()),
@@ -446,14 +513,14 @@ pub fn serve(store: &Store, request: &str, capability: &str, cli: &Path) -> Resu
         let mut bytes = vec![];
         let n = reader
             .by_ref()
-            .take(1048577)
+            .take(FRAME_LIMIT as u64 + 1)
             .read_until(b'\n', &mut bytes)?;
         if n == 0 {
             break;
         }
         ensure!(
-            bytes.len() <= 1048576 && bytes.ends_with(b"\n"),
-            "MCP message exceeds 1 MiB"
+            bytes.len() <= FRAME_LIMIT && bytes.ends_with(b"\n"),
+            "MCP message exceeds 64 MiB"
         );
         let v: Value = match serde_json::from_slice(&bytes) {
             Ok(v) => v,
@@ -512,7 +579,7 @@ mod mailbox_tests {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::new(Some(temp.path().join("board"))).unwrap();
         store.transaction(|s| {
-            let grant = Grant { id:"mailbox-grant".into(), project:temp.path().to_string_lossy().into_owned(), allowed_paths:vec!["allowed.txt".into()], targets:vec!["endpoint".into()], kinds:vec!["question".into()], expected_result:"Fixture".into(), max_requests:2, max_delegations:0, max_hops:1, timeout_seconds:20, expires_at:now()+600, compute:vec![] };
+            let grant = Grant { id:"mailbox-grant".into(), project:temp.path().to_string_lossy().into_owned(), allowed_paths:vec!["allowed.txt".into()], targets:vec!["endpoint".into()], kinds:vec!["question".into()], expected_result:"Fixture".into(), max_requests:2, max_delegations:0, max_hops:1, timeout_seconds:20, expires_at:now()+600, compute:vec![], max_turns:200, revoked_at:None };
             s.grants.insert(grant.id.clone(), grant);
             Ok(())
         }).unwrap();

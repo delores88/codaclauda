@@ -43,10 +43,19 @@ one Claude and one Codex registration. Equivalent owner JSON operations are:
 | --- | --- |
 | `session-register` | `id`, `provider` (`claude` or `codex`), `chat_id`, `label`, `project`, `mode`, `expires_seconds` |
 | `session-conversation` | `id`, `registrations` (exact pair), `max_messages`, `max_hops`, `expires_seconds` |
-| `session-list` | optional `conversation_id`, `after` (exclusive sequence), `limit` (1–20) |
+| `session-list` | optional `conversation_id`, `after` (exclusive sequence), `limit` (1–100, default 20) |
 | `session-probe` | `registration_id` for an existing Codex queue registration; read-only |
 | `session-rotate` | `registration_id`, optional `expires_seconds`; invalidates its old capability |
 | `session-revoke` | exactly one of `registration_id` or `conversation_id`; preserves history |
+
+Registration `expires_seconds` is 30–2592000 (30 days), default 86400. A
+conversation accepts `max_messages` 1–10000 (default 64), `max_hops` 0–16
+(default 8) and `expires_seconds` 30–2592000 (default 86400), never outliving
+either registration. The session `inbox` page limit is 1–100 (default 20) and
+`wait` accepts 0–300 seconds (default 20); a client's own tool timeout may end a
+long wait sooner. Codex stops MCP calls after 60 seconds by default; for waits
+longer than 55 seconds set `tool_timeout_sec = 330` on the CodaClauda session
+server's `[mcp_servers.<name>]` entry in Codex's `config.toml`.
 
 Delivery modes are `inbox`, `claude-channel` and `codex-queue`. Codex queue also
 requires the absolute native `codex_executable` and optionally `codex_socket`.
@@ -181,16 +190,47 @@ project. Delegation requires the repository root as `project`.
 | `targets` | 1–4 connected endpoint IDs |
 | `kinds` | Nonempty subset of `question`, `review`, `delegate` |
 | `expected_result` | Required nonempty text |
-| `max_requests` | 1–16; default 8, includes peer requests |
-| `max_delegations` | 0–8; default 2 |
-| `max_hops` | 0–3; default 2; owner request starts at hop 0 |
-| `timeout_seconds` | 10–600 per request; default 180, also bounded by grant expiry |
-| `expires_seconds` | 30–3600 from grant creation; default 1800 |
+| `max_requests` | 1–100000; default 100, includes peer requests |
+| `max_delegations` | 0–10000; default 20 |
+| `max_hops` | 0–16; default 2; owner request starts at hop 0 |
+| `max_turns` | 1–10000 provider turns per run; default 200 |
+| `timeout_seconds` | 10–2592000 (30 days) per run; default 28800 (8 hours), also bounded by grant expiry |
+| `expires_seconds` | 30–31536000 (365 days) from grant creation; default 604800 (7 days) |
 | `compute` | Up to four exact `{argv, placement, runtime}` permissions; default empty |
 
+These are owner choices, not product ceilings. When work reaches one, the error
+or blocker names the limit and the setting that raises it, for example
+`OWNER_LIMIT: request budget reached (max_requests 100 on this authorization).
+Create a new authorization with a higher Maximum requests.` A run stopped by its
+time limit reports `Run time limit reached (timeout_seconds N). Create a new
+authorization with a longer run time.`; one stopped by its turn limit names
+`max_turns`. Both end as `needs-owner`, and the receipt keeps the machine
+`stop_reason` beside the readable `stop_message`.
+
 Paths reject traversal, links/reparse points, internal and recognizable secret
-locations. File reads/writes are UTF-8 and limited to 256 KiB. Existing parent
-directories are required for new files. Questions and reviews cannot write.
+locations. Files are UTF-8. `read_file` has no file-size cap: it returns one
+window at a time (see MCP below). `write_file` accepts up to 16 MiB of content.
+Existing parent directories are required for new files. Questions and reviews
+cannot write.
+
+### Revoke a grant and set board limits
+
+```powershell
+@{ id = $GrantId } | ConvertTo-Json | & $Coda --json api grant-revoke
+@{} | ConvertTo-Json | & $Coda --json api limits
+@{ concurrent = 6 } | ConvertTo-Json | & $Coda --json api limits-set
+```
+
+`grant-revoke` records `revoked_at` and moves the grant's `expires_at` to that
+moment, so its queued requests become `needs-owner`, running provider sessions
+are stopped, and its MCP tools and new submissions are refused with
+`OWNER_LIMIT: authorization expired or revoked; create a new authorization`.
+Revoking again returns the same grant. `limits` returns the board's owner
+settings; `limits-set` changes `concurrent`, the number of requests that may
+run at once (1–64, default 4). Raising it dispatches eligible queued work;
+lowering it never stops running work. `status` reports it as
+`limits.concurrent`. These are owner operations: a process holding a scoped
+request or session capability is refused.
 
 ## Ask, delegate and review
 
@@ -246,8 +286,8 @@ $ReviewId = [guid]::NewGuid().ToString()
 Edits remain in the returned `workspace`/receipt `worktree`, with `merged:false`.
 Review does not merge them. A conflicting active delegation against the same
 source project/path is refused with `CLAIM_CONFLICT`; separate worktrees do not
-evade the claim. Independent paths may proceed, with at most two active requests
-and one active request per endpoint.
+evade the claim. Independent paths may proceed, up to the board's `concurrent`
+setting (default 4) and one active request per endpoint.
 
 ## Read history, pause, cancel and recover
 
@@ -268,6 +308,8 @@ $Page = & $Coda --json messages $QuestionId --after 0 | ConvertFrom-Json
 `messages --after` is an inclusive sequence offset. Each response contains at
 most 100 events plus `next_offset`, state, answer and receipt. Use the returned
 offset for the next page. `wait --timeout` accepts 0–60 seconds, default 20.
+`wait` returns the request without its event log, plus `events_total`; read the
+events with `messages`.
 
 Pause stops new dispatch; it does not suspend already running provider work.
 Resume permits dispatch again. `cancel` requests cancellation of one request;
@@ -350,6 +392,17 @@ Both providers receive `get_context`, `list_files`, `read_file`, `write_file`,
 requests inherit the existing grant, actual origin and remaining limits; MCP
 cannot create a grant or connect a new endpoint. Agents must poll replies; a
 server notification does not wake an arbitrary existing chat.
+
+`list_files` returns a page: optional `offset` (default 0) and `limit` (default
+1000, 1–10000), with `files`, `offset`, `limit`, `total` and `next_offset`
+(`null` on the last page). `read_file` takes `path`, optional `offset` in bytes
+(default 0) and optional `max_bytes` (default 1048576, 1–8388608). It reads only
+that window and returns `path`, `content`, `offset`, `next_offset` (`null` at
+end of file), `size` and `eof`. A window that stops before the end ends after
+its last line break, or on a character boundary when it has none, and always
+advances. Continue from `next_offset`; an offset past the end or inside a
+character is refused. Content is redacted with its neighbouring text in view,
+so a credential split across two windows is removed from both.
 
 `get_context.endpoints` is the directory of connections permitted by the current
 grant, with `id`, `label`, provider and workspace. `peer_requests` links each

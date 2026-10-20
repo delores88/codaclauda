@@ -120,9 +120,31 @@ fn add_worktree(project: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn redact(text: &str) -> String {
+fn secret_pattern() -> &'static regex::Regex {
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    PATTERN.get_or_init(||regex::Regex::new(r#"(?is)(?:-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----.*?-----END (?:[A-Z ]*PRIVATE KEY)-----|sk-(?:ant-)?[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{15,}|bearer\s+[a-z0-9._-]+|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|client[_-]?secret)["']?\s*[:=]\s*["']?[^\s,;"'}]+)"#).unwrap()).replace_all(text,"[REDACTED]").into_owned()
+    PATTERN.get_or_init(||regex::Regex::new(r#"(?is)(?:-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----.*?-----END (?:[A-Z ]*PRIVATE KEY)-----|sk-(?:ant-)?[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{15,}|bearer\s+[a-z0-9._-]+|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|client[_-]?secret)["']?\s*[:=]\s*["']?[^\s,;"'}]+)"#).unwrap())
+}
+pub fn redact(text: &str) -> String {
+    secret_pattern().replace_all(text, "[REDACTED]").into_owned()
+}
+/// Redact `text` as it reads between its neighbours, so a credential split
+/// across separately returned file windows is removed from every window.
+pub fn redact_in_context(before: &str, text: &str, after: &str) -> String {
+    let joined = format!("{before}{text}{after}");
+    let (mut at, end) = (before.len(), before.len() + text.len());
+    let mut out = String::with_capacity(text.len());
+    for m in secret_pattern().find_iter(&joined) {
+        if m.start() >= end {
+            break;
+        }
+        if m.end() > at {
+            out.push_str(&joined[at..m.start().max(at)]);
+            out.push_str("[REDACTED]");
+            at = m.end().min(end);
+        }
+    }
+    out.push_str(&joined[at..end]);
+    redact(&out)
 }
 fn sanitized(v: &Value) -> Value {
     match v {
@@ -300,10 +322,22 @@ pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value
             let mut requests: Vec<_> = s.requests.values().map(public_request).collect();
             requests.sort_by_key(|r| std::cmp::Reverse(r["created_at"].as_u64().unwrap_or(0)));
             Ok(
-                json!({"schema_version":s.schema_version,"endpoints":s.endpoints.values().map(public_endpoint).collect::<Vec<_>>(),"grants":s.grants.values().collect::<Vec<_>>(),"requests":requests,"spark":{"executable":s.spark,"acceptance":"pending until actual shared job receipt"},"paused":s.paused,"state_dir":store.root,"limits":{"concurrent":2,"codex_cost":"unavailable","hard_token_cap":"unavailable"}}),
+                json!({"schema_version":s.schema_version,"endpoints":s.endpoints.values().map(public_endpoint).collect::<Vec<_>>(),"grants":s.grants.values().collect::<Vec<_>>(),"requests":requests,"spark":{"executable":s.spark,"acceptance":"pending until actual shared job receipt"},"paused":s.paused,"state_dir":store.root,"limits":{"concurrent":s.limits.concurrent,"codex_cost":"unavailable","hard_token_cap":"unavailable"}}),
             )
         }
         "grant" => create_grant(store, a),
+        "grant-revoke" => revoke_grant(store, field(a, "id")?),
+        "limits" => Ok(json!({"concurrent":store.read()?.limits.concurrent})),
+        "limits-set" => {
+            let concurrent = bound(a, "concurrent", 0, 1, 64)? as u32;
+            store.transaction(|s| {
+                s.limits.concurrent = concurrent;
+                Ok(())
+            })?;
+            // A higher limit can start queued work now; a lower one only gates new launches.
+            dispatch(store, cli)?;
+            Ok(json!({"concurrent":concurrent}))
+        }
         "submit" => {
             let r = submit(store, a, None)?;
             dispatch(store, cli)?;
@@ -443,6 +477,7 @@ fn create_grant(store: &Store, a: &Value) -> Result<Value> {
             "Invalid compute placement or runtime"
         );
     }
+    // Owner-chosen bounds. The ranges only reject nonsense; defaults suit multi-hour work.
     let g = Grant {
         id: id(),
         project: project.to_string_lossy().into(),
@@ -450,12 +485,14 @@ fn create_grant(store: &Store, a: &Value) -> Result<Value> {
         targets,
         kinds,
         expected_result: field(a, "expected_result")?.into(),
-        max_requests: bound(a, "max_requests", 8, 1, 16)? as usize,
-        max_delegations: bound(a, "max_delegations", 2, 0, 8)? as usize,
-        max_hops: bound(a, "max_hops", 2, 0, 3)? as u32,
-        timeout_seconds: bound(a, "timeout_seconds", 180, 10, 600)?,
-        expires_at: now() + bound(a, "expires_seconds", 1800, 30, 3600)?,
+        max_requests: bound(a, "max_requests", 100, 1, 100_000)? as usize,
+        max_delegations: bound(a, "max_delegations", 20, 0, 10_000)? as usize,
+        max_hops: bound(a, "max_hops", 2, 0, 16)? as u32,
+        timeout_seconds: bound(a, "timeout_seconds", 28_800, 10, adapters::MAX_RUN_SECONDS)?,
+        expires_at: now().saturating_add(bound(a, "expires_seconds", 604_800, 30, 31_536_000)?),
         compute,
+        max_turns: bound(a, "max_turns", DEFAULT_MAX_TURNS.into(), 1, adapters::MAX_TURNS.into())? as u32,
+        revoked_at: None,
     };
     store.transaction(|s| {
         for target in &g.targets {
@@ -472,6 +509,41 @@ fn create_grant(store: &Store, a: &Value) -> Result<Value> {
         Ok(())
     })?;
     Ok(json!(g))
+}
+
+const EXPIRED: &str = "OWNER_LIMIT: authorization expired or revoked; create a new authorization";
+
+/// Owner revocation. Moving the deadline to now lets every existing expiry
+/// check stop the grant's queued, running and peer work; like an owner cancel
+/// it also stops the grant's owned Spark jobs. Repeating is harmless.
+fn revoke_grant(store: &Store, grant_id: &str) -> Result<Value> {
+    let (g, stopped) = store.transaction(|s| {
+        let g = s.grants.get_mut(grant_id).context("Owner grant not found")?;
+        let at = *g.revoked_at.get_or_insert(now());
+        g.expires_at = g.expires_at.min(at);
+        let g = g.clone();
+        let mut stopped = vec![];
+        for r in s
+            .requests
+            .values_mut()
+            .filter(|r| r.grant_id == grant_id && (!r.terminal() || !r.spark_jobs.is_empty()))
+        {
+            if !r.cancel_requested {
+                r.cancel_requested = true;
+                r.event("cancel-requested", json!({"scope":"revoked"}));
+            }
+            if r.state == "queued" && r.worker_claim.is_none() {
+                r.blocker = Some(EXPIRED.into());
+                r.transition("needs-owner", json!({"reason":"revoked"}));
+            }
+            stopped.push(r.id.clone());
+        }
+        Ok((json!(g), stopped))
+    })?;
+    for id in stopped {
+        cancel_owned_spark(store, &id)?;
+    }
+    Ok(g)
 }
 
 pub fn submit(store: &Store, a: &Value, parent: Option<&str>) -> Result<Request> {
@@ -496,12 +568,12 @@ pub fn submit(store: &Store, a: &Value, parent: Option<&str>) -> Result<Request>
         let expected=a["expected_result"].as_str().unwrap_or(&g.expected_result).to_owned();
         let digest=hash(&json!({"target":target,"kind":kind,"prompt":prompt,"grant":grant_id,"parent":parent,"expected":expected}).to_string());
         if let Some(existing)=s.requests.get(&request_id){ensure!(existing.digest==digest,"ID_CONFLICT: request ID already has different content");return Ok(existing.clone())}
-        ensure!(g.expires_at>now(),"OWNER_LIMIT: grant expired");
+        ensure!(g.expires_at>now(),"{EXPIRED}");
         ensure!(g.targets.contains(&target)&&g.kinds.contains(&kind),"OWNER_SCOPE: target or request type was not authorized");
-        ensure!(s.requests.values().filter(|r|r.grant_id==grant_id).count()<g.max_requests,"OWNER_LIMIT: request budget reached");
-        let hop=p.as_ref().map(|p|p.hop+1).unwrap_or(0);ensure!(hop<=g.max_hops,"OWNER_LIMIT: hop limit reached; stop and report unresolved work");
+        ensure!(s.requests.values().filter(|r|r.grant_id==grant_id).count()<g.max_requests,"OWNER_LIMIT: request budget reached (max_requests {} on this authorization). Create a new authorization with a higher Maximum requests.",g.max_requests);
+        let hop=p.as_ref().map(|p|p.hop+1).unwrap_or(0);ensure!(hop<=g.max_hops,"OWNER_LIMIT: hop limit reached (max_hops {} on this authorization); stop and report unresolved work. Create a new authorization with a higher Maximum hops.",g.max_hops);
         if kind=="delegate"{
-            ensure!(s.requests.values().filter(|r|r.grant_id==grant_id&&r.kind=="delegate").count()<g.max_delegations,"OWNER_LIMIT: delegation budget reached");
+            ensure!(s.requests.values().filter(|r|r.grant_id==grant_id&&r.kind=="delegate").count()<g.max_delegations,"OWNER_LIMIT: delegation budget reached (max_delegations {} on this authorization). Create a new authorization with a higher Maximum delegations.",g.max_delegations);
             for other in s.requests.values().filter(|r|r.kind=="delegate"&&!r.terminal()){
                 let og=&s.grants[&other.grant_id];
                 ensure!(og.project!=g.project||!og.allowed_paths.iter().any(|x|g.allowed_paths.iter().any(|y|paths::overlaps(x,y))),"CLAIM_CONFLICT: overlapping delegated edit already owns this source path");
@@ -530,7 +602,11 @@ pub fn wait(store: &Store, request: &str, seconds: u64) -> Result<Value> {
         let s = store.read()?;
         let r = s.requests.get(request).context("Request not found")?;
         if r.terminal() || std::time::Instant::now() >= end {
-            return Ok(json!({"timed_out":!r.terminal(),"request":public_request(r)}));
+            // Long runs log thousands of events; `messages` pages them instead.
+            let mut request = public_request(r);
+            request.as_object_mut().unwrap().remove("events");
+            request["events_total"] = json!(r.events.len());
+            return Ok(json!({"timed_out":!r.terminal(),"request":request}));
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -660,7 +736,7 @@ pub fn dispatch(store: &Store, cli: &Path) -> Result<()> {
                 .values()
                 .filter(|r| r.worker_claim.is_some() && !r.terminal())
                 .count();
-            if active >= 2 {
+            if active >= s.limits.concurrent as usize {
                 return Ok(None);
             }
             let busy: Vec<_> = s
@@ -683,7 +759,7 @@ pub fn dispatch(store: &Store, cli: &Path) -> Result<()> {
             if let Some(rid) = candidate {
                 let r = s.requests.get_mut(&rid).unwrap();
                 if s.grants[&r.grant_id].expires_at <= now() {
-                    r.blocker = Some("Owner grant expired before dispatch".into());
+                    r.blocker = Some(EXPIRED.into());
                     r.transition("needs-owner", json!({"reason":"deadline"}));
                     return Ok(Some((rid, false)));
                 }
@@ -719,6 +795,24 @@ pub fn dispatch(store: &Store, cli: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Owner-facing reason for a run stopped by one of the authorization's limits.
+fn limit_message(stop: Option<&str>, g: &Grant, run_seconds: u64, expired: bool) -> Option<String> {
+    match stop? {
+        "deadline_exceeded" if run_seconds >= g.timeout_seconds => Some(format!(
+            "Run time limit reached (timeout_seconds {}). Create a new authorization with a longer run time.",
+            g.timeout_seconds
+        )),
+        // The run was clipped to the authorization deadline, or revocation stopped it.
+        "deadline_exceeded" => Some(EXPIRED.into()),
+        "cancelled" if expired => Some(EXPIRED.into()),
+        "max_turns_reached" => Some(format!(
+            "Turn limit reached (max_turns {}). Create a new authorization with a higher Maximum turns.",
+            g.max_turns
+        )),
+        _ => None,
+    }
 }
 
 fn recover(store: &Store) -> Result<()> {
@@ -832,10 +926,10 @@ pub fn worker(
             request_id: r.id.clone(),
             capability: capability.into(),
             timeout_seconds: g.timeout_seconds.min(g.expires_at.saturating_sub(now())),
-            max_turns: 12,
+            max_turns: g.max_turns,
             work_dir: run_dir,
         };
-        ensure!(spec.timeout_seconds > 0, "Owner grant expired");
+        ensure!(spec.timeout_seconds > 0, EXPIRED);
         let outcome = adapters::run(
             &spec,
             |event| {
@@ -880,12 +974,13 @@ pub fn worker(
         } else {
             None
         };
-        store.transaction(|s|{let r=s.requests.get_mut(request_id).unwrap();r.answer=Some(redact(&outcome.answer));if outcome.session_id.is_some(){r.session_id=outcome.session_id.clone();}
+        store.transaction(|s|{let expired=s.grants.get(&g.id).is_none_or(|x|x.expires_at<=now());let r=s.requests.get_mut(request_id).unwrap();r.answer=Some(redact(&outcome.answer));if outcome.session_id.is_some(){r.session_id=outcome.session_id.clone();}
             let scoped_context_read=r.events.iter().any(|event|event.kind=="context-read");
-            r.receipt=Some(json!({"adapter":"new-session-v1","agent":endpoint.agent,"version":endpoint.version,"session_id":r.session_id,"exit_code":outcome.exit_code,"usage":outcome.usage,"estimated_cost_usd":outcome.estimated_cost_usd,"observed_cost_usd":null,"verification":"agent-result; tests require separate receipts","scoped_context_read":scoped_context_read,"changed_files":changed,"diff":diff.as_deref().map(redact),"worktree":workspace,"merged":false,"tests_run":[],"stop_reason":outcome.stop_reason}));
+            let limit=if r.cancel_requested{None}else{limit_message(outcome.stop_reason.as_deref(),&g,spec.timeout_seconds,expired)};
+            r.receipt=Some(json!({"adapter":"new-session-v1","agent":endpoint.agent,"version":endpoint.version,"session_id":r.session_id,"exit_code":outcome.exit_code,"usage":outcome.usage,"estimated_cost_usd":outcome.estimated_cost_usd,"observed_cost_usd":null,"verification":"agent-result; tests require separate receipts","scoped_context_read":scoped_context_read,"changed_files":changed,"diff":diff.as_deref().map(redact),"worktree":workspace,"merged":false,"tests_run":[],"stop_reason":outcome.stop_reason,"stop_message":limit}));
             let missing_context=outcome.success&&!scoped_context_read;
-            let state=if r.cancel_requested{"cancelled"}else if missing_context{"needs-owner"}else if outcome.success&&r.session_id.is_some(){"completed"}else if outcome.stop_reason.as_deref().is_some_and(|x|x.contains("timeout")||x.contains("deadline")||x.contains("limit")){"needs-owner"}else{"failed"};
-            if state!="completed"{r.blocker=Some(if missing_context&&!r.cancel_requested{"Provider returned without accessing scoped CodaClauda tools".into()}else{outcome.stop_reason.clone().unwrap_or("Agent did not complete with a verified session receipt".into())});}r.transition(state,json!({"receipt_available":true}));Ok(())})?;
+            let state=if r.cancel_requested{"cancelled"}else if missing_context{"needs-owner"}else if outcome.success&&r.session_id.is_some(){"completed"}else if limit.is_some()||outcome.stop_reason.as_deref().is_some_and(|x|x.contains("timeout")||x.contains("deadline")||x.contains("limit")){"needs-owner"}else{"failed"};
+            if state!="completed"{r.blocker=Some(if missing_context&&!r.cancel_requested{"Provider returned without accessing scoped CodaClauda tools".into()}else{limit.clone().or_else(||outcome.stop_reason.clone()).unwrap_or("Agent did not complete with a verified session receipt".into())});}r.transition(state,json!({"receipt_available":true}));Ok(())})?;
         Ok(())
     })();
     if let Err(error) = result {

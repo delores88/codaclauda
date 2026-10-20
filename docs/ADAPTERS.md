@@ -28,8 +28,9 @@ process is selected by name or recycled PID. The adapter does not stop another
 provider process, session or build. Hosts without this Windows containment fail
 closed in version 1.
 
-The supervisor enforces 1–3600 seconds per launch, 8 MiB combined output and 1 MiB
-per unfinished JSON line. Provider probes have independent ten-second timeouts
+The supervisor enforces 1–2592000 seconds (30 days) and 1–10000 turns per launch,
+taken from the owner's authorization, plus a 16 GiB combined-output runaway guard
+and 128 MiB per unfinished JSON line. Provider probes have independent ten-second timeouts
 and a 1 MiB output cap. They make no model requests. A heartbeat is emitted while
 the model runs. A clean process exit without an actual session ID and provider
 terminal event is a failure, not an answer receipt. Unknown launch outcomes must

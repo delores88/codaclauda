@@ -81,7 +81,7 @@ const requests = [
 ];
 const grants = [{ id: 'grant-demo', project: endpoints[1].workspace, targets: ['codex-claudacoda'], kinds: ['question', 'review'], allowed_paths: ['README.md', 'ui/'], expected_result: 'Preview grant', expires_at: now() + 3600 }];
 const liveRequests = new Map();
-let boardPaused = false, sparkExecutable = 'C:\\mock\\sparkdev.exe';
+let boardPaused = false, sparkExecutable = 'C:\\mock\\sparkdev.exe', boardConcurrent = 4;
 
 const repos = [
   ['codaclauda', 'Owner-scoped Claude Code and Codex coordination', 'Rust', 2400, 160, 0.2],
@@ -135,7 +135,7 @@ const sparkStatus = () => sparkRemoteDown === 'throw' ? (() => { throw new Error
   laptop_jobs: [sparkJob('j5', 'laptop', 'claude', 'rust', 6, 3), sparkJob('j6', 'laptop', 'codex', 'node', 2, 200, 180)],
 });
 const handlers = {
-  status: () => ({ endpoints, grants, requests: [...requests, ...liveRequests.values()], paused: boardPaused, state_dir: 'C:\\mock\\board', spark: { executable: sparkExecutable } }),
+  status: () => ({ endpoints, grants, requests: [...requests, ...liveRequests.values()], paused: boardPaused, state_dir: 'C:\\mock\\board', spark: { executable: sparkExecutable }, limits: { concurrent: boardConcurrent } }),
   spark: () => sparkStatus(),
   'mailbox-directory': () => ({ addresses, identity: 'self-asserted-label' }),
   'mailbox-register': ({ name, label }) => register(name, label),
@@ -155,7 +155,19 @@ const handlers = {
   },
   'mailbox-post': payload => { const m = { ...msg(payload.from, payload.to, payload.kind, payload.subject, payload.body, 0), ...payload, id: payload.id }; messages.push(m); if (payload.to !== 'owner') mockReply(payload.to, payload.subject); return m; },
   'mailbox-ack': ({ id }) => { const m = messages.find(x => x.id === id); if (m) m.read_at = now(); return { read_at: now() }; },
-  grant: args => { const g = { ...args, id: `grant-${grants.length + 1}`, expires_at: now() + 3600 }; grants.push(g); return g; },
+  grant: args => { const g = { max_turns: 200, ...args, id: `grant-${grants.length + 1}`, expires_at: now() + (Number(args.expires_seconds) || 604800), revoked_at: null }; grants.push(g); return g; },
+  'grant-revoke': ({ id }) => { // like coord-core: idempotent, ends the grant now
+    const g = grants.find(x => x.id === id);
+    if (!g) throw new Error('Owner grant not found');
+    g.revoked_at ??= now(); g.expires_at = Math.min(g.expires_at, now());
+    return g;
+  },
+  limits: () => ({ concurrent: boardConcurrent }),
+  'limits-set': ({ concurrent }) => {
+    if (!Number.isInteger(concurrent) || concurrent < 1 || concurrent > 64) throw new Error('concurrent must be from 1 to 64.');
+    boardConcurrent = concurrent;
+    return { concurrent };
+  },
   submit: ({ id, target, prompt }) => { const r = { id, target, kind: 'question', origin: 'owner', state: 'running', prompt, created_at: now(), updated_at: now() }; liveRequests.set(id, r); setTimeout(() => Object.assign(r, { state: 'completed', answer, updated_at: now(), session_id: 'mock-session' }), 4500); return r; },
   request: ({ id }) => liveRequests.get(id) || requests.find(r => r.id === id),
   cancel: ({ id, all }) => { // like coord-core: unfinished requests (or the whole root tree) become cancelled
@@ -203,11 +215,11 @@ function geocodePlace({ query }) {
 
 /* 0.4 agent sessions: an echo agent that streams fake deltas over 'session://event'. Sessions and
  * their display logs persist in localStorage (mock.sessions), so a reload shows resume-after-restart.
- * 0.4.1: a busy session queues sends (at most 10, kind 'queued'); wake-enabled sessions get a fake
+ * 0.4.1: a busy session queues sends (up to 50, kind 'queued'); wake-enabled sessions get a fake
  * board message every 30 s (kind 'wake', then a wake turn); schedules "run" into a dedicated session. */
 const SESSIONS_KEY = 'mock.sessions';
 const SCHEDULES_KEY = 'mock.schedules';
-const QUEUE_MAX = 10;
+const QUEUE_MAX = 50;
 const emptyUsage = () => ({ input: 0, output: 0, cached: 0, costUsd: null, contextPct: null });
 /** Like the engine's error codes (bridge.js puts .code on the thrown Error). */
 const coded = (code, message) => Object.assign(new Error(message), { code });
@@ -510,7 +522,7 @@ const scheduleHandlers = {
 
 /* 0.5 mocks: fork, hand-off, worktree diff/apply/discard/PR, compact, external sessions, MCP servers,
  * phone push settings, CLAUDE.md/AGENTS.md editor and CI runs. Nothing here touches git, gh or the network. */
-const MCP_KEY = 'mock.mcp', NOTIFY_KEY = 'mock.notify', INSTRUCTIONS_KEY = 'mock.instructions';
+const MCP_KEY = 'mock.mcp', NOTIFY_KEY = 'mock.notify', INSTRUCTIONS_KEY = 'mock.instructions', LIMITS_KEY = 'mock.sessionLimits';
 const readJson = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key) || 'null') ?? fallback; } catch { return fallback; } };
 const writeJson = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* preview only */ } };
 const MCP_PRESETS = [
@@ -614,6 +626,12 @@ const v05Handlers = {
     if (clean.length) book[projectId] = clean; else delete book[projectId];
     writeJson(MCP_KEY, book);
     return { servers: clean };
+  },
+  session_limits_get: () => ({ maxLive: readJson(LIMITS_KEY, 6), queueMax: QUEUE_MAX }),
+  session_limits_set: ({ maxLive }) => {
+    if (!Number.isInteger(maxLive) || maxLive < 1 || maxLive > 32) throw coded('INVALID_ARGUMENTS', 'Agents at once must be a whole number from 1 to 32.');
+    writeJson(LIMITS_KEY, maxLive);
+    return { maxLive, queueMax: QUEUE_MAX };
   },
   notify_settings_get: () => readJson(NOTIFY_KEY, { ntfyUrl: null, onFinish: false, onError: false }),
   notify_settings_set: ({ ntfyUrl = null, onFinish = false, onError = false }) => {

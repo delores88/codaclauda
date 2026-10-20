@@ -48,6 +48,23 @@ export function joinPrompt({ cli, stateDir, address, label }) {
   ].join('\n');
 }
 
+/** Grant & send limit fields → the grant's limits (hours and days become seconds). Throws on an out-of-range value. */
+export function grantLimits(values) {
+  const read = (key, label, min, max, whole) => {
+    const text = String(values?.[key] ?? '').trim(), n = Number(text);
+    if (!text || !Number.isFinite(n) || (whole && !Number.isInteger(n)) || n < min || n > max) throw new Error(`${label} must be ${whole ? 'a whole number ' : ''}from ${min} to ${max}.`);
+    return n;
+  };
+  return {
+    max_requests: read('max_requests', 'Maximum requests', 1, 100000, true),
+    max_delegations: read('max_delegations', 'Maximum delegations', 0, 10000, true),
+    max_hops: read('max_hops', 'Maximum hops', 0, 16, true),
+    timeout_seconds: Math.max(10, Math.round(read('run_hours', 'Hours per run', 0.1, 720) * 3600)),
+    max_turns: read('max_turns', 'Maximum turns per run', 1, 10000, true),
+    expires_seconds: Math.max(30, Math.round(read('expiry_days', 'Days until it expires', 0.1, 365) * 86400)),
+  };
+}
+
 export function mount(root, ctx) {
   const { store, ui, bridge, navigate } = ctx;
   const { h, icon, toast, modal, pill, portrait, timeAgo, clockTime, fullTime, toMs, clear, copyText } = ui;
@@ -272,7 +289,24 @@ export function mount(root, ctx) {
   const onTaskSelect = () => { freshIds(); renderTaskPrompt(); };
   const taskProject = h('select.select', { 'aria-label': 'Project', onchange: onTaskSelect });
   const taskTarget = h('select.select', { 'aria-label': 'Target connection', onchange: onTaskSelect });
-  const taskGrant = h('select.select', { 'aria-label': 'Existing owner grant', onchange: onTaskSelect });
+  const taskGrant = h('select.select', { 'aria-label': 'Existing owner grant', style: { flex: '1', minWidth: '0' }, onchange: onTaskSelect });
+  const taskRevoke = h('button.btn', { type: 'button', disabled: true, title: 'Revoke the selected grant now', onclick: () => revokeGrant(taskGrant.value) }, icon('close'), 'Revoke');
+  /** Owner-only: stops the grant's queued and running requests now; nothing new can use it. */
+  function revokeGrant(id) {
+    const grant = store.board.grants.find(g => g.id === id);
+    if (!grant) return;
+    modal({
+      title: 'Revoke this authorization?',
+      body: h('div', h('p', `${grant.id} (${(grant.kinds || []).join(', ')}) ends now. Its queued and running requests stop, and no new request can use it.`), h('p.muted', 'Answers and diffs already returned stay on the board. This cannot be undone; create a new grant to continue.')),
+      actions: [{ label: 'Keep it' }, { label: 'Revoke', kind: 'danger', run: async () => {
+        try {
+          await bridge.rpc('grant-revoke', { id: grant.id });
+          toast(`${grant.id} revoked.`, { kind: 'success' });
+          await reloadBoard();
+        } catch (error) { toast(error.message || String(error), { kind: 'error' }); return false; }
+      } }],
+    });
+  }
   const taskCli = h('code.mono'), taskBoard = h('code.mono');
   const taskText = h('textarea.textarea.cx-prompt', { readOnly: true, rows: 12, spellcheck: 'false', 'aria-label': 'Dedicated task prompt', placeholder: 'The installed CLI and actual board directory are required to prepare this prompt.' });
   const taskNote = h('span.field-hint');
@@ -291,9 +325,10 @@ export function mount(root, ctx) {
     const inProject = endpoints.filter(e => sameWorkspace(e.workspace, project));
     selectOptions(taskTarget, inProject.map(e => ({ value: e.id, label: `${labelFor(e.id)} · ${e.id}` })), inProject.length ? null : 'No connected target');
     const target = endpoints.find(e => e.id === taskTarget.value);
-    const grants = store.board.grants.filter(g => target && sameWorkspace(g.project, project) && g.targets?.includes(target.id) && toMs(g.expires_at) > Date.now());
+    const grants = store.board.grants.filter(g => target && sameWorkspace(g.project, project) && g.targets?.includes(target.id) && !g.revoked_at && toMs(g.expires_at) > Date.now());
     selectOptions(taskGrant, grants.map(g => ({ value: g.id, label: `${g.id} · ${(g.kinds || []).join(', ')} · expires ${clockTime(g.expires_at)}` })), 'No grant selected · ask for authorization');
     const grant = grants.find(g => g.id === taskGrant.value);
+    taskRevoke.disabled = !grant;
     const { cli, stateDir, matches } = paths();
     taskCli.textContent = cli || 'Installed CLI unavailable';
     taskBoard.textContent = stateDir || 'Actual board directory unavailable';
@@ -309,7 +344,7 @@ export function mount(root, ctx) {
       h('div.cx-form',
         h('label.field', h('span', 'Project'), taskProject),
         h('label.field', h('span', 'Target connection'), taskTarget),
-        h('label.field.cx-wide', h('span', 'Existing owner grant ', h('span.muted', '(optional)')), taskGrant)),
+        h('label.field.cx-wide', h('span', 'Existing owner grant ', h('span.muted', '(optional)')), h('span.cx-path-picker', taskGrant, taskRevoke))),
       h('p.field-hint', 'Paths come from this running installation. Copying a prompt does not connect an agent or authorize a request.'),
       h('dl.cx-runtime', h('dt', 'Installed CLI'), h('dd', taskCli), h('dt', 'Actual board'), h('dd', taskBoard)),
       taskText,
@@ -322,7 +357,7 @@ export function mount(root, ctx) {
   const KINDS = [{ id: 'question', label: 'Question', hint: 'Ask for an answer' }, { id: 'review', label: 'Review', hint: 'Get another perspective' }, { id: 'delegate', label: 'Delegate', hint: 'Create a scoped diff' }];
   let pendingSubmission = null, gsInFlight = false;   // in flight: a grant/submit call is still running
   const gs = { kind: 'question' };
-  const num = (name, min, max, value) => h('input.input', { type: 'number', name, min, max, value, required: true });
+  const num = (name, min, max, value, step) => h('input.input', { type: 'number', name, min, max, value, step, required: true });
   const gsTarget = h('select.select', { required: true, onchange: () => { gsProject.value = store.board.endpoints.find(e => e.id === gsTarget.value)?.workspace || ''; renderPeers(true); } });
   const gsProject = h('input.input.mono', { type: 'text', required: true, spellcheck: 'false', autocomplete: 'off', onchange: () => renderPeers() });
   const gsBrowse = h('button.btn', { type: 'button', onclick: async () => {
@@ -340,7 +375,13 @@ export function mount(root, ctx) {
   const gsPaths = h('textarea.textarea.mono', { rows: 3, required: true, spellcheck: 'false', placeholder: 'README.md\nsrc/components/' });
   const gsExpected = h('textarea.textarea', { rows: 3, required: true, placeholder: 'For example: a concise explanation with file references and any remaining uncertainty.' });
   const gsScope = h('p.field-hint');
-  const gsLimits = { max_requests: num('max_requests', 1, 16, 8), max_delegations: num('max_delegations', 0, 8, 2), max_hops: num('max_hops', 0, 3, 2), timeout_seconds: num('timeout_seconds', 10, 600, 180), expiry_minutes: num('expiry_minutes', 1, 60, 30) };
+  const gsLimits = { max_requests: num('max_requests', 1, 100000, 100), max_delegations: num('max_delegations', 0, 10000, 20), max_hops: num('max_hops', 0, 16, 2), run_hours: num('run_hours', 0.1, 720, 8, 'any'), max_turns: num('max_turns', 1, 10000, 200), expiry_days: num('expiry_days', 0.1, 365, 7, 'any') };
+  const gsLimitsSummary = h('span.muted');
+  const renderLimitsSummary = () => {
+    const v = key => gsLimits[key].value || '?';
+    gsLimitsSummary.textContent = `${v('max_requests')} requests · ${v('max_delegations')} delegations · ${v('max_hops')} hops · ${v('run_hours')} h/run · ${v('max_turns')} turns · ${v('expiry_days')} days`;
+  };
+  renderLimitsSummary();
   const gsCompute = h('textarea.textarea.mono', { rows: 3, spellcheck: 'false', value: '[]' });
   const gsComputeOk = h('input', { type: 'checkbox' });
   const gsConsent = h('input', { type: 'checkbox', required: true });
@@ -369,7 +410,7 @@ export function mount(root, ctx) {
     gsSend.disabled = gsInFlight || !endpoints.length;
     renderPeers(); renderScope();
   }
-  const gsForm = h('form.cx-form', { oninput: () => { if (pendingSubmission) pendingSubmission.dirty = true; }, onsubmit: async event => {
+  const gsForm = h('form.cx-form', { oninput: () => { renderLimitsSummary(); if (pendingSubmission) pendingSubmission.dirty = true; }, onsubmit: async event => {
     event.preventDefault();
     if (gsInFlight) return;
     gsInFlight = true; gsError.hidden = true; gsSend.disabled = true;
@@ -387,6 +428,7 @@ export function mount(root, ctx) {
         }
       }
       if (compute.length && !gsComputeOk.checked) throw new Error('Explicitly authorize external job execution for the listed commands.');
+      const limits = grantLimits(values);
       const endpointOf = id => store.board.endpoints.find(e => e.id === id);
       const targets = [...new Set([values.target, ...values.peers].filter(Boolean))];
       if (targets.some(id => !endpointOf(id) || !sameWorkspace(endpointOf(id).workspace, values.project.trim()))) throw new Error('Every selected agent must be connected to this workspace. Update the target and peer selections first.');
@@ -394,7 +436,7 @@ export function mount(root, ctx) {
       const fingerprint = JSON.stringify({ values, paths, targets });
       if (pendingSubmission && pendingSubmission.fingerprint !== fingerprint) throw new Error('The previous submission had an uncertain outcome. Reload this page and inspect Tasks before starting a changed request.');
       if (!pendingSubmission) {
-        const grant = await bridge.rpc('grant', { project: values.project.trim(), allowed_paths: paths, targets, kinds: values.kind === 'delegate' ? ['question', 'review', 'delegate'] : ['question', 'review'], expected_result: values.expected_result.trim(), max_requests: Number(values.max_requests), max_delegations: values.kind === 'delegate' ? Number(values.max_delegations) : 0, max_hops: Number(values.max_hops), timeout_seconds: Number(values.timeout_seconds), expires_seconds: Number(values.expiry_minutes) * 60, compute });
+        const grant = await bridge.rpc('grant', { project: values.project.trim(), allowed_paths: paths, targets, kinds: values.kind === 'delegate' ? ['question', 'review', 'delegate'] : ['question', 'review'], expected_result: values.expected_result.trim(), ...limits, max_delegations: values.kind === 'delegate' ? limits.max_delegations : 0, compute });
         pendingSubmission = { id: crypto.randomUUID(), grant_id: grant.id, fingerprint, dirty: false };
       }
       const request = await bridge.rpc('submit', { ...payload, id: pendingSubmission.id, grant_id: pendingSubmission.grant_id });
@@ -416,11 +458,12 @@ export function mount(root, ctx) {
     h('label.field', h('span', 'Allowed paths'), gsPaths, h('span.field-hint', 'Exact relative files or folders, one per line. Secret files and paths outside the workspace are blocked.')),
     h('label.field', h('span', 'Expected result'), gsExpected),
     h('div.cx-wide', icon('shield'), ' ', gsScope),
-    h('details.cx-sub.cx-wide', h('summary', 'Scope & limits ', h('span.muted', '8 requests · 2 delegations · 2 hops · 3 min/run')),
+    h('details.cx-sub.cx-wide', h('summary', 'Scope & limits ', gsLimitsSummary),
       h('div.cx-form',
         h('label.field', h('span', 'Maximum requests'), gsLimits.max_requests), h('label.field', h('span', 'Maximum delegations'), gsLimits.max_delegations),
-        h('label.field', h('span', 'Maximum hops'), gsLimits.max_hops), h('label.field', h('span', 'Seconds per run'), gsLimits.timeout_seconds),
-        h('label.field', h('span', 'Grant expiry (minutes)'), gsLimits.expiry_minutes)),
+        h('label.field', h('span', 'Maximum hops'), gsLimits.max_hops), h('label.field', h('span', 'Hours per run'), gsLimits.run_hours),
+        h('label.field', h('span', 'Maximum turns per run'), gsLimits.max_turns), h('label.field', h('span', 'Days until it expires'), gsLimits.expiry_days)),
+      h('p.field-hint', 'Hours per run is how long one agent run may take before it is stopped (0.1 to 720 hours); turns per run caps its agent turns. Revoke a grant any time under Dedicated task prompt → Existing owner grant.'),
       h('p.field-hint', 'Peer requests may target only the primary agent and the optional peers selected above in this workspace. Question and review grants permit read-only requests; delegation grants also permit scoped writes in an isolated Git worktree. Nothing auto-merges.')),
     h('details.cx-sub.cx-wide', h('summary', 'External compute authorization ', h('span.muted', 'Optional · no jobs by default')),
       h('label.field', h('span', 'Exact command permissions (JSON array)'), gsCompute),

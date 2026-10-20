@@ -16,9 +16,11 @@ use std::{
 };
 
 const INPUT_LIMIT: usize = 256 * 1024;
-const OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+// Holds a full inbox page of maximum-size bodies after JSON escaping.
+const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 const BODY_LIMIT: usize = 32_000;
-const PAGE_LIMIT: u64 = 20;
+const PAGE_LIMIT: u64 = session::PAGE_MAX;
+const WAIT_LIMIT: u64 = session::WAIT_MAX_SECONDS;
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -80,8 +82,8 @@ fn tool_definitions() -> Value {
         ),
         (
             "wait",
-            "Observe a scoped message for at most 60 seconds. Timeout is not delivery failure and does not permit a duplicate send.",
-            json!({"id":id,"timeout":{"type":"integer","minimum":0,"maximum":60}}),
+            "Observe a scoped message for at most 300 seconds (default 20). Timeout is not delivery failure and does not permit a duplicate send. Keep timeout below your client's MCP tool timeout (Codex defaults to 60 s).",
+            json!({"id":id,"timeout":{"type":"integer","minimum":0,"maximum":WAIT_LIMIT}}),
             vec!["id"],
         ),
     ];
@@ -129,13 +131,13 @@ fn validate_arguments(name: &str, args: &Value) -> Result<()> {
                     value
                         .as_u64()
                         .is_some_and(|n| (1..=PAGE_LIMIT).contains(&n)),
-                    "limit must be from 1 to 20"
+                    "limit must be from 1 to {PAGE_LIMIT}"
                 );
             }
             "timeout" => {
                 ensure!(
-                    value.as_u64().is_some_and(|n| n <= 60),
-                    "timeout must be from 0 to 60 seconds"
+                    value.as_u64().is_some_and(|n| n <= WAIT_LIMIT),
+                    "timeout must be from 0 to {WAIT_LIMIT} seconds"
                 );
             }
             _ => {
@@ -736,8 +738,8 @@ mod tests {
                 "send",
                 json!({"id":"m","conversation_id":"c","body":"hello","sender":"forged"}),
             ),
-            ("inbox", json!({"limit":21})),
-            ("wait", json!({"id":"m","timeout":61})),
+            ("inbox", json!({"limit":101})),
+            ("wait", json!({"id":"m","timeout":301})),
             ("wait", json!({"id":"m","timeout":-1})),
             ("ack", json!({"id":null})),
             (

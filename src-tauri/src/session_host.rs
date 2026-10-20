@@ -15,9 +15,11 @@
 //! Codex compact-now, read-only detection of other Claude/Codex sessions
 //! (`external.rs`), the owner's own MCP servers at Full access (`mcp.rs`) and
 //! opt-in phone push (`notify.rs`). All of them reuse the lifecycle below.
+//! How many agents may work at once is an owner setting (`limits.rs`).
 
 pub(crate) mod external;
 pub(crate) mod fork;
+pub(crate) mod limits;
 pub(crate) mod mcp;
 pub(crate) mod notify;
 pub(crate) mod schedule;
@@ -52,7 +54,6 @@ const EVENT: &str = "session://event";
 const REGISTRY_FILE: &str = "sessions.json";
 const LOG_DIR: &str = "sessions";
 const LOG_LIMIT: u64 = 5 * 1024 * 1024;
-const MAX_LIVE: usize = 3;
 const IDLE_LIMIT: Duration = Duration::from_secs(10 * 60);
 const REAP_EVERY: Duration = Duration::from_secs(60);
 const STOP_GRACE: Duration = Duration::from_secs(5);
@@ -62,7 +63,7 @@ const STDERR_TAIL: usize = 4096;
 const HISTORY_DEFAULT: u64 = 500;
 const HISTORY_MAX: u64 = 5000;
 /// Turns that may wait behind the current one, per session.
-const QUEUE_MAX: usize = 10;
+const QUEUE_MAX: usize = 50;
 /// Removed from every launch environment (coord-core already strips these and more).
 const STRIPPED_ENV: &[&str] = &[
     "ANTHROPIC_API_KEY",
@@ -474,13 +475,27 @@ fn accept_codex_turn(
     }
 }
 
-#[derive(Default)]
 struct State {
     records: Vec<Record>,
     live: HashMap<String, Live>,
     turns: HashMap<String, Turn>,
     launching: HashMap<String, String>,
     queues: HashMap<String, VecDeque<Queued>>,
+    /// Owner setting (Settings → Limits → Agents at once), see `limits.rs`.
+    max_live: usize,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            records: Vec::new(),
+            live: HashMap::new(),
+            turns: HashMap::new(),
+            launching: HashMap::new(),
+            queues: HashMap::new(),
+            max_live: limits::DEFAULT_MAX_LIVE,
+        }
+    }
 }
 
 impl State {
@@ -499,12 +514,13 @@ impl State {
         if self.live.contains_key(id) || self.launching.contains_key(id) {
             return Err("This agent already has a process or launch in progress.".into());
         }
-        let victim = if self.live.len() + self.launching.len() >= MAX_LIVE {
+        let working = self.live.len() + self.launching.len();
+        let victim = if working >= self.max_live {
             let oldest = self.live.iter()
                 .filter(|(id, _)| !self.turns.contains_key(*id))
                 .min_by_key(|(_, live)| live.last_used)
                 .map(|(id, _)| id.clone())
-                .ok_or_else(|| format!("{MAX_LIVE} agents are already working. Wait for one to finish or stop one, then send again."))?;
+                .ok_or_else(|| format!("{working} agents are already working (Settings → Limits → Agents at once). Wait for one to finish, stop one, or raise the limit."))?;
             self.live.remove(&oldest).map(|live| (oldest, live))
         } else {
             None
@@ -607,6 +623,7 @@ impl SessionHost {
         inner.load_wake();
         inner.load_schedules();
         inner.load_notify();
+        inner.load_limits();
         let reaper = inner.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -2981,6 +2998,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let lease = runtime_lease(dir.path()).unwrap();
         let mut state = State::default();
+        state.max_live = 5; // the owner's setting, not a built-in cap
         for n in 0..8 {
             state
                 .turns
@@ -3003,8 +3021,14 @@ mod tests {
             .map(|attempt| attempt.join().unwrap())
             .filter(|admitted| *admitted)
             .count();
-        assert_eq!(admitted, MAX_LIVE);
-        assert_eq!(lock(&state).launching.len(), MAX_LIVE);
+        assert_eq!(admitted, 5);
+        assert_eq!(lock(&state).launching.len(), 5);
+        let mut state = lock(&state);
+        state.turns.insert("s9".into(), queued_turn("t", lease));
+        let Err(refused) = state.reserve_launch("s9", "t") else {
+            panic!("a launch past the owner's limit was admitted");
+        };
+        assert!(refused.contains("Settings → Limits → Agents at once"), "{refused}");
     }
 
     #[test]

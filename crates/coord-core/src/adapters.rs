@@ -14,8 +14,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
-const LINE_LIMIT: usize = 1024 * 1024;
+// Runaway guard only; the owner's run time limit is the real bound on a run.
+const OUTPUT_LIMIT: u64 = 16 << 30;
+// One provider stream line can echo a whole read_file chunk or write_file body,
+// JSON-escaped more than once, so this must stay well above those tool limits.
+const LINE_LIMIT: usize = 128 * 1024 * 1024;
+const PROBE_LIMIT: usize = 1024 * 1024;
+pub const MAX_RUN_SECONDS: u64 = 2_592_000;
+pub const MAX_TURNS: u32 = 10_000;
 // Only these request-bound server tools receive noninteractive provider approval.
 // Each call still passes the MCP server's immutable owner-grant checks.
 const OWNED_MCP_TOOLS: &[&str] = &[
@@ -521,6 +527,7 @@ struct Parsed {
     cost: Option<f64>,
     completed: bool,
     failed: bool,
+    max_turns_reached: bool,
     claude_tools_verified: bool,
 }
 
@@ -636,6 +643,7 @@ impl Parsed {
         } else {
             if kind == "result" {
                 self.completed = true;
+                self.max_turns_reached = value["subtype"] == "error_max_turns";
                 self.failed = value
                     .get("is_error")
                     .and_then(Value::as_bool)
@@ -694,12 +702,10 @@ pub fn run(
     valid_agent(&spec.agent)?;
     native_executable(&spec.executable)?;
     native_executable(&spec.mcp_executable)?;
-    if spec.timeout_seconds == 0
-        || spec.timeout_seconds > 3600
-        || spec.max_turns == 0
-        || spec.max_turns > 100
+    if !(1..=MAX_RUN_SECONDS).contains(&spec.timeout_seconds)
+        || !(1..=MAX_TURNS).contains(&spec.max_turns)
     {
-        bail!("adapter requires timeout 1..3600 seconds and max_turns 1..100");
+        bail!("adapter requires timeout 1..{MAX_RUN_SECONDS} seconds and max_turns 1..{MAX_TURNS}");
     }
     if spec.prompt.len() > LINE_LIMIT
         || spec.capability.is_empty()
@@ -744,7 +750,7 @@ pub fn run(
     let mut parsed = Parsed::default();
     let mut pending = Vec::new();
     let mut stderr = Vec::new();
-    let mut bytes = 0usize;
+    let mut bytes = 0u64;
     let mut streams = 0;
     let mut code = None;
     let mut stop_reason = None;
@@ -766,7 +772,7 @@ pub fn run(
         }
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(PipeEvent::Data(is_error, data)) => {
-                bytes = bytes.saturating_add(data.len());
+                bytes = bytes.saturating_add(data.len() as u64);
                 if bytes > OUTPUT_LIMIT {
                     if stop_reason.is_none() {
                         stop_reason = Some("output_limit_exceeded".to_owned());
@@ -780,14 +786,18 @@ pub fn run(
                     }
                 } else {
                     pending.extend_from_slice(&data);
-                    while let Some(newline) = pending.iter().position(|x| *x == b'\n') {
-                        let line: Vec<u8> = pending.drain(..=newline).collect();
-                        if let Ok(value) = serde_json::from_slice::<Value>(&line) {
-                            parsed.event(
-                                &spec.agent,
-                                scrub_value(&value, &spec.capability),
-                                &mut on_event,
-                            )?;
+                    // `pending` never holds a newline between chunks, so only a chunk
+                    // with one can finish a line; this keeps huge lines linear.
+                    if data.contains(&b'\n') {
+                        while let Some(newline) = pending.iter().position(|x| *x == b'\n') {
+                            let line: Vec<u8> = pending.drain(..=newline).collect();
+                            if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+                                parsed.event(
+                                    &spec.agent,
+                                    scrub_value(&value, &spec.capability),
+                                    &mut on_event,
+                                )?;
+                            }
                         }
                     }
                     if pending.len() > LINE_LIMIT && stop_reason.is_none() {
@@ -842,6 +852,9 @@ pub fn run(
     }
     if stop_reason.is_none() && (!parsed.completed || parsed.session.is_none()) {
         stop_reason = Some("provider_exited_without_terminal_session_receipt".to_owned());
+    }
+    if stop_reason.is_none() && parsed.max_turns_reached {
+        stop_reason = Some("max_turns_reached".to_owned());
     }
     if stop_reason.is_none() && (parsed.failed || code != Some(0)) {
         stop_reason = Some("provider_failed".to_owned());
@@ -931,7 +944,7 @@ fn capture(exe: &Path, args: &[OsString], cwd: &Path, timeout: u64) -> Result<Ca
         }
         match receiver.recv_timeout(Duration::from_millis(50)) {
             Ok(PipeEvent::Data(err, data)) => {
-                if stdout.len() + stderr.len() + data.len() > LINE_LIMIT {
+                if stdout.len() + stderr.len() + data.len() > PROBE_LIMIT {
                     child.terminate()?;
                     bail!("provider probe output exceeded limit");
                 }
@@ -1544,6 +1557,7 @@ mod tests {
         parsed.event("claude",json!({"type":"result","session_id":"actual","subtype":"error_max_turns","is_error":true,"total_cost_usd":0.03}),&mut |_|Ok(())).unwrap();
         assert!(parsed.failed);
         assert!(parsed.completed);
+        assert!(parsed.max_turns_reached);
         assert_eq!(parsed.cost, Some(0.03));
     }
     #[test]

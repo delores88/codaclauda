@@ -275,7 +275,7 @@ acknowledgment and resource-claim transactions across processes. Do not migrate
 or rewrite state.json merely to use the mailbox. Keep messages for 30 days,
 preserve monotonic sequence cursors across retention, and paginate oldest first.
 Bodies are UTF-8, capped at 32 KiB, and scanned before persistence for recognizable
-credentials, password/token assignments and pairing codes. Refuse matches without
+credentials, password or token assignments and pairing codes. Refuse matches without
 echoing their contents. This guard is not proof arbitrary prose contains no secret.
 
 Stable post IDs return the original message on an identical retry and reject a
@@ -330,10 +330,10 @@ Chat has two separate modes. Mailbox mode posts to the durable passive board and
 waits for the existing recipient to check. Live mode starts a new dedicated
 question request for every send; it never attaches to an existing conversation.
 Its grant covers the connected endpoint's project, question-only access, at most
-16 requests, no delegation or hops, a 600-second request timeout and one-hour
-expiry. A send includes at most 12 prior UI messages truncated to 4,000 characters
-each and bounded attachment text; the complete prompt is capped at 200,000
-characters. UI polling reads existing receipts and does not resume a provider.
+1,000 requests, no delegation or hops, a 4-hour run time, 200 turns and 7-day
+expiry; revoking it from the board makes the chat request a new one. A send
+includes at most 12 prior UI messages truncated to 4,000 characters each and
+bounded attachment text; the complete prompt is capped at 200,000 characters. UI polling reads existing receipts and does not resume a provider.
 
 Markdown, code highlighting, math and HTML sanitization use bundled marked,
 highlight.js, KaTeX and DOMPurify; three.js powers the City and avatar preview.
