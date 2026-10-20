@@ -11,6 +11,7 @@ import { rpc, desktop, isNative } from './bridge.js';
 import { agentAvatar, normalizeAvatar, hash } from './avatar/spec.js';
 import { toMs } from './ui.js';
 import { sparkLink, sparkFresh, jobRunning, jobEndSec } from './spark-link.js';
+import { accessFor, normalizeLevel } from './access.js';
 
 const OWNER = 'owner';
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'needs-owner']);
@@ -38,7 +39,8 @@ function emptyDesktop() {
     avatarRequests: {},
     chats: { threads: {} },
     tasks: {},
-    prefs: { theme: 'dark', notify: true, sound: true, cityQuality: 'high', cityTime: 'auto', citySpark: 'auto', reducedMotion: false },
+    projectAccess: {},   // { [projectId]: { level: 'full'|'read', playwright, updatedAt } } (see access.js)
+    prefs: { theme: 'dark', notify: true, sound: true, cityQuality: 'high', cityTime: 'auto', citySpark: 'auto', reducedMotion: false, chatFirst: false, chatProject: '' },
   };
 }
 const normalizePath = path => String(path || '').replaceAll('\\', '/').replace(/^\/\/\?\/UNC\//i, '//').replace(/^\/\/\?\//, '').replace(/\/+$/, '').toLowerCase();
@@ -573,6 +575,37 @@ class Store extends EventTarget {
     // The thread's first message (usually where the [Project] tag or topic is) decides first.
     for (const m of messages) { const p = this.matchProject(`${m.subject}\n${m.body}`, this.projects, home?.id || null); if (p) return p; }
     return home || null;
+  }
+  /* Project access for sessions CodaClauda starts (access.js): Full or Read only, plus Playwright. */
+  projectAccess(projectId) { const p = typeof projectId === 'object' ? projectId : this.project(projectId); return accessFor(p || { id: projectId, ids: [projectId] }, this.desktop.projectAccess); }
+  /** patch: { level?, playwright? }. Strict save to the native state file; a failed save restores the previous records. */
+  async setProjectAccess(projectId, patch) { return (await this.setProjectAccessMany([[projectId, patch]]))[0]; }
+  /** entries: [[projectId, patch]] in one write ("Apply to all projects", undo). Saves run one at a time. */
+  setProjectAccessMany(entries) {
+    const run = async () => {
+      const now = Date.now(), saved = [];
+      const before = JSON.parse(JSON.stringify(this.desktop.projectAccess || {}));
+      this.updateDesktop(d => {
+        const map = { ...(d.projectAccess || {}) };
+        for (const [id, patch] of entries) {
+          const p = this.project(id) || { id, ids: [id] };
+          const current = accessFor(p, map);
+          const next = { level: normalizeLevel(patch?.level) || current.level, playwright: typeof patch?.playwright === 'boolean' ? patch.playwright : current.playwright, updatedAt: now };
+          for (const key of p.ids) delete map[key];
+          map[p.id] = next; saved.push(next);
+        }
+        d.projectAccess = map;
+      });
+      try { await this.saveDesktopStrict(); }
+      catch (error) {
+        this.updateDesktop(d => { d.projectAccess = before; });
+        throw new Error(`Could not save the access level (${String(error?.message || error || 'unknown error').replace(/\s+/g, ' ').trim()}). Nothing changed; try again.`);
+      }
+      return saved;
+    };
+    const next = (this._accessQueue || Promise.resolve()).then(run, run);
+    this._accessQueue = next.catch(() => {});
+    return next;
   }
   /** City lot pins: { [projectId]: { i, j } } — a project created on a chosen plot stays there. */
   get cityLots() { return this.desktop.cityLots || {}; }

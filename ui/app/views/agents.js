@@ -80,7 +80,7 @@ export function mount(root, ctx) {
         h('span.agents-tip-icon', icon('clock')),
         h('div',
           h('strong', 'How fast they answer'),
-          h('p', `${HEARTBEAT_COPY} Live workers start a fresh session for each message and usually answer in 30–90 s. A message is information, not permission.`),
+          h('p', `${HEARTBEAT_COPY} Sessions you start in Chat stream their replies as they work. A message is information, not permission.`),
         ),
       ),
     ),
@@ -205,7 +205,7 @@ export function mount(root, ctx) {
         clear(emptySlot, agents.length
           ? emptyState('search', 'No agents match', 'Try another status or search term.', h('button.btn', { type: 'button', onclick: () => { searchInput.value = ''; state.query = ''; setFilter('all'); } }, 'Clear filters'))
           : emptyState('agents', 'No agents on the board yet',
-            'Agents appear here when a Claude or Codex desktop chat registers a mailbox on the board, or when a connected agent runs a live chat.',
+            'Agents appear here when a Claude or Codex desktop chat registers a mailbox on the board, or when a dedicated connection runs a task. Start a session from Chat.',
             h('button.btn.primary', { type: 'button', onclick: () => navigate('chat') }, icon('chat'), 'Start a chat'),
             h('button.btn', { type: 'button', onclick: () => navigate('connect') }, icon('agentAdd'), 'Connect agents')));
       }
@@ -228,7 +228,7 @@ export function mount(root, ctx) {
 
     const kindLine = agent.kind === 'mailbox'
       ? h('div.agent-kind', { title: `Existing desktop chat that reads mailbox "${agent.address}" on its heartbeat` }, 'Desktop chat · mailbox ', h('code', agent.address))
-      : h('div.agent-kind', { title: 'Dedicated worker: each message starts a fresh, owner-authorized session' }, 'Live worker · ', h('code', agent.endpointId));
+      : h('div.agent-kind', { title: 'Dedicated worker: each request starts a fresh, owner-authorized session' }, 'Dedicated worker · ', h('code', agent.endpointId));
 
     const top = h('div.agent-top',
       avatarButton,
@@ -264,7 +264,7 @@ export function mount(root, ctx) {
 
     const actions = h('div.agent-actions',
       h('button.btn.small.primary', { type: 'button', dataset: { fk: 'chat' }, onclick: () => navigate('chat', { agentId: agent.id }) }, icon('chat'), 'Chat'),
-      h('button.btn.small', { type: 'button', dataset: { fk: 'city' }, onclick: () => navigate('city', { focusAgent: agent.id }) }, icon('city'), 'Show in City'),
+      h('button.btn.small.city-entry', { type: 'button', dataset: { fk: 'city' }, onclick: () => navigate('city', { focusAgent: agent.id }) }, icon('city'), 'Show in City'),
       agent.kind === 'mailbox' ? askButton(agent) : null,
       h('button.btn.small.ghost', { type: 'button', dataset: { fk: 'look' }, onclick: () => openLookEditor(agent) }, icon('sparkle'), 'Customize look'),
     );

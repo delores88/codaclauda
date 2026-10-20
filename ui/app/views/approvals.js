@@ -329,7 +329,7 @@ export function mount(root, ctx) {
   function howCard() {
     return h('section.card.appr-setup',
       h('h2.panel-title', 'How this works'),
-      h('p.appr-honest', icon('alert'), h('span', 'Mailbox messages can be posted by any local agent, so CodaClauda never treats them as your authority. Your words in each agent\'s chat are what count. Project-level access managed by CodaClauda is planned for 0.4.')),
+      h('p.appr-honest', icon('alert'), h('span', 'Mailbox messages can be posted by any local agent, so CodaClauda never treats them as your authority. Your words in each agent\'s chat are what count. Access is enforced for sessions CodaClauda starts (Full or Read only per project, set in Projects); these standing permissions are for desktop chats.')),
       h('ol.appr-how-steps',
         h('li', 'Grant a permission here. It is saved on this PC.'),
         h('li', "Paste its text into each agent's own chat and tick “Mark as pasted”."),
