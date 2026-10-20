@@ -6,7 +6,7 @@
  * nothing that cannot work. Prompts and errors are rendered as text only. */
 import { schedules, SCHEDULES_UNAVAILABLE_TEXT, RUNS_SHOWN } from '../schedules.js';
 import { sessions } from '../sessions.js';
-import { cadenceText, untilText, validateSchedule, runStatus, WEEK_ORDER, DAY_SHORT, MIN_INTERVAL, NAME_LIMIT, PROMPT_LIMIT } from '../schedule-model.js';
+import { cadenceText, untilText, validateSchedule, runStatus, runAccepted, WEEK_ORDER, DAY_SHORT, MIN_INTERVAL, NAME_LIMIT, PROMPT_LIMIT } from '../schedule-model.js';
 import { providerLabel } from '../session-model.js';
 import { levelInfo } from '../access.js';
 
@@ -25,7 +25,7 @@ export function mount(root, ctx) {
       h('div', h('span.eyebrow', 'CodaClauda'), h('h1', 'Schedules'),
         h('p', "Send a prompt to a Claude Code or Codex session on a timer. Each schedule keeps one session at its project's access level; read the replies in Chat.")),
       newBtn),
-    h('p.sched-note', icon('clock'), h('span', h('strong', NOTE), ' With catch-up on, a run missed while the app was closed runs once at the next start.')),
+    h('p.sched-note', icon('clock'), h('span', h('strong', NOTE), ' With catch-up on, a run missed while the app was closed or the PC was asleep runs once when available.')),
     listHost));
 
   /* ---------- rendering ---------- */
@@ -75,6 +75,7 @@ export function mount(root, ctx) {
     const fid = part => ({ fid: `${s.id}:${part}` });
     const edit = iconButton('edit', `Edit ${name}`, () => openEditor(s));
     const remove = iconButton('trash', `Delete ${name}`, () => confirmDelete(s));
+    edit.disabled = busy; remove.disabled = busy;
     Object.assign(edit.dataset, fid('edit'));
     Object.assign(remove.dataset, fid('delete'));
     return h(`article.card.sched-card${enabled ? '' : '.paused'}`, { dataset: { id: s.id } },
@@ -127,6 +128,7 @@ export function mount(root, ctx) {
     render();
   }
   async function withBusy(s, fn) {
+    if (state.busy.has(s.id)) return;
     state.busy.add(s.id); render();
     try { return await fn(); }
     finally { state.busy.delete(s.id); render(); }
@@ -146,7 +148,11 @@ export function mount(root, ctx) {
       try {
         const run = await schedules.runNow(s.id);
         const sessionId = run?.sessionId;
-        toast(`${s.name}: prompt sent to ${providerLabel(s.provider, true)}`, { kind: 'success', timeout: 6000, action: sessionId ? { label: 'Open', run: () => openSession(sessionId) } : undefined });
+        if (runAccepted(run)) {
+          toast(`${s.name}: prompt accepted by ${providerLabel(s.provider, true)}`, { kind: 'success', timeout: 6000, action: sessionId ? { label: 'Open', run: () => openSession(sessionId) } : undefined });
+        } else {
+          toast(`${s.name}: ${run?.error || 'The run was not confirmed. Check History before retrying.'}`, { kind: 'error', timeout: 9000, action: sessionId ? { label: 'Open', run: () => openSession(sessionId) } : undefined });
+        }
         sessions.scheduleRefresh(400);
       } catch (error) { toast(`Couldn't run ${s.name}: ${error?.message || error}`, { kind: 'error', timeout: 8000 }); }
     });
@@ -154,7 +160,7 @@ export function mount(root, ctx) {
   function confirmDelete(s) {
     modal({
       title: 'Delete this schedule?',
-      body: `“${s.name || 'Untitled schedule'}” stops running and its run history is removed. Its session stays in Chat.`,
+      body: `“${s.name || 'Untitled schedule'}” will not start new runs. Already running work continues; use Stop in Chat to cancel it. Its session and existing receipts stay in Chat.`,
       actions: [
         { label: 'Cancel', kind: 'ghost' },
         { label: 'Delete schedule', kind: 'danger', run: async () => {
@@ -224,7 +230,7 @@ export function mount(root, ctx) {
       const project = store.project(pick.projectId);
       const level = levelInfo(project ? store.projectAccess(project.id).level : 'read');
       accessLine.replaceChildren(...(project?.path
-        ? [h(`span.acc-tag.${level.id}`, level.long), ` The first run starts a ${providerLabel(pick.provider, true)} session in ${project.name} at this level; later runs reuse it.`]
+        ? [h(`span.acc-tag.${level.id}`, level.long), ` Each run checks this level. A ${providerLabel(pick.provider, true)} session in ${project.name} is reused while its access matches; a change starts a new session.`]
         : ['Pick a project with a local folder.']));
     }
     refresh();
@@ -237,13 +243,13 @@ export function mount(root, ctx) {
       accessLine,
       h('label.field', h('span', 'Prompt'), promptInput),
       h('div.field', h('span', 'Cadence'), h('div.segmented', { role: 'group', 'aria-label': 'Cadence' }, kindButtons), intervalRow, dailyRow, cadenceWords),
-      h('div.setting-row.sched-switch-row', h('div.setting-text', h('strong', 'On'), h('span.field-hint', 'Paused schedules keep their settings and history.')), h('label.switch', enabledInput, h('span'))),
-      h('div.setting-row.sched-switch-row', h('div.setting-text', h('strong', 'Catch up'), h('span.field-hint', 'If a run was missed while CodaClauda was closed, run once at startup.')), h('label.switch', catchUpInput, h('span'))),
+      h('div.setting-row.sched-switch-row', h('div.setting-text', h('strong', 'On'), h('span.field-hint', 'Pausing prevents new automatic runs. Run now is a one-shot; use Stop in Chat for a turn already running.')), h('label.switch', enabledInput, h('span'))),
+      h('div.setting-row.sched-switch-row', h('div.setting-text', h('strong', 'Catch up'), h('span.field-hint', 'If a run was missed while CodaClauda was closed or the PC was asleep, run once when available.')), h('label.switch', catchUpInput, h('span'))),
       h('p.sched-note.small', icon('clock'), h('span', NOTE)),
       errorLine);
 
     async function submit() {
-      const result = validateSchedule({ name: pick.name, projectId: pick.projectId, cwd: cwdOf(pick.projectId), provider: pick.provider, prompt: pick.prompt, cadence: cadence(), enabled: pick.enabled, catchUp: pick.catchUp });
+      const result = validateSchedule({ name: pick.name, projectId: pick.projectId, cwd: cwdOf(pick.projectId), provider: pick.provider, prompt: pick.prompt, access: store.projectAccess(pick.projectId).level, cadence: cadence(), enabled: pick.enabled, catchUp: pick.catchUp });
       if (!result.ok) {
         errorLine.textContent = result.error; errorLine.hidden = false;
         ({ name: nameInput, project: projectSelect, prompt: promptInput, cadence: pick.kind === 'daily' ? timeInput : minutesInput }[result.field])?.focus();

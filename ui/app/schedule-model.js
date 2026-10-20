@@ -12,7 +12,9 @@ export const DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 /** Display order of the weekday chips: Monday first. */
 export const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0];
 export const RUN_STATUS = {
+  reserved: { label: 'Preparing', tone: 'neutral' },
   sent: { label: 'Sent', tone: 'accent' },
+  unknown: { label: 'Unknown outcome', tone: 'danger' },
   done: { label: 'Done', tone: 'success' },
   error: { label: 'Error', tone: 'danger' },
 };
@@ -87,7 +89,7 @@ export function validateSchedule(input) {
   } else return { ok: false, field: 'cadence', error: 'Pick how often it runs.' };
   return {
     ok: true,
-    schedule: { name, projectId: String(d.projectId), cwd: String(d.cwd), provider: d.provider, prompt, cadence, enabled: d.enabled !== false, catchUp: d.catchUp === true },
+    schedule: { name, projectId: String(d.projectId), cwd: String(d.cwd), provider: d.provider, prompt, cadence, access: d.access === 'full' ? 'full' : 'read', enabled: d.enabled !== false, catchUp: d.catchUp === true },
   };
 }
 
@@ -95,7 +97,17 @@ export function validateSchedule(input) {
 export function mergeRuns(existing, incoming) {
   const keyOf = r => (r.turnId ? `t:${r.turnId}` : `a:${r.at}|${r.sessionId ?? ''}`);
   const map = new Map();
-  for (const r of [...(existing || []), ...(incoming || [])]) if (r && typeof r === 'object') map.set(keyOf(r), { ...map.get(keyOf(r)), ...r });
+  for (const r of [...(existing || []), ...(incoming || [])]) if (r && typeof r === 'object') {
+    const previous = map.get(keyOf(r));
+    // An IPC response can arrive after the completion event for the same turn.
+    // Never replace an already terminal receipt with a stale Preparing/Sent row.
+    const terminal = value => value && !['reserved', 'sent'].includes(value.status);
+    if (terminal(previous) && ['reserved', 'sent'].includes(r.status)) continue;
+    map.set(keyOf(r), { ...previous, ...r });
+  }
   const ms = v => { const n = typeof v === 'number' ? v : Date.parse(v); return Number.isFinite(n) ? (n < 1e12 ? n * 1000 : n) : 0; };
   return [...map.values()].sort((a, b) => ms(b.at) - ms(a.at));
 }
+
+/** Run now may return a persisted refusal rather than throw. */
+export const runAccepted = run => Boolean(run && ['sent', 'done'].includes(run.status));

@@ -20,6 +20,7 @@ use coord_core::adapters::{self, OwnedProcess};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     ffi::OsString,
@@ -75,7 +76,7 @@ type Failure = (&'static str, String);
 
 fn require_browser_disabled(playwright: bool) -> Result<(), String> {
     if playwright {
-        return Err("Browser control is unavailable in CodaClauda 0.4.0. Start a new session without browser control.".into());
+        return Err("Browser control is unavailable in CodaClauda. Start a new session without browser control.".into());
     }
     Ok(())
 }
@@ -342,11 +343,14 @@ struct Turn {
 }
 
 /// A turn waiting in a session's send queue (or about to start).
+#[derive(Clone, Serialize, Deserialize)]
 struct Queued {
     turn_id: String,
     text: String,
     attachments: Vec<Attachment>,
     origin: Value,
+    #[serde(default)]
+    key: Option<String>,
 }
 
 impl Queued {
@@ -356,7 +360,105 @@ impl Queued {
             text,
             attachments,
             origin,
+            key: None,
         }
+    }
+
+    /// Automation retries reuse an identity, never generate a second turn.
+    fn keyed(text: String, attachments: Vec<Attachment>, origin: Value, key: String) -> Self {
+        Self {
+            turn_id: keyed_turn_id(&key),
+            text,
+            attachments,
+            origin,
+            key: Some(key),
+        }
+    }
+
+    fn fingerprint(&self, session: &str) -> String {
+        hex_digest(
+            &serde_json::to_vec(&json!({
+                "sessionId": session, "text": self.text, "attachments": self.attachments,
+                "origin": self.origin, "key": self.key,
+            }))
+            .expect("A turn contains only JSON values"),
+        )
+    }
+
+    fn user_event(&self, session: &str) -> Value {
+        let mut data = json!({"text": self.text, "attachments": self.attachments, "queued": true});
+        if !self.origin.is_null() {
+            data["origin"] = self.origin.clone();
+        }
+        event(session, Some(&self.turn_id), "user", data)
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn keyed_turn_id(key: &str) -> String {
+    format!(
+        "t_{}",
+        hex_digest(format!("codaclauda.turn/1:{key}").as_bytes())
+    )
+}
+
+fn valid_turn_id(id: &str) -> bool {
+    id.starts_with("t_")
+        && (3..=80).contains(&id.len())
+        && id[2..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Persisted in the same atomic snapshot as session records. Terminal entries
+/// retain a small identity/outcome index; prompt and attachment copies are
+/// removed once their terminal display events have been saved. Dedupe identities
+/// are never discarded merely because the bounded display log was trimmed.
+#[derive(Clone, Serialize, Deserialize)]
+struct DurableTurn {
+    session_id: String,
+    turn_id: String,
+    fingerprint: String,
+    key: Option<String>,
+    origin: Value,
+    status: String,
+    error: Option<String>,
+    payload: Option<Queued>,
+    history_saved: bool,
+}
+
+impl DurableTurn {
+    fn accepted(session: &str, item: &Queued) -> Self {
+        Self {
+            session_id: session.to_owned(),
+            turn_id: item.turn_id.clone(),
+            fingerprint: item.fingerprint(session),
+            key: item.key.clone(),
+            origin: item.origin.clone(),
+            status: "queued".into(),
+            error: None,
+            payload: Some(item.clone()),
+            history_saved: false,
+        }
+    }
+
+    fn terminal(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "completed" | "failed" | "cancelled" | "interrupted"
+        )
+    }
+
+    fn settle(&mut self, status: &str, error: Option<&str>) {
+        self.status = status.to_owned();
+        self.error = error.map(str::to_owned);
+        self.history_saved = false;
+    }
+
+    fn outcome(&self) -> Value {
+        json!({"turnId": self.turn_id, "sessionId": self.session_id,
+            "status": self.status, "origin": self.origin, "error": self.error})
     }
 }
 
@@ -367,7 +469,6 @@ struct Started {
     proc: Option<Arc<Proc>>,
     item: Queued,
     lease: Arc<File>,
-    user: Value,
 }
 
 impl Turn {
@@ -424,9 +525,78 @@ struct State {
     turns: HashMap<String, Turn>,
     launching: HashMap<String, String>,
     queues: HashMap<String, VecDeque<Queued>>,
+    ledger: BTreeMap<String, DurableTurn>,
 }
 
 impl State {
+    fn duplicate(&self, session: &str, item: &Queued) -> Result<Option<Value>, Failure> {
+        let Some(previous) = self.ledger.get(&item.turn_id) else {
+            return Ok(None);
+        };
+        if previous.session_id != session || previous.fingerprint != item.fingerprint(session) {
+            return Err((
+                "TURN_ID_CONFLICT",
+                "This turn identity already belongs to different content.".into(),
+            ));
+        }
+        Ok(Some(json!({"accepted": true, "turnId": previous.turn_id,
+            "queued": self.queues.get(session).map_or(0, VecDeque::len),
+            "duplicate": true, "status": previous.status})))
+    }
+
+    fn accept_queued(
+        &mut self,
+        session: &str,
+        item: Queued,
+        persist: impl FnOnce(&Self) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let id = item.turn_id.clone();
+        self.ledger
+            .insert(id.clone(), DurableTurn::accepted(session, &item));
+        self.queues
+            .entry(session.to_owned())
+            .or_default()
+            .push_back(item);
+        if let Err(error) = persist(self) {
+            self.ledger.remove(&id);
+            if let Some(queue) = self.queues.get_mut(session) {
+                queue.retain(|turn| turn.turn_id != id);
+                if queue.is_empty() {
+                    self.queues.remove(session);
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Recovery never reconstructs a runnable queue. Both queued and active
+    /// acceptances become inspectable interruptions, including automation.
+    fn interrupt_pending(&mut self) -> (bool, Vec<(String, Option<String>)>) {
+        let known: HashSet<_> = self.ledger.keys().cloned().collect();
+        let mut legacy = Vec::new();
+        let mut changed = false;
+        for record in &mut self.records {
+            if record.status == "running" {
+                record.status = "idle".into();
+                let turn = record.turn_id.take();
+                if !turn.as_ref().is_some_and(|id| known.contains(id)) {
+                    legacy.push((record.id.clone(), turn));
+                }
+                changed = true;
+            } else if record.turn_id.as_ref().is_some_and(|id| known.contains(id)) {
+                record.turn_id = None;
+                changed = true;
+            }
+        }
+        for turn in self.ledger.values_mut().filter(|turn| !turn.terminal()) {
+            turn.settle("interrupted", Some("CodaClauda closed before this turn completed. It was not replayed; inspect any partial work before sending again."));
+            changed = true;
+        }
+        self.queues.clear();
+        (changed, legacy)
+    }
+
     fn reserve_launch(
         &mut self,
         id: &str,
@@ -631,15 +801,22 @@ fn runtime_lease(board: &Path) -> Result<Arc<File>, String> {
 }
 
 fn read_registry(path: &Path) -> Result<Vec<Record>, String> {
+    read_snapshot(path).map(|(records, _)| records)
+}
+
+fn read_snapshot(path: &Path) -> Result<(Vec<Record>, BTreeMap<String, DurableTurn>), String> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), BTreeMap::new()));
+        }
         Err(e) => return Err(format!("Could not read the saved sessions: {e}")),
     };
     let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
         "The saved sessions registry is unreadable; its bytes have been preserved.".to_owned()
     })?;
-    if value["schema"] != "codaclauda.sessions/1" {
+    let legacy = value["schema"] == "codaclauda.sessions/1";
+    if !legacy && value["schema"] != "codaclauda.sessions/2" {
         return Err(
             "The saved sessions registry has an unsupported schema; it has been preserved.".into(),
         );
@@ -647,23 +824,125 @@ fn read_registry(path: &Path) -> Result<Vec<Record>, String> {
     let records: Vec<Record> = serde_json::from_value(value["sessions"].clone()).map_err(|_| {
         "The saved sessions registry has invalid records; it has been preserved.".to_owned()
     })?;
-    let mut seen = std::collections::HashSet::new();
-    if records
-        .iter()
-        .any(|r| !valid_id(&r.id) || Provider::parse(&r.provider).is_none() || !seen.insert(&r.id))
-    {
+    let mut seen = HashSet::new();
+    if records.iter().any(|r| {
+        !valid_id(&r.id) || Provider::parse(&r.provider).is_none() || !seen.insert(r.id.clone())
+    }) {
         return Err("The saved sessions registry has invalid or duplicate identities; it has been preserved.".into());
     }
-    Ok(records)
+    let ledger: BTreeMap<String, DurableTurn> = if legacy {
+        if value.get("turns").is_some() {
+            return Err(
+                "A legacy sessions registry contains unexpected turn data; it has been preserved."
+                    .into(),
+            );
+        }
+        BTreeMap::new()
+    } else {
+        serde_json::from_value(value["turns"].clone()).map_err(|_| {
+            "The saved turn ledger is invalid; its bytes have been preserved.".to_owned()
+        })?
+    };
+    for (id, turn) in &ledger {
+        let valid_payload = match &turn.payload {
+            Some(item) => {
+                item.turn_id == *id
+                    && item.key == turn.key
+                    && item.origin == turn.origin
+                    && item.fingerprint(&turn.session_id) == turn.fingerprint
+                    && item.text.len() <= TEXT_LIMIT
+                    && item.attachments.len() <= 20
+                    && item
+                        .attachments
+                        .iter()
+                        .all(|a| Path::new(&a.path).is_absolute())
+            }
+            None => turn.terminal() && turn.history_saved,
+        };
+        if id != &turn.turn_id
+            || turn.fingerprint.len() != 64
+            || !turn.fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
+            || !valid_turn_id(id)
+            || !seen.contains(&turn.session_id)
+            || !(turn.terminal() || matches!(turn.status.as_str(), "queued" | "active"))
+            || !valid_payload
+            || (turn.history_saved && turn.payload.is_some())
+            || turn
+                .key
+                .as_ref()
+                .is_some_and(|key| key.len() > 4096 || keyed_turn_id(key) != *id)
+            || (turn.status == "active"
+                && !records
+                    .iter()
+                    .any(|r| r.id == turn.session_id && r.turn_id.as_deref() == Some(id.as_str())))
+        {
+            return Err("The saved turn ledger has inconsistent identities or outcomes; its bytes have been preserved.".into());
+        }
+    }
+    if !legacy
+        && records.iter().any(|r| {
+            r.status == "running"
+                && !r.turn_id.as_ref().is_some_and(|id| {
+                    ledger
+                        .get(id)
+                        .is_some_and(|t| t.session_id == r.id && t.status == "active")
+                })
+        })
+    {
+        return Err(
+            "A running session is missing its durable turn; the registry has been preserved."
+                .into(),
+        );
+    }
+    Ok((records, ledger))
 }
 
-fn save_registry(dir: &Path, records: &[Record]) -> Result<(), String> {
+fn save_snapshot(
+    dir: &Path,
+    records: &[Record],
+    ledger: &BTreeMap<String, DurableTurn>,
+) -> Result<(), String> {
     ensure_dirs(dir).map_err(|e| format!("Could not prepare session storage: {e}"))?;
-    let bytes =
-        serde_json::to_vec_pretty(&json!({"schema": "codaclauda.sessions/1", "sessions": records}))
-            .map_err(|e| format!("Could not encode saved sessions: {e}"))?;
-    write_atomic(&dir.join(REGISTRY_FILE), &bytes)
-        .map_err(|e| format!("Could not save sessions.json: {e}"))
+    let target = dir.join(REGISTRY_FILE);
+    if let Ok(previous) = fs::read(&target) {
+        if serde_json::from_slice::<Value>(&previous)
+            .is_ok_and(|v| v["schema"] == "codaclauda.sessions/1")
+        {
+            let backup = dir.join("sessions.schema1.backup.json");
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&backup)
+            {
+                Ok(mut file) => file
+                    .write_all(&previous)
+                    .and_then(|_| file.sync_all())
+                    .map_err(|e| {
+                        format!("Could not preserve the original session registry: {e}")
+                    })?,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if fs::read(&backup).map_err(|e| e.to_string())? != previous {
+                        return Err("The original session registry backup differs; preserve both files before migrating.".into());
+                    }
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Could not preserve the original session registry: {e}"
+                    ));
+                }
+            }
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(
+        &json!({"schema": "codaclauda.sessions/2", "sessions": records, "turns": ledger}),
+    )
+    .map_err(|e| format!("Could not encode saved sessions: {e}"))?;
+    write_atomic(&target, &bytes).map_err(|e| format!("Could not save sessions.json: {e}"))
+}
+
+#[cfg(test)]
+fn save_registry(dir: &Path, records: &[Record]) -> Result<(), String> {
+    save_snapshot(dir, records, &BTreeMap::new())
 }
 
 /// Keeps the newest half of an oversized display log, on a line boundary.
@@ -684,30 +963,157 @@ impl Inner {
     }
 
     fn load(&self) -> Result<(), String> {
-        let path = self.dir.join(REGISTRY_FILE);
-        let mut records = read_registry(&path)?;
-        let mut interrupted = Vec::new();
-        for record in &mut records {
-            if record.status == "running" {
-                record.status = "idle".into();
-                interrupted.push((record.id.clone(), record.turn_id.take()));
+        let (records, ledger) = read_snapshot(&self.dir.join(REGISTRY_FILE))?;
+        {
+            let mut state = lock(&self.state);
+            state.records = records;
+            state.ledger = ledger;
+        }
+        // No provider is resumed from disk. Ensure accepted payloads can be
+        // inspected, then atomically record interruption of every pending turn.
+        let pending: Vec<_> = lock(&self.state)
+            .ledger
+            .values()
+            .filter(|turn| !turn.terminal())
+            .cloned()
+            .collect();
+        for turn in &pending {
+            if let Some(item) = &turn.payload {
+                self.append_once(&item.user_event(&turn.session_id))?;
             }
         }
-        let mut state = lock(&self.state);
-        state.records = records;
-        if !interrupted.is_empty() {
-            self.save(&state)?;
+        let legacy = {
+            let mut state = lock(&self.state);
+            let (changed, legacy) = state.interrupt_pending();
+            if changed {
+                self.save(&state)?;
+            }
+            legacy
+        };
+        for (id, turn) in legacy {
+            self.append_once(&event(&id, turn.as_deref(), "done", json!({
+                "status": "interrupted", "text": "CodaClauda closed during this reply; the agent may have finished part of the work."
+            })))?;
         }
-        drop(state);
-        for (id, turn) in interrupted {
-            self.append(&event(
-                &id,
-                turn.as_deref(),
-                "done",
-                json!({"status": "interrupted", "text": "CodaClauda closed during this reply; the agent may have finished part of the work."}),
-            ))?;
+        let unsettled: Vec<_> = lock(&self.state)
+            .ledger
+            .values()
+            .filter(|turn| turn.terminal() && !turn.history_saved)
+            .map(|turn| turn.turn_id.clone())
+            .collect();
+        for turn in unsettled {
+            self.write_settlement(&turn, false)?;
         }
         Ok(())
+    }
+
+    /// Retry-safe history repair after a crash between the atomic registry
+    /// transition and display-log append. Lifecycle serializes all callers.
+    fn append_once(&self, ev: &Value) -> Result<(), String> {
+        let id = ev["id"]
+            .as_str()
+            .filter(|id| valid_id(id))
+            .ok_or("Invalid session event identity.")?;
+        let existing = match fs::read(self.log_path(id)) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                let message = format!("Could not reconcile session history: {e}");
+                self.storage_error(&message);
+                return Err(message);
+            }
+        };
+        if existing
+            .split(|b| *b == b'\n')
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .any(|old| {
+                old["turnId"] == ev["turnId"]
+                    && old["kind"] == ev["kind"]
+                    && old["terminal"] == ev["terminal"]
+            })
+        {
+            return Ok(());
+        }
+        self.append(ev)
+    }
+
+    /// The ledger is the durable outcome. Once display events are saved, keep
+    /// only its identity/digest/origin/status, not another copy of the prompt.
+    fn write_settlement(&self, turn_id: &str, emit: bool) -> Result<(), String> {
+        let Some(turn) = lock(&self.state).ledger.get(turn_id).cloned() else {
+            return Ok(());
+        };
+        if !turn.terminal() {
+            return Ok(());
+        }
+        if let Some(item) = &turn.payload {
+            self.append_once(&item.user_event(&turn.session_id))?;
+        }
+        let error = turn.error.as_ref().map(|message| {
+            event(
+                &turn.session_id,
+                Some(turn_id),
+                "error",
+                json!({"error": message, "terminal": true}),
+            )
+        });
+        if let Some(ev) = &error {
+            self.append_once(ev)?;
+        }
+        let done = event(
+            &turn.session_id,
+            Some(turn_id),
+            "done",
+            json!({"status": turn.status, "error": turn.error}),
+        );
+        self.append_once(&done)?;
+        if emit {
+            if let Some(ev) = error {
+                self.publish(ev, false);
+            }
+            self.publish(done, false);
+        }
+        let mut state = lock(&self.state);
+        if let Some(current) = state.ledger.get_mut(turn_id) {
+            current.history_saved = true;
+            current.payload = None;
+        }
+        self.save(&state)
+    }
+
+    fn turn_outcome(&self, turn_id: &str) -> Option<Value> {
+        lock(&self.state)
+            .ledger
+            .get(turn_id)
+            .map(DurableTurn::outcome)
+    }
+
+    /// Caller holds lifecycle and state; automation validators may lock only
+    /// their own configuration books, never reacquire these locks.
+    fn validate_origin(&self, record: &Record, origin: &Value) -> Result<(), Failure> {
+        if origin.is_null() {
+            return Ok(());
+        }
+        match origin["kind"].as_str() {
+            Some("wake") => self.validate_wake_origin(record, origin),
+            Some("schedule") => self.validate_schedule_origin(record, origin),
+            _ => Err(("INVALID_ARGUMENTS", "Unknown turn origin.".into())),
+        }
+    }
+
+    fn validate_turn_origin(&self, state: &State, id: &str, turn_id: &str) -> Result<(), String> {
+        let record = state
+            .records
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or("The session no longer exists.")?;
+        let turn = state
+            .turns
+            .get(id)
+            .filter(|t| t.id == turn_id)
+            .ok_or("The turn no longer exists.")?;
+        self.validate_origin(record, &turn.origin)
+            .map_err(|(_, message)| message)
     }
 
     fn storage_error(&self, message: &str) {
@@ -718,7 +1124,7 @@ impl Inner {
     }
 
     fn save(&self, state: &State) -> Result<(), String> {
-        let result = save_registry(&self.dir, &state.records);
+        let result = save_snapshot(&self.dir, &state.records, &state.ledger);
         if let Err(message) = &result {
             self.storage_error(message);
         }
@@ -851,20 +1257,21 @@ impl Inner {
             if let Some(live) = state.live.get_mut(id) {
                 live.last_used = Instant::now();
             }
+            if let Some(durable) = state.ledger.get_mut(&turn.id) {
+                durable.settle(
+                    status,
+                    if status == "interrupted" {
+                        None
+                    } else {
+                        failure.as_deref()
+                    },
+                );
+            }
             let _ = self.save(&state);
             (turn, status.to_owned(), shown)
         };
         let failure = failure.filter(|_| status != "interrupted");
-        if let Some(message) = &failure {
-            self.publish(
-                event(id, Some(&turn.id), "error", json!({"error": message})),
-                true,
-            );
-        }
-        self.publish(
-            event(id, Some(&turn.id), "done", json!({"status": status})),
-            true,
-        );
+        let _ = self.write_settlement(&turn.id, true);
         self.publish(event(id, None, "status", json!({"status": shown})), false);
         if turn.origin["kind"] == "schedule" {
             self.schedule_finished(&turn.origin, &turn.id, &status, failure.as_deref());
@@ -941,7 +1348,7 @@ impl Inner {
             }
             Out::ServerRequest { id: call, method } => {
                 let _ = proc.write(
-                    json!({"id": call, "error": {"code": -32601, "message": format!("CodaClauda 0.4.0 does not answer {method}.")}})
+                    json!({"id": call, "error": {"code": -32601, "message": format!("CodaClauda does not answer {method}.")}})
                         .to_string(),
                 );
                 let turn = self.current_turn(id).map(|t| t.0);
@@ -950,14 +1357,14 @@ impl Inner {
                         id,
                         turn.as_deref(),
                         "error",
-                        json!({"error": format!("Codex asked for {method}; CodaClauda 0.4.0 declined it.")}),
+                        json!({"error": format!("Codex asked for {method}; CodaClauda declined it.")}),
                     ),
                     true,
                 );
             }
             Out::ControlRequest(request) => {
                 let _ = proc.write(
-                    json!({"type": "control_response", "response": {"subtype": "error", "request_id": request, "error": "CodaClauda 0.4.0 does not answer permission prompts."}})
+                    json!({"type": "control_response", "response": {"subtype": "error", "request_id": request, "error": "CodaClauda does not answer permission prompts."}})
                         .to_string(),
                 );
             }
@@ -1193,7 +1600,11 @@ impl Inner {
         turn_id: &str,
     ) -> Result<LaunchReservation, String> {
         let _lifecycle = lock(&self.lifecycle);
-        let victim = lock(&self.state).reserve_launch(id, turn_id)?;
+        let victim = {
+            let mut state = lock(&self.state);
+            self.validate_turn_origin(&state, id, turn_id)?;
+            state.reserve_launch(id, turn_id)?
+        };
         if let Some((old_id, live)) = victim {
             if !retire(&live.proc) {
                 let mut state = lock(&self.state);
@@ -1251,6 +1662,7 @@ impl Inner {
             if !state.accepts_launch(&record.id, turn_id) {
                 return Err("This turn was stopped while the agent was starting.".into());
             }
+            self.validate_turn_origin(&state, &record.id, turn_id)?;
             // Admission and spawn share the close/stop gate.
             let (proc, stdout) = spawn_owned(
                 &exe,
@@ -1584,13 +1996,32 @@ impl Inner {
         {
             return Err("This turn stopped before the agent could receive it.".into());
         }
+        let record = state
+            .records
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or("The session no longer exists.")?;
+        let turn = state.turns.get(id).ok_or("The turn no longer exists.")?;
+        self.validate_origin(record, &turn.origin)
+            .map_err(|(_, message)| message)?;
         Ok(())
     }
 
     // ------------------------------------------------------------- commands
 
     fn list(&self) -> Value {
-        json!({"sessions": lock(&self.state).records})
+        let state = lock(&self.state);
+        let sessions: Vec<Value> = state
+            .records
+            .iter()
+            .map(|record| {
+                let mut value =
+                    serde_json::to_value(record).expect("A record contains only JSON values");
+                value["queued"] = json!(state.queues.get(&record.id).map_or(0, VecDeque::len));
+                value
+            })
+            .collect();
+        json!({"sessions": sessions})
     }
 
     async fn start(&self, args: Value) -> Result<Value, Failure> {
@@ -1694,13 +2125,29 @@ impl Inner {
     /// work (see `take_next`).
     fn submit(self: &Arc<Self>, id: &str, item: Queued) -> Result<Value, Failure> {
         let _lifecycle = lock(&self.lifecycle);
+        if !valid_turn_id(&item.turn_id)
+            || item
+                .key
+                .as_ref()
+                .is_some_and(|key| key.len() > 4096 || keyed_turn_id(key) != item.turn_id)
+        {
+            return Err(("INVALID_ARGUMENTS", "Invalid turn identity.".into()));
+        }
+        // Reconcile prior durable acceptance before checking changed settings.
+        // No provider action or budget consumption occurs on this path.
+        if let Some(previous) = lock(&self.state).duplicate(id, &item)? {
+            return Ok(previous);
+        }
         if let Some(message) = lock(&self.storage_failure).clone() {
             return Err(("STORAGE_FAILED", message));
         }
         if item.text.trim().is_empty() && item.attachments.is_empty() {
             return Err(("INVALID_ARGUMENTS", "Type a message first.".into()));
         }
-        if item.text.len() > TEXT_LIMIT || item.attachments.len() > 20 {
+        if item.text.len() > TEXT_LIMIT
+            || item.attachments.len() > 20
+            || serde_json::to_vec(&item.origin).map_or(true, |b| b.len() > TEXT_LIMIT)
+        {
             return Err((
                 "INPUT_TOO_LARGE",
                 "The message or its attachment list is too large.".into(),
@@ -1717,6 +2164,7 @@ impl Inner {
             ));
         }
         let turn_id = item.turn_id.clone();
+        let user = item.user_event(id);
         let before = {
             let mut state = lock(&self.state);
             let Some(record) = state.records.iter().find(|r| r.id == id) else {
@@ -1725,21 +2173,47 @@ impl Inner {
             require_browser_disabled(record.playwright)
                 .map_err(|message| ("BROWSER_UNAVAILABLE", message))?;
             let before = state.queues.get(id).map_or(0, VecDeque::len);
+            if item.origin["kind"] == "schedule"
+                && item.origin["trigger"] != "manual"
+                && (state.session_busy(id) || before > 0)
+            {
+                return Err((
+                    "SESSION_BUSY",
+                    "Skipped: the session was still working on an earlier turn.".into(),
+                ));
+            }
             if before >= QUEUE_MAX {
                 return Err((
                     "QUEUE_FULL",
-                    format!("{QUEUE_MAX} messages are already waiting for this agent. Let it catch up or stop it, then send again."),
+                    format!(
+                        "{QUEUE_MAX} messages are already waiting for this agent. Let it catch up or close it, then send again."
+                    ),
                 ));
             }
-            state.queues.entry(id.to_owned()).or_default().push_back(item);
+            self.validate_origin(record, &item.origin)?;
+            state
+                .accept_queued(id, item.clone(), |state| self.save(state))
+                .map_err(|message| ("STORAGE_FAILED", message))?;
             before
         };
+        if let Err(message) = self.append_once(&user) {
+            {
+                let mut state = lock(&self.state);
+                if let Some(queue) = state.queues.get_mut(id) {
+                    queue.retain(|turn| turn.turn_id != turn_id);
+                }
+                self.waiting(&mut state, id);
+            }
+            self.settle_unstarted(id, &item, "failed", Some(&message));
+            return Err(("STORAGE_FAILED", message));
+        }
+        self.publish(user, false);
         let (outcome, waiting) = self.admit_queued(id, Some(turn_id.as_str()));
         if waiting != before {
             self.publish_queued(id, waiting);
         }
         outcome?;
-        Ok(json!({"accepted": true, "turnId": turn_id, "queued": waiting}))
+        Ok(json!({"accepted": true, "turnId": turn_id, "queued": waiting, "duplicate": false}))
     }
 
     /// Turns still waiting for this session (and forgets an empty queue).
@@ -1769,11 +2243,7 @@ impl Inner {
     /// provider work; a failed save is rolled back and refuses the turn.
     /// None: nothing can start now. Some(Err): the front turn could not be
     /// admitted and has left the queue.
-    fn take_next(
-        &self,
-        state: &mut State,
-        id: &str,
-    ) -> Option<Result<Started, (Queued, Failure)>> {
+    fn take_next(&self, state: &mut State, id: &str) -> Option<Result<Started, (Queued, Failure)>> {
         if state.session_busy(id) {
             return None;
         }
@@ -1794,21 +2264,40 @@ impl Inner {
         if let Err(message) = require_browser_disabled(record.playwright) {
             return Some(Err((item, ("BROWSER_UNAVAILABLE", message))));
         }
-        let mut user = json!({"text": item.text, "attachments": item.attachments});
-        if !item.origin.is_null() {
-            user["origin"] = item.origin.clone();
+        if let Err(failure) = self.validate_origin(record, &item.origin) {
+            return Some(Err((item, failure)));
         }
-        let user = event(id, Some(&item.turn_id), "user", user);
         let previous = record.clone();
         record.status = "running".into();
         record.turn_id = Some(item.turn_id.clone());
         record.last_activity_at = now_ms();
         let record = record.clone();
-        if let Err(message) = self.save(state).and_then(|_| self.append(&user)) {
+        let Some(durable) = state.ledger.get_mut(&item.turn_id) else {
             if let Some(current) = state.records.iter_mut().find(|r| r.id == id) {
                 *current = previous;
             }
-            let _ = self.save(state);
+            return Some(Err((
+                item,
+                (
+                    "STORAGE_FAILED",
+                    "The queued turn has no durable acceptance record.".into(),
+                ),
+            )));
+        };
+        durable.status = "active".into();
+        let running = event(
+            id,
+            Some(&item.turn_id),
+            "status",
+            json!({"status": "running"}),
+        );
+        if let Err(message) = self.save(state).and_then(|_| self.append_once(&running)) {
+            if let Some(current) = state.records.iter_mut().find(|r| r.id == id) {
+                *current = previous;
+            }
+            if let Some(durable) = state.ledger.get_mut(&item.turn_id) {
+                durable.status = "queued".into();
+            }
             return Some(Err((item, ("STORAGE_FAILED", message))));
         }
         state.turns.insert(
@@ -1834,7 +2323,6 @@ impl Inner {
             proc,
             item,
             lease,
-            user,
         }))
     }
 
@@ -1861,28 +2349,26 @@ impl Inner {
                     return (Ok(mine), waiting);
                 }
                 Some(Err((item, failure))) => {
+                    self.settle_unstarted(id, &item, "failed", Some(failure.1.as_str()));
                     if submitted == Some(item.turn_id.as_str()) {
                         return (Err(failure), waiting);
                     }
-                    self.settle_unstarted(id, &item, "failed", Some(failure.1.as_str()));
                 }
             }
         }
     }
 
-    /// A queued turn that never started: settle its pending bubble (and its
-    /// scheduled run). Nothing is persisted, as no user event was.
-    fn settle_unstarted(&self, id: &str, item: &Queued, status: &str, failure: Option<&str>) {
-        if let Some(message) = failure {
-            self.publish(
-                event(id, Some(&item.turn_id), "error", json!({"error": message})),
-                false,
-            );
+    /// Accepted turns always receive a durable terminal outcome, including
+    /// rejection after waiting and explicit queue cancellation.
+    fn settle_unstarted(&self, _id: &str, item: &Queued, status: &str, failure: Option<&str>) {
+        {
+            let mut state = lock(&self.state);
+            if let Some(turn) = state.ledger.get_mut(&item.turn_id) {
+                turn.settle(status, failure);
+            }
+            let _ = self.save(&state);
         }
-        self.publish(
-            event(id, Some(&item.turn_id), "done", json!({"status": status})),
-            false,
-        );
+        let _ = self.write_settlement(&item.turn_id, true);
         if item.origin["kind"] == "schedule" {
             self.schedule_finished(&item.origin, &item.turn_id, status, failure);
         }
@@ -1918,7 +2404,6 @@ impl Inner {
             proc,
             item,
             lease,
-            user,
         } = started;
         let Queued {
             turn_id,
@@ -1926,10 +2411,15 @@ impl Inner {
             attachments,
             ..
         } = item;
-        // Persisted at admission; the webview sees it now.
-        self.publish(user, false);
+        // The accepted user event was already persisted and emitted, including
+        // while this turn waited behind an earlier one.
         self.publish(
-            event(&record.id, Some(&turn_id), "status", json!({"status": "running"})),
+            event(
+                &record.id,
+                Some(&turn_id),
+                "status",
+                json!({"status": "running"}),
+            ),
             false,
         );
         let inner = self.clone();
@@ -2083,7 +2573,7 @@ impl Inner {
 
     fn close(&self, id: &str) -> Result<Value, Failure> {
         let _lifecycle = lock(&self.lifecycle);
-        let (live, turn, dropped) = {
+        let (live, turn, dropped, saved) = {
             let mut state = lock(&self.state);
             let Some(record) = state.records.iter_mut().find(|r| r.id == id) else {
                 return Err(("SESSION_NOT_FOUND", "That chat no longer exists.".into()));
@@ -2103,25 +2593,33 @@ impl Inner {
                     record.turn_id = None;
                 }
             }
-            // Queued turns never start once the session closes.
+            if let Some(turn) = &turn {
+                if let Some(durable) = state.ledger.get_mut(&turn.id) {
+                    durable.settle("interrupted", None);
+                }
+            }
             let dropped = state.queues.remove(id).unwrap_or_default();
-            let _ = self.save(&state);
-            (proc, turn, dropped)
+            for item in &dropped {
+                if let Some(durable) = state.ledger.get_mut(&item.turn_id) {
+                    durable.settle("cancelled", None);
+                }
+            }
+            let saved = self.save(&state);
+            (proc, turn, dropped, saved)
         };
         if let Some(turn) = turn {
-            self.publish(
-                event(id, Some(&turn.id), "done", json!({"status": "interrupted"})),
-                true,
-            );
+            let _ = self.write_settlement(&turn.id, true);
             if turn.origin["kind"] == "schedule" {
                 self.schedule_finished(&turn.origin, &turn.id, "interrupted", None);
             }
         }
-        if !dropped.is_empty() {
-            // Queued turns never started: tell the UI so their pending bubbles settle.
-            for item in &dropped {
-                self.settle_unstarted(id, item, "cancelled", None);
+        for item in &dropped {
+            let _ = self.write_settlement(&item.turn_id, true);
+            if item.origin["kind"] == "schedule" {
+                self.schedule_finished(&item.origin, &item.turn_id, "cancelled", None);
             }
+        }
+        if !dropped.is_empty() {
             self.publish_queued(id, 0);
         }
         self.publish(
@@ -2129,10 +2627,10 @@ impl Inner {
             false,
         );
         if let Some(proc) = live {
-            // Keep this generation and its turn until exit is confirmed. An
-            // immediate new send cannot overlap the closing process.
+            // Keep this generation and its turn until exit is confirmed.
             proc.kill();
         }
+        saved.map_err(|message| ("STORAGE_FAILED", message))?;
         Ok(json!({"closed": true}))
     }
 
@@ -2561,6 +3059,179 @@ mod tests {
             wake: false,
             mailbox_address: None,
             wakes: Wakes::default(),
+        }
+    }
+
+    #[test]
+    fn durable_queue_recovery_interrupts_without_replaying_and_preserves_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = record("claude", "read");
+        let mut state = State {
+            records: vec![saved.clone()],
+            ..State::default()
+        };
+        let first = Queued::keyed(
+            "private prompt".into(),
+            vec![],
+            json!({"kind":"wake","messageId":"m1"}),
+            "wake:stable-key".into(),
+        );
+        let second = Queued::new("second queued prompt".into(), vec![], Value::Null);
+        for item in [&first, &second] {
+            state
+                .accept_queued(&saved.id, item.clone(), |s| {
+                    save_snapshot(dir.path(), &s.records, &s.ledger)
+                })
+                .unwrap();
+        }
+        // One accepted turn started; the other never reached a provider.
+        state.records[0].status = "running".into();
+        state.records[0].turn_id = Some(first.turn_id.clone());
+        state.ledger.get_mut(&first.turn_id).unwrap().status = "active".into();
+        save_snapshot(dir.path(), &state.records, &state.ledger).unwrap();
+        let (records, ledger) = read_snapshot(&dir.path().join(REGISTRY_FILE)).unwrap();
+        let mut recovered = State {
+            records,
+            ledger,
+            ..State::default()
+        };
+        assert!(recovered.interrupt_pending().0);
+        assert!(
+            recovered.queues.is_empty()
+                && recovered.turns.is_empty()
+                && recovered.launching.is_empty()
+        );
+        assert_eq!(recovered.records[0].status, "idle");
+        for item in [&first, &second] {
+            let turn = &recovered.ledger[&item.turn_id];
+            assert_eq!(turn.status, "interrupted");
+            assert_eq!(turn.payload.as_ref().unwrap().text, item.text);
+            assert_eq!(
+                recovered.duplicate(&saved.id, item).unwrap().unwrap()["turnId"],
+                item.turn_id
+            );
+        }
+        save_snapshot(dir.path(), &recovered.records, &recovered.ledger).unwrap();
+        assert!(
+            read_snapshot(&dir.path().join(REGISTRY_FILE))
+                .unwrap()
+                .1
+                .values()
+                .all(|t| t.status == "interrupted")
+        );
+    }
+
+    #[test]
+    fn rejected_queue_save_rolls_back_admission_without_losing_prior_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = record("codex", "read");
+        let mut state = State {
+            records: vec![saved.clone()],
+            ..State::default()
+        };
+        save_snapshot(dir.path(), &state.records, &state.ledger).unwrap();
+        let previous = fs::read(dir.path().join(REGISTRY_FILE)).unwrap();
+        fs::remove_dir(dir.path().join(LOG_DIR)).unwrap();
+        fs::write(dir.path().join(LOG_DIR), b"preserve storage obstruction").unwrap();
+        let item = Queued::new("must not dispatch".into(), vec![], Value::Null);
+        assert!(
+            state
+                .accept_queued(&saved.id, item, |s| save_snapshot(
+                    dir.path(),
+                    &s.records,
+                    &s.ledger
+                ))
+                .is_err()
+        );
+        assert!(state.queues.is_empty() && state.ledger.is_empty() && state.turns.is_empty());
+        assert_eq!(fs::read(dir.path().join(REGISTRY_FILE)).unwrap(), previous);
+    }
+
+    #[test]
+    fn terminal_receipts_compact_payload_without_forgetting_dedupe_or_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = record("codex", "read");
+        let item = Queued::keyed(
+            "original confidential prompt".into(),
+            vec![],
+            json!({"kind":"schedule","scheduleId":"test"}),
+            "scheduled:run1".into(),
+        );
+        let mut state = State {
+            records: vec![saved.clone()],
+            ..State::default()
+        };
+        state
+            .accept_queued(&saved.id, item.clone(), |s| {
+                save_snapshot(dir.path(), &s.records, &s.ledger)
+            })
+            .unwrap();
+        for status in ["cancelled", "failed"] {
+            let turn = state.ledger.get_mut(&item.turn_id).unwrap();
+            turn.settle(status, Some("explicit terminal reason"));
+            save_snapshot(dir.path(), &state.records, &state.ledger).unwrap();
+            let (_, rows) = read_snapshot(&dir.path().join(REGISTRY_FILE)).unwrap();
+            assert_eq!(rows[&item.turn_id].status, status);
+        }
+        let turn = state.ledger.get_mut(&item.turn_id).unwrap();
+        turn.history_saved = true;
+        turn.payload = None;
+        save_snapshot(dir.path(), &state.records, &state.ledger).unwrap();
+        assert!(
+            !String::from_utf8(fs::read(dir.path().join(REGISTRY_FILE)).unwrap())
+                .unwrap()
+                .contains("original confidential prompt")
+        );
+        let (records, ledger) = read_snapshot(&dir.path().join(REGISTRY_FILE)).unwrap();
+        let state = State {
+            records,
+            ledger,
+            ..State::default()
+        };
+        assert_eq!(
+            state.duplicate(&saved.id, &item).unwrap().unwrap()["duplicate"],
+            true
+        );
+        let changed = Queued::keyed(
+            "changed payload".into(),
+            vec![],
+            item.origin.clone(),
+            item.key.clone().unwrap(),
+        );
+        assert_eq!(
+            state.duplicate(&saved.id, &changed).unwrap_err().0,
+            "TURN_ID_CONFLICT"
+        );
+        assert!(state.duplicate("s_1111111111111111", &item).is_err());
+    }
+
+    #[test]
+    fn legacy_registry_migration_preserves_original_and_new_ledger_is_strict() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_dirs(dir.path()).unwrap();
+        let saved = record("claude", "read");
+        let path = dir.path().join(REGISTRY_FILE);
+        let original =
+            serde_json::to_vec(&json!({"schema":"codaclauda.sessions/1","sessions":[saved]}))
+                .unwrap();
+        fs::write(&path, &original).unwrap();
+        let (records, ledger) = read_snapshot(&path).unwrap();
+        assert!(ledger.is_empty());
+        save_snapshot(dir.path(), &records, &ledger).unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("sessions.schema1.backup.json")).unwrap(),
+            original
+        );
+        assert_eq!(read_snapshot(&path).unwrap().0[0].id, saved.id);
+        let good: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for malformed in [
+            json!({"schema":"codaclauda.sessions/2","sessions":good["sessions"]}),
+            json!({"schema":"codaclauda.sessions/2","sessions":good["sessions"],"turns":{"t_00":{}}}),
+        ] {
+            let bytes = serde_json::to_vec(&malformed).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            assert!(read_snapshot(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
         }
     }
 
