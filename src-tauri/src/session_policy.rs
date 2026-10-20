@@ -143,7 +143,17 @@ pub fn verify_claude_auth(auth: &Value) -> Result<(), String> {
 }
 
 /// Verify the system/init event before accepting it as a ready session.
-pub fn verify_claude_init(event: &Value, access: &str) -> Result<(), String> {
+/// `mcp` names the owner's own servers passed with `--mcp-config` (Full
+/// access only, 0.5); every other server or MCP tool is still refused.
+pub fn verify_claude_init(event: &Value, access: &str, mcp: &[String]) -> Result<(), String> {
+    let mcp: &[String] = if access == "full" { mcp } else { &[] };
+    let owned_tool = |name: &str| {
+        mcp.iter().any(|server| {
+            name.strip_prefix("mcp__")
+                .and_then(|rest| rest.strip_prefix(server.as_str()))
+                .is_some_and(|rest| rest.starts_with("__"))
+        })
+    };
     let mode = if access == "full" {
         "bypassPermissions"
     } else {
@@ -181,12 +191,15 @@ pub fn verify_claude_init(event: &Value, access: &str) -> Result<(), String> {
             if !READ_TOOLS.contains(&name) {
                 return Err("Claude exposed a tool outside the Read only allowlist.".into());
             }
-        } else if name.starts_with("mcp__") {
-            return Err("MCP tools are unavailable in CodaClauda-owned sessions.".into());
+        } else if name.starts_with("mcp__") && !owned_tool(name) {
+            return Err("Claude exposed an MCP tool that is not one of this project's own servers.".into());
         }
     }
-    if !servers.is_empty() {
-        return Err("MCP servers are unavailable in CodaClauda-owned sessions.".into());
+    for server in servers {
+        let name = server["name"].as_str().unwrap_or("");
+        if !mcp.iter().any(|own| own == name) {
+            return Err("Claude loaded an MCP server that is not one of this project's own servers.".into());
+        }
     }
     Ok(())
 }
@@ -280,7 +293,73 @@ pub fn codex_preflight_overrides(response: &Value) -> Result<Vec<String>, String
     Ok(overrides)
 }
 
-pub fn verify_codex_config(response: &Value) -> Result<(), String> {
+/// Inherited MCP server names (from the preflight `config/read`).
+pub fn codex_mcp_names(response: &Value) -> Vec<String> {
+    response["config"]["mcp_servers"]
+        .as_object()
+        .map(|servers| servers.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// One owner-configured stdio MCP server (0.5, Full access only).
+pub struct OwnedServer<'a> {
+    pub name: &'a str,
+    pub command: &'a str,
+    pub args: &'a [String],
+    /// Names only: the values travel in the provider's own environment.
+    pub env_names: Vec<&'a str>,
+}
+
+/// `-c` additions for the owner's servers. Names are [A-Za-z0-9_-] (checked
+/// when saved), so the dotted key is literal; values are TOML strings and
+/// arrays (a JSON string literal is a valid TOML basic string). A name Codex
+/// already defines is refused rather than merged into the inherited entry.
+pub fn codex_mcp_overrides(
+    servers: &[OwnedServer<'_>],
+    inherited: &[String],
+) -> Result<Vec<String>, String> {
+    let quote = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
+    let list = |items: &mut dyn Iterator<Item = &str>| {
+        format!("[{}]", items.map(quote).collect::<Vec<_>>().join(","))
+    };
+    let mut overrides = Vec::new();
+    for server in servers {
+        if !server
+            .name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            || server.name.is_empty()
+        {
+            return Err("An MCP server name may use only letters, digits, '_' and '-'.".into());
+        }
+        if inherited.iter().any(|name| name == server.name) {
+            return Err(format!(
+                "Codex's own configuration already has an MCP server named {}; rename the CodaClauda one.",
+                server.name
+            ));
+        }
+        let key = format!("mcp_servers.{}", server.name);
+        overrides.push(format!("{key}.command={}", quote(server.command)));
+        overrides.push(format!(
+            "{key}.args={}",
+            list(&mut server.args.iter().map(String::as_str))
+        ));
+        if !server.env_names.is_empty() {
+            overrides.push(format!(
+                "{key}.env_vars={}",
+                list(&mut server.env_names.iter().copied())
+            ));
+        }
+        overrides.push(format!("{key}.enabled=true"));
+        // Full access never prompts; an MCP approval request would be declined.
+        overrides.push(format!("{key}.default_tools_approval_mode=\"approve\""));
+    }
+    Ok(overrides)
+}
+
+/// `owned` lists (name, command) of the owner's servers for this launch; every
+/// other effective server must be disabled.
+pub fn verify_codex_config(response: &Value, owned: &[(String, String)]) -> Result<(), String> {
     let config = config(response)?;
     verify_codex_routing(config)?;
     if config
@@ -304,11 +383,23 @@ pub fn verify_codex_config(response: &Value) -> Result<(), String> {
         }
     }
     if let Some(servers) = optional_table(config, "mcp_servers")? {
-        for server in servers.values() {
-            if server["enabled"] != false {
+        for (name, server) in servers {
+            if let Some((_, command)) = owned.iter().find(|(own, _)| own == name) {
+                if server["command"].as_str() != Some(command.as_str()) {
+                    return Err(format!("Codex did not load this project's MCP server {name} as configured."));
+                }
+            } else if server["enabled"] != false {
                 return Err("Codex retained an enabled MCP server in an isolated session.".into());
             }
         }
+    }
+    if owned.iter().any(|(name, _)| {
+        optional_table(config, "mcp_servers")
+            .ok()
+            .flatten()
+            .is_none_or(|servers| !servers.contains_key(name))
+    }) {
+        return Err("Codex did not load this project's MCP servers.".into());
     }
     Ok(())
 }
@@ -406,7 +497,7 @@ mod tests {
                 event["plugins"] = json!([{
                     "name": name, "path": "builtin", "source": format!("{name}@builtin"),
                 }]);
-                assert!(verify_claude_init(&event, access).is_err());
+                assert!(verify_claude_init(&event, access, &[]).is_err());
             }
         }
     }
@@ -452,16 +543,16 @@ mod tests {
     #[test]
     fn claude_rejects_read_tool_escalation_and_browser_off_mcp() {
         let initial = claude_init();
-        assert!(verify_claude_init(&initial, "read").is_ok());
+        assert!(verify_claude_init(&initial, "read", &[]).is_ok());
         for name in ["Bash", "Write", "Agent", "WebFetch", "mcp__other__read"] {
             let mut event = initial.clone();
             event["tools"].as_array_mut().unwrap().push(json!(name));
-            assert!(verify_claude_init(&event, "read").is_err());
+            assert!(verify_claude_init(&event, "read", &[]).is_err());
         }
         let mut full = initial.clone();
         full["permissionMode"] = json!("bypassPermissions");
         full["mcp_servers"] = json!([{"name":"unexpected","status":"connected"}]);
-        assert!(verify_claude_init(&full, "full").is_err());
+        assert!(verify_claude_init(&full, "full", &[]).is_err());
     }
 
     #[test]
@@ -469,12 +560,38 @@ mod tests {
         let mut event = claude_init();
         event["permissionMode"] = json!("bypassPermissions");
         event["tools"] = json!(["Read", "Write", "Bash"]);
-        assert!(verify_claude_init(&event, "full").is_ok());
+        assert!(verify_claude_init(&event, "full", &[]).is_ok());
         event["tools"] = json!(["mcp__legacy_browser__snapshot"]);
-        assert!(verify_claude_init(&event, "full").is_err());
+        assert!(verify_claude_init(&event, "full", &[]).is_err());
         event["tools"] = json!(["Read"]);
         event["mcp_servers"] = json!([{"name":"legacy_browser","status":"connected"}]);
-        assert!(verify_claude_init(&event, "full").is_err());
+        assert!(verify_claude_init(&event, "full", &[]).is_err());
+    }
+
+    #[test]
+    fn owner_mcp_servers_pass_only_at_full_and_only_by_name() {
+        let own = ["playwright".to_owned()];
+        let mut event = claude_init();
+        event["permissionMode"] = json!("bypassPermissions");
+        event["tools"] = json!(["Read", "mcp__playwright__browser_click"]);
+        event["mcp_servers"] = json!([{"name":"playwright","status":"connected"}]);
+        assert!(verify_claude_init(&event, "full", &own).is_ok());
+        event["tools"] = json!(["mcp__playwrightx__x"]);
+        assert!(verify_claude_init(&event, "full", &own).is_err());
+        let mut read = claude_init();
+        read["mcp_servers"] = json!([{"name":"playwright","status":"connected"}]);
+        assert!(verify_claude_init(&read, "read", &own).is_err());
+        let args = ["--headless".to_owned()];
+        let server = OwnedServer { name: "playwright", command: "cmd", args: &args, env_names: vec!["DEBUG"] };
+        let overrides = codex_mcp_overrides(&[server], &[]).unwrap();
+        assert!(overrides.contains(&r#"mcp_servers.playwright.args=["--headless"]"#.to_owned()));
+        let mut config = codex_config();
+        apply_codex_cli_overrides(&mut config, &overrides);
+        let owned = [("playwright".to_owned(), "cmd".to_owned())];
+        assert!(verify_codex_config(&config, &owned).is_ok());
+        assert!(verify_codex_config(&config, &[]).is_err());
+        let again = OwnedServer { name: "node_repl", command: "x", args: &[], env_names: vec![] };
+        assert!(codex_mcp_overrides(&[again], &["node_repl".to_owned()]).is_err());
     }
 
     // Match the installed CLI's observed parsing boundary: literal dotted keys,
@@ -524,7 +641,7 @@ mod tests {
         let mut actual = initial.clone();
         apply_codex_cli_overrides(&mut actual, &overrides);
         assert_eq!(actual, expected);
-        assert!(verify_codex_config(&actual).is_ok());
+        assert!(verify_codex_config(&actual, &[]).is_ok());
 
         // The old form adds an enabled-only entry whose name includes quotes,
         // leaving the real server enabled and lacking a transport of its own.
@@ -540,7 +657,7 @@ mod tests {
             initial["config"]["mcp_servers"]["\"node_repl\""],
             json!({"enabled":false})
         );
-        assert!(verify_codex_config(&initial).is_err());
+        assert!(verify_codex_config(&initial, &[]).is_err());
         assert!(!codex_base_overrides().contains(&"mcp_servers={}".to_owned()));
     }
 
@@ -561,22 +678,22 @@ mod tests {
             let mut config = codex_config();
             config["config"][key] = value;
             assert!(codex_preflight_overrides(&config).is_err(), "{key}");
-            assert!(verify_codex_config(&config).is_err(), "{key}");
+            assert!(verify_codex_config(&config, &[]).is_err(), "{key}");
         }
     }
 
     #[test]
     fn codex_verifies_effective_disabled_flags_and_notify() {
         let baseline = codex_config();
-        assert!(verify_codex_config(&baseline).is_ok());
+        assert!(verify_codex_config(&baseline, &[]).is_ok());
         for feature in DISABLED_CODEX_FEATURES {
             let mut config = baseline.clone();
             config["config"]["features"][*feature] = json!(true);
-            assert!(verify_codex_config(&config).is_err(), "{feature}");
+            assert!(verify_codex_config(&config, &[]).is_err(), "{feature}");
         }
         let mut config = baseline;
         config["config"]["notify"] = json!(["some-command"]);
-        assert!(verify_codex_config(&config).is_err());
+        assert!(verify_codex_config(&config, &[]).is_err());
     }
 
     #[test]
@@ -589,9 +706,9 @@ mod tests {
             codex_preflight_overrides(&config).unwrap(),
             [r#"mcp_servers={"legacy_browser"={enabled=false}}"#]
         );
-        assert!(verify_codex_config(&config).is_err());
+        assert!(verify_codex_config(&config, &[]).is_err());
         config["config"]["mcp_servers"]["legacy_browser"]["enabled"] = json!(false);
-        assert!(verify_codex_config(&config).is_ok());
+        assert!(verify_codex_config(&config, &[]).is_ok());
     }
 
     #[test]

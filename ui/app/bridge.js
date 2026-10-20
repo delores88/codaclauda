@@ -63,7 +63,7 @@ export const desktop = {
   /* 0.4 agent sessions (src-tauri/src/session_host.rs). Times are epoch milliseconds. */
   /** → { sessions: [{ id, provider, projectId, cwd, title, access, threadId, providerSessionId, status, createdAt, lastActivityAt, shared, sharedId }] } */
   sessionList: () => invoke('session_list'),
-  /** { provider:'claude'|'codex', projectId, cwd, access:'full'|'read', title, playwright, model?, effort?, sharedId? } → { session } */
+  /** { provider:'claude'|'codex', projectId, cwd, access:'full'|'read', title, playwright, model?, effort?, sharedId?, worktree? } → { session } */
   sessionStart: options => invoke('session_start', { args: options || {} }),
   /** → { accepted: true, turnId, queued }. A busy session queues the turn (at most 10 waiting; queued = how many wait,
    *  0 when it started now) and emits kind 'queued' { count }. The 'user' event arrives when the turn starts.
@@ -104,6 +104,48 @@ export const desktop = {
   scheduleRuns: arg => invoke('schedule_runs', arg?.limit == null ? { id: sessionId(arg) } : { id: sessionId(arg), limit: arg.limit }),
   /** cb(payload) for every 'schedule://event' ({ id, kind: 'run'|'error', run }). Resolves to an unlisten function. */
   onScheduleEvent: cb => listenTo('schedule://event', cb),
+
+  /* 0.5 (src-tauri/src/session_host/{fork,worktree,external,mcp,notify}.rs, src-tauri/src/project_tools.rs).
+   * sessionStart also takes worktree:boolean (git projects only; error NOT_A_GIT_REPO otherwise).
+   * Records gain worktreePath|null, branch|null and usage { input, output, cached, costUsd|null, contextPct|null };
+   * optionally forkedFrom, handoffFrom, prUrl, prNumber, rateLimits (Codex: { primary, secondary, planType, at }).
+   * 'session://event' gains kind 'usage' { usage, rateLimits? } (not persisted). costUsd is Claude's own estimate; Codex never has one. */
+  /** Copies the whole conversation into a new chat (Claude --resume --fork-session / Codex thread/fork on its first send) → { session }.
+   *  Error NOTHING_TO_FORK before the first reply. */
+  sessionFork: arg => invoke('session_fork', { id: sessionId(arg) }),
+  /** Starts the other agent in the same folder; its first turn is a summary of the last ~12 exchanges (≤ ~6,000 chars) → { session } */
+  sessionHandoff: ({ id, toProvider }) => invoke('session_handoff', { id, toProvider: toProvider || null }),
+  /** Changes vs the worktree's base (or vs HEAD for a chat without a worktree) → { files: [{ path, status, additions, deletions }], patch, truncated } */
+  sessionDiff: arg => invoke('session_diff', { id: sessionId(arg) }),
+  /** Commits the worktree and merges codaclauda/<short> into the original branch → { committed, merged, branch }.
+   *  Errors: SESSION_BUSY, NO_WORKTREE, BASE_NOT_CHECKED_OUT, MERGE_FAILED (merge aborted). */
+  sessionWorktreeApply: ({ id, message = '' }) => invoke('session_worktree_apply', { id, message }),
+  /** Removes the worktree and its branch; the chat stays readable but stopped → { discarded: true } */
+  sessionWorktreeDiscard: arg => invoke('session_worktree_discard', { id: sessionId(arg) }),
+  /** Commits, pushes the branch and runs gh pr create → { url, number } */
+  sessionPrCreate: ({ id, title, body = '' }) => invoke('session_pr_create', { id, title, body }),
+  /** gh pr view for the chat's branch → { url|null, state|null ('open'|'merged'|'closed'), checks: [{ name, status, conclusion }] } (lowercase) */
+  sessionPrStatus: arg => invoke('session_pr_status', { id: sessionId(arg) }),
+  /** Codex compact-now (queued as a turn) → { ok: true }. Claude: error COMPACT_UNSUPPORTED (slash commands are disabled). */
+  sessionCompact: arg => invoke('session_compact', { id: sessionId(arg) }),
+  /** Other Claude Code / Codex sessions on this machine, metadata only →
+   *  { sessions: [{ provider, cwd, projectHint, modifiedAt, active (modified < 15 min ago), owned (started by CodaClauda) }] } */
+  externalSessionsList: () => invoke('external_sessions_list'),
+  /** → { servers: [{ name, command, args, env }], presets: [{ id, label, name, command, args, env, install, notes, source }] }.
+   *  Servers reach sessions only at Full access; CodaClauda never installs them (presets are text). */
+  mcpServersGet: arg => invoke('mcp_servers_get', { projectId: arg && typeof arg === 'object' ? arg.projectId : arg }),
+  /** Replaces the project's list (validated: names [A-Za-z0-9_-], ≤ 12 servers) → { servers } */
+  mcpServersSet: ({ projectId, servers = [] }) => invoke('mcp_servers_set', { projectId, servers }),
+  /** Phone push → { ntfyUrl|null, onFinish, onError } */
+  notifySettingsGet: () => invoke('notify_settings_get'),
+  /** ntfyUrl must be https (null or '' turns push off) → { ntfyUrl, onFinish, onError } */
+  notifySettingsSet: ({ ntfyUrl = null, onFinish = false, onError = false } = {}) => invoke('notify_settings_set', { ntfyUrl: ntfyUrl || null, onFinish: Boolean(onFinish), onError: Boolean(onError) }),
+  /** file: 'CLAUDE.md' | 'AGENTS.md' at the project root (≤ 200 KB) → { text, exists } */
+  projectInstructionsRead: ({ projectId = null, cwd, file }) => invoke('project_instructions_read', { projectId, cwd, file }),
+  /** → { ok: true } */
+  projectInstructionsWrite: ({ projectId = null, cwd, file, text = '' }) => invoke('project_instructions_write', { projectId, cwd, file, text }),
+  /** gh run list for repo 'owner/name' → { runs: [{ name, title, status, conclusion, branch, url, at }] } (lowercase; at = epoch ms) */
+  ciStatus: ({ projectId = null, repo }) => invoke('ci_status', { projectId, repo }),
 };
 
 async function listenTo(name, cb) {

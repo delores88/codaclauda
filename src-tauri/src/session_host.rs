@@ -9,11 +9,22 @@
 //! 0.4.1 adds a per-session send queue (owner turns, wakes and scheduled runs
 //! wait their turn), wake on mail (`wake.rs`) and in-app schedules
 //! (`schedule.rs`); both reuse the one send/lifecycle path below.
+//!
+//! 0.5 adds fork and hand-off (`fork.rs`), an optional git worktree per chat
+//! with diff/apply/discard/PR (`worktree.rs`), usage and context fill with
+//! Codex compact-now, read-only detection of other Claude/Codex sessions
+//! (`external.rs`), the owner's own MCP servers at Full access (`mcp.rs`) and
+//! opt-in phone push (`notify.rs`). All of them reuse the lifecycle below.
 
+pub(crate) mod external;
+pub(crate) mod fork;
+pub(crate) mod mcp;
+pub(crate) mod notify;
 pub(crate) mod schedule;
 pub(crate) mod wake;
+pub(crate) mod worktree;
 
-use crate::session_parse::{self, Out};
+use crate::session_parse::{self, Out, Reported, Usage};
 use crate::session_policy;
 use crate::{board, error};
 use coord_core::adapters::{self, OwnedProcess};
@@ -67,7 +78,6 @@ const CODEX_QUIET: &[&str] = &[
     "item/reasoning/textDelta",
     "item/reasoning/summaryTextDelta",
     "item/reasoning/summaryPartAdded",
-    "thread/tokenUsage/updated",
     "turn/diff/updated",
 ];
 
@@ -176,7 +186,7 @@ impl Provider {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Record {
     id: String,
@@ -208,6 +218,35 @@ struct Record {
     mailbox_address: Option<String>,
     #[serde(default)]
     wakes: Wakes,
+    /// 0.5 worktree chats: the worktree root and its `codaclauda/<short>` branch.
+    #[serde(default)]
+    worktree_path: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    /// The original checkout and the branch/commit the worktree started from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repo_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pr_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pr_number: Option<u64>,
+    #[serde(default)]
+    usage: Usage,
+    /// Codex account rate-limit windows, as last reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rate_limits: Option<Value>,
+    /// A fork's source provider session (Claude) or thread (Codex), forked on
+    /// its first launch; `forked_from`/`handoff_from` name the CodaClauda chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fork_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forked_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handoff_from: Option<String>,
 }
 
 /// Wake counters shown in the UI: rolling hour and day, and all time.
@@ -241,6 +280,13 @@ struct Proc {
     /// Held until a completed turn or confirmed process exit. The updater takes
     /// this same board lease exclusively before it permits replacement.
     runtime_lease: Mutex<Option<Arc<File>>>,
+    /// Claude: tokens in context after the latest model call.
+    context: AtomicU64,
+    /// The saved usage when this process first reported, and whether it
+    /// restored the provider's earlier totals (see `merge_usage`).
+    usage_base: Mutex<Option<(Usage, Option<bool>)>>,
+    /// (name, command) of the owner's MCP servers passed to this launch.
+    mcp: Mutex<Vec<(String, String)>>,
 }
 
 impl Proc {
@@ -279,8 +325,16 @@ fn spawn_owned(
     provider: Provider,
     generation: u64,
     lease: Arc<File>,
+    extra_env: &[(String, String)],
 ) -> Result<(Arc<Proc>, File), String> {
-    let mut child = OwnedProcess::spawn(exe, args, cwd, &launch_env())
+    let mut env = launch_env();
+    // The owner's MCP server variables (names checked when saved, never the
+    // stripped provider controls), inherited by the MCP children.
+    for (name, value) in extra_env {
+        env.retain(|key, _| !key.to_string_lossy().eq_ignore_ascii_case(name));
+        env.insert(name.into(), value.into());
+    }
+    let mut child = OwnedProcess::spawn(exe, args, cwd, &env)
         .map_err(|e| format!("Could not start {}: {e:#}", provider.label()))?;
     let (Some(stdin), Some(stdout), Some(stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -319,6 +373,9 @@ fn spawn_owned(
             failure: Mutex::new(None),
             completed_turns: Mutex::new(HashSet::new()),
             runtime_lease: Mutex::new(Some(lease)),
+            context: AtomicU64::new(0),
+            usage_base: Mutex::new(None),
+            mcp: Mutex::new(Vec::new()),
         }),
         stdout,
     ))
@@ -513,6 +570,7 @@ struct Inner {
     wake: Mutex<wake::Book>,
     schedules: Mutex<Vec<schedule::Schedule>>,
     run_lock: Mutex<()>,
+    notify: Mutex<notify::Settings>,
 }
 
 /// Tauri-managed handle to the session engine.
@@ -543,10 +601,12 @@ impl SessionHost {
             wake: Mutex::new(wake::Book::default()),
             schedules: Mutex::new(Vec::new()),
             run_lock: Mutex::new(()),
+            notify: Mutex::new(notify::Settings::default()),
         });
         inner.load()?;
         inner.load_wake();
         inner.load_schedules();
+        inner.load_notify();
         let reaper = inner.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -869,6 +929,7 @@ impl Inner {
         if turn.origin["kind"] == "schedule" {
             self.schedule_finished(&turn.origin, &turn.id, &status, failure.as_deref());
         }
+        self.notify_turn(id, &status);
         // Each 'done' releases the next queued turn, in order.
         self.queue_next(id);
         true
@@ -907,8 +968,12 @@ impl Inner {
         if proc.expected_exit.load(Ordering::SeqCst) {
             return;
         }
+        // Rate limits are account-wide, so they carry no thread or turn.
         if proc.provider == Provider::Codex
-            && !matches!(&out, Out::Response { .. } | Out::ServerRequest { .. })
+            && !matches!(
+                &out,
+                Out::Response { .. } | Out::ServerRequest { .. } | Out::RateLimits(_)
+            )
         {
             let mut state = lock(&self.state);
             let thread = envelope["params"]["threadId"].as_str();
@@ -963,6 +1028,18 @@ impl Inner {
             }
             Out::ProviderSession(session) => {
                 let mut state = lock(&self.state);
+                // A fork that reports its source session would interleave two chats.
+                if state.records.iter().any(|r| {
+                    r.id == id
+                        && r.provider_session_id.is_none()
+                        && r.fork_from.as_deref() == Some(session.as_str())
+                }) {
+                    *lock(&proc.failure) = Some(
+                        "Claude resumed the original conversation instead of forking it; it was stopped before replying.".into(),
+                    );
+                    proc.kill();
+                    return;
+                }
                 let changed = match state.records.iter_mut().find(|r| r.id == id) {
                     Some(r) if r.provider_session_id.as_deref() != Some(session.as_str()) => {
                         r.provider_session_id = Some(session);
@@ -1034,7 +1111,75 @@ impl Inner {
                 }
                 self.complete_provider_turn(id, proc, status);
             }
+            Out::Context(tokens) => proc.context.store(tokens, Ordering::SeqCst),
+            Out::Usage(reported) => self.record_usage(id, proc, reported),
+            Out::RateLimits(limits) => self.record_rate_limits(id, &limits),
+            Out::Compacted => {
+                let compacting = lock(&self.state)
+                    .turns
+                    .get(id)
+                    .is_some_and(|t| t.origin["kind"] == "compact");
+                if compacting && lock(&proc.failure).is_none() {
+                    self.complete_provider_turn(id, proc, "completed".into());
+                }
+            }
         }
+    }
+
+    /// Folds one cumulative report into the record and tells the webview.
+    fn record_usage(&self, id: &str, proc: &Arc<Proc>, reported: Reported) {
+        let tokens = reported.context_tokens.or_else(|| {
+            let seen = proc.context.load(Ordering::SeqCst);
+            (seen > 0).then_some(seen)
+        });
+        let pct = session_parse::context_pct(tokens, reported.context_window);
+        let (usage, turn) = {
+            let mut state = lock(&self.state);
+            let turn = state.turns.get(id).map(|t| t.id.clone());
+            let Some(record) = state.records.iter_mut().find(|r| r.id == id) else {
+                return;
+            };
+            let mut base = lock(&proc.usage_base);
+            let (saved, restored) = base.get_or_insert((record.usage, None));
+            record.usage = session_parse::merge_usage(saved, restored, &reported, pct);
+            let usage = record.usage;
+            drop(base);
+            let _ = self.save(&state);
+            (usage, turn)
+        };
+        self.publish(
+            event(id, turn.as_deref(), "usage", json!({"usage": usage})),
+            false,
+        );
+    }
+
+    /// Keeps only the plan windows (used percent, window length, reset time).
+    fn record_rate_limits(&self, id: &str, limits: &Value) {
+        let window = |w: &Value| {
+            w.is_object().then(|| {
+                json!({"usedPercent": w["usedPercent"], "windowDurationMins": w["windowDurationMins"], "resetsAt": w["resetsAt"]})
+            })
+        };
+        let kept = json!({
+            "primary": window(&limits["primary"]),
+            "secondary": window(&limits["secondary"]),
+            "planType": limits["planType"],
+            "at": now_ms(),
+        });
+        let usage = {
+            let mut state = lock(&self.state);
+            let Some(record) = state.records.iter_mut().find(|r| r.id == id) else {
+                return;
+            };
+            record.rate_limits = Some(kept.clone());
+            let usage = record.usage;
+            let _ = self.save(&state);
+            usage
+        };
+        self.publish(
+            event(id, None, "usage", json!({"usage": usage, "rateLimits": kept})),
+            false,
+        );
     }
 
     /// A terminal notification does not authorize process reuse while its
@@ -1079,7 +1224,10 @@ impl Inner {
                     .find(|r| r.id == id)
                     .map(|r| r.access.clone());
                 if let Some(access) = policy {
-                    if let Err(message) = session_policy::verify_claude_init(&value, &access) {
+                    let mcp: Vec<String> =
+                        lock(&proc.mcp).iter().map(|(name, _)| name.clone()).collect();
+                    if let Err(message) = session_policy::verify_claude_init(&value, &access, &mcp)
+                    {
                         *lock(&proc.failure) = Some(message);
                         proc.kill();
                         continue;
@@ -1232,19 +1380,28 @@ impl Inner {
                 record.cwd
             ));
         }
+        // The owner's own MCP servers (0.5): Full access only, read at each launch.
+        let servers = if record.access == "full" {
+            self.project_mcp(&record.project_id)
+        } else {
+            Vec::new()
+        };
         let args = match provider {
             Provider::Claude => {
                 self.claude_preflight(record, &exe, lease.clone(), reservation.clone())
                     .await?;
-                claude_args(record, &uuid_v4())
+                let config = mcp::write_claude_config(&self.dir, &record.id, &servers)?;
+                claude_args(record, &uuid_v4(), config.as_deref())
             }
             Provider::Codex => {
-                let overrides = self
+                let (mut overrides, inherited) = self
                     .codex_preflight(record, &exe, lease.clone(), reservation.clone())
                     .await?;
+                overrides.extend(mcp::codex_overrides(&servers, &inherited)?);
                 codex_args(&overrides)
             }
         };
+        let extra_env = mcp::provider_env(&servers);
         let (proc, stdout) = {
             let _lifecycle = lock(&self.lifecycle);
             let mut state = lock(&self.state);
@@ -1259,7 +1416,10 @@ impl Inner {
                 provider,
                 self.generation.fetch_add(1, Ordering::SeqCst) + 1,
                 lease,
+                &extra_env,
             )?;
+            // Set before its output is read: startup checks accept only these.
+            *lock(&proc.mcp) = mcp::owned_list(&servers);
             state.release_launch(&record.id, turn_id);
             state.live.insert(
                 record.id.clone(),
@@ -1325,6 +1485,7 @@ impl Inner {
                 Provider::Claude,
                 self.generation.fetch_add(1, Ordering::SeqCst) + 1,
                 lease,
+                &[],
             )?
         };
         lock(&proc.input).take();
@@ -1387,7 +1548,7 @@ impl Inner {
         exe: &Path,
         lease: Arc<File>,
         reservation: Arc<LaunchReservation>,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<(Vec<String>, Vec<String>), String> {
         let (proc, stdout) = {
             let _lifecycle = lock(&self.lifecycle);
             if !lock(&self.state).accepts_launch(&record.id, &reservation.turn_id) {
@@ -1400,6 +1561,7 @@ impl Inner {
                 Provider::Codex,
                 self.generation.fetch_add(1, Ordering::SeqCst) + 1,
                 lease,
+                &[],
             )?
         };
         let turn_id = reservation.turn_id.clone();
@@ -1436,6 +1598,7 @@ impl Inner {
             )
             .await?;
             session_policy::codex_preflight_overrides(&config)
+                .map(|overrides| (overrides, session_policy::codex_mcp_names(&config)))
         };
         let result = tokio::select! {
             result = operation => result,
@@ -1470,7 +1633,8 @@ impl Inner {
                 json!({"includeLayers": false, "cwd": record.cwd}),
             )
             .await?;
-        session_policy::verify_codex_config(&config)?;
+        let owned = lock(&proc.mcp).clone();
+        session_policy::verify_codex_config(&config, &owned)?;
         let account = self
             .turn_rpc(
                 &record.id,
@@ -1485,12 +1649,45 @@ impl Inner {
         if let Some(model) = &record.model {
             base["model"] = json!(model);
         }
-        let known = lock(&self.state)
+        let (known, fork) = lock(&self.state)
             .records
             .iter()
             .find(|r| r.id == record.id)
-            .and_then(|r| r.thread_id.clone());
+            .map(|r| (r.thread_id.clone(), r.fork_from.clone()))
+            .unwrap_or_default();
         let result = match known {
+            // A fork's first launch copies its source thread (0.5).
+            None if fork.is_some() => {
+                let source = fork.clone().unwrap_or_default();
+                let mut params = base.clone();
+                params["threadId"] = json!(source);
+                params["excludeTurns"] = json!(true);
+                match self
+                    .turn_rpc(&record.id, turn_id, proc, "thread/fork", params)
+                    .await
+                {
+                    Ok(result) if result["thread"]["id"].as_str() != Some(source.as_str()) => {
+                        result
+                    }
+                    outcome => {
+                        let problem = outcome.err().unwrap_or_else(|| {
+                            "it returned the original thread".to_owned()
+                        });
+                        self.publish(
+                            event(
+                                &record.id,
+                                Some(turn_id),
+                                "error",
+                                json!({"error": format!("Codex could not fork the earlier thread ({problem}). Starting a new thread; earlier context is not available to it.")}),
+                            ),
+                            true,
+                        );
+                        base["serviceName"] = json!("codaclauda");
+                        self.turn_rpc(&record.id, turn_id, proc, "thread/start", base)
+                            .await?
+                    }
+                }
+            }
             Some(thread) => {
                 let mut params = base.clone();
                 params["threadId"] = json!(thread);
@@ -1557,10 +1754,12 @@ impl Inner {
         let (call, receiver) = {
             let _lifecycle = lock(&self.lifecycle);
             self.check_dispatch(id, turn_id, proc)?;
-            if method == "turn/start" {
+            // A compaction runs as a provider turn whose id arrives only in
+            // its notifications, so there is no start reply to wait for.
+            if method == "turn/start" || method == "thread/compact/start" {
                 if let Some(turn) = lock(&self.state).turns.get_mut(id) {
                     turn.dispatched = true;
-                    turn.start_pending = true;
+                    turn.start_pending = method == "turn/start";
                 }
             }
             begin_rpc(proc, method, params)?
@@ -1653,36 +1852,49 @@ impl Inner {
             return Err(("STORAGE_FAILED", message));
         }
         let now = now_ms();
+        let id = format!("s_{}", random_hex(8));
+        // 0.5: an optional git worktree of its own on branch codaclauda/<short>.
+        let tree = if args["worktree"].as_bool() == Some(true) {
+            Some(worktree::create(&self.dir, &id, folder).await?)
+        } else {
+            None
+        };
         let record = Record {
-            id: format!("s_{}", random_hex(8)),
             provider: provider.name().into(),
             project_id: short(&args["projectId"], 512).unwrap_or_else(|| cwd.to_owned()),
-            cwd: cwd.to_owned(),
+            cwd: tree.as_ref().map_or_else(|| cwd.to_owned(), |t| t.cwd.clone()),
             title: short(&args["title"], 200)
                 .unwrap_or_else(|| format!("{} chat", provider.label())),
             access: access.into(),
-            thread_id: None,
-            provider_session_id: None,
             status: "idle".into(),
             created_at: now,
             last_activity_at: now,
             shared: shared_id.is_some(),
             shared_id,
-            playwright: false,
             model,
             effort,
-            turn_id: None,
-            wake: false,
-            mailbox_address: None,
-            wakes: Wakes::default(),
+            worktree_path: tree.as_ref().map(|t| t.root.clone()),
+            branch: tree.as_ref().map(|t| t.branch.clone()),
+            repo_root: tree.as_ref().map(|t| t.repo_root.clone()),
+            base_branch: tree.as_ref().and_then(|t| t.base_branch.clone()),
+            base_commit: tree.as_ref().map(|t| t.base_commit.clone()),
+            id,
+            ..Record::default()
         };
-        {
+        let saved = {
             let mut state = lock(&self.state);
             state.records.push(record.clone());
-            if let Err(message) = self.save(&state) {
+            let saved = self.save(&state);
+            if saved.is_err() {
                 state.records.pop();
-                return Err(("STORAGE_FAILED", message));
             }
+            saved
+        };
+        if let Err(message) = saved {
+            if let Some(tree) = &tree {
+                worktree::remove(tree).await;
+            }
+            return Err(("STORAGE_FAILED", message));
         }
         Ok(json!({"session": record}))
     }
@@ -1924,7 +2136,7 @@ impl Inner {
             turn_id,
             text,
             attachments,
-            ..
+            origin,
         } = item;
         // Persisted at admission; the webview sees it now.
         self.publish(user, false);
@@ -1933,9 +2145,10 @@ impl Inner {
             false,
         );
         let inner = self.clone();
+        let compact = origin["kind"] == "compact";
         tauri::async_runtime::spawn(async move {
             if let Err(message) = inner
-                .deliver(&record, proc, &turn_id, &text, &attachments, lease)
+                .deliver(&record, proc, &turn_id, &text, &attachments, lease, compact)
                 .await
             {
                 inner.fail_turn(&record.id, &turn_id, message);
@@ -1951,6 +2164,7 @@ impl Inner {
         text: &str,
         attachments: &[Attachment],
         lease: Arc<File>,
+        compact: bool,
     ) -> Result<(), String> {
         let provider = Provider::parse(&record.provider).ok_or("Unknown provider.")?;
         let proc = match proc {
@@ -1959,6 +2173,28 @@ impl Inner {
         };
         if !self.turn_active(&record.id, turn_id) {
             return Ok(()); // stopped while the agent was starting
+        }
+        if compact {
+            // Codex compact-now (0.5); the turn ends on its turn/completed
+            // or thread/compacted notification.
+            if provider != Provider::Codex {
+                return Err("Only Codex sessions can compact on request.".into());
+            }
+            let thread = lock(&self.state)
+                .records
+                .iter()
+                .find(|r| r.id == record.id)
+                .and_then(|r| r.thread_id.clone())
+                .ok_or("Codex has no thread for this chat.")?;
+            self.turn_rpc(
+                &record.id,
+                turn_id,
+                &proc,
+                "thread/compact/start",
+                json!({"threadId": thread}),
+            )
+            .await?;
+            return Ok(());
         }
         let prompt = with_attachments(text, attachments);
         match provider {
@@ -2285,7 +2521,7 @@ fn sandbox_policy(access: &str) -> Value {
     }
 }
 
-fn claude_args(record: &Record, fresh_session: &str) -> Vec<OsString> {
+fn claude_args(record: &Record, fresh_session: &str, mcp_config: Option<&Path>) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "-p",
         "--input-format",
@@ -2298,15 +2534,25 @@ fn claude_args(record: &Record, fresh_session: &str) -> Vec<OsString> {
     .map(OsString::from)
     .into();
     args.extend(session_policy::claude_policy_args(&record.access));
+    // Full access only (the caller passes None otherwise). `--mcp-config` is
+    // variadic, so another option always follows it; `--strict-mcp-config`
+    // (policy args) keeps every other MCP source out.
+    if let Some(config) = mcp_config.filter(|_| record.access == "full") {
+        args.extend(["--mcp-config".into(), config.as_os_str().to_owned()]);
+    }
     if let Some(model) = &record.model {
         args.extend(["--model".into(), model.into()]);
     }
     if let Some(effort) = &record.effort {
         args.extend(["--effort".into(), effort.into()]);
     }
-    match &record.provider_session_id {
-        Some(session) => args.extend(["--resume".into(), session.into()]),
-        None => args.extend(["--session-id".into(), fresh_session.into()]),
+    match (&record.provider_session_id, &record.fork_from) {
+        (Some(session), _) => args.extend(["--resume".into(), session.into()]),
+        // A fork's first launch: a new session id holding a copy of the source.
+        (None, Some(source)) => {
+            args.extend(["--resume".into(), source.into(), "--fork-session".into()])
+        }
+        (None, None) => args.extend(["--session-id".into(), fresh_session.into()]),
     }
     args
 }
@@ -2535,6 +2781,44 @@ pub(crate) async fn session_history(
     reply(host(&app).history(&id, limit))
 }
 
+impl Inner {
+    /// Codex compact-now (0.5), queued like any other turn. Claude runs with
+    /// slash commands disabled here, so `/compact` cannot be sent to it.
+    fn compact(self: &Arc<Self>, id: &str) -> Result<Value, Failure> {
+        let (provider, thread) = lock(&self.state)
+            .records
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| (r.provider.clone(), r.thread_id.clone()))
+            .ok_or(("SESSION_NOT_FOUND", "That chat no longer exists.".to_owned()))?;
+        if provider != "codex" {
+            return Err((
+                "COMPACT_UNSUPPORTED",
+                "Claude sessions in CodaClauda run with slash commands disabled, so /compact is unavailable here. Claude compacts on its own when its context fills.".into(),
+            ));
+        }
+        if thread.is_none() {
+            return Err((
+                "NOTHING_TO_COMPACT",
+                "Send a message first; this chat has no Codex thread yet.".into(),
+            ));
+        }
+        let item = Queued::new(
+            "Compact this conversation's context.".into(),
+            Vec::new(),
+            json!({"kind": "compact"}),
+        );
+        self.submit(id, item)?;
+        Ok(json!({"ok": true}))
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn session_compact(app: tauri::AppHandle, id: String) -> Value {
+    let inner = host(&app);
+    reply(inner.compact(&id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2547,26 +2831,14 @@ mod tests {
             cwd: "C:\\p".into(),
             title: "t".into(),
             access: access.into(),
-            thread_id: None,
-            provider_session_id: None,
             status: "idle".into(),
-            created_at: 0,
-            last_activity_at: 0,
-            shared: false,
-            shared_id: None,
-            playwright: false,
-            model: None,
-            effort: None,
-            turn_id: None,
-            wake: false,
-            mailbox_address: None,
-            wakes: Wakes::default(),
+            ..Record::default()
         }
     }
 
     #[test]
     fn launch_arguments_follow_the_access_level() {
-        let full: Vec<String> = claude_args(&record("claude", "full"), "u")
+        let full: Vec<String> = claude_args(&record("claude", "full"), "u", None)
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
@@ -2576,12 +2848,21 @@ mod tests {
         );
         assert!(full.contains(&"--disable-slash-commands".to_owned()));
         assert!(!full.contains(&"--mcp-config".to_owned()));
-        let read: Vec<String> = claude_args(&record("claude", "read"), "u")
+        let read: Vec<String> = claude_args(&record("claude", "read"), "u", Some(Path::new("m.json")))
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(read.contains(&"--restricted".to_owned()));
         assert!(read.windows(2).any(|w| w == ["--session-id", "u"]));
+        assert!(!read.contains(&"--mcp-config".to_owned()));
+        let mut fork = record("claude", "full");
+        fork.fork_from = Some("src".into());
+        let forked: Vec<String> = claude_args(&fork, "u", Some(Path::new("m.json")))
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(forked.windows(3).any(|w| w == ["--resume", "src", "--fork-session"]));
+        assert!(forked.windows(2).any(|w| w == ["--mcp-config", "m.json"]));
         let codex: Vec<String> = codex_args(&[])
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -2818,6 +3099,7 @@ mod tests {
             Provider::Codex,
             1,
             runtime_lease(dir.path()).unwrap(),
+            &[],
         )
         .unwrap();
         let (call, receiver) = begin_rpc(&proc, "turn/start", json!({})).unwrap();

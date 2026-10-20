@@ -2,6 +2,7 @@
 
 mod board;
 mod desktop;
+mod project_tools;
 mod session_host;
 mod session_parse;
 mod session_policy;
@@ -456,7 +457,23 @@ fn main() {
             session_host::schedule::schedule_save,
             session_host::schedule::schedule_delete,
             session_host::schedule::schedule_run_now,
-            session_host::schedule::schedule_runs
+            session_host::schedule::schedule_runs,
+            session_host::session_compact,
+            session_host::fork::session_fork,
+            session_host::fork::session_handoff,
+            session_host::worktree::session_diff,
+            session_host::worktree::session_worktree_apply,
+            session_host::worktree::session_worktree_discard,
+            session_host::worktree::session_pr_create,
+            session_host::worktree::session_pr_status,
+            session_host::external::external_sessions_list,
+            session_host::mcp::mcp_servers_get,
+            session_host::mcp::mcp_servers_set,
+            session_host::notify::notify_settings_get,
+            session_host::notify::notify_settings_set,
+            project_tools::project_instructions_read,
+            project_tools::project_instructions_write,
+            project_tools::ci_status
         ])
         .run(tauri::generate_context!());
     if let Err(error) = result {

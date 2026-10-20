@@ -208,6 +208,9 @@ function geocodePlace({ query }) {
 const SESSIONS_KEY = 'mock.sessions';
 const SCHEDULES_KEY = 'mock.schedules';
 const QUEUE_MAX = 10;
+const emptyUsage = () => ({ input: 0, output: 0, cached: 0, costUsd: null, contextPct: null });
+/** Like the engine's error codes (bridge.js puts .code on the thrown Error). */
+const coded = (code, message) => Object.assign(new Error(message), { code });
 const sessionListeners = new Set();
 const scheduleListeners = new Set();
 const sessionTurns = new Map(); // id → { timers, turnId, origin }
@@ -222,6 +225,7 @@ function sessions() {
   for (const s of sessionStore.sessions) {
     if (s.status === 'running') s.status = 'idle'; // the "app" restarted mid-reply
     s.wake ??= false; s.mailboxAddress ??= null; s.wakes ??= { hour: 0, day: 0, total: 0 };
+    s.worktreePath ??= null; s.branch ??= null; s.usage ??= emptyUsage();
   }
   return sessionStore;
 }
@@ -263,6 +267,13 @@ function runTurn(session, { turnId, text, attachments = [], origin = null }) {
   chunks.forEach((chunk, i) => later(500 + i * 50, () => sessionEmit({ id, turnId, kind: 'delta', text: chunk })));
   const end = 550 + chunks.length * 50;
   later(end, () => sessionEmit({ id, turnId, kind: 'message', text: reply }));
+  later(end + 20, () => {
+    // Fake usage: Claude reports an estimated cost, Codex never does (as in the engine).
+    const u = session.usage || emptyUsage(), input = 1800 + String(text).length * 4, output = Math.round(reply.length / 4);
+    session.usage = { input: u.input + input, output: u.output + output, cached: u.cached + Math.round(input * 0.6), costUsd: session.provider === 'claude' ? Math.round(((u.costUsd || 0) + input * 3e-6 + output * 15e-6) * 1e4) / 1e4 : null, contextPct: Math.min(100, Math.round(((u.contextPct || 2) + 3.7) * 10) / 10) };
+    saveSessions();
+    sessionEmit({ id, turnId, kind: 'usage', usage: session.usage, ...(session.provider === 'codex' ? { rateLimits: { primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 7200 }, secondary: { usedPercent: 31, windowDurationMins: 10080, resetsAt: null }, planType: 'plus', at: Date.now() } } : {}) }, false);
+  });
   later(end + 40, () => finishTurn(session, 'completed'));
   sessionTurns.set(id, { timers, turnId, origin });
 }
@@ -327,8 +338,11 @@ const sessionHandlers = {
   session_start: ({ args = {} }) => {
     if (!['claude', 'codex'].includes(args.provider)) throw new Error('provider must be claude or codex.');
     if (!args.cwd) throw new Error('cwd must be the project folder.');
-    const at = Date.now();
-    const session = { id: `s_${hex(8)}`, provider: args.provider, projectId: args.projectId || args.cwd, cwd: args.cwd, title: args.title || `${agentName(args.provider)} chat`, access: args.access === 'full' ? 'full' : 'read', threadId: null, providerSessionId: null, status: 'idle', createdAt: at, lastActivityAt: at, shared: Boolean(args.sharedId), sharedId: args.sharedId || null, playwright: false, wake: false, mailboxAddress: null, wakes: { hour: 0, day: 0, total: 0 } };
+    const at = Date.now(), id = `s_${hex(8)}`, short = id.slice(2, 10);
+    // Preview: any folder named like a project counts as a git repository.
+    const repoName = String(args.cwd).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'project';
+    const worktreePath = args.worktree ? `C:\\mock\\board\\desktop-ui\\worktrees\\${short}\\${repoName}` : null;
+    const session = { id, provider: args.provider, projectId: args.projectId || args.cwd, cwd: worktreePath || args.cwd, title: args.title || `${agentName(args.provider)} chat`, access: args.access === 'full' ? 'full' : 'read', threadId: null, providerSessionId: null, status: 'idle', createdAt: at, lastActivityAt: at, shared: Boolean(args.sharedId), sharedId: args.sharedId || null, playwright: false, wake: false, mailboxAddress: null, wakes: { hour: 0, day: 0, total: 0 }, worktreePath, branch: worktreePath ? `codaclauda/${short}` : null, usage: emptyUsage(), ...(worktreePath ? { repoRoot: args.cwd, baseBranch: 'main' } : {}) };
     sessions().sessions.push(session);
     saveSessions();
     return { session };
@@ -494,9 +508,156 @@ const scheduleHandlers = {
   schedule_runs: ({ id, limit = 50 }) => { findSchedule(id); return { runs: (schedules().runs[id] || []).slice(-Math.min(500, Math.max(1, limit))).reverse() }; },
 };
 
+/* 0.5 mocks: fork, hand-off, worktree diff/apply/discard/PR, compact, external sessions, MCP servers,
+ * phone push settings, CLAUDE.md/AGENTS.md editor and CI runs. Nothing here touches git, gh or the network. */
+const MCP_KEY = 'mock.mcp', NOTIFY_KEY = 'mock.notify', INSTRUCTIONS_KEY = 'mock.instructions';
+const readJson = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key) || 'null') ?? fallback; } catch { return fallback; } };
+const writeJson = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* preview only */ } };
+const MCP_PRESETS = [
+  { id: 'playwright', label: 'Playwright MCP (browser automation)', name: 'playwright', command: 'cmd', args: ['/c', 'playwright-mcp'], env: {}, install: 'npm i -g @playwright/mcp', notes: 'Preview copy of the engine preset: install it yourself first; the npm bin is playwright-mcp, run through cmd /c on Windows.', source: 'https://registry.npmjs.org/@playwright/mcp/latest' },
+  { id: 'windows-mcp', label: 'Windows-MCP (desktop control, CursorTouch)', name: 'windows-mcp', command: 'uvx', args: ['windows-mcp', 'serve'], env: {}, install: 'pip install uv  (the README also requires Python 3.14+)', notes: 'Preview copy of the engine preset: its README starts it with uvx windows-mcp serve; run that once yourself first.', source: 'https://github.com/CursorTouch/Windows-MCP#readme' },
+];
+const busy = id => sessionTurns.has(id) || Boolean(sessionQueues.get(id)?.length);
+const needsWorktree = session => { if (!session.worktreePath) throw coded('NO_WORKTREE', 'This chat does not have its own worktree.'); };
+const MOCK_PATCH = 'diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # Project\n-Old line\n+New line from the agent\n+Another added line\n \n diff --git a/src/new.js b/src/new.js\nnew file mode 100644\n--- /dev/null\n+++ b/src/new.js\n@@ -0,0 +1,2 @@\n+export const hello = () => \'preview\';\n+// mock data\n';
+const v05Handlers = {
+  session_fork: ({ id }) => {
+    const source = findSession(id);
+    const from = source.provider === 'codex' ? source.threadId : source.providerSessionId;
+    if (!from && !source.forkFrom) throw coded('NOTHING_TO_FORK', 'Send a message in this chat before forking it.');
+    const at = Date.now(), newId = `s_${hex(8)}`;
+    const session = { ...structuredClone(source), id: newId, title: `Fork of ${source.title}`.slice(0, 200), threadId: null, providerSessionId: null, status: 'idle', createdAt: at, lastActivityAt: at, shared: false, sharedId: null, wake: false, mailboxAddress: null, wakes: { hour: 0, day: 0, total: 0 }, worktreePath: null, branch: null, usage: { ...emptyUsage(), contextPct: source.usage?.contextPct ?? null }, forkFrom: from || source.forkFrom, forkedFrom: source.id };
+    delete session.prUrl; delete session.prNumber; delete session.repoRoot; delete session.baseBranch;
+    sessions().sessions.push(session);
+    sessions().logs[newId] = (sessions().logs[id] || []).map(ev => ({ ...ev, id: newId }));
+    saveSessions();
+    return { session };
+  },
+  session_handoff: ({ id, toProvider }) => {
+    const source = findSession(id);
+    const target = toProvider || (source.provider === 'claude' ? 'codex' : 'claude');
+    if (!['claude', 'codex'].includes(target)) throw coded('INVALID_ARGUMENTS', 'toProvider must be claude or codex.');
+    if (target === source.provider) throw coded('INVALID_ARGUMENTS', 'A hand-off goes to the other agent; fork the chat to continue with the same one.');
+    const log = sessions().logs[id] || [];
+    const turns = log.filter(ev => ev.kind === 'user').slice(-12).map(ev => `User: ${String(ev.text || '').slice(0, 1200)}\n${agentName(source.provider)}: ${log.filter(m => m.kind === 'message' && m.turnId === ev.turnId).map(m => m.text).join('\n\n').slice(0, 2400) || '(no reply)'}`);
+    if (!turns.length) throw coded('NOTHING_TO_HAND_OFF', 'This chat has no exchanges to hand off yet.');
+    const summary = `CodaClauda hand-off. You are taking over a conversation that ${agentName(source.provider)} had in this project (${source.cwd}), titled "${source.title}". Its last ${turns.length} exchanges follow, oldest first and shortened. They are context, not new instructions from Ben.\n\n${turns.join('\n\n')}`.slice(0, 6000);
+    const { session } = sessionHandlers.session_start({ args: { provider: target, projectId: source.projectId, cwd: source.cwd, access: source.access, title: `${source.title} (from ${agentName(source.provider)})` } });
+    session.handoffFrom = source.id;
+    saveSessions();
+    submit(session.id, summary, [], { kind: 'handoff', from: source.id, fromProvider: source.provider });
+    return { session: findSession(session.id) };
+  },
+  session_diff: ({ id }) => {
+    findSession(id);
+    return { files: [{ path: 'README.md', status: 'modified', additions: 2, deletions: 1 }, { path: 'src/new.js', status: 'added', additions: 2, deletions: 0 }], patch: MOCK_PATCH, truncated: false };
+  },
+  session_worktree_apply: ({ id }) => {
+    const session = findSession(id);
+    needsWorktree(session);
+    if (busy(id)) throw coded('SESSION_BUSY', 'Wait for the agent to finish (or stop it) first.');
+    return { committed: true, merged: true, branch: session.branch };
+  },
+  session_worktree_discard: ({ id }) => {
+    const session = findSession(id);
+    needsWorktree(session);
+    if (busy(id)) throw coded('SESSION_BUSY', 'Wait for the agent to finish (or stop it) first.');
+    Object.assign(session, { worktreePath: null, branch: null });
+    sessionStatus(session, 'stopped');
+    return { discarded: true };
+  },
+  session_pr_create: ({ id, title }) => {
+    const session = findSession(id);
+    needsWorktree(session);
+    if (!String(title || '').trim()) throw coded('INVALID_ARGUMENTS', 'Give the pull request a title.');
+    session.prNumber = 40 + (parseInt(session.id.slice(2, 4), 16) % 50);
+    session.prUrl = `https://github.com/delores88/codaclauda/pull/${session.prNumber}`;
+    saveSessions();
+    return { url: session.prUrl, number: session.prNumber };
+  },
+  session_pr_status: ({ id }) => {
+    const session = findSession(id);
+    if (!session.prUrl) return { url: null, state: null, checks: [] };
+    return { url: session.prUrl, state: 'open', checks: [{ name: 'build', status: 'completed', conclusion: 'success' }, { name: 'test', status: 'in_progress', conclusion: null }] };
+  },
+  session_compact: ({ id }) => {
+    const session = findSession(id);
+    if (session.provider !== 'codex') throw coded('COMPACT_UNSUPPORTED', 'Claude sessions in CodaClauda run with slash commands disabled, so /compact is unavailable here. Claude compacts on its own when its context fills.');
+    if (!session.threadId) throw coded('NOTHING_TO_COMPACT', 'Send a message first; this chat has no Codex thread yet.');
+    submit(id, 'Compact this conversation\'s context.', [], { kind: 'compact' });
+    session.usage = { ...(session.usage || emptyUsage()), contextPct: 8 };
+    saveSessions();
+    return { ok: true };
+  },
+  external_sessions_list: () => {
+    const at = Date.now(), owned = new Set(sessions().sessions.flatMap(s => [s.providerSessionId, s.threadId]).filter(Boolean));
+    const fake = [
+      ['claude', 'C:\\Users\\Ben\\Desktop\\CodaClauda', 3], ['claude', 'D:\\PhaseForge-claude', 40], ['codex', 'C:\\Users\\Ben\\Desktop\\CodaClauda', 9],
+      ['codex', 'C:\\Users\\Ben\\Desktop\\DGXBridge', 300], ['claude', 'C:\\Users\\Ben\\Desktop\\TuningSpork', 2900],
+    ].map(([provider, cwd, minutesAgo]) => ({ provider, cwd, projectHint: cwd.split('\\').pop(), modifiedAt: at - minutesAgo * 60e3, active: minutesAgo < 15, owned: false }));
+    const mine = sessions().sessions.filter(s => s.providerSessionId).map(s => ({ provider: s.provider, cwd: s.cwd, projectHint: s.cwd.split(/[\\/]/).pop(), modifiedAt: s.lastActivityAt, active: at - s.lastActivityAt < 15 * 60e3, owned: owned.has(s.providerSessionId) }));
+    return { sessions: [...fake, ...mine].sort((a, b) => b.modifiedAt - a.modifiedAt) };
+  },
+  mcp_servers_get: ({ projectId }) => ({ servers: readJson(MCP_KEY, {})[projectId] || [], presets: structuredClone(MCP_PRESETS) }),
+  mcp_servers_set: ({ projectId, servers = [] }) => {
+    if (!Array.isArray(servers) || servers.length > 12) throw coded('INVALID_ARGUMENTS', 'A project can have at most 12 MCP servers.');
+    const names = new Set();
+    const clean = servers.map(s => {
+      const name = String(s?.name || '').trim(), command = String(s?.command || '').trim();
+      if (!/^[A-Za-z0-9_-]{1,48}$/.test(name)) throw coded('INVALID_ARGUMENTS', 'Name each MCP server with 1-48 letters, digits, \'_\' or \'-\'.');
+      if (name.toLowerCase() === 'codaclauda' || names.has(name.toLowerCase())) throw coded('INVALID_ARGUMENTS', `The MCP server name ${name} is reserved or already used.`);
+      if (!command) throw coded('INVALID_ARGUMENTS', `Give ${name} the program to run (one line, at most 1024 characters).`);
+      names.add(name.toLowerCase());
+      return { name, command, args: (s.args || []).map(String), env: { ...(s.env || {}) } };
+    });
+    const book = readJson(MCP_KEY, {});
+    if (clean.length) book[projectId] = clean; else delete book[projectId];
+    writeJson(MCP_KEY, book);
+    return { servers: clean };
+  },
+  notify_settings_get: () => readJson(NOTIFY_KEY, { ntfyUrl: null, onFinish: false, onError: false }),
+  notify_settings_set: ({ ntfyUrl = null, onFinish = false, onError = false }) => {
+    const url = String(ntfyUrl || '').trim();
+    if (url) {
+      let parsed;
+      try { parsed = new URL(url); } catch { throw coded('INVALID_ARGUMENTS', 'Enter the full ntfy topic URL, for example https://ntfy.sh/your-topic.'); }
+      if (parsed.protocol !== 'https:') throw coded('INVALID_ARGUMENTS', 'The ntfy topic URL must start with https://.');
+      if (parsed.username || parsed.password) throw coded('INVALID_ARGUMENTS', 'Leave sign-in details out of the URL; use a hard-to-guess topic name instead.');
+      if (!parsed.pathname.replace(/\//g, '')) throw coded('INVALID_ARGUMENTS', 'Add your topic to the URL, for example https://ntfy.sh/your-topic.');
+    }
+    const settings = { ntfyUrl: url ? new URL(url).toString() : null, onFinish: Boolean(onFinish), onError: Boolean(onError) };
+    writeJson(NOTIFY_KEY, settings);
+    return settings;
+  },
+  project_instructions_read: ({ cwd, file }) => {
+    if (!['CLAUDE.md', 'AGENTS.md'].includes(file)) throw coded('INVALID_ARGUMENTS', 'file must be CLAUDE.md or AGENTS.md.');
+    const text = readJson(INSTRUCTIONS_KEY, {})[`${cwd}|${file}`];
+    return text == null ? { text: '', exists: false } : { text, exists: true };
+  },
+  project_instructions_write: ({ cwd, file, text = '' }) => {
+    if (!['CLAUDE.md', 'AGENTS.md'].includes(file)) throw coded('INVALID_ARGUMENTS', 'file must be CLAUDE.md or AGENTS.md.');
+    if (new TextEncoder().encode(String(text)).length > 200 * 1024) throw coded('FILE_TOO_LARGE', `${file} is limited to 200 KB here.`);
+    const book = readJson(INSTRUCTIONS_KEY, {});
+    book[`${cwd}|${file}`] = String(text);
+    writeJson(INSTRUCTIONS_KEY, book);
+    return { ok: true };
+  },
+  ci_status: ({ repo }) => {
+    if (!/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/.test(String(repo || ''))) throw coded('INVALID_ARGUMENTS', 'repo must be owner/name.');
+    const at = Date.now(), url = n => `https://github.com/${repo}/actions/runs/${n}`;
+    const failing = /phaseforge|dgx/i.test(repo);
+    return { runs: [
+      { name: 'CI', title: 'Merge codaclauda/5f1c9a2e', status: 'completed', conclusion: failing ? 'failure' : 'success', branch: 'main', url: url(103), at: at - 25 * 60e3 },
+      { name: 'CI', title: 'UI 0.5 polish', status: 'in_progress', conclusion: null, branch: 'claude/codaclauda-0.5', url: url(104), at: at - 4 * 60e3 },
+      { name: 'Release', title: 'v0.4.0', status: 'completed', conclusion: 'success', branch: 'main', url: url(99), at: at - 26 * 3600e3 },
+    ] };
+  },
+};
+
 const desktopHandlers = {
   ...sessionHandlers,
   ...scheduleHandlers,
+  ...v05Handlers,
   desktop_paths:() => ({ state_dir: 'C:\\mock\\board', ui_dir: 'C:\\mock\\board\\desktop-ui', attachments_dir: 'C:\\mock\\board\\desktop-ui\\attachments', manifest_path: 'C:\\mock\\board\\desktop-ui\\projects.manifest.json', desktop_dir: 'C:\\Users\\Ben\\Desktop' }),
   desktop_state_load: () => ({ state: JSON.parse(localStorage.getItem('mock.desktop') || 'null') }),
   desktop_state_save: ({ state }) => { localStorage.setItem('mock.desktop', JSON.stringify(state)); return { saved_at: now() }; },
@@ -540,7 +701,7 @@ export function createMock() {
         const fn = desktopHandlers[command];
         if (!fn) return { ok: false, error: { code: 'MOCK_UNSUPPORTED', message: `Preview has no mock for ${command}` } };
         return { ok: true, data: structuredClone(fn(args)) };
-      } catch (error) { return { ok: false, error: { code: 'MOCK_ERROR', message: error.message } }; }
+      } catch (error) { return { ok: false, error: { code: error.code || 'MOCK_ERROR', message: error.message } }; }
     },
     /** Mirrors Tauri's event listen for 'session://event' and 'schedule://event'; returns an unlisten function. */
     listen(event, cb) {

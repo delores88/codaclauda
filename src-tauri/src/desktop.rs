@@ -113,7 +113,7 @@ fn fail(code: &'static str, message: impl Into<String>) -> Failure {
 }
 
 /// Runs filesystem work off the async runtime and wraps it in the envelope.
-async fn blocking<F>(work: F) -> Value
+pub(crate) async fn blocking<F>(work: F) -> Value
 where
     F: FnOnce() -> Result<Value, Failure> + Send + 'static,
 {
@@ -201,7 +201,7 @@ fn desktop_dir() -> Option<PathBuf> {
     known_desktop().or_else(|| home_dir().map(|home| home.join("Desktop")))
 }
 
-fn is_link(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_link(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)]
     let reparse = {
         use std::os::windows::fs::MetadataExt;
@@ -239,7 +239,7 @@ fn ensure_dir(path: &Path) -> Result<(), Failure> {
 }
 
 /// Missing files are `None`; links, oversized files and read errors fail.
-fn read_bounded(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, Failure> {
+pub(crate) fn read_bounded(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, Failure> {
     let metadata = match fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
@@ -296,7 +296,7 @@ fn local_absolute(raw: &str) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-fn existing_directory(raw: &str) -> Result<PathBuf, String> {
+pub(crate) fn existing_directory(raw: &str) -> Result<PathBuf, String> {
     let path = local_absolute(raw).ok_or("The path must be an absolute local folder.")?;
     let canonical = fs::canonicalize(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !canonical.is_dir() {
@@ -882,7 +882,7 @@ fn scrub(stderr: &[u8]) -> String {
 
 /// The most telling stderr line of a failed create/clone: git progress lines
 /// ("Cloning into ...") are skipped in favour of the actual error.
-fn failure_line(stderr: &[u8]) -> String {
+pub(crate) fn failure_line(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
     let lines: Vec<&str> = text
         .lines()
@@ -924,7 +924,7 @@ fn failure_line(stderr: &[u8]) -> String {
 
 /// Spawns gh with fixed argv (never a shell), no console window and no
 /// interactive prompts. A timeout is reported as `GH_TIMEOUT`.
-async fn gh_output(
+pub(crate) async fn gh_output(
     args: &[&str],
     limit: Duration,
     cwd: Option<&Path>,
@@ -978,7 +978,7 @@ async fn gh_output(
 
 /// Ends a still-running process and its descendants with the system taskkill.
 #[cfg(windows)]
-async fn kill_tree(pid: u32) {
+pub(crate) async fn kill_tree(pid: u32) {
     let root = std::env::var_os("SystemRoot")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -997,7 +997,7 @@ async fn kill_tree(pid: u32) {
     }
 }
 
-async fn run_gh(args: &[&str], limit: Duration) -> Result<Vec<u8>, Failure> {
+pub(crate) async fn run_gh(args: &[&str], limit: Duration) -> Result<Vec<u8>, Failure> {
     let output = gh_output(args, limit, None)
         .await
         .map_err(|(code, message)| match code {
