@@ -10,6 +10,22 @@ use serde_json::{Map, Value};
 use std::ffi::OsString;
 
 const READ_TOOLS: &[&str] = &["Read", "Glob", "Grep"];
+// Claude 2.1.299 keeps ordinary builtins enabled even in safe mode. Disable
+// its registered ordinary builtin IDs only in this process's flag settings.
+// Do not override the policy-only sec-default plugin. Managed sources remain
+// unsupported, and any plugin still present in system/init is refused below.
+const DISABLED_CLAUDE_BUILTINS: &[&str] = &[
+    "cc-plugin-agents-md@builtin",
+    "cc-plugin-claude-test@builtin",
+    "cc-plugin-diff@builtin",
+    "cc-plugin-mermaid@builtin",
+    "cc-plugin-mods-guide@builtin",
+    "cc-plugin-plugin-authoring@builtin",
+    "cc-plugin-responsive-mode@builtin",
+    "cc-plugin-telemetry@builtin",
+    "cc-plugin-tips@builtin",
+    "cc-plugin-you-should-know@builtin",
+];
 const DISABLED_CODEX_FEATURES: &[&str] = &[
     "hooks",
     "apps",
@@ -32,11 +48,20 @@ pub fn retain_launch_env(name: &str) -> bool {
 }
 
 fn claude_isolation_args(access: &str) -> Vec<OsString> {
+    let disabled: Map<String, Value> = DISABLED_CLAUDE_BUILTINS
+        .iter()
+        .map(|name| ((*name).to_owned(), Value::Bool(false)))
+        .collect();
+    let settings = serde_json::json!({
+        "disableAllHooks": true,
+        "enabledPlugins": disabled,
+    })
+    .to_string();
     let mut args: Vec<OsString> = [
         "--setting-sources",
         "",
         "--settings",
-        r#"{"disableAllHooks":true}"#,
+        settings.as_str(),
         "--strict-mcp-config",
         "--no-chrome",
     ]
@@ -229,7 +254,9 @@ fn verify_codex_routing(config: &Map<String, Value>) -> Result<(), String> {
 }
 
 /// ONLY named additions; the caller supplies codex_base_overrides separately.
-/// TOML tables merge: `mcp_servers={}` does not remove inherited servers.
+/// Codex splits the `-c` key on literal dots; quoted names must be inside its
+/// TOML value instead. These tables merge `enabled=false` into each inherited
+/// entry, preserving its transport. An empty table would not disable anything.
 pub fn codex_preflight_overrides(response: &Value) -> Result<Vec<String>, String> {
     let config = config(response)?;
     verify_codex_routing(config)?;
@@ -239,10 +266,14 @@ pub fn codex_preflight_overrides(response: &Value) -> Result<Vec<String>, String
             if entries.len() > 128 {
                 return Err("Codex configuration has too many inherited servers or plugins for an owned session.".into());
             }
+            let mut disabled = Vec::with_capacity(entries.len());
             for name in entries.keys() {
                 let quoted = serde_json::to_string(name)
                     .map_err(|_| "Could not encode an inherited Codex configuration name.")?;
-                overrides.push(format!("{key}.{quoted}.enabled=false"));
+                disabled.push(format!("{quoted}={{enabled=false}}"));
+            }
+            if !disabled.is_empty() {
+                overrides.push(format!("{key}={{{}}}", disabled.join(",")));
             }
         }
     }
@@ -331,6 +362,56 @@ mod tests {
     }
 
     #[test]
+    fn claude_builtin_overrides_are_process_scoped_and_never_override_policy() {
+        let mut observed = None;
+        for args in [
+            claude_policy_args("read"),
+            claude_policy_args("full"),
+            claude_auth_args("read"),
+            claude_auth_args("full"),
+        ] {
+            let index = args.iter().position(|arg| arg == "--settings").unwrap();
+            let settings: Value = serde_json::from_str(args[index + 1].to_str().unwrap()).unwrap();
+            assert_eq!(settings["disableAllHooks"], true);
+            let plugins = settings["enabledPlugins"].as_object().unwrap();
+            assert_eq!(plugins.len(), 10);
+            assert!(
+                plugins
+                    .values()
+                    .all(|enabled| enabled == &Value::Bool(false))
+            );
+            assert_eq!(plugins["cc-plugin-agents-md@builtin"], false);
+            assert_eq!(plugins["cc-plugin-plugin-authoring@builtin"], false);
+            assert!(!plugins.contains_key("cc-plugin-sec-default@builtin"));
+            if let Some(previous) = &observed {
+                assert_eq!(&settings, previous);
+            } else {
+                observed = Some(settings);
+            }
+        }
+    }
+
+    #[test]
+    fn claude_still_refuses_plugins_even_when_they_claim_builtin_provenance() {
+        for access in ["read", "full"] {
+            for name in [
+                "cc-plugin-plugin-authoring",
+                "future-unknown-plugin",
+                "cc-plugin-sec-default",
+            ] {
+                let mut event = claude_init();
+                if access == "full" {
+                    event["permissionMode"] = json!("bypassPermissions");
+                }
+                event["plugins"] = json!([{
+                    "name": name, "path": "builtin", "source": format!("{name}@builtin"),
+                }]);
+                assert!(verify_claude_init(&event, access).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn provider_environment_controls_are_removed_without_reading_credentials() {
         for key in [
             "ANTHROPIC_CUSTOM_HEADERS",
@@ -396,17 +477,70 @@ mod tests {
         assert!(verify_claude_init(&event, "full").is_err());
     }
 
+    // Match the installed CLI's observed parsing boundary: literal dotted keys,
+    // TOML values, then recursive table merge. This catches names incorrectly
+    // quoted in the key, which generated-string assertions previously missed.
+    fn apply_codex_cli_overrides(response: &mut Value, overrides: &[String]) {
+        fn merge(target: &mut Value, addition: Value) {
+            if let (Some(target), Value::Object(addition)) = (target.as_object_mut(), &addition) {
+                for (key, value) in addition {
+                    merge(
+                        target.entry(key.clone()).or_insert(Value::Null),
+                        value.clone(),
+                    );
+                }
+            } else {
+                *target = addition;
+            }
+        }
+        for setting in overrides {
+            let (key, value) = setting.split_once('=').unwrap();
+            let parsed: toml::Table = format!("value={value}").parse().unwrap();
+            let mut addition = serde_json::to_value(&parsed["value"]).unwrap();
+            for segment in key.split('.').rev() {
+                addition = json!({segment: addition});
+            }
+            merge(&mut response["config"], addition);
+        }
+    }
+
     #[test]
-    fn codex_disables_each_inherited_name_without_table_replacement() {
-        let mut config = codex_config();
-        config["config"]["mcp_servers"] =
-            json!({"a.b":{"enabled":true},"quotes\"here":{"enabled":true}});
-        config["config"]["plugins"] = json!({"p@market":{"enabled":true}});
-        let overrides = codex_preflight_overrides(&config).unwrap();
-        assert!(overrides.contains(&r#"mcp_servers."a.b".enabled=false"#.to_owned()));
-        assert!(overrides.contains(&r#"mcp_servers."quotes\"here".enabled=false"#.to_owned()));
-        assert!(overrides.contains(&r#"plugins."p@market".enabled=false"#.to_owned()));
-        assert!(verify_codex_config(&config).is_err());
+    fn codex_disables_exact_inherited_names_and_preserves_transport_after_cli_parsing() {
+        let mut initial = codex_config();
+        let names = ["node_repl", "a.b", "quotes\"here", "p@market"];
+        for name in names {
+            initial["config"]["mcp_servers"][name] = json!({
+                "enabled":true, "command":"synthetic-never-launched", "args":["preserved"]
+            });
+            initial["config"]["plugins"][name] = json!({"enabled":true});
+        }
+        let mut expected = initial.clone();
+        for category in ["mcp_servers", "plugins"] {
+            for name in names {
+                expected["config"][category][name]["enabled"] = json!(false);
+            }
+        }
+        let overrides = codex_preflight_overrides(&initial).unwrap();
+        let mut actual = initial.clone();
+        apply_codex_cli_overrides(&mut actual, &overrides);
+        assert_eq!(actual, expected);
+        assert!(verify_codex_config(&actual).is_ok());
+
+        // The old form adds an enabled-only entry whose name includes quotes,
+        // leaving the real server enabled and lacking a transport of its own.
+        apply_codex_cli_overrides(
+            &mut initial,
+            &[r#"mcp_servers."node_repl".enabled=false"#.into()],
+        );
+        assert_eq!(
+            initial["config"]["mcp_servers"]["node_repl"]["enabled"],
+            true
+        );
+        assert_eq!(
+            initial["config"]["mcp_servers"]["\"node_repl\""],
+            json!({"enabled":false})
+        );
+        assert!(verify_codex_config(&initial).is_err());
         assert!(!codex_base_overrides().contains(&"mcp_servers={}".to_owned()));
     }
 
@@ -453,7 +587,7 @@ mod tests {
         });
         assert_eq!(
             codex_preflight_overrides(&config).unwrap(),
-            [r#"mcp_servers."legacy_browser".enabled=false"#]
+            [r#"mcp_servers={"legacy_browser"={enabled=false}}"#]
         );
         assert!(verify_codex_config(&config).is_err());
         config["config"]["mcp_servers"]["legacy_browser"]["enabled"] = json!(false);

@@ -374,6 +374,7 @@ dependencies = [
  "tauri-build",
  "tempfile",
  "tokio",
+ "toml 0.8.2",
  "url",
  "windows",
  "zeroize",
