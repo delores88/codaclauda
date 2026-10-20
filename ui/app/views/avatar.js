@@ -7,6 +7,8 @@ import {
   EYE_STYLES, MOUTHS, TOPS, BOTTOMS, EMBLEMS, ACCESSORIES,
 } from '../avatar/spec.js';
 import { analyzePhoto, decodePhoto, describeMatch } from '../avatar/photo.js';
+import { designPrompt, avatarFromReply } from '../avatar/agent-design.js';
+import { sessions } from '../sessions.js';
 
 /* ---------- vocabulary ---------- */
 const LABELS = {
@@ -441,6 +443,7 @@ export function mount(root, ctx) {
         : !agent ? 'Pick an agent.'
           : agent.status === 'offline' ? `${agent.name} looks powered down. It will see the request the next time it checks the board.`
             : `Sends your photo and current draft to ${agent.name}'s mailbox.`;
+    renderDesign();   // its hint mentions the photo
   }
   async function sendToAgent() {
     const agent = selectedAgent();
@@ -470,6 +473,112 @@ export function mount(root, ctx) {
     toast(`Applied ${agentName(reply.agent)}'s design.`, { kind: 'success' });
   }
   function dismissRequest(requestId) { store.updateDesktop(d => { delete d.avatarRequests?.[requestId]; }); }
+
+  /* ---------------- agent design in a chat (0.5): Claude or Codex designs it now ---------------- */
+  const NAMES = { claude: 'Claude', codex: 'Codex' };
+  let design = null;   // { provider, state: 'starting' | 'waiting' | 'ready' | 'error', sessionId, turnId, spec, error, project }
+  const designWish = h('input.input', { type: 'text', maxLength: 300, placeholder: 'Describe the look (optional), e.g. curly red hair and a green hoodie', 'aria-label': 'Describe the look you want (optional)', autocomplete: 'off', spellcheck: false });
+  const designActions = h('div.av-design-actions');
+  const designHint = h('p.field-hint.av-design-hint');
+  const designStatus = h('div.av-design-status-box', { 'aria-live': 'polite' });
+  const designBox = h('div.av-design', h('div.av-design-title', icon('sparkle'), h('strong', 'Design it with Claude or Codex now')), designWish, designActions, designHint, designStatus);
+  const designProject = () => {
+    const local = store.projects.filter(p => String(p.path || '').trim());
+    const pref = store.prefs.chatProject;
+    return local.find(p => pref && (p.id === pref || p.ids?.includes(pref))) || local[0] || null;
+  };
+  function designBlocked() {
+    if (!sessions.supported() || sessions.available === false) return 'This needs CodaClauda desktop sessions (0.4 or later). You can still send your photo to a board agent below.';
+    if (!designProject()) return 'Link a local project folder first: the design chat needs a working folder (it is Read only, so nothing there changes).';
+    return '';
+  }
+  const designBusy = () => Boolean(design && (design.state === 'starting' || design.state === 'waiting'));
+  async function startDesign(provider) {
+    if (designBusy()) return;
+    const blocked = designBlocked();
+    if (blocked) { toast(blocked, { kind: 'error' }); return; }
+    const project = designProject();
+    design = { provider, state: 'starting', sessionId: null, turnId: null, spec: null, error: '', project: project.name };
+    renderDesign();
+    try {
+      if (sessions.available !== true) await sessions.refresh();
+      const session = await sessions.start({ provider, projectId: project.id, cwd: project.path, access: 'read', title: 'Avatar design', playwright: false });
+      design.sessionId = session.id;
+      let attachments = [];
+      if (photo?.file) {
+        try { const saved = await store.saveAttachment(photo.file); if (saved?.path) attachments = [{ path: saved.path, name: saved.name || photo.file.name }]; }
+        catch { /* the design still works from the description and the current draft */ }
+      }
+      const sent = await sessions.send(session.id, designPrompt(normalizeAvatar(draft), { description: designWish.value, photo: attachments.length > 0 }), attachments);
+      design.turnId = sent?.turnId || null;
+      design.state = 'waiting';
+      checkDesign();
+    } catch (error) {
+      design.state = 'error';
+      design.error = `Couldn't start the design chat: ${String(error?.message || error).replace(/\s+/g, ' ').slice(0, 200)}`;
+    }
+    renderDesign();
+  }
+  /** Reads the design chat's display log (sessions.js): the first usable avatar JSON in this turn's replies wins. */
+  function checkDesign() {
+    if (design?.state !== 'waiting' || !design.sessionId) return;
+    const events = sessions.logs.get(design.sessionId)?.events || [];
+    const mine = events.filter(e => !design.turnId || !e.turnId || e.turnId === design.turnId);
+    const replies = mine.filter(e => e.kind === 'message' && typeof e.text === 'string');
+    let problem = '';
+    for (const reply of replies) {
+      const result = avatarFromReply(reply.text);
+      if (result.spec) { design.state = 'ready'; design.spec = withName(result.spec); renderDesign(); return; }
+      problem ||= result.error;
+    }
+    const failed = mine.find(e => e.kind === 'error'), done = mine.find(e => e.kind === 'done');
+    if (!failed && !done) return;
+    const who = NAMES[design.provider] || 'The agent';
+    design.state = 'error';
+    design.error = problem ? `${who} replied, but the design can't be used: ${problem}`
+      : failed ? `${who} couldn't answer: ${String(failed.error || failed.text || 'the turn failed').replace(/\s+/g, ' ').slice(0, 200)}`
+        : `${who} finished without a reply.`;
+    renderDesign();
+  }
+  sessions.on('change', () => { if (design?.state === 'waiting') checkDesign(); });
+  function openDesignChat() { if (design?.sessionId) navigate('chat', { thread: `sess:${design.sessionId}` }); }
+  function renderDesign() {
+    const blocked = designBlocked(), busy = designBusy();
+    const sigActions = JSON.stringify([blocked, busy]);
+    if (memo.designActions !== sigActions) {
+      memo.designActions = sigActions;
+      clear(designActions, ['claude', 'codex'].map(provider => h(`button.btn.small${provider === 'claude' ? '.primary' : ''}`, { type: 'button', disabled: Boolean(blocked) || busy, dataset: { key: `design:${provider}` }, onclick: () => startDesign(provider) }, icon('sparkle'), `${NAMES[provider]}, design it`)));
+    }
+    const project = designProject();
+    designHint.textContent = blocked || `Starts a Read only ${project ? `chat in ${project.name}` : 'chat'}${photo ? ' and attaches your photo' : ''}. The reply is a suggestion: nothing changes until you apply it.`;
+    const applied = design?.spec ? sig(design.spec) === baselineSig : false;
+    const previewing = design?.spec ? !applied && sig(design.spec) === sig(draft) : false;
+    const sigStatus = JSON.stringify([design?.state, design?.error, design?.sessionId, applied, previewing]);
+    if (memo.designStatus === sigStatus) return;
+    memo.designStatus = sigStatus;
+    const chatBtn = () => (design?.sessionId ? h('button.btn.small.ghost', { type: 'button', onclick: openDesignChat }, icon('chat'), 'Open chat') : null);
+    if (!design) { clear(designStatus); return; }
+    const who = NAMES[design.provider] || 'The agent';
+    if (busy) {
+      clear(designStatus, h('div.av-design-status', h('span.spinner'), h('span', design.state === 'starting' ? `Starting a ${who} chat in ${design.project}…` : `${who} is designing your avatar…`), chatBtn()));
+    } else if (design.state === 'ready') {
+      clear(designStatus, h('article.av-result.fresh',
+        portrait(design.spec, { size: 56, provider: design.provider }),
+        h('div.av-result-body',
+          h('strong', `${who} designed an avatar`),
+          h('span.muted', summary(design.spec)),
+          h('div.av-result-actions',
+            h('button.btn.small', { type: 'button', disabled: previewing || applied, onclick: () => { replaceDraft(design.spec); if (!reduced()) stage?.greet(); toast(`Previewing ${who}'s design. Apply to keep it.`, { kind: 'info', timeout: 3000 }); renderDesign(); } }, icon('eye'), previewing ? 'Previewing' : 'Preview'),
+            h('button.btn.small.primary', { type: 'button', disabled: applied, onclick: () => { replaceDraft(design.spec); commitSave(design.spec); toast(`Applied ${who}'s design.`, { kind: 'success' }); renderDesign(); } }, applied ? [icon('check'), 'Applied'] : 'Apply & save'),
+            chatBtn(),
+            h('button.btn.small.ghost', { type: 'button', onclick: () => { design = null; renderDesign(); } }, 'Dismiss')))));
+    } else {
+      clear(designStatus, h('div.av-design-error', { role: 'alert' }, icon('alert'),
+        h('div.av-design-error-body', h('span', design.error),
+          h('div.av-result-actions', h('button.btn.small', { type: 'button', onclick: () => { const p = design.provider; design = null; startDesign(p); } }, icon('refresh'), 'Try again'), chatBtn(),
+            h('button.btn.small.ghost', { type: 'button', onclick: () => { design = null; renderDesign(); } }, 'Dismiss')))));
+    }
+  }
   function renderRequests() {
     const requests = Object.entries(store.desktop.avatarRequests || {}).map(([id, info]) => ({ id, ...info })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     const replies = store.avatarReplies().sort((a, b) => toMs(b.reply.created_at) - toMs(a.reply.created_at));
@@ -539,7 +648,9 @@ export function mount(root, ctx) {
     section('photo', 'Start from a photo', 'camera', 'Match your skin, hair, facial hair and shirt in one click.',
       photoBody,
       h('p.field-hint.av-privacy', icon('av-lock'), h('span', 'Your photo stays on this PC. If you ask an agent to build your avatar, the photo is saved to the board\'s attachments folder so that agent can open it.'))),
-    section('agent', 'Have an agent build it', 'agents', 'Send your photo to a Claude or Codex agent. It designs your avatar and replies on the board.',
+    section('agent', 'Have an agent build it', 'agents', 'Ask Claude or Codex to design it in a chat right now, or send your photo to a board agent, which replies when it next checks the board.',
+      designBox,
+      h('div.av-design-sep', h('span', 'or send your photo to a board agent')),
       agentList, h('div.av-send-row', sendBtn), sendHint, requestsBox,
       h('p.field-hint.av-agent-note', icon('clock'), h('span', 'Agents reply when they next check their inbox. Each agent has its own schedule and sending does not wake it, so this is not instant. A reply is a suggestion: nothing changes until you preview or apply it.'))),
     section('basics', 'Name & skin', 'av-drop', null,
@@ -690,6 +801,7 @@ export function mount(root, ctx) {
     }
     stage?.setQuality(store.prefs.cityQuality === 'low' ? 'low' : 'high');
     renderAgents(); renderAgentSend(); renderRequests(); updateFooter();
+    if (design?.state === 'waiting') checkDesign();
   }
   store.on('change', () => {
     if (!shown || dynamicQueued) return;

@@ -13,6 +13,11 @@ import { SparkCity, FOUNDRY, jobLabel } from '../city/spark.js';
 import { TalkPanel, talkSpot, talkShot, sayLine, STAGE } from '../city/talk.js';
 import { IslandMode } from '../city/portal.js';
 import { CityWeather } from '../city/weather-hud.js';
+import { sessions } from '../sessions.js';
+import { sessionAgents, externalAgents, SESSION_STATUS_LABEL, PROVIDER_NAME } from '../city/agents-extra.js';
+import { openAssignDialog } from '../city/assign.js';
+import { CityCi } from '../city/ci.js';
+import { tickerBank, tickerSegments } from '../city/ticker.js';
 
 registerIcons({
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.6 2.4c-.8.4-1.2.9-1.2 1.7v.4M12 17h.01"/>',
@@ -59,7 +64,12 @@ const storage = { get(key) { try { return localStorage.getItem(key); } catch { r
 const LABEL_MAX = 10;            // labels + cluster chips on screen at once (selected/hovered always show)
 const DECLUTTER_MS = 120;
 const LABEL_H = 22, CHIP_H = 24, LABEL_LIFT = 4;   // match .city-label / .city-cluster in city.css
-const LABEL_PRIORITY = { active: 60, idle: 40, offline: 20 };
+const LABEL_PRIORITY = { active: 60, error: 50, idle: 40, offline: 20 };
+const EXTERNAL_POLL_MS = 60e3;   // Claude Code / Codex sessions outside CodaClauda (metadata only)
+const DRAG_START_PX = 6;         // an agent pressed and moved this far is being dragged, not clicked
+const extraKind = agent => agent?.kind === 'session' || agent?.kind === 'external';
+/** Status words: CodaClauda sessions say Working / Idle / Error; desktop sessions Active; board agents as before. */
+const statusText = agent => (agent?.kind === 'session' ? SESSION_STATUS_LABEL[agent.status] || agent.status : agent?.kind === 'external' ? 'Active' : STATUS_LABEL[agent?.status] || agent?.status || '');
 const OWNER_PRIORITY = 55;       // "You": above idle people and idle groups (chips get +10), below working agents
 const SHORT_NAME = 18;
 const OWNER_TARGET = Object.freeze({ kind: 'owner' });
@@ -164,17 +174,69 @@ class CityView {
     this.streetKeys = new Set();
     this.talk = null;                // talk mode { id, back, phase: 'wait' | 'walk' | 'on', spot, … } (enterTalk)
     this.sparkOffline = false;
+    this.external = [];              // external_sessions_list rows (metadata only)
+    this.extraCache = null;          // zero-config agents (extraAgents)
+    this.agentDrag = null;           // drag to assign { id, x, y, pointerId, moved, over }
     root.classList.add('city-view');
     this.buildDom();
     if (!webglAvailable()) { this.fail('This computer could not start 3D graphics (WebGL is unavailable).'); return; }
     try { this.initWorld(); }
     catch (error) { console.error(error); this.fail(`The 3D view could not start: ${error.message}`); return; }
     this.islands = new IslandMode(this);   // contributor islands: route map, portal, current island (city/portal.js)
-    this.store.on('change', () => { this.dirty = true; if (this.visible && !this.world.running) this.sync(); });
+    this.store.on('change', () => { this.extraCache = null; this.dirty = true; if (this.visible && !this.world.running) this.sync(); });
+    this.offSessions = sessions.on('change', () => { this.extraCache = null; this.dirty = true; if (this.visible && !this.world.running) this.sync(); });
     loadPeople().then(create => { this.npcs.setCreate(create); this.peopleReady = true; this.dirty = true; if (this.visible) this.sync(); });
   }
 
   reduced() { return Boolean(this.store.prefs.reducedMotion) || Boolean(this.motionQuery?.matches); }
+
+  /* ---------------- zero-config agents (0.5) ---------------- */
+  /** CodaClauda's own sessions (working / idle / error) and active Claude Code / Codex sessions found
+   *  on this PC, as City agents next to the board's. Home city only (contributor islands show theirs). */
+  extraAgents() {
+    if (this.islands?.current) return [];
+    if (!this.extraCache) {
+      const store = this.store, projects = store.projects;
+      const own = sessions.available === false ? [] : sessionAgents(sessions.list, projects, { projectOf: id => (id ? store.project(id) : null), running: id => sessions.running(id) });
+      this.extraCache = [...own, ...externalAgents(this.external, projects, { own: sessions.list })];
+    }
+    return this.extraCache;
+  }
+  allAgents() { const extra = this.extraAgents(); return extra.length ? [...this.store.agents, ...extra] : this.store.agents; }
+  agentById(id) { return this.store.agent(id) || this.extraAgents().find(a => a.id === id) || null; }
+  /** external_sessions_list through bridge.js when this build has it (feature-detected). */
+  externalCall() {
+    const bridge = this.ctx.bridge, d = bridge.desktop;
+    if (typeof d.externalSessionsList === 'function') return () => d.externalSessionsList();
+    return bridge.isNative?.() ? () => bridge.invoke('external_sessions_list') : null;
+  }
+  async pollExternal() {
+    const call = this.externalCall();
+    if (!call || this.externalBusy) return;
+    this.externalBusy = true;
+    try { const data = await call(); this.external = Array.isArray(data?.sessions) ? data.sessions : []; }
+    catch { this.external = []; }   // an older engine: no desktop sessions, nothing else changes
+    finally { this.externalBusy = false; this.extraCache = null; this.dirty = true; }
+  }
+  /** ci_status through bridge.js when this build has it (feature-detected); null: no ambient CI. */
+  ciCall() {
+    const bridge = this.ctx.bridge, d = bridge.desktop;
+    if (typeof d.ciStatus === 'function') return args => d.ciStatus(args);
+    return bridge.isNative?.() ? args => bridge.invoke('ci_status', args) : null;
+  }
+  /** Access ticker segments per building (home city): name • Full access / Read only • who works there. */
+  tickerMap(projects, agents) {
+    const map = new Map();
+    if (this.islands?.current || typeof this.store.projectAccess !== 'function') return map;
+    const working = new Map();
+    for (const a of agents) if (a.status === 'active' && a.currentProjectId) { const id = this.store.project(a.currentProjectId)?.id || a.currentProjectId; working.set(id, (working.get(id) || 0) + 1); }
+    for (const p of projects) {
+      let level = 'read';
+      try { level = this.store.projectAccess(p).level; } catch { /* default */ }
+      map.set(p.id, tickerSegments(p, level, working.get(p.id) || 0));
+    }
+    return map;
+  }
 
   /* ---------------- DOM skeleton ---------------- */
   buildDom() {
@@ -206,8 +268,11 @@ class CityView {
       h('div.city-legend-row', h('span.city-gem.active'), 'Working'),
       h('div.city-legend-row', h('span.city-gem.idle'), 'Awake'),
       h('div.city-legend-row', h('span.city-gem.offline'), 'Powered down'),
+      h('div.city-legend-row', h('span.city-gem.error'), 'Session error'),
       h('div.city-legend-sep'),
       h('div.city-legend-note', 'Taller = more code & commits'),
+      h('div.city-legend-note', 'Drag an agent onto a building to give it a task'),
+      this.legendCi = h('div.city-legend-note', { hidden: true }, 'Rain cloud = latest CI run failed'),
       h('div.city-legend-note', 'Scaffolding = an agent is working there'),
       this.legendGear, this.legendSpark);
 
@@ -238,7 +303,7 @@ class CityView {
     this.help = h('div.city-help.card', { hidden: true, role: 'dialog', 'aria-label': 'City controls' },
       h('div.city-help-head', h('strong', 'Getting around'), iconButton('close', 'Close help', () => this.toggleHelp(false))),
       h('dl.city-help-list',
-        ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
+        ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Drag an agent', 'Drop it on a building to give it a task there'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
           .flatMap(([k, v]) => [h('dt', h('kbd', k)), h('dd', v)])),
       h('button.btn.small.primary', { type: 'button', onclick: () => this.toggleHelp(false) }, 'Got it'));
 
@@ -256,7 +321,9 @@ class CityView {
       onAgentLine: text => this.talkHeard(text),
       onThinking: on => this.talkThinking(on),
     });
-    this.cityRoot = h('div.city-root', this.stage, ...this.bars, this.overlay, this.hud, this.legend, this.machinesCard, this.streetHint, this.zoomHint, this.toolbar, this.help, this.panel, this.empty, this.leaveBtn, this.talkPanel.node, this.fallback);
+    // Drag to assign: the agent you're carrying, under the pointer (pointer-events: none).
+    this.dragGhost = h('div.city-drag-ghost', { hidden: true, 'aria-hidden': 'true' });
+    this.cityRoot = h('div.city-root', this.stage, ...this.bars, this.overlay, this.hud, this.legend, this.machinesCard, this.streetHint, this.zoomHint, this.toolbar, this.help, this.panel, this.empty, this.leaveBtn, this.talkPanel.node, this.fallback, this.dragGhost);
     this.root.append(this.cityRoot);
     if (!storage.get(HELP_KEY)) this.help.hidden = false;
   }
@@ -294,6 +361,13 @@ class CityView {
     // Weather (This PC side only): effects, HUD chip + quick picker, live feed while the City is shown.
     this.weather = new CityWeather(this.world, { store: this.store, bridge: this.ctx.bridge, reducedMotion: () => this.reduced(), navigate: (view, params) => this.ctx.navigate(view, params) });
     this.weatherSlot.append(this.weather.node);
+    // Ambient CI (city/ci.js): rain over failing buildings, fireworks when the default branch goes green.
+    this.ci = new CityCi({
+      world: this.world, buildings: this.buildings, caller: () => this.ciCall(), reducedMotion: () => this.reduced(),
+      projects: () => (this.islands?.current ? [] : this.store.visibleProjects('city')), home: () => !this.islands?.current,
+      onChange: () => { this.panelSig = ''; this.dirty = true; },
+    });
+    this.legendCi.hidden = !this.ci.available;
     this.bindInput();
   }
 
@@ -329,10 +403,11 @@ class CityView {
     const ringsChanged = this.world.setRings(rings, { animate: Boolean(this.firstSyncDone) });
     // Until the owner moves the camera, keep the whole (growing) island framed.
     if (ringsChanged && !this.world.userMoved && !this.pendingFocus && !this.talk) this.world.resetView({ instant: !this.firstSyncDone, auto: true });
-    const agents = store.agents;
+    const agents = this.allAgents();   // the board's agents + CodaClauda sessions + desktop sessions (zero-config)
     const active = new Set(agents.filter(a => a.status === 'active' && a.currentProjectId).map(a => store.project(a.currentProjectId)?.id || a.currentProjectId));
-    const lotsChanged = this.buildings.sync(projects, cells, active, { animate: true });
+    const lotsChanged = this.buildings.sync(projects, cells, active, { animate: true, tickers: this.tickerMap(projects, agents) });
     if (lotsChanged || ringsChanged) this.world.setLots(this.buildings.lots());
+    this.ci?.sync();
     const quality = store.prefs.cityQuality === 'low' ? 'low' : 'high';
     if (this.world.quality !== quality) this.world.setQuality(quality);
     const timeMode = TIME_MODES.includes(store.prefs.cityTime) ? store.prefs.cityTime : 'auto';
@@ -354,7 +429,7 @@ class CityView {
     this.offlineText = offline ? offlineLabel(machines.offlineSince) : '';
     if (this.sparkTag.textContent !== this.offlineText && offline) this.sparkTag.textContent = this.offlineText;
     this.world.setUnderside(under);
-    try { this.spark.sync({ shown: under, projects, cells, rings, machines, quality, peopleReady: Boolean(this.peopleReady), gears: mode !== 'off', offline, agents }); }
+    try { this.spark.sync({ shown: under, projects, cells, rings, machines, quality, peopleReady: Boolean(this.peopleReady), gears: mode !== 'off', offline, agents: store.agents }); }
     catch (error) { console.error('City: could not build the Spark underside', error); }
     this.legendSpark.hidden = !under;
     this.legendOffline.hidden = !(under && offline);
@@ -376,6 +451,8 @@ class CityView {
   frame(dt, elapsed, env) {
     if (this.dirty) this.sync();
     this.buildings.update(dt, elapsed, env);
+    tickerBank.update(dt, env.reducedMotion);
+    this.ci?.update(dt, elapsed);
     try { this.npcs.update(dt, elapsed, env); }
     catch (error) { if (!this.npcError) { this.npcError = true; console.error('City: agent animation failed', error); } }
     try { this.spark.update(dt, elapsed, env); }
@@ -570,16 +647,16 @@ class CityView {
     if (!entry) return;
     this.closeCluster();
     const rank = a => LABEL_PRIORITY[a.status] ?? 0;
-    const agents = entry.members.map(id => this.store.agent(id)).filter(Boolean).sort((a, b) => rank(b) - rank(a) || a.name.localeCompare(b.name));
+    const agents = entry.members.map(id => this.agentById(id)).filter(Boolean).sort((a, b) => rank(b) - rank(a) || a.name.localeCompare(b.name));
     if (!agents.length) return;
     clear(this.clusterPop,
       h('div.city-cluster-head', h('strong', `${agents.length} agents here`), iconButton('close', 'Close list', () => this.closeCluster(true))),
       h('div.city-cluster-list', ...agents.map(a => h('button.city-cluster-item', {
-        type: 'button', title: `${a.name} · ${STATUS_LABEL[a.status] || a.status}`,
+        type: 'button', title: `${a.name} · ${statusText(a)}`,
         onclick: () => this.pickFromCluster(a.id),
         onpointerenter: () => this.setHover({ kind: 'agent', id: a.id }),
         onpointerleave: () => { if (!this.pointer) this.setHover(null); },
-      }, portrait(a.look, { size: 28, provider: a.provider, status: a.status }), h('span.city-cluster-name', a.name), h('span.city-cluster-status', STATUS_LABEL[a.status] || a.status)))));
+      }, portrait(a.look, { size: 28, provider: a.provider, status: a.status }), h('span.city-cluster-name', a.name), h('span.city-cluster-status', statusText(a))))));
     this.clusterPop.hidden = false;
     this.cluster = { key, members: agents.map(a => a.id), w: this.clusterPop.offsetWidth, h: this.clusterPop.offsetHeight };
     entry.node.setAttribute('aria-expanded', 'true');
@@ -598,7 +675,7 @@ class CityView {
   }
   pickFromCluster(id) {
     this.closeCluster();
-    if (this.store.agent(id)) this.enterTalk(id);   // the same as clicking that agent
+    if (this.agentById(id)) this.onClick({ kind: 'agent', id });   // the same as clicking that agent
   }
   /** The open cluster list rides above its group (below it near the top edge), kept inside the view. */
   placeClusterPop() {
@@ -647,7 +724,8 @@ class CityView {
       }
     });
     this.bindWheel();
-    canvas.addEventListener('pointerleave', () => { this.pointer = null; this.setHover(null); });
+    this.bindAgentDrag(canvas);
+    canvas.addEventListener('pointerleave', () => { if (!this.agentDrag) { this.pointer = null; this.setHover(null); } });
     canvas.addEventListener('pointerdown', event => {
       this.down = { x: event.clientX, y: event.clientY, t: performance.now(), button: event.button }; this.dragging = false; this.closeCluster(); this.stage.focus({ preventScroll: true });
       // Street view: orbit controls are off, so nothing else captures the pointer; capture it so the up lands here.
@@ -674,6 +752,71 @@ class CityView {
     this.onKeyDown = event => this.keyDown(event);
     this.onKeyUp = event => { this.world.keyUp(event.code); this.streetKeys.delete(event.code); };
     this.onBlur = () => { this.world.clearKeys(); this.streetKeys.clear(); this.world.releaseTilt?.(); };   // a held drag lets go: the island settles flat
+  }
+  /** Drag to assign: a left press on an agent (This PC side up, island still, no talk / street view)
+   *  is caught in the capture phase on the stage, before the orbit controls and the island tilt see
+   *  it. A press that never moves is still a click on that agent; a drag carries the agent's ghost and
+   *  a drop on a building opens "Give <agent> a task on <project>". */
+  bindAgentDrag(canvas) {
+    const end = () => {
+      const d = this.agentDrag;
+      if (!d) return null;
+      this.agentDrag = null; this.dragging = false;
+      this.dragGhost.hidden = true;
+      this.stage.classList.remove('is-carrying');
+      try { if (canvas.hasPointerCapture?.(d.pointerId)) canvas.releasePointerCapture(d.pointerId); } catch { /* released */ }
+      return d;
+    };
+    this.stage.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || !event.isPrimary) return;
+      if (event.target !== canvas || this.talk || this.street || this.streetPending || !this.world.settled || this.islands?.blocking || this.failed) return;
+      const target = this.pick(event.clientX, event.clientY);
+      if (target?.kind !== 'agent' || !this.agentById(target.id)) return;
+      event.stopPropagation();   // no orbit, no tilt, no click handling below: this handler owns the gesture
+      this.closeCluster(); this.stage.focus({ preventScroll: true });
+      this.agentDrag = { id: target.id, x: event.clientX, y: event.clientY, pointerId: event.pointerId, moved: false, over: null };
+      this.dragging = true;
+      try { canvas.setPointerCapture(event.pointerId); } catch { /* not capturable */ }
+    }, { capture: true });
+    canvas.addEventListener('pointermove', event => {
+      const d = this.agentDrag;
+      if (!d || event.pointerId !== d.pointerId) return;
+      if (!d.moved && Math.hypot(event.clientX - d.x, event.clientY - d.y) < DRAG_START_PX) return;
+      if (!d.moved) { d.moved = true; this.startCarry(d); }
+      const base = this.cityRoot.getBoundingClientRect();
+      this.dragGhost.style.transform = `translate3d(${(event.clientX - base.left).toFixed(1)}px, ${(event.clientY - base.top).toFixed(1)}px, 0)`;
+      const target = this.pick(event.clientX, event.clientY);
+      const over = target?.kind === 'building' ? target.id : null;
+      if (over !== d.over) { d.over = over; this.setHover(over ? target : null); this.renderCarry(d); }
+    });
+    canvas.addEventListener('pointerup', event => {
+      const d = this.agentDrag;
+      if (!d || event.pointerId !== d.pointerId) return;
+      end();
+      this.setHover(null);
+      if (!d.moved) { this.onClick({ kind: 'agent', id: d.id }); return; }   // a press without a drag: the usual click
+      if (d.over) this.openAssign(d.id, d.over);
+      else toast('Drop the agent on a building to give it a task there.', { timeout: 2600 });
+    });
+    canvas.addEventListener('pointercancel', () => { if (end()) this.setHover(null); });
+    this.cancelAgentDrag = () => { if (end()) this.setHover(null); };
+  }
+  startCarry(d) {
+    const agent = this.agentById(d.id);
+    this.stage.classList.add('is-carrying');
+    this.bubble.hidden = true; this.bubbleTarget = null;
+    this.carrySig = '';
+    this.renderCarry(d, agent);
+    this.dragGhost.hidden = false;
+  }
+  renderCarry(d, agent = this.agentById(d.id)) {
+    const project = d.over ? this.store.project(d.over) : null;
+    const sig = `${d.id}|${d.over || ''}`;
+    if (!agent || sig === this.carrySig) return;
+    this.carrySig = sig;
+    this.dragGhost.classList.toggle('is-over', Boolean(project));
+    clear(this.dragGhost, portrait(agent.look, { size: 30, provider: agent.provider }),
+      h('span.city-drag-text', project ? `Give ${shortName(agent.name)} a task on ${project.name}` : `Carrying ${shortName(agent.name)} · drop on a building`));
   }
   /** Wheel, touchpad scroll and pinch (WebView2 sends a pinch as Ctrl+wheel) zoom the city, handled
    *  ONCE here: a capture-phase listener on the whole City root, so labels, chips, the toolbar or
@@ -803,10 +946,11 @@ class CityView {
   describe(target) {
     if (!target) return null;
     if (target.kind === 'agent') {
-      const agent = this.store.agent(target.id);
+      const agent = this.agentById(target.id);
       if (!agent) return null;
       const project = this.store.project(agent.currentProjectId);
-      return { title: agent.name, status: agent.status, sub: `${STATUS_LABEL[agent.status] || agent.status}${project && agent.status !== 'offline' ? ` · ${project.name}` : ''}`, badge: agent.visiting ? 'visiting' : '' };
+      const badge = agent.kind === 'external' ? 'desktop' : agent.kind === 'session' ? 'CodaClauda' : agent.visiting ? 'visiting' : '';
+      return { title: agent.name, status: agent.status, sub: `${statusText(agent)}${project && agent.status !== 'offline' ? ` · ${project.name}` : ''}`, badge };
     }
     if (target.kind === 'owner') return { title: this.store.avatar?.name || 'You', sub: this.street ? 'You · street view' : 'You · double-click to walk · G for street view' };
     if (target.kind === 'building') {
@@ -911,8 +1055,11 @@ class CityView {
   /* ---------------- selection ---------------- */
   onClick(target) {
     // Talk mode: another agent switches the conversation; empty ground (or anything else but you) leaves it.
-    if (this.talk) { if (target?.kind === 'agent') this.enterTalk(target.id); else if (target?.kind !== 'owner') this.exitTalk(); return; }
+    const extra = target?.kind === 'agent' && extraKind(this.agentById(target.id));
+    if (this.talk) { if (target?.kind === 'agent' && !extra) this.enterTalk(target.id); else if (target?.kind !== 'owner') this.exitTalk(); return; }
     if (!target) { this.select(null); return; }
+    // A CodaClauda session or a desktop session: its card (talk mode is for board agents).
+    if (extra) { const agent = this.agentById(target.id); this.select(target); this.showBubble(target, this.bubbleText(agent)); return; }
     if (target.kind === 'plot') {
       clearTimeout(this.plotClickTimer);
       this.plotClickTimer = setTimeout(() => { this.plotClickTimer = 0; if (this.visible) this.startProjectOnPlot(target); }, 300);
@@ -935,6 +1082,13 @@ class CityView {
   bubbleText(agent) {
     const project = this.store.project(agent.currentProjectId);
     const activity = String(agent.activity || '').replace(/\s+/g, ' ').trim();
+    if (agent.kind === 'external') return `${agent.name}: ${activity}. I run outside CodaClauda, so I can't be messaged from here. Drag me onto a building to start a CodaClauda chat there.`;
+    if (agent.kind === 'session') {
+      const where = project ? ` in ${project.name}` : '';
+      if (agent.status === 'active') return `Working on a turn${where}.`;
+      if (agent.status === 'error') return `My last turn${where} ended with an error. Open me in Chat to see what happened.`;
+      return `Idle${where}. Drag me onto a building to give me a task, or open me in Chat.`;
+    }
     if (agent.status === 'offline') return `Powered down${activity ? ` — last: ${activity}` : ''}. I'll read the board on my next heartbeat.`;
     if (activity) return activity.length > 140 ? `${activity.slice(0, 137)}…` : activity;
     if (agent.status === 'active') return project ? `Working on ${project.name}.` : 'Working away!';
@@ -1009,7 +1163,7 @@ class CityView {
     const target = kind === 'hq' ? { kind: 'hq' } : { kind, id };
     this.select(target);
     this.focusSelection();
-    if (kind === 'agent') { const agent = this.store.agent(id); if (agent) this.showBubble(target, this.bubbleText(agent)); }
+    if (kind === 'agent') { const agent = this.agentById(id); if (agent) this.showBubble(target, this.bubbleText(agent)); }
     this.stage.focus({ preventScroll: true });
   }
 
@@ -1021,16 +1175,19 @@ class CityView {
     const island = this.islands?.panelFor(s);   // contributor island: repo and town-hall cards
     if (island) ({ sig, render } = island);
     else if (s.kind === 'agent') {
-      const agent = this.store.agent(s.id);
+      const agent = this.agentById(s.id);
       if (!agent) { this.select(null); return; }
       sig = JSON.stringify(['agent', agent.id, agent.name, agent.label, agent.status, agent.activity, agent.currentProjectId, agent.homeProjectId, agent.visiting, Math.floor((Date.now() - agent.lastSeenAt) / 60000), agent.unreadForOwner, agent.look, this.store.projects.map(p => [p.id, p.name])]);
-      render = () => this.renderAgentPanel(agent);
+      render = () => (extraKind(agent) ? this.renderSessionPanel(agent) : this.renderAgentPanel(agent));
     } else if (s.kind === 'building') {
       const project = this.store.project(s.id);
       if (!project || !project.visible.city) { this.select(null); return; }
       const here = this.agentsAt(project.id).map(a => [a.id, a.status, a.look]);
       const compute = [...this.spark.sparkJobs(project.id), ...this.spark.gearJobs(project.id)].map(j => [j.job, j.state, j.machine]);
-      sig = JSON.stringify(['building', project.id, project.name, project.description, project.metrics, project.languages, project.source, project.private, project.path, project.url, here, compute, Math.floor(Date.now() / 60000)]);
+      const ci = this.ci?.status(project.id);
+      let access = '';
+      try { access = this.islands?.current ? '' : this.store.projectAccess(project).level; } catch { /* islands */ }
+      sig = JSON.stringify(['building', project.id, project.name, project.description, project.metrics, project.languages, project.source, project.private, project.path, project.url, here, compute, ci ? [ci.at, ci.error] : null, access, Math.floor(Date.now() / 60000)]);
       render = () => this.renderBuildingPanel(project);
     } else if (s.kind === 'owner') {
       sig = JSON.stringify(['owner', this.store.avatar, Boolean(this.following), Boolean(this.street || this.streetPending)]);
@@ -1043,7 +1200,7 @@ class CityView {
       sig = JSON.stringify(['runner', runner.id, Boolean(runner.crew), this.sparkOffline, this.computeText(s), agent ? [agent.id, agent.name, agent.status, agent.look] : null, Math.floor(Date.now() / 60000)]);
       render = () => this.renderRunnerPanel(runner, s);
     } else {
-      sig = JSON.stringify(['hq', this.store.agents.map(a => [a.id, a.status]), this.store.visibleProjects('city').length]);
+      sig = JSON.stringify(['hq', this.allAgents().map(a => [a.id, a.status]), this.store.visibleProjects('city').length]);
       render = () => this.renderHqPanel();
     }
     if (sig === this.panelSig) return;
@@ -1056,7 +1213,7 @@ class CityView {
     this.panel.scrollTop = scroll;
   }
   agentsAt(projectId) {
-    return this.store.agents.filter(a => (a.currentProjectId === projectId && a.status !== 'offline') || a.homeProjectId === projectId);
+    return this.allAgents().filter(a => (a.currentProjectId === projectId && a.status !== 'offline') || a.homeProjectId === projectId);
   }
   panelHead(art, title, sub, extra) {
     return h('header.city-panel-head', art, h('div.city-panel-title', h('h2', title), sub ? h('p', sub) : null),
@@ -1091,9 +1248,50 @@ class CityView {
       h('div.city-actions',
         h('button.btn.small.primary', { type: 'button', title: 'Walk over and talk here in the city', onclick: () => this.enterTalk(agent.id) }, icon('chat'), 'Talk'),
         h('button.btn.small', { type: 'button', onclick: () => this.ctx.navigate('chat', { agentId: agent.id }) }, icon('chat'), 'Open in Chat'),
-        askBtn, taskBtn),
+        askBtn, taskBtn,
+        (current || home) && ['claude', 'codex'].includes(agent.provider)
+          ? h('button.btn.small', { type: 'button', title: `Start a CodaClauda ${PROVIDER_NAME[agent.provider]} chat in ${(current || home).name} with a task (or drag ${agent.name} onto any building)`, onclick: () => this.openAssign(agent.id, (current || home).id) }, icon('play'), 'Give a task in a chat…')
+          : null),
       this.taskFormFor === agent.id && isMailbox ? this.taskForm(agent, current || home) : null,
       h('p.city-note', isMailbox ? MAILBOX_NOTE : 'A dedicated worker runs one task per request. To talk with Claude Code or Codex, start a session in Chat.'));
+  }
+  /** A CodaClauda session or a desktop session (zero-config agents): status, folder and what you can do. */
+  renderSessionPanel(agent) {
+    const project = this.store.project(agent.currentProjectId);
+    const session = agent.kind === 'session' ? sessions.session(agent.sessionId) : null;
+    const who = PROVIDER_NAME[agent.provider] || 'Agent';
+    const projectLink = project
+      ? h('button.city-link', { type: 'button', onclick: () => { this.select({ kind: 'building', id: project.id }); this.focusSelection(); } }, project.name)
+      : h('span.muted', agent.cwd ? 'Not a linked project' : 'Unknown folder');
+    const giveBtn = h('button.btn.small', { type: 'button', disabled: !project, title: project ? `Give ${agent.name} a task on ${project.name}` : 'Drag this agent onto a building to give it a task there', onclick: () => project && this.openAssign(agent.id, project.id) }, icon('plus'), 'Give a task…');
+    const facts = h('dl.city-facts',
+      h('dt', 'Status'), h('dd', h(`span.city-gem.${agent.status}`), ' ', statusText(agent)),
+      h('dt', 'Project'), h('dd', projectLink),
+      agent.cwd ? [h('dt', 'Folder'), h('dd.city-path', { title: agent.cwd }, agent.cwd)] : null,
+      session ? [h('dt', 'Access'), h('dd', session.access === 'full' ? 'Full access' : 'Read only')] : null,
+      session?.worktreePath ? [h('dt', 'Worktree'), h('dd.city-path', { title: session.worktreePath }, session.branch || session.worktreePath)] : null,
+      h('dt', agent.kind === 'external' ? 'File changed' : 'Last activity'), h('dd', agent.lastSeenAt ? h('span', { title: fullTime(agent.lastSeenAt) }, timeAgo(agent.lastSeenAt)) : h('span.muted', 'Unknown')));
+    const actions = agent.kind === 'session'
+      ? [h('button.btn.small.primary', { type: 'button', onclick: () => this.ctx.navigate('chat', { thread: session?.sharedId ? `pair:${session.sharedId}` : `sess:${agent.sessionId}` }) }, icon('chat'), 'Open in Chat'), giveBtn]
+      : [giveBtn, h('button.btn.small', { type: 'button', onclick: () => this.ctx.navigate('chat') }, icon('chat'), 'Chat')];
+    const note = agent.kind === 'external'
+      ? `${who} is running on this PC outside CodaClauda (seen from its session file's timestamp; no conversation content is read). CodaClauda can't message it: a task you give it here starts a CodaClauda ${who} chat in that project instead.`
+      : `A ${who} chat started from CodaClauda. Drag it onto another building to give it a task there (that starts a new chat in that project).`;
+    clear(this.panel,
+      this.panelHead(portrait(agent.look, { size: 52, provider: agent.provider, status: agent.status }), agent.name, agent.label,
+        iconButton('crosshair', 'Center view (F)', () => this.focusSelection())),
+      h('div.city-panel-pills', pill(who, agent.provider), pill(agent.kind === 'external' ? 'Desktop session' : 'CodaClauda session', 'neutral'), agent.status === 'error' ? pill('Error', 'danger') : null),
+      h('section.city-panel-section', h('div.city-section-label', 'Doing'), h('p.city-activity', agent.activity || '')),
+      facts,
+      h('div.city-actions.wrap', actions),
+      h('p.city-note', note));
+  }
+  /** Drag to assign / Give a task…: "Give <agent> a task on <project>" (city/assign.js). */
+  openAssign(agentId, projectId) {
+    const agent = this.agentById(agentId), project = this.store.project(projectId);
+    if (!agent || !project) return;
+    if (this.talk) this.exitTalk({ instant: true });
+    openAssignDialog({ store: this.store, sessions, navigate: (view, params) => this.ctx.navigate(view, params) }, agent, project);
   }
   taskForm(agent, defaultProject) {
     this.taskDraft ||= { title: '', detail: '' };
@@ -1159,10 +1357,19 @@ class CityView {
     const compute = sparkJobs.length || localJobs.length
       ? h('section.city-panel-section', h('div.city-section-label', 'Compute jobs running'), h('div.city-jobs', ...sparkJobs.map(j => jobRow(j, true)), ...localJobs.map(j => jobRow(j, false))))
       : null;
+    const ci = this.ciSection(project);
+    let accessRow = null;
+    if (!this.islands?.current && typeof store.projectAccess === 'function') {
+      const level = store.projectAccess(project).level;
+      accessRow = h('div.city-access-row', h(`span.city-access-chip.is-${level}`, level === 'full' ? 'Full access' : 'Read only'),
+        h('span.muted', level === 'full' ? 'Agents work without permission prompts' : 'Agents can read and explain, not change files'),
+        h('button.city-link', { type: 'button', onclick: () => this.ctx.navigate('projects', { project: project.id }) }, 'Change'));
+    }
     clear(this.panel,
       this.panelHead(swatch, project.name, project.primaryLanguage ? `${project.primaryLanguage} · ${building?.size.floors || m.floors} floor${(building?.size.floors || m.floors) === 1 ? '' : 's'}` : null,
         iconButton('crosshair', 'Center view (F)', () => this.focusSelection())),
       sources.length ? h('div.city-panel-pills', sources) : null,
+      accessRow,
       project.description ? h('p.city-desc', project.description) : null,
       h('section.city-panel-section', h('div.city-section-label', 'Languages'), langBar, langLegend),
       h('div.city-stats',
@@ -1171,11 +1378,25 @@ class CityView {
         stat('Commits', m.commits ? formatNumber(m.commits) : '—', m.commits7d ? `+${m.commits7d} in 7 days` : null),
         stat('Last activity', m.lastActivityAt ? timeAgo(m.lastActivityAt) : '—', m.sizeBytes ? formatBytes(m.sizeBytes) : null)),
       h('section.city-panel-section', h('div.city-section-label', 'Agents here'),
-        here.length ? h('div.city-people', ...here.map(a => h('button.city-person', { type: 'button', title: `${a.name} · ${STATUS_LABEL[a.status] || a.status}${a.homeProjectId === project.id ? ' · lives here' : ' · visiting'}`, onclick: () => { this.select({ kind: 'agent', id: a.id }); this.focusSelection(); } },
+        here.length ? h('div.city-people', ...here.map(a => h('button.city-person', { type: 'button', title: `${a.name} · ${statusText(a)}${extraKind(a) ? '' : a.homeProjectId === project.id ? ' · lives here' : ' · visiting'}`, onclick: () => { this.select({ kind: 'agent', id: a.id }); this.focusSelection(); } },
           portrait(a.look, { size: 34, provider: a.provider, status: a.status }), h('span', a.name))))
-          : h('p.muted', 'Nobody is here right now. Assign one from an agent card.')),
+          : h('p.muted', 'Nobody is here right now. Drag an agent onto this building to give it a task.')),
+      ci,
       compute,
       h('div.city-actions.wrap', actions));
+  }
+  /** CI card section from the last ci_status poll (city/ci.js); null when there is nothing to say. */
+  ciSection(project) {
+    const r = this.ci?.status(project.id);
+    if (!r) return null;
+    const run = r.summary?.latest;
+    const word = c => ({ success: 'Passed', failure: 'Failed', timed_out: 'Timed out', cancelled: 'Cancelled', skipped: 'Skipped', startup_failure: 'Failed to start' }[String(c || '').toLowerCase()] || String(c || 'Finished'));
+    const row = run
+      ? h('div.city-ci-row', h(`span.city-ci-dot.${r.summary.failing ? 'bad' : String(run.conclusion).toLowerCase() === 'success' ? 'ok' : 'neutral'}`),
+        h('span.city-ci-text', h('strong', word(run.conclusion)), ` · ${String(run.name || 'Workflow').slice(0, 60)}${run.branch ? ` on ${String(run.branch).slice(0, 40)}` : ''}${run.at ? ` · ${timeAgo(run.at)}` : ''}`),
+        /^https:\/\/github\.com\//.test(String(run.url || '')) ? h('button.city-link', { type: 'button', onclick: () => this.open(run.url) }, 'Open run') : null)
+      : h('p.muted', r.error ? `Couldn't read CI: ${String(r.error).replace(/\s+/g, ' ').slice(0, 120)}` : 'No finished workflow runs yet.');
+    return h('section.city-panel-section', h('div.city-section-label', 'CI', r.summary?.running ? h('span.muted', ' · a run is in progress') : null), row);
   }
   /** Your own card (Find me / clicking your avatar). */
   renderOwnerPanel() {
@@ -1223,8 +1444,9 @@ class CityView {
         agent ? [h('dt', 'Likely from'), h('dd', h('button.city-link', { type: 'button', onclick: () => { this.select({ kind: 'agent', id: agent.id }); this.focusSelection(); } }, agent.name), h('span.muted', ' · on this PC'))] : null));
   }
   renderHqPanel() {
-    const agents = this.store.agents;
+    const agents = this.allAgents();
     const count = status => agents.filter(a => a.status === status).length;
+    const own = agents.filter(a => a.kind === 'session').length, desktop = agents.filter(a => a.kind === 'external').length;
     clear(this.panel,
       this.panelHead(h('span.city-swatch.hq', icon('home')), 'CodaClauda HQ', 'Town hall and plaza'),
       h('p.city-desc', 'Agents without a home project gather here. Powered-down agents rest on the plaza benches; your avatar starts by the fountain.'),
@@ -1233,6 +1455,7 @@ class CityView {
         h('div.city-stat', h('div.city-stat-value', String(count('idle'))), h('div.city-stat-label', 'Awake')),
         h('div.city-stat', h('div.city-stat-value', String(count('offline'))), h('div.city-stat-label', 'Powered down')),
         h('div.city-stat', h('div.city-stat-value', String(this.store.visibleProjects('city').length)), h('div.city-stat-label', 'Buildings'))),
+      own || desktop ? h('p.city-desc', `Also in town: ${[own ? plural(own, 'CodaClauda chat') : '', desktop ? `${plural(desktop, 'desktop session')} (Claude Code or Codex running outside CodaClauda, seen from session file times only)` : ''].filter(Boolean).join(' and ')}.`) : null,
       h('p.city-note', MAILBOX_NOTE),
       h('div.city-actions.wrap',
         h('button.btn.small.primary', { type: 'button', onclick: () => this.ctx.navigate('board') }, icon('board'), 'Message board'),
@@ -1315,7 +1538,7 @@ class CityView {
     const local = m.local || {}, spark = m.spark || {};
     const offline = Boolean(m.enabled) && !m.online;
     // Agent sessions all run on this PC; the Spark only runs DGXBridge jobs (some started by those agents).
-    const agents = this.store.agents || [];
+    const agents = this.allAgents() || [];
     const working = agents.filter(a => a.status === 'active').length, driving = this.spark?.drivingAgents || 0;
     const sparkJobs = (Array.isArray(m.jobs) ? m.jobs : []).filter(j => j && j.machine === 'spark');
     const when = j => Number(j.finished_at) || Number(j.started_at) || 0;
@@ -1414,7 +1637,7 @@ class CityView {
       h('option', { value: '' }, 'Jump to…'),
       h('option', { value: 'me' }, `📌 You (${this.store.avatar?.name || 'me'})`),
       h('option', { value: 'hq' }, 'CodaClauda HQ'),
-      agents.length ? h('optgroup', { label: 'This PC — agents' }, ...agents.map(a => h('option', { value: `agent:${a.id}` }, `${a.name} — ${STATUS_LABEL[a.status] || a.status}`))) : null,
+      agents.length ? h('optgroup', { label: 'This PC — agents' }, ...agents.map(a => h('option', { value: `agent:${a.id}` }, `${a.name} — ${statusText(a)}`))) : null,
       sparkPeople.length ? h('optgroup', { label: 'DGX Spark — agents & crew' }, ...sparkPeople.map(r => h('option', { value: `runner:${r.id}` }, sparkLabel(r)))) : null,
       projects.length ? h('optgroup', { label: 'Buildings' }, ...[...projects].sort((a, b) => a.name.localeCompare(b.name)).map(p => h('option', { value: `building:${p.id}` }, p.name))) : null);
     this.jump.value = '';
@@ -1910,6 +2133,13 @@ class CityView {
     this.world.resize();
     this.world.start();
     this.weather?.show();
+    // Zero-config agents and ambient CI refresh only while the City is on screen.
+    if (sessions.available === null) sessions.refresh().catch(() => {});
+    this.pollExternal();
+    clearInterval(this.externalTimer);
+    if (this.externalCall()) this.externalTimer = setInterval(() => this.pollExternal(), EXTERNAL_POLL_MS);
+    this.ci?.start();
+    this.legendCi.hidden = !this.ci?.available;
     // Deep link #city?side=spark (or side=pc) turns the island to that face once the Spark side exists.
     if (params.side === 'spark' || params.side === 'pc') {
       const side = params.side;
@@ -1926,6 +2156,8 @@ class CityView {
     for (const label of this.runnerLabels.values()) label.node.remove();
     this.runnerLabels.clear();
     clearTimeout(this.checkTimer);
+    this.offSessions?.();
+    this.ci?.dispose();
     this.islands?.dispose();
     this.weather?.dispose();
     this.spark?.dispose(); this.npcs?.dispose(); this.buildings?.dispose(); this.world?.dispose();
@@ -1933,7 +2165,10 @@ class CityView {
   }
   hide() {
     this.visible = false;
+    clearInterval(this.externalTimer); this.externalTimer = 0;
+    this.ci?.stop();
     if (this.failed || !this.world) return;
+    this.cancelAgentDrag?.();
     this.exitTalk({ instant: true });
     this.exitStreet({ instant: true });   // coming back to the City starts from the overview
     this.world.releaseTilt?.();

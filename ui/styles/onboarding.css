@@ -1,0 +1,44 @@
+/* 60-second onboarding (ui/app/onboarding.js): a floating card, bottom left beside the rail (toasts
+ * stack bottom right), over every view. */
+.onb { position: fixed; left: calc(var(--rail-width, 72px) + 20px); bottom: 20px; z-index: 900; display: grid; gap: 10px; width: min(420px, calc(100vw - var(--rail-width, 72px) - 40px)); max-height: calc(100vh - 40px); padding: 16px 18px 14px; overflow: auto; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--surface); color: var(--text); box-shadow: var(--shadow-lg), 0 0 0 4px var(--accent-soft); animation: onb-in var(--med) var(--ease); }
+.onb.leaving { opacity: 0; transform: translateY(8px); transition: opacity .2s, transform .2s; }
+@keyframes onb-in { from { opacity: 0; transform: translateY(12px); } }
+.onb-head { display: flex; align-items: center; gap: 8px; }
+.onb-eyebrow { display: inline-flex; flex: 1; align-items: center; gap: 6px; color: var(--accent-2); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.onb-eyebrow .icon { width: 15px; height: 15px; }
+.onb-count { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.onb-close { width: 28px; height: 28px; margin: -4px -6px -4px 0; }
+.onb-title { margin: 2px 0 0; font: 650 19px var(--font-display); letter-spacing: -.01em; }
+.onb-lead { margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.5; }
+.onb-body { display: grid; gap: 8px; }
+.onb-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.onb-row-text { display: grid; flex: 1; min-width: 0; }
+.onb-row-text strong { font-size: 13px; }
+.onb-row-text .muted { overflow: hidden; font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.onb-glyph { display: grid; flex: none; place-items: center; width: 30px; height: 30px; border-radius: 9px; font-weight: 750; font-size: 13px; }
+.onb-glyph.claude { background: var(--claude-soft); color: var(--claude); }
+.onb-glyph.codex { background: var(--codex-soft); color: var(--codex); }
+.onb-checking { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; }
+.onb-checking .spinner { width: 14px; height: 14px; }
+.onb-note { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.onb-note.bad { color: var(--danger); }
+.onb-inline { display: flex; flex-wrap: wrap; gap: 6px; }
+.onb-stat { font-size: 13px; color: var(--text-2); }
+.onb-stat strong { color: var(--text); font-size: 20px; font-weight: 700; }
+.onb-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.onb-chip { max-width: 180px; padding: 3px 9px; overflow: hidden; border-radius: var(--radius-pill); background: var(--surface-3); color: var(--text-2); font-size: 11.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.onb-chip.more { color: var(--muted); }
+.onb-option { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); cursor: pointer; transition: border-color var(--fast), background var(--fast); }
+.onb-option:hover { border-color: var(--border-strong); }
+.onb-option.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent-soft) 60%, var(--surface-2)); }
+.onb-option input { flex: none; margin: 3px 0 0; accent-color: var(--accent); }
+.onb-option-text { display: grid; gap: 2px; min-width: 0; }
+.onb-option-text strong { font-size: 13px; }
+.onb-option-text .muted { font-size: 12px; line-height: 1.45; }
+.onb-list { display: grid; gap: 4px; margin: 0; padding-left: 20px; color: var(--text-2); font-size: 13px; line-height: 1.5; }
+.onb-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 4px; }
+.onb-dots { display: flex; gap: 5px; }
+.onb-dot { width: 18px; height: 4px; border-radius: 2px; background: var(--surface-3); transition: background var(--fast); }
+.onb-dot.on { background: var(--accent); }
+.onb-buttons { display: flex; gap: 6px; }
+@media (prefers-reduced-motion: reduce) { .onb, .onb.leaving { animation: none; transition: none; } }

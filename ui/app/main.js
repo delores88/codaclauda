@@ -195,6 +195,7 @@ async function boot() {
   if (initial !== 'city') await store.loadDesktop();
   applyTheme(store.prefs.theme || 'dark');
   store.emit('change');
+  import('./onboarding.js').then(m => m.maybeOnboard(ctx)).catch(error => console.warn('Onboarding unavailable', error));   // 0.5 first-run tour (once)
   // Session events and schedule events are heard from launch, whichever view is open.
   sessions.refresh();
   schedules.refresh();
