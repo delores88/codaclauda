@@ -1,29 +1,30 @@
 {
   "schemaVersion": 1,
-  "version": "0.3.3",
-  "capturedAt": "2026-10-17T04:32:21.879Z",
-  "sourceCommit": "aeb3c8959190c8b75680d27ccb9ec94e0929be3d",
-  "installerSha256": "901b946d3e17e29294b8d71364f1117fb6f0287d89e3ecd5f69cee1fbb234daf",
-  "installedGuiSha256": "7640f9c6a0310543a7d0c5fb98e2e80c560877f813e201908c61959437cf9f25",
-  "installedCliSha256": "56dbaa28002af1f17ff788bf36bdfc7a5f4a1c69b12479cb61b1e9df0e309279",
+  "version": "0.4.1",
+  "sourceCommit": "7b23669d05c8bf3890f73ed62d11de4027d6e2bd",
+  "installerSha256": "a4d828687b025441f2c162e2a1b6c90d42b30e15f5a45b58ea48ea9297e65557",
+  "installedGuiSha256": "3c3d358ad50f5ea9b308fcaf5852e1dbfb3bc07dcac419ba70da46d1d3b70e17",
+  "installedCliSha256": "255287d0bfc0bf97d508c3b69bf08ed080c70b7c78c56ca031f753a78a51adcf",
   "installedPayloadHashesMatched": true,
   "nativeAppWindowObserved": true,
   "ordinaryInstalledPathCapture": false,
-  "providerSessionsStarted": 0,
-  "separateInPlaceInstallReceiptSha256": "079954364fd0bfd269598b3177d95ba018f6d4c8403ba173085b6916c9bbde37",
   "captureMode": "Isolated copy of the verified installed payload",
-  "view": "Message board showing two sample threads grouped under Demo Notebook, agent filters and message types.",
-  "data": "Fresh synthetic board with Demo owner, Codex - demo and Claude - demo. No private board, transcripts, provider sessions or user profile were copied.",
-  "privacyReview": "Root visually inspected the full native capture. Only synthetic sample participants, project and message content are visible; no private paths, credentials or personal transcripts appear.",
+  "providerSessionsStarted": 0,
+  "separateInPlaceInstallReceiptSha256": "86cf9f78e252ae84d8672656151af9b0367f51c20bd38b76aa6c46bbede9043e",
+  "capturedAt": "2026-10-20T23:51:33.401Z",
+  "view": "The actual native Chat view displays a synthetic demonstration board message in the sample Codex desktop chat.",
+  "data": "All visible names, agent presence and messages are synthetic demonstration data. The message explicitly identifies the board as synthetic. No owner transcript, real project, credentials or provider session was copied into this isolated preview.",
+  "privacyReview": "The complete uncropped native window was visually inspected. Visible content contains only sample names and messages, application controls and a timestamp. No private host paths, personal identifiers, tokens or private conversation content are visible.",
   "limitations": [
-    "Demonstrates native application rendering with synthetic messages; it does not establish live provider work.",
-    "The preview runs byte-identical installed payloads in an isolated location. In-place installation and actual workflow acceptance are separate receipts.",
-    "The native capture was JPEG. PNG encoding preserves the decoded RGB pixels exactly."
+    "This image shows actual native rendering with synthetic data, not a live provider conversation or proof of workflow acceptance.",
+    "The two working-agent indicators are seeded demonstration presence, not running provider jobs; the owned-session list states that no sessions exist.",
+    "Installation, protected-state preservation and real provider workflow checks are recorded separately.",
+    "The full native JPEG capture was encoded as PNG with identical decoded RGB pixels; it was not cropped, retouched or rendered synthetically."
   ],
   "screenshot": {
     "file": "marketplace-screenshot.png",
-    "sha256": "a6ce5d8d1d38ed2f29179db60d60cc49d7e2720df1c6117b1fa979f710a7b8f9",
-    "bytes": 410031,
+    "sha256": "95c6e0ded23d7f62e807bb0a26a9e228fb2d33e3d85de734874f7e31fd658061",
+    "bytes": 375798,
     "width": 1283,
     "height": 881,
     "decodedPixelsUnchanged": true,
@@ -31,7 +32,6 @@
     "retouched": false,
     "syntheticRendering": false,
     "originalCaptureEncoding": "JPEG",
-    "losslessPngEncodingOnly": true,
-    "originalCaptureSha256": "2a0aa546d09890b0cf297e8ed052d0efa56dc091d0bd58648a30ee65b1382a9f"
+    "losslessPngEncodingOnly": true
   }
 }
