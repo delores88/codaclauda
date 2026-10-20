@@ -93,27 +93,104 @@ Hello) are planned for 0.4" line in the Approvals view.
 - **Projects view:** the same level selector and toggles per project, for anyone who prefers not to
   use the 3D world.
 
-### Island portals to repos you contribute to
-- **Discovery:** repos where the user is a collaborator or org member but not the owner
-  (`gh api user/repos?affiliation=collaborator,organization_member`). Each owner or org becomes its own
-  island. Its buildings are the repos you can contribute to, sized from GitHub data (languages
-  bytes, commit counts); no clone is needed.
-- **Route map:** a "Delta route map" style pop-up shows the home island and each contributor island,
-  joined by flight arcs. It opens automatically when GitHub shows you were added to a new repo
-  (a new arc pulses). Clicking an island plays a portal transition into that island city; a
-  Home button returns. Agents working in a local clone of that repo appear there.
+### Unified chat: a full chat app for people who skip the 3D world (Ben, 2026-10-16)
+Goal: Chat on its own should feel like the Claude Code and Codex desktop apps, a complete,
+standard chat that unifies both providers' agents around **projects**.
+- **Project dropdown** at the top of Chat, as in Claude Code and Codex. It uses the same project
+  model as the City and Projects views (local folders plus GitHub repos), and filters the conversation list to that project.
+- **New chat in a project:** pick the agent (Claude Code or Codex), plus model and effort where the CLI
+  supports them. CodaClauda starts a session in the project folder (item 1). Existing mailbox
+  desktop chats show in the same list, clearly labelled "desktop chat (replies when it checks in)".
+- **Connected resources panel** for the active chat:
+  - workspace folder;
+  - git branch and dirty state;
+  - GitHub repo link;
+  - the project's access level;
+  - attached MCP tools (for example Playwright or Windows-MCP, below);
+  - Spark/DGXBridge availability;
+  - attached files.
+  It is the equivalent of Claude's connectors and Codex's environment indicator.
+- **Parity checklist (what users expect from those apps):**
+  - streaming replies with stop;
+  - edit-and-resend and regenerate;
+  - collapsible tool-call activity;
+  - inline diff/patch previews of agent changes;
+  - inline approval buttons for "Ask me";
+  - attachments;
+  - mic;
+  - markdown, math and code with copy (all three exist today).
+- **Chat-first layout option:** a setting hides the City and other 3D entry points from the rail
+  for people who never want them. The City stays one click away.
+- **Depends on sessions** (item 1) for real-time replies and on project access levels for the
+  resources panel. Most of the UI is new, but it reuses the Chat view's renderer and composer.
+
+### Desktop-app parity: scheduled tasks and the rest (Ben, 2026-10-16)
+Ben wants the features people know from the Claude Code and Codex apps, including ones he hasn't
+named. Each provider's exact feature names and behaviour must be checked against the current apps
+before implementation. Items marked † need sessions (item 1).
+- **Scheduled tasks / automations†:**
+  - a Schedules view with runs per project (agent, prompt, cron or interval, access level);
+  - next run time, a run history with status and links to transcripts;
+  - pause, resume and run-now.
+  CodaClauda's own scheduler launches the CLI session, and the access level applies to each run.
+  Show the provider's native schedules too where they are readable.
+- **Background work†:**
+  - a live list of running agents and their tasks, with stop;
+  - a to-do/plan view per run;
+  - notifications on finish, failure or needs-you (row 5).
+- **Conversation management:**
+  - pin, archive, rename and search transcripts across both providers;
+  - group by project, with sections;
+  - fork a conversation at any message†;
+  - hand off to the other provider with a summary†.
+- **Code work†:**
+  - an isolated git worktree per chat, so parallel agents don't collide;
+  - a diff viewer with accept or discard;
+  - "create PR", with PR status, CI checks and an auto-fix suggestion;
+  - a review mode (`codex exec review`, or a Claude review prompt).
+- **Agent configuration:**
+  - model and effort per agent† and plan mode†;
+  - view and edit project instructions (CLAUDE.md / AGENTS.md);
+  - memory on or off per provider (see SESSIONS-RESEARCH.md);
+  - MCP tools, skills and plugins per project, shown in the connected-resources panel.
+- **Context and cost:**
+  - context-window fill per chat, with a compact-now button† (both CLIs compact natively);
+  - usage and cost meters per agent and provider (row 4).
+- **Remote:** phone notifications (row 5); remote control of a running session (later).
+
+### Computer use for CodaClauda-started agents (Ben, 2026-10-16)
+Background (see [SESSIONS-RESEARCH.md](SESSIONS-RESEARCH.md)): the Claude Code CLI has computer use
+only as a macOS preview, and Codex has it only in its desktop app. Both CLIs accept MCP servers
+(Claude `--mcp-config` / `claude mcp add`; Codex `codex mcp add` / config.toml), so one tool can
+give both agents desktop or browser control.
+
+| Tool | What it gives | Checked 2026-10-16 |
+|---|---|---|
+| Playwright MCP (Microsoft) | Browser automation through the page structure; reliable for web tasks | Apache-2.0, ~38k stars |
+| Windows-MCP (CursorTouch) | Windows desktop control: UI Automation, screenshots, mouse and keyboard | MIT, ~9.2k stars, active; third-party |
+| Chrome DevTools MCP (Chrome team) | Drive and debug Chrome | Apache-2.0, ~54k stars |
+| CodaClauda's own guarded tool | Desktop control with built-in guardrails | Estimate: 1-2 days; consider after the above prove out |
+
+Plan:
+1. Attach **Playwright MCP by default** to sessions CodaClauda starts.
+2. Make **Windows-MCP opt-in per project, Full access level only**, with a visible stop control.
+3. Pin versions and vet updates; this is third-party code running with the user's rights.
+4. Treat on-screen text as untrusted (prompt-injection risk).
+5. Windows-MCP takes over the mouse and keyboard while it runs.
+6. Keep the desktop apps for heavy desktop work until this has proven itself.
+
+### Moved to 0.3.3 (Ben, 2026-10-16)
+These were planned here but ship early in 0.3.3:
+- island portals to repos you contribute to (route map plus portal);
+- City weather: Off, Live (MET Norway, free) or Pick your own;
+- the talk-view fixes and board fixes;
+- the non-affiliation line in Settings (the README line is Codex's).
 
 ### Also in 0.4 (deferred from the 0.3.x work)
 - **Zero-config City:** show existing Claude Code and Codex sessions without setup. This was the
   research's top differentiator. macOS support is a follow-on.
-- **Non-affiliation line** in the README and listing: "Coordinates OpenAI Codex and Claude Code
-  agents. Not affiliated with or endorsed by Anthropic or OpenAI."
 - **Decide on Conversation setup** (registered chats, private MCP) and the old request-history
-  board, which 0.3.2 did not port: rebuild or retire.
-- **Talk-view fixes:**
-  - a pending plot focus can steal the camera mid-conversation;
-  - the composer stays locked after switching agents mid-send.
-- **Board fixes:** the "All projects" tooltip count; the dimmed-row style when selected.
+  board, which 0.3.2 did not port: rebuild or retire. The unified chat above may replace both.
 - **Signed installers:** the Microsoft Store (free) or Azure Artifact Signing (about $10 a month).
 - **Dependency advisory:** glib 0.18.5 GHSA-wrw7-89jp-8q8g (Codex maintenance).
 
@@ -122,9 +199,47 @@ Hello) are planned for 0.4" line in the Approvals view.
   "Clauda" is acknowledged; revisit before any public promotion.
 - **Windows Hello signed approvals:** replaced by app-managed project access levels.
 
-### Later (0.5)
-Rows 2-8 above: City control surface, explicit agent status, cost meters, notifications,
-60-second onboarding, ambient signals and agent-built avatars end to end. Row 9 stays parked.
+## Release split (Ben asked for an explicit list, 2026-10-16)
+
+**0.4 — "agents run from CodaClauda".** Everything here depends on sessions or makes them usable.
+1. **Sessions** (item 1 plus the notes):
+   - Start agent (Claude Code or Codex, project, task), resume, stop, and stream into Chat;
+   - wake on mail, with hop, rate and per-agent caps;
+   - a controlled launch environment (no stray API keys; see SESSIONS-RESEARCH.md).
+2. **Project access levels, enforced** through launch flags:
+   - Read only, Work freely and Full access, plus the action toggles;
+   - building tickers and the Projects toggles (already built, unreviewed, on `claude/033-access-ticker`);
+   - "Ask me" inline approvals are the riskiest piece. If they slip, they go to 0.4.1 rather than holding the release.
+3. **Unified chat:**
+   - project dropdown and new chat per project;
+   - connected-resources panel;
+   - streaming with stop;
+   - chat-first layout option;
+   - desktop chats listed alongside, labelled honestly.
+4. **Scheduled tasks:** a Schedules view, runs per project at that project's access level, history, pause and run-now.
+5. **Computer use through MCP:** Playwright by default, and Windows-MCP opt-in at Full access only.
+6. **Retire the old Conversation setup and request-history screens**, because the unified chat replaces them.
+
+**0.5 — "power features and polish".**
+1. **Background work view** (running agents, plan view) and **notifications**: Windows toasts, plus optional phone push.
+2. **Conversations:** fork from any message, hand off to the other provider with a summary, search across both providers, and sections.
+3. **Code work:** a git worktree per chat, a diff viewer with accept or discard, create PR with CI status and auto-fix suggestions, and a review mode.
+4. **Agent configuration UI:**
+   - model and effort pickers beyond 0.4's basic choice;
+   - a CLAUDE.md / AGENTS.md editor;
+   - memory toggles;
+   - skills and plugins per project.
+5. **Context and cost:** context-fill gauge with compact-now, and usage and cost meters per agent and provider.
+6. **City:**
+   - zero-config City (show existing sessions without setup);
+   - City as a control surface (drag an agent onto a building);
+   - explicit agent status;
+   - ambient CI signals (rain on failing CI, fireworks on merge).
+7. **Onboarding and identity:** 60-second onboarding, and agent-built avatars end to end.
+8. **Launch prep:** signed installers (Microsoft Store or Artifact Signing), plus a rename decision before any public promotion.
+
+**Later or parked:** remote control of a running session, a shared world for teams (row 9),
+and CodaClauda's own guarded desktop-control tool (only if the MCP tools fall short).
 
 Release rule unchanged: Codex builds installers and runs Marketplace submission;
 Claude owns UI. Nothing publishes without Ben's explicit "ship it".
