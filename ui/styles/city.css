@@ -383,3 +383,29 @@
 .city-view.reduce-motion .city-bar, .city-view.reduce-motion .city-talk-leave, .city-view.reduce-motion .city-talk-chip, .city-view.reduce-motion .city-talk-box { transition: none; }
 .city-view.reduce-motion .city-talk, .city-view.reduce-motion .city-root.is-talk .city-talk-leave, .city-view.reduce-motion .city-talk-say { animation: none; }
 .city-view.reduce-motion .typing-dots i { animation: none; opacity: .75; }
+
+/* 0.5: zero-config agents (session error status), drag to assign, access row, ambient CI */
+.city-gem.error { background: var(--danger); box-shadow: 0 0 7px var(--danger); }
+.city-root .status-dot.error { background: var(--danger); }
+.city-stage.is-carrying, .city-stage.is-carrying.is-pointing { cursor: grabbing; }
+.city-drag-ghost { position: absolute; left: 0; top: 0; z-index: 6; display: inline-flex; align-items: center; gap: 8px; max-width: 360px; margin: 16px 0 0 16px; padding: 4px 12px 4px 4px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: color-mix(in srgb, var(--surface) 92%, transparent); color: var(--text); font-size: 12.5px; font-weight: 600; box-shadow: var(--shadow); pointer-events: none; will-change: transform; }
+.city-drag-ghost.is-over { border-color: var(--accent); background: var(--surface); box-shadow: var(--shadow), 0 0 0 3px var(--accent-soft); }
+.city-drag-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.city-path { overflow: hidden; font-family: var(--font-mono); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.city-access-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 12px; }
+.city-access-chip { padding: 2px 9px; border-radius: var(--radius-pill); font-size: 11.5px; font-weight: 700; }
+.city-access-chip.is-full { background: rgba(255, 107, 61, .16); color: #ff6b3d; }
+.city-access-chip.is-read { background: rgba(79, 140, 255, .16); color: #4f8cff; }
+.city-ci-row { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12.5px; }
+.city-ci-text { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.city-ci-text strong { color: var(--text); }
+.city-ci-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--status-offline); }
+.city-ci-dot.ok { background: var(--success); }
+.city-ci-dot.bad { background: var(--danger); }
+/* "Give <agent> a task on <project>" (a modal on document.body) */
+.city-assign { display: grid; gap: 12px; }
+.city-assign-fresh { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: 12.5px; }
+.city-assign-note, .city-assign-ext { margin: 0; }
+.city-assign-ext { display: flex; align-items: flex-start; gap: 6px; }
+.city-assign-ext .icon { flex: none; width: 15px; height: 15px; margin-top: 1px; }
+.city-assign-error { margin: 0; color: var(--danger); font-size: 12.5px; }

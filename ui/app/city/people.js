@@ -31,12 +31,13 @@ export const WALK_SPEED = 0.85;
 export const ACTIONS = ['stand', 'walk', 'work', 'sit', 'wave', 'talk'];
 
 const ACCENT = '#a597ff';
-const STATUS_COLORS = { active: '#3ccf8e', idle: '#f5b544', offline: '#7d8299' };
+const STATUS_COLORS = { active: '#3ccf8e', idle: '#f5b544', offline: '#7d8299', error: '#ff5d6c' };   // error: a CodaClauda session whose last turn failed
 const RING_COLORS = { claude: '#d97757', codex: '#10a37f', other: '#a597ff' };
 const GEM_MOTION = {
   active: { spin: 2.4, ring: 2.6, bob: 0.045, bobRate: 3.2, drop: 0, glow: 0.62 },
   idle: { spin: 0.7, ring: 0.9, bob: 0.022, bobRate: 1.4, drop: 0, glow: 0.42 },
   offline: { spin: 0.12, ring: 0.25, bob: 0.008, bobRate: 0.8, drop: 0.05, glow: 0 },
+  error: { spin: 0.3, ring: 0.4, bob: 0.03, bobRate: 4.2, drop: 0, glow: 0.5 },
 };
 const BLEND = 0.25; // seconds to cross-fade between actions
 
@@ -600,7 +601,7 @@ function gemMaterial(status) {
   if (!gemMats[status]) {
     const c = new THREE.Color(STATUS_COLORS[status]);
     gemMats[status] = new THREE.MeshToonMaterial({
-      color: c, emissive: c, emissiveIntensity: status === 'active' ? 0.6 : status === 'idle' ? 0.4 : 0.06,
+      color: c, emissive: c, emissiveIntensity: status === 'active' ? 0.6 : status === 'idle' || status === 'error' ? 0.4 : 0.06,
       gradientMap: gradientMap(),
     });
     gemMats[status].userData.shared = true;

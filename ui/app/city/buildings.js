@@ -8,6 +8,7 @@ import { RoundedBoxGeometry } from '../../vendor/three/addons/RoundedBoxGeometry
 import { mergeParts, placed, plaqueTexture, githubFlagTexture, lockTexture, disposeAll as disposeObject } from './fx.js';
 import { cellCenter, cellKey } from './layout.js';
 import { GROUND_Y, seeded, lotSeats } from './scenery.js';
+import { Ticker, TICKER } from './ticker.js';
 
 export const GF = 2.6;           // ground floor height
 export const FH = 1.3;           // upper floor height
@@ -253,6 +254,7 @@ export class Building {
     this.hover = false; this.active = false;
     this.removing = false;
     this.elapsedEmit = 0;
+    this.ticker = null; this.tickerInfo = null;   // { segments, paused } from the view (see setTicker)
     this.apply(project, { animate: env.animateIn });
   }
 
@@ -285,9 +287,10 @@ export class Building {
   }
 
   clearTower() {
+    this.dropTicker();
     for (const child of [...this.tower.children]) { this.tower.remove(child); disposeObject(child); }
     this.pickables = []; this.gear = null; this.flag = null; this.beaconLight = null; this.jib = null; this.chimneyTop = null; this.scaffold = null;
-    this.paintMeshes = []; this.litWindows = null; this.litPanes = []; this.rigTip = null;
+    this.paintMeshes = []; this.litWindows = null; this.litPanes = []; this.rigTip = null; this.plaque = null;
     for (const m of this.signs || []) SPARK_SIGNS.delete(m);
     this.signs = [];
   }
@@ -422,11 +425,36 @@ export class Building {
     if (mirror) { plaqueMaterial = sparkSign(plaqueTexture(this.project.name, { accent: SPARK_GREEN }), { transparent: true }); this.signs.push(plaqueMaterial); }
     else plaqueMaterial = new THREE.MeshBasicMaterial({ map: plaqueTexture(this.project.name, { accent: this.project.color }), transparent: true });
     const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueH), plaqueMaterial);
-    plaque.position.set(0, PAD_TOP + (s.key === 'storefront' ? 2.32 : 2.18), D / 2 + 0.07);
+    // One floor: the ticker band crosses the sign's top, so the sign stands just in front of it.
+    plaque.position.set(0, PAD_TOP + (s.key === 'storefront' ? 2.32 : 2.18), D / 2 + (floors === 1 && this.tickerInfo ? TICKER.off + 0.05 : 0.07));
     plaque.userData = { ...tag };
-    this.tower.add(plaque); this.pickables.push(plaque);
+    this.tower.add(plaque); this.pickables.push(plaque); this.plaque = plaque;
 
     this.buildWindows();
+    this.mountTicker();
+  }
+
+  /* Access ticker: segments from ticker.js tickerSegments (null: none); paused: grey and still. */
+  setTicker(segments, paused = false) {
+    const had = Boolean(this.tickerInfo);
+    this.tickerInfo = segments ? { segments, paused: Boolean(paused) } : null;
+    if (!segments) { this.dropTicker(); return; }
+    if (this.ticker) this.ticker.set(segments, { grey: Boolean(paused) }); else this.mountTicker();
+    if (!had && this.size?.floors === 1 && this.plaque) this.plaque.position.z = this.size.D / 2 + TICKER.off + 0.05;
+  }
+  mountTicker() {
+    if (!this.tickerInfo || this.ticker || !this.size) return;
+    const { W, D, H } = this.size;
+    // Picking the band picks the building (same tag as its walls).
+    this.ticker = new Ticker({ W, D, top: PAD_TOP + H, tag: this.mirror ? { sparkBuildingId: this.id } : { buildingId: this.id } });
+    this.ticker.set(this.tickerInfo.segments, { grey: this.tickerInfo.paused });
+    this.tower.add(this.ticker.mesh); this.pickables.push(this.ticker.mesh);
+  }
+  dropTicker() {
+    if (!this.ticker) return;
+    const mesh = this.ticker.mesh;
+    this.pickables = this.pickables.filter(m => m !== mesh);
+    this.ticker.dispose(); this.ticker = null;
   }
 
   /* Spark side: shared materials swap with hover / busy state. */
@@ -663,8 +691,9 @@ export class BuildingManager {
   get list() { return [...this.items.values()].filter(b => !b.removing); }
 
   /** projects + their cells (Map id → cell) + Set of project ids with active agents.
-   * Returns true when lot footprints changed (decor needs rebuilding). */
-  sync(projects, cells, activeIds, { animate = true } = {}) {
+   * tickers: Map project id → access ticker segments (omitted: leave tickers as they are); paused:
+   * tickers grey and still. Returns true when lot footprints changed (decor needs rebuilding). */
+  sync(projects, cells, activeIds, { animate = true, tickers = null, paused = false } = {}) {
     let lotsChanged = false, staggerIndex = 0;
     const seen = new Set();
     for (const project of projects) {
@@ -684,6 +713,7 @@ export class BuildingManager {
         lotsChanged = true;
       } else if (building.apply(project, { animate })) lotsChanged = true;
       building.setActive(activeIds.has(project.id));
+      if (tickers) building.setTicker(tickers.get(project.id) || null, paused);
     }
     for (const [id, building] of this.items) {
       if (seen.has(id)) continue;
