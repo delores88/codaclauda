@@ -1,14 +1,21 @@
-/* Chat view: thread sidebar, conversation pane and composer.
+/* Chat view: conversation list, conversation pane, composer and connected-resources panel.
  *
- * Two kinds of thread:
- *   mailbox  existing desktop chats. Messages go to the passive shared board; the agent
+ * Kinds of thread:
+ *   session  sess:<id>  a Claude Code or Codex session CodaClauda started (sessions.js): replies
+ *                       stream here, Stop interrupts a turn, and it resumes after a restart.
+ *            pair:<sharedId>  a shared project thread: one Claude and one Codex session shown as
+ *                       one conversation; @claude / @codex / @both route each message.
+ *   mailbox  mail:<addr>  existing desktop chats. Messages go to the passive shared board; the agent
  *            reads it when it next checks its inbox (schedules vary), so replies are not instant.
- *   live     every message starts a fresh dedicated agent session (~30–90 s per answer).
+ *   live     live:<id>  earlier live chats (0.3), replaced by sessions: kept readable, not sendable.
  * A message is information, not permission. Message content is untrusted and is only
- * rendered through markdown.js. Re-renders are keyed by id + signature so scroll
+ * rendered through markdown.js or textContent. Re-renders are keyed by id + signature so scroll
  * position, focus, drafts and open UI survive store updates. */
 import { renderMarkdown, plainText } from '../markdown.js';
 import { agentAvatar } from '../avatar/spec.js';
+import { sessions, UNAVAILABLE_TEXT } from '../sessions.js';
+import { mergeShared, routeMessage, sharedContext, resumeCommand, providerLabel, toMs as eventMs } from '../session-model.js';
+import { LEVELS, ACCESS_NOTE, levelInfo } from '../access.js';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'needs-owner']);
 const MAX_FILES = 10;
@@ -34,12 +41,18 @@ const MAIL_STARTERS = [
   "Give me a short summary of today's progress.",
   'What should I review or decide next?',
 ];
-const LIVE_STARTERS = [
+const SESSION_STARTERS = [
   'Explain how this project is structured.',
   'What changed in the most recent commits?',
   "Look for likely bugs in the code I'm working on.",
   'Draft a test plan for the next release.',
 ];
+const SHARED_STARTERS = [
+  'Both of you: review the latest changes and list the riskiest parts.',
+  '@claude Sketch a plan for the next feature, then @codex can critique it.',
+  "@codex What's failing in the build right now?",
+];
+const ROUTE_HINT = '@claude → Claude only · @codex → Codex only · @both or no mention → both';
 
 /* ---------- pure helpers ---------- */
 const providerName = provider => PROVIDER_NAME[provider] || 'Agent';
@@ -73,6 +86,15 @@ function fenced(text, lang) {
   const fence = '`'.repeat(Math.max(3, longest + 1));
   return `${fence}${lang}\n${String(text).replace(/\n$/, '')}\n${fence}`;
 }
+const samePath = (a, b) => {
+  const norm = path => String(path || '').replaceAll('\\', '/').replace(/^\/\/\?\//, '').replace(/\/+$/, '').toLowerCase();
+  return Boolean(a && b) && norm(a) === norm(b);
+};
+const baseName = path => String(path || '').split(/[\\/]/).filter(Boolean).pop() || '';
+/** One stable look per provider for CodaClauda sessions. */
+const sessionLook = provider => agentAvatar(`codaclauda:${provider}`, provider, providerLabel(provider, true));
+const SESSION_STATUS = { running: 'Working', idle: 'Ready', stopped: 'Closed', error: 'Error' };
+const dotStatus = status => (status === 'running' ? 'active' : status === 'idle' ? 'idle' : 'offline');
 function isTextLike(entry) { return TEXT_TYPES.test(entry.type || '') || TEXT_EXT.test(entry.name || ''); }
 function readDataUrl(file) {
   return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error); reader.readAsDataURL(file); });
@@ -136,49 +158,67 @@ export function mount(root, ctx) {
     'chat-plain': '<path d="M4 6h16M4 11h16M4 16h10"/>',
     'chat-inbox': '<path d="M3 13h5l1.5 3h5L16 13h5"/><path d="M5.6 5h12.8L21 13v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6Z"/>',
     'chat-sidebar': '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9.5 4v16"/>',
+    'chat-panel': '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M14.5 4v16M17 8.5h1.5M17 12h1.5"/>',
   });
 
   const narrow = matchMedia('(max-width: 1000px)');
+  const resNarrow = matchMedia('(max-width: 1200px)');
   const state = {
     threadId: null, search: '', visible: false, dirty: true, raf: 0,
     sideOpen: false, sideCollapsed: false,
     drafts: new Map(),          // threadId -> draft (kept in memory while switching threads)
     sending: new Set(),         // threadIds with a send in flight
     scroll: new Map(),          // threadId -> { top, bottom }
-    msgCache: new Map(), mailRows: new Map(), liveRows: new Map(),
+    msgCache: new Map(), mailRows: new Map(), liveRows: new Map(), sessionRows: new Map(),
     renderedThread: undefined, knownIds: new Set(), firstUnread: null,
     atBottom: true, forceBottom: false, newCount: 0,
-    headSig: '', heroSig: '', bannerSig: '', noteSig: '',
+    headSig: '', heroSig: '', bannerSig: '', noteSig: '', resSig: '', projectSig: '',
     subjectEditing: false, recording: null, ticker: 0,
     acking: new Set(), ackTimer: 0, dragDepth: 0,
+    liveOpen: false,            // "Earlier live chats" starts collapsed
+    resPinned: true, resOverlay: false,   // resources column (wide) / popover (narrow)
+    openTools: new Set(),       // tool groups the owner expanded
   };
 
   /* ---------- sidebar ---------- */
+  const projectSelect = h('select.select.side-project', {
+    'aria-label': 'Filter chats by project', title: 'Show the chats of one project',
+    onchange: event => { store.setPref('chatProject', event.currentTarget.value); schedule(); },
+  });
   const searchInput = h('input.input.side-search-input', {
     type: 'search', placeholder: 'Search chats', 'aria-label': 'Search chats', autocomplete: 'off', spellcheck: 'false',
     oninput: event => { state.search = event.currentTarget.value; renderSidebar(); },
     onkeydown: onSearchKey,
   });
+  const sessionList = h('div.thread-list');
   const mailList = h('div.thread-list');
   const liveList = h('div.thread-list');
+  const sessionCount = h('span.side-count');
   const mailCount = h('span.side-count');
   const liveCount = h('span.side-count');
   const mailSkeleton = h('div.side-skeleton', { 'aria-hidden': 'true' }, [0, 1, 2].map(() => h('div.sk-row', h('span.sk-dot'), h('span.sk-lines', h('span'), h('span')))));
+  const sessionEmpty = h('div.side-empty', { hidden: true });
   const mailEmpty = h('div.side-empty', { hidden: true }, 'No desktop chats on the board yet. They appear here once an agent registers a mailbox.');
-  const liveEmpty = h('div.side-empty', { hidden: true }, h('span', 'No live chats yet.'), h('button.link-btn', { type: 'button', onclick: () => openNewChat('live') }, 'Start one'));
   const searchEmpty = h('div.side-empty.search-empty', { hidden: true });
+  const sessionSection = h('section.side-section',
+    h('header.side-section-head', h('span', 'CodaClauda sessions'), sessionCount, iconButton('plus', 'Start a session', () => openNewChat(), 'side-add')),
+    h('p.side-hint', 'Claude Code and Codex · replies stream here'),
+    sessionList, sessionEmpty);
   const mailSection = h('section.side-section',
-    h('header.side-section-head', h('span', 'Agent mailboxes'), mailCount),
-    h('p.side-hint', 'Existing desktop chats · reply when they check in'),
+    h('header.side-section-head', h('span', 'Desktop chats'), mailCount),
+    h('p.side-hint', 'desktop chat · replies when it checks in'),
     mailList, mailSkeleton, mailEmpty);
-  const liveSection = h('section.side-section',
-    h('header.side-section-head', h('span', 'Live chats'), liveCount, iconButton('plus', 'Start a live chat', () => openNewChat('live'), 'side-add')),
-    h('p.side-hint', 'Fresh session per message · ~30–90 s'),
-    liveList, liveEmpty);
+  const liveToggle = h('button.side-section-toggle', { type: 'button', 'aria-expanded': 'false', onclick: () => { state.liveOpen = !state.liveOpen; renderSidebar(); } },
+    icon('arrowRight', 'side-chevron'), h('span', 'Earlier live chats'), liveCount);
+  const liveSection = h('section.side-section.side-earlier',
+    h('header.side-section-head', liveToggle),
+    h('p.side-hint', 'Read only · replaced by sessions in 0.4'),
+    liveList);
   const side = h('aside.chat-side', { 'aria-label': 'Chats' },
     h('div.side-head', h('h2', 'Chats'), h('button.btn.primary.small.new-chat-btn', { type: 'button', title: 'Start a new conversation', onclick: () => openNewChat() }, icon('plus'), 'New chat')),
+    h('div.side-filter', icon('projects'), projectSelect),
     h('div.side-search', icon('search'), searchInput, h('kbd', 'Ctrl K')),
-    h('nav.side-scroll', { 'aria-label': 'Conversations', onkeydown: onListKey }, mailSection, liveSection, searchEmpty));
+    h('nav.side-scroll', { 'aria-label': 'Conversations', onkeydown: onListKey }, sessionSection, mailSection, liveSection, searchEmpty));
 
   /* ---------- conversation ---------- */
   const head = h('header.chat-head');
@@ -203,7 +243,11 @@ export function mount(root, ctx) {
   const fyiBtn = h('button', { type: 'button', title: 'Just so they know (sent as a notice)', onclick: () => setNeedsReply(false) }, 'FYI');
   const kindToggle = h('div.segmented.kind-toggle', { role: 'group', 'aria-label': 'Message type' }, needsBtn, fyiBtn);
   const sendBtn = h('button.send-btn', { type: 'button', 'aria-label': 'Send message', title: 'Send (Enter)', disabled: true, onclick: () => send() }, icon('send'));
-  const stopBtn = h('button.stop-btn', { type: 'button', 'aria-label': 'Stop the live reply', title: 'Stop', hidden: true, onclick: event => { const run = activeRun(state.threadId); if (run) stopRun(run.requestId, event.currentTarget); } }, icon('stop'));
+  const stopBtn = h('button.stop-btn', { type: 'button', 'aria-label': 'Stop the reply', title: 'Stop', hidden: true, onclick: event => {
+    const info = threadInfo();
+    if (info?.kind === 'session') { stopSessions(info.sessions.filter(s => sessions.running(s.id)), event.currentTarget); return; }
+    const run = activeRun(state.threadId); if (run) stopRun(run.requestId, event.currentTarget);
+  } }, icon('stop'));
   const composer = h('div.composer', replyChip, tray, textarea,
     h('div.composer-bar', h('div.composer-left', attachBtn, micBtn, subjectWrap, kindToggle), h('div.composer-right', sendBtn, stopBtn)),
     fileInput);
@@ -215,11 +259,14 @@ export function mount(root, ctx) {
     h('div.drop-card', icon('paperclip'), h('strong', 'Drop files to attach'), h('span', `Up to ${MAX_FILES} files, 25 MB each`)));
   const main = h('div.chat-main', head, chatBody, composerWrap, dropOverlay);
   const scrim = h('div.side-scrim', { onclick: () => setSide(false) });
-  const shell = h('div.chat', side, scrim, main);
+  const resPanel = h('aside.chat-resources', { 'aria-label': 'Connected resources', hidden: true });
+  const shell = h('div.chat', side, scrim, main, resPanel);
   root.append(shell);
 
   /* ---------- global listeners ---------- */
   store.on('change', schedule);
+  sessions.on('change', schedule);
+  resNarrow.addEventListener('change', () => { state.resOverlay = false; renderHead(true); renderResources(); });
   new ResizeObserver(() => { if (state.visible && state.atBottom && state.threadId) scroller.scrollTop = scroller.scrollHeight; }).observe(scroller);
   narrow.addEventListener('change', () => { if (!narrow.matches) state.sideOpen = false; applySide(); });
   window.addEventListener('focus', scheduleAck);
@@ -231,6 +278,7 @@ export function mount(root, ctx) {
       if (narrow.matches) setSide(true); else if (state.sideCollapsed) { state.sideCollapsed = false; applySide(); }
       searchInput.focus(); searchInput.select();
     } else if (event.key === 'Escape' && state.sideOpen && narrow.matches) setSide(false);
+    else if (event.key === 'Escape' && state.resOverlay && resNarrow.matches) { state.resOverlay = false; renderHead(); renderResources(); }
   });
   const hasFiles = event => Array.from(event.dataTransfer?.types || []).includes('Files');
   main.addEventListener('dragenter', event => { if (!hasFiles(event)) return; event.preventDefault(); if (!state.threadId) return; state.dragDepth += 1; dropOverlay.hidden = false; });
@@ -257,16 +305,59 @@ export function mount(root, ctx) {
     state.dirty = false;
     if (state.threadId?.startsWith('live:') && !store.desktop.chats.threads[state.threadId]) { state.threadId = null; load = true; }
     root.classList.toggle('reduce-motion', Boolean(store.prefs.reducedMotion));
+    markViewing();
     renderSidebar();
     renderHead();
     renderThread();
     updateComposer({ load });
+    renderResources();
     syncTicker();
     scheduleAck();
   }
 
+  /* ----- sessions → conversations ----- */
+  const isSessionThread = id => Boolean(id) && (id.startsWith('sess:') || id.startsWith('pair:'));
+  const threadIdFor = s => (s.sharedId ? `pair:${s.sharedId}` : `sess:${s.id}`);
+  function conversations() {
+    const map = new Map();
+    for (const s of sessions.list) {
+      const id = threadIdFor(s);
+      if (!map.has(id)) map.set(id, { id, shared: Boolean(s.sharedId), sessions: [] });
+      map.get(id).sessions.push(s);
+    }
+    return [...map.values()].map(finishConversation).sort((a, b) => b.lastAt - a.lastAt);
+  }
+  function conversation(id) {
+    if (!isSessionThread(id)) return null;
+    const list = sessions.list.filter(s => threadIdFor(s) === id);
+    return list.length ? finishConversation({ id, shared: id.startsWith('pair:'), sessions: list }) : null;
+  }
+  function finishConversation(c) {
+    c.sessions.sort((a, b) => (a.provider === 'claude' ? 0 : 1) - (b.provider === 'claude' ? 0 : 1));
+    const first = c.sessions[0];
+    c.title = first.title || (c.shared ? 'Shared thread' : `${providerLabel(first.provider, true)} session`);
+    c.projectId = first.projectId; c.cwd = first.cwd; c.access = first.access === 'read' ? 'read' : 'full';
+    c.lastAt = Math.max(0, ...c.sessions.map(s => eventMs(s.lastActivityAt) || eventMs(s.createdAt)));
+    c.running = c.sessions.some(s => sessions.running(s.id));
+    c.unread = c.sessions.some(s => sessions.unread.has(s.id));
+    c.status = c.running ? 'running' : c.sessions.some(s => s.status === 'error') ? 'error' : c.sessions.every(s => s.status === 'stopped') ? 'stopped' : 'idle';
+    c.project = store.project(c.projectId) || store.projects.find(p => p.path && samePath(p.path, c.cwd)) || null;
+    return c;
+  }
+
   function threadInfo(id = state.threadId) {
     if (!id) return null;
+    if (isSessionThread(id)) {
+      const conv = conversation(id);
+      if (!conv) return null;
+      const provider = conv.shared ? 'both' : conv.sessions[0].provider;
+      return {
+        id, kind: 'session', conv, shared: conv.shared, sessions: conv.sessions, provider, title: conv.title, name: conv.title,
+        agentName: conv.shared ? 'Claude + Codex' : providerLabel(provider, true), look: sessionLook(conv.shared ? 'claude' : provider),
+        status: dotStatus(conv.status), sessionStatus: conv.status, running: conv.running, project: conv.project, cwd: conv.cwd,
+        workspace: shownPath(conv.cwd), access: conv.access,
+      };
+    }
     if (id.startsWith('live:')) {
       const raw = store.desktop.chats.threads[id];
       if (!raw) return null;
@@ -302,10 +393,21 @@ export function mount(root, ctx) {
     return null;
   }
 
+  function sessionState(s) {
+    if (sessions.running(s.id)) return 'Working…';
+    if (s.status === 'stopped') return 'Closed · sending resumes it';
+    if (s.status === 'error') return 'Error · see the latest message';
+    return 'Ready';
+  }
   function statusText(info) {
+    if (info.kind === 'session') {
+      const where = info.project?.name || baseName(info.cwd);
+      if (info.shared) return info.sessions.map(s => `${providerLabel(s.provider)}: ${sessionState(s)}`).join(' · ');
+      return `${sessionState(info.sessions[0])}${where ? ` · ${where}` : ''}`;
+    }
     if (info.kind === 'live') {
-      if (activeRun(info.id)) return 'Working on your message';
-      return info.missing ? 'This endpoint is no longer on the board' : 'Ready · starts a fresh session per message';
+      if (activeRun(info.id)) return 'Finishing an earlier reply';
+      return 'Earlier live chat · read only';
     }
     return `${STATUS_LABEL[info.status] || 'Powered down'} · ${info.lastSeenAt ? `seen ${timeAgo(info.lastSeenAt)}` : 'not seen yet'}`;
   }
@@ -333,11 +435,42 @@ export function mount(root, ctx) {
     return `${start ? '…' : ''}${plain.slice(start, i + q.length + 60)}`;
   }
 
+  /* Project dropdown: "All projects" plus every linked project; the choice is a top-level pref. */
+  function filterProject() {
+    const id = store.prefs.chatProject;
+    return id ? store.project(id) || null : null;
+  }
+  function renderProjectSelect() {
+    const options = [{ value: '', label: 'All projects' }, ...store.projects.map(p => ({ value: p.id, label: p.path ? p.name : `${p.name} (GitHub)` }))];
+    const current = filterProject()?.id || '';
+    const sig = JSON.stringify([options, current]);
+    if (sig === state.projectSig) return;
+    state.projectSig = sig;
+    projectSelect.replaceChildren(...options.map(o => h('option', { value: o.value }, o.label)));
+    projectSelect.value = current;
+  }
+  function inProject(project, { projectId, cwd, agentId, endpointId }) {
+    if (!project) return true;
+    if (projectId && (project.id === projectId || project.ids.includes(projectId))) return true;
+    if (cwd && project.path && samePath(cwd, project.path)) return true;
+    if (agentId) { const a = store.agent(agentId); if (a && (a.homeProjectId === project.id || a.currentProjectId === project.id)) return true; }
+    if (endpointId) { const e = store.board.endpoints.find(x => x.id === endpointId); if (e?.workspace && project.path && samePath(e.workspace, project.path)) return true; }
+    return false;
+  }
+
   function renderSidebar() {
+    renderProjectSelect();
     const q = state.search.trim().toLowerCase();
+    const project = filterProject();
     const threads = store.threads();
-    const mail = [], live = [];
+    const mail = [], live = [], owned = [];
+    for (const c of conversations()) {
+      if (!inProject(project, { projectId: c.projectId, cwd: c.cwd })) continue;
+      if (q && !`${c.title}\n${c.project?.name || ''}\n${c.cwd || ''}\n${c.sessions.map(s => s.provider).join(' ')}`.toLowerCase().includes(q)) continue;
+      owned.push(sessionRowItem(c, q));
+    }
     for (const t of threads) {
+      if (!inProject(project, t.kind === 'live' ? { endpointId: String(t.agentId).replace(/^endpoint:/, '') } : { agentId: t.agentId })) continue;
       let snippet = '';
       if (q) {
         const agent = store.agent(t.agentId);
@@ -351,19 +484,80 @@ export function mount(root, ctx) {
       (t.kind === 'live' ? live : mail).push(rowItem(t, snippet, q));
     }
     const focused = side.contains(document.activeElement) ? document.activeElement.dataset?.thread : null;
+    const liveShown = state.liveOpen || Boolean(q) || live.some(item => item.key === state.threadId);
+    reconcile(sessionList, owned, state.sessionRows);
     reconcile(mailList, mail, state.mailRows);
-    reconcile(liveList, live, state.liveRows);
+    reconcile(liveList, liveShown ? live : [], state.liveRows);
     if (focused && !side.contains(document.activeElement)) side.querySelector(`[data-thread="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+    sessionCount.textContent = owned.length ? String(owned.length) : '';
     mailCount.textContent = mail.length ? String(mail.length) : '';
     liveCount.textContent = live.length ? String(live.length) : '';
+    liveToggle.setAttribute('aria-expanded', String(liveShown));
     const loading = !store.sync.at && !threads.length;
     mailSkeleton.hidden = !loading || Boolean(q);
     mailEmpty.hidden = loading || Boolean(mail.length) || Boolean(q);
-    liveEmpty.hidden = Boolean(live.length) || Boolean(q);
+    mailEmpty.textContent = project && threads.some(t => t.kind === 'mailbox')
+      ? `No desktop chats work on ${project.name} right now.`
+      : 'No desktop chats on the board yet. They appear here once an agent registers a mailbox.';
+    const emptySig = JSON.stringify([sessions.available, Boolean(project), owned.length, Boolean(q)]);
+    if (sessionEmpty.dataset.sig !== emptySig) {
+      sessionEmpty.dataset.sig = emptySig;
+      sessionEmpty.replaceChildren(...(sessions.available === false
+        ? [h('span', `${UNAVAILABLE_TEXT}.`), h('span.side-empty-sub', 'Desktop chats below still work.')]
+        : sessions.available === null ? [h('span', 'Loading sessions…')]
+          : [h('span', project ? 'No sessions in this project yet.' : 'No sessions yet.'), h('button.link-btn', { type: 'button', onclick: () => openNewChat() }, 'Start one')]));
+    }
+    sessionEmpty.hidden = Boolean(owned.length) || Boolean(q);
+    sessionSection.hidden = Boolean(q) && !owned.length;
     mailSection.hidden = Boolean(q) && !mail.length;
-    liveSection.hidden = Boolean(q) && !live.length;
-    searchEmpty.hidden = !q || mail.length + live.length > 0;
+    liveSection.hidden = !live.length;
+    searchEmpty.hidden = !q || owned.length + mail.length + live.length > 0;
     if (!searchEmpty.hidden) searchEmpty.textContent = `No chats match “${state.search.trim()}”.`;
+  }
+
+  function pairPortraits(size, status) {
+    const node = h('span.pair-portraits', portrait(sessionLook('claude'), { size, provider: 'claude' }), portrait(sessionLook('codex'), { size, provider: 'codex' }));
+    if (status) node.append(ui.statusDot(status));
+    return node;
+  }
+  function lastAgentText(c) {
+    let best = null;
+    for (const s of c.sessions) {
+      const t = sessions.transcript(s.id);
+      const last = t.items.findLast(x => x.kind === 'agent' && x.text.trim());
+      if (last && (!best || last.at > best.at)) best = last;
+    }
+    return best ? `${c.shared ? `${providerLabel(best.provider)}: ` : ''}${plainText(best.text, 90)}` : '';
+  }
+  function sessionRowItem(c, q) {
+    const selected = c.id === state.threadId;
+    const d = state.drafts.get(c.id);
+    const draftText = !selected && d?.text.trim() ? plainText(d.text, 70) : '';
+    const who = c.shared ? 'Claude + Codex' : providerLabel(c.sessions[0].provider, true);
+    const where = c.project?.name || baseName(c.cwd);
+    const preview = c.running ? `${who} is working…` : lastAgentText(c) || `${who}${where ? ` · ${where}` : ''}`;
+    const time = c.lastAt ? timeAgo(c.lastAt) : '';
+    const status = dotStatus(c.status);
+    const level = levelInfo(c.access);
+    const sig = JSON.stringify([c.title, preview, time, c.unread, status, selected, draftText, q, c.shared, c.sessions[0].provider, c.access]);
+    return {
+      key: c.id, sig,
+      build: () => {
+        const tag = h(`span.acc-tag.${level.id}`, { title: `${level.long}: ${level.rule}` }, level.label);
+        return h(`button.thread-row.session-row${selected ? '.selected' : ''}${c.unread ? '.unread' : ''}`, {
+          type: 'button', 'aria-current': selected ? 'true' : null, dataset: { thread: c.id },
+          title: `${c.title} — ${who}${where ? ` in ${where}` : ''} · ${level.long}`,
+          onclick: () => select(c.id),
+        },
+        c.shared ? pairPortraits(24, status) : portrait(sessionLook(c.sessions[0].provider), { size: 36, provider: c.sessions[0].provider, status }),
+        h('span.thread-text',
+          h('span.thread-top', h('span.thread-title', highlight(c.title, q)), h('span.thread-time', time)),
+          h('span.thread-bottom',
+            draftText ? h('span.thread-preview', h('span.draft-tag', 'Draft: '), draftText) : h('span.thread-preview', preview),
+            tag,
+            c.unread ? h('span.unread-dot', { 'aria-label': 'New reply' }) : null)));
+      },
+    };
   }
 
   function rowItem(t, snippet, q) {
@@ -382,7 +576,7 @@ export function mount(root, ctx) {
       key: t.id, sig,
       build: () => h(`button.thread-row${selected ? '.selected' : ''}${t.unread ? '.unread' : ''}`, {
         type: 'button', 'aria-current': selected ? 'true' : null, dataset: { thread: t.id },
-        title: t.kind === 'live' ? `${t.title} — live chat with ${name}` : `${name} — agent mailbox`,
+        title: t.kind === 'live' ? `${t.title} — earlier live chat with ${name} (read only)` : `${name} — desktop chat · replies when it checks in. CodaClauda can't wake or stream this chat.`,
         onclick: () => select(t.id),
       },
       portrait(look, { size: 36, provider: t.provider, status }),
@@ -428,9 +622,17 @@ export function mount(root, ctx) {
   }
 
   /* ----- header ----- */
+  const resVisible = () => (resNarrow.matches ? state.resOverlay : state.resPinned);
+  function toggleResources() {
+    if (resNarrow.matches) state.resOverlay = !state.resOverlay; else state.resPinned = !state.resPinned;
+    state.resSig = '';
+    renderHead(); renderResources();
+  }
+
   function renderHead() {
     const info = threadInfo();
-    const sig = JSON.stringify(info ? [info.id, info.name, info.title, info.provider, info.status, statusText(info), JSON.stringify(info.look), info.kind] : 0) + sideVisible();
+    const chatFirst = Boolean(store.prefs.chatFirst);
+    const sig = JSON.stringify(info ? [info.id, info.name, info.title, info.provider, info.status, statusText(info), JSON.stringify(info.look), info.kind, info.access, info.running] : 0) + sideVisible() + resVisible() + chatFirst;
     if (sig === state.headSig) return;
     state.headSig = sig;
     preserveFocus(head, () => {
@@ -441,6 +643,21 @@ export function mount(root, ctx) {
           h('button.btn.small.gradient', { type: 'button', onclick: () => openNewChat() }, icon('plus'), 'New chat'));
         return;
       }
+      if (info.kind === 'session') {
+        const level = levelInfo(info.access);
+        const res = iconButton('chat-panel', resVisible() ? 'Hide connected resources' : 'Show connected resources', toggleResources, 'res-toggle');
+        res.setAttribute('aria-expanded', String(resVisible()));
+        const accessPill = h(`span.mode-pill.access.${level.id}`, { tabindex: '0', title: `${level.long}: ${level.rule} Set when the session started. ${ACCESS_NOTE}` }, icon('shield'), h('b', level.label), h('span.mode-detail', '· CodaClauda session'));
+        head.replaceChildren(
+          toggle,
+          info.shared ? pairPortraits(30, info.status) : portrait(info.look, { size: 38, provider: info.provider, status: info.status }),
+          h('div.head-text',
+            h('div.head-title', h('strong.head-name', { title: info.title }, info.title), ...(info.shared ? info.sessions.map(s => providerPill(s.provider)) : [providerPill(info.provider)])),
+            h('div.head-sub', h('span.head-status', statusText(info)))),
+          accessPill,
+          h('div.head-actions', res, iconButton('power', info.shared ? 'Close both sessions' : 'Close session', () => confirmClose(info))));
+        return;
+      }
       const live = info.kind === 'live';
       head.replaceChildren(
         toggle,
@@ -449,17 +666,81 @@ export function mount(root, ctx) {
           h('div.head-title', h('strong.head-name', { title: info.agent?.label || info.name }, info.name), providerPill(info.provider)),
           h('div.head-sub', live && info.title !== info.name ? h('span.head-thread', info.title) : null, h('span.head-status', statusText(info)))),
         live
-          ? h('span.mode-pill.live', { tabindex: '0', title: 'Each message starts a fresh dedicated agent session that reads this conversation, answers in about 30–90 seconds, then exits.' }, icon('bolt'), h('b', 'Live'), h('span.mode-detail', '· new session per message'))
-          : h('span.mode-pill.mailbox', { tabindex: '0', title: 'An existing desktop chat. Messages wait until it checks its inbox; its schedule may vary and sending does not wake it. A message is information, not permission.' }, icon('clock'), h('b', 'Mailbox'), h('span.mode-detail', '· replies when the agent checks in')),
+          ? h('span.mode-pill.live', { tabindex: '0', title: 'An earlier live chat from CodaClauda 0.3. Live chats were replaced by sessions; this one stays readable.' }, icon('clock'), h('b', 'Earlier live chat'), h('span.mode-detail', '· read only'))
+          : h('span.mode-pill.mailbox', { tabindex: '0', title: "An existing desktop chat. Messages wait until it checks its inbox; its schedule may vary, and CodaClauda can't wake or stream it. A message is information, not permission." }, icon('clock'), h('b', 'Desktop chat'), h('span.mode-detail', '· replies when it checks in')),
         h('div.head-actions',
-          iconButton('city', 'Show in City', () => navigate('city', { focusAgent: info.agentId })),
+          chatFirst ? null : iconButton('city', 'Show in City', () => navigate('city', { focusAgent: info.agentId })),
           iconButton('agents', 'Agent details', () => navigate('agents', { agent: info.agentId })),
           live ? iconButton('trash', 'Delete chat', () => confirmDelete(info)) : null));
     });
   }
 
+  /* ----- connected resources (sessions only): a right column, or a popover on narrow windows ----- */
+  function renderResources() {
+    const info = threadInfo();
+    const show = info?.kind === 'session' && resVisible();
+    shell.classList.toggle('has-res', Boolean(show) && !resNarrow.matches);
+    shell.classList.toggle('res-overlay', Boolean(show) && resNarrow.matches);
+    resPanel.hidden = !show;
+    if (!show) { state.resSig = ''; return; }
+    const project = info.project;
+    const access = project ? store.projectAccess(project.id) : null;
+    const sig = JSON.stringify([info.id, project?.id, project?.name, project?.path, project?.url, access?.level, access?.playwright, info.access,
+      info.sessions.map(s => [s.id, s.provider, s.status, s.access, s.playwright, s.providerSessionId, s.threadId, s.cwd, sessions.running(s.id)])]);
+    if (sig === state.resSig) return;
+    state.resSig = sig;
+    const block = (iconName, title, ...body) => h('section.res-block', h('h4', icon(iconName), title), ...body);
+    const cwd = info.cwd || project?.path || '';
+    const level = levelInfo(info.access);
+    const levelPicker = project ? h('div.segmented.res-levels', { role: 'group', 'aria-label': `Access level for ${project.name}` }, LEVELS.map(l => h(`button.res-level.${l.id}`, {
+      type: 'button', 'aria-pressed': String(access.level === l.id), title: l.rule,
+      onclick: () => { if (store.projectAccess(project.id).level !== l.id) saveAccess(project, { level: l.id }, `${project.name}: ${l.long}. Applies to the next session started there.`); },
+    }, l.label))) : null;
+    const playwright = project ? h('label.switch', { title: 'Playwright MCP browser control' },
+      h('input', { type: 'checkbox', checked: access.playwright, 'aria-label': `Browser control (Playwright) for ${project.name}`,
+        onchange: event => saveAccess(project, { playwright: event.currentTarget.checked }, `Browser control ${event.currentTarget.checked ? 'on' : 'off'} for ${project.name}. Applies to the next session started there.`) }),
+      h('span')) : null;
+    const sessionCard = s => {
+      const command = resumeCommand(s);
+      const providerId = s.provider === 'claude' ? s.providerSessionId : s.threadId || s.providerSessionId;
+      return h('section.res-block.res-session',
+        h('h4', providerPill(s.provider), h('span.res-status', h(`span.status-dot.${dotStatus(sessions.running(s.id) ? 'running' : s.status)}`), SESSION_STATUS[sessions.running(s.id) ? 'running' : s.status] || s.status)),
+        h('dl.res-facts',
+          h('dt', 'Session ID'),
+          h('dd', providerId ? h('code.res-id', { title: String(providerId) }, String(providerId)) : h('span.muted', 'Known after the first reply')),
+          h('dt', 'Access'), h('dd', levelInfo(s.access).long),
+          h('dt', 'Browser'), h('dd', s.playwright ? 'Playwright on' : 'Off')),
+        h('div.res-actions',
+          h('button.btn.small', { type: 'button', disabled: !command, title: command || 'Available after the first reply', onclick: () => copyText(command, 'Resume command copied') }, icon('terminal'), 'Copy resume command')));
+    };
+    preserveFocus(resPanel, () => resPanel.replaceChildren(
+      h('header.res-head', h('h3', 'Connected resources'), iconButton('close', 'Hide connected resources', toggleResources, 'res-close')),
+      block('folder', 'Workspace',
+        cwd ? h('code.res-path', { title: shownPath(cwd) }, shownPath(cwd)) : h('p.muted', 'No folder recorded'),
+        cwd ? h('div.res-actions', h('button.btn.small', { type: 'button', onclick: () => bridge.desktop.openExternal(cwd).catch(() => copyText(cwd, 'Path copied')) }, icon('folder'), 'Open folder'),
+          h('button.btn.small.ghost', { type: 'button', onclick: () => copyText(shownPath(cwd), 'Path copied') }, icon('copy'), 'Copy path')) : null),
+      project?.url || project?.repo ? block('github', 'GitHub',
+        h('a.res-link', { href: project.url || `https://github.com/${project.repo.full_name}`, title: project.url || '' }, project.repo?.full_name || project.url)) : null,
+      block('shield', 'Access',
+        levelPicker || h('p', level.long),
+        h('p.field-hint', `This chat runs with ${level.long.toLowerCase()} (${level.rule.toLowerCase().replace(/\.$/, '')}).`,
+          project && access.level !== info.access ? h('strong.res-pending', ` ${project.name} is now ${levelInfo(access.level).long}: applies to the next session started there.`) : ' A change applies to the next session started in this project, not to this one.')),
+      project ? block('external', 'Browser control',
+        h('div.res-row', h('span', 'Playwright MCP'), playwright),
+        h('p.field-hint', 'Lets agents drive a browser. Off by default; applies to the next session started in this project.')) : null,
+      ...info.sessions.map(sessionCard),
+      h('p.res-note', icon('alert'), h('span', "A session you open in a terminal with the resume command runs outside CodaClauda's access level and its stop and memory limits.")),
+      h('div.res-actions.res-end', h('button.btn.small.ghost', { type: 'button', onclick: () => confirmClose(info) }, icon('power'), info.shared ? 'Close both sessions' : 'Close session'))));
+  }
+  async function saveAccess(project, patch, message) {
+    try { await store.setProjectAccess(project.id, patch); toast(message, { kind: 'success', timeout: 4200 }); }
+    catch (error) { toast(error?.message || String(error), { kind: 'error', timeout: 8000 }); }
+    state.resSig = '';
+    renderResources();
+  }
+
   /* ----- conversation ----- */
-  const nearBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 72;
+  const nearBottom =() => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 72;
 
   function renderThread() {
     const id = state.threadId;
@@ -479,6 +760,7 @@ export function mount(root, ctx) {
       log.replaceChildren(); statusArea.replaceChildren();
       state.msgCache = new Map(); state.knownIds = new Set(); state.newCount = 0; state.bannerSig = ''; state.renderedThread = id;
     }
+    if (info.kind === 'session') { renderSessionThread(info, { switched, wasBottom }); return; }
     const msgs = store.threadMessages(id);
     renderHero(msgs.length ? null : 'thread', info);
 
@@ -512,6 +794,117 @@ export function mount(root, ctx) {
     state.forceBottom = false;
     state.restoreOnShow = false;
     updateJump();
+  }
+
+  /* ----- session conversation: history from the display log, then live events ----- */
+  function renderSessionThread(info, { switched, wasBottom }) {
+    for (const s of info.sessions) sessions.load(s.id);
+    const lists = info.sessions.map(s => sessions.transcript(s.id));
+    const all = info.shared ? mergeShared(lists.map(l => l.items)) : lists[0].items;
+    const loading = lists.some(l => l.state === 'loading' || l.state === 'none');
+    const failed = lists.filter(l => l.state === 'error');
+    renderHero(all.length || loading || failed.length ? null : 'thread', info);
+    const items = [];
+    if (loading && !all.length) items.push({ key: 'loading', sig: 'loading', build: () => h('div.msg-system', 'Loading the conversation…') });
+    failed.forEach((l, i) => items.push({ key: `load-error:${i}`, sig: l.error, build: () => h('div.msg-callout.danger.session-callout', icon('alert'), h('div', h('strong', "Couldn't load this history. "), l.error)) }));
+    let prev = null, prevDay = '';
+    for (const item of all) {
+      const day = dayKey(item.at);
+      if (day !== prevDay) {
+        const label = dayLabel(item.at);
+        items.push({ key: `day:${day}`, sig: label, build: () => h('div.day-sep', { role: 'separator' }, h('span', label)) });
+        prevDay = day; prev = null;
+      }
+      const continued = Boolean(prev && prev.kind === item.kind && (item.kind === 'agent' || item.kind === 'owner') && prev.provider === item.provider
+        && item.at - prev.at < GROUP_WINDOW && (item.kind !== 'owner' || prev.targets.join() === item.targets.join()));
+      items.push(sessionItem(item, { info, continued }));
+      prev = item;
+    }
+    for (const s of info.sessions) {
+      if (!sessions.running(s.id)) continue;
+      const mine = all.filter(x => x.sessionId === s.id);
+      if (mine.at(-1)?.kind === 'agent' && mine.at(-1).streaming) continue;
+      const since = mine.findLast(x => x.kind === 'owner')?.at || 0;
+      items.push({ key: `working:${s.id}`, sig: JSON.stringify([s.provider, since]), build: () => sessionWorkingRow(s, since) });
+    }
+    reconcile(log, items, state.msgCache);
+    // Streamed text is updated in place, so a long reply is not rebuilt on every chunk.
+    for (const item of all) {
+      if (item.kind !== 'agent' || !item.streaming) continue;
+      const node = state.msgCache.get(`s:${item.key}`)?.node?.querySelector('.stream-text');
+      if (node && node.textContent !== item.text) node.textContent = item.text;
+    }
+    if (state.bannerSig) { statusArea.replaceChildren(); state.bannerSig = ''; }
+    const fresh = all.filter(x => !state.knownIds.has(x.key));
+    for (const x of fresh) state.knownIds.add(x.key);
+    if (switched || state.restoreOnShow) restoreScroll(info.id);
+    else if (state.forceBottom || wasBottom) scrollToBottom(false);
+    else if (fresh.length) state.newCount += fresh.length;
+    state.forceBottom = false;
+    state.restoreOnShow = false;
+    updateJump();
+  }
+
+  function sessionItem(item, opts) {
+    const key = `s:${item.key}`;
+    if (item.kind === 'agent' && item.streaming) return { key, sig: JSON.stringify(['stream', item.provider, opts.continued, opts.info.shared]), build: () => buildSessionAgent(item, opts) };
+    const sig = JSON.stringify([item.kind, item.text, item.tools, item.targets, item.pending, Boolean(item.turnId), item.attachments, opts.continued, opts.info.shared, clockTime(item.at)]);
+    const build = { owner: buildSessionOwner, agent: buildSessionAgent, tools: buildTools, error: buildSessionError }[item.kind] || buildSessionError;
+    return { key, sig, build: () => build(item, opts) };
+  }
+
+  function buildSessionOwner(item, { info, continued }) {
+    const m = { id: item.key, role: 'owner', text: item.text };
+    const time = h('time.msg-time', { dateTime: isoTime(item.at), title: fullTime(item.at) }, clockTime(item.at));
+    const to = info.shared ? h('span.msg-route', `To ${item.targets.length > 1 ? 'Claude + Codex' : providerLabel(item.targets[0])}`) : null;
+    const status = item.pending && !item.turnId ? h('span.msg-status', icon('clock'), 'Sending…') : h('span.msg-status', icon('check'), 'Sent');
+    return h(`article.msg.owner${continued ? '.continued' : ''}`, { dataset: { id: item.key } },
+      h('div.msg-stack',
+        h('div.bubble', item.text.trim() ? renderMarkdown(item.text) : h('p.msg-muted', '(attachments only)')),
+        attachmentList(item.attachments),
+        h('div.msg-meta', toolbar(m, info), to, time, status)));
+  }
+
+  function buildSessionAgent(item, { info, continued }) {
+    const provider = item.provider;
+    const time = h('time.msg-time', { dateTime: isoTime(item.at), title: fullTime(item.at) }, clockTime(item.at));
+    const content = item.streaming
+      ? h('div.stream-text', item.text)
+      : item.text.trim() ? renderMarkdown(item.text) : h('p.msg-muted', '(empty message)');
+    const m = { id: item.key, role: 'agent', text: item.streaming ? '' : item.text };
+    return h(`article.msg.agent.session-msg${continued ? '.continued' : ''}${item.streaming ? '.running' : ''}`, { dataset: { id: item.key } },
+      h('div.msg-avatar', continued ? h('time.msg-gutter-time', { title: fullTime(item.at) }, shortTime(item.at)) : portrait(sessionLook(provider), { size: 32, provider })),
+      h('div.msg-main',
+        continued ? null : h('div.msg-head', h('strong.msg-author', providerLabel(provider, true)), time, info.shared ? providerPill(provider) : null),
+        h('div.msg-content', content),
+        item.streaming ? null : h('div.msg-foot', toolbar(m, info))));
+  }
+
+  function buildTools(item) {
+    const names = [...new Set(item.tools.map(t => t.name))];
+    const details = h('details.tool-group', {
+      open: state.openTools.has(item.key),
+      ontoggle: event => { if (event.currentTarget.open) state.openTools.add(item.key); else state.openTools.delete(item.key); },
+    },
+    h('summary', icon('terminal'), h('span.tool-count', item.tools.length === 1 ? '1 tool call' : `${item.tools.length} tool calls`),
+      h('span.tool-names', names.slice(0, 4).join(', ') + (names.length > 4 ? '…' : ''))),
+    h('ol.tool-lines', item.tools.map(t => h('li', h('code.tool-name', t.name), t.summary ? h('span.tool-summary', String(t.summary).slice(0, 400)) : null))));
+    return h('div.tool-row', { dataset: { id: item.key } }, details);
+  }
+
+  function buildSessionError(item, { info }) {
+    return h('div.tool-row', { dataset: { id: item.key } },
+      h('div.msg-callout.danger.session-callout', icon('alert'), h('div', info.shared ? h('strong', `${providerLabel(item.provider)}: `) : null, String(item.text || 'The session reported an error.'))));
+  }
+
+  function sessionWorkingRow(s, since) {
+    return h('article.msg.agent.session-msg.running',
+      h('div.msg-avatar', portrait(sessionLook(s.provider), { size: 32, provider: s.provider })),
+      h('div.msg-main', h(`div.working-row.${s.provider}`,
+        h('span.typing-dots', { 'aria-hidden': 'true' }, h('i'), h('i'), h('i')),
+        h('span.working-label', `${providerLabel(s.provider, true)} is working…`),
+        since ? h('span.elapsed', { 'aria-hidden': 'true', dataset: { since: String(since) } }, elapsed(since)) : null,
+        h('button.btn.small.ghost.stop-inline', { type: 'button', 'aria-label': `Stop ${providerLabel(s.provider)}`, onclick: event => stopSessions([s], event.currentTarget) }, icon('stop'), 'Stop'))));
   }
 
   function subjectVisible(m, prev, byId) {
@@ -620,9 +1013,6 @@ export function mount(root, ctx) {
     if (fromAgent && info.kind === 'mailbox') {
       tools.push(h('button.tool-btn.labelled', { type: 'button', title: 'Reply to this message', 'aria-label': 'Reply to this message', onclick: () => startReply(m, info) }, icon('reply'), h('span', 'Reply')));
     }
-    if (fromAgent && info.kind === 'live' && m.requestId && ['failed', 'cancelled', 'needs-owner'].includes(m.state)) {
-      tools.push(h('button.tool-btn.labelled', { type: 'button', title: 'Send the previous message again', 'aria-label': 'Retry', onclick: () => retryLive(m, info.id) }, icon('refresh'), h('span', 'Retry')));
-    }
     return tools.length ? h('div.msg-tools', { role: 'toolbar', 'aria-label': 'Message actions' }, tools) : null;
   }
 
@@ -657,9 +1047,19 @@ export function mount(root, ctx) {
     const last = msgs.at(-1);
     let sig = '';
     if (info.kind === 'mailbox' && last?.role === 'owner') sig = JSON.stringify([info.name, last.status, info.status, info.lastSeenAt ? timeAgo(info.lastSeenAt) : '']);
+    if (info.kind === 'live') sig = 'live-read-only';
     if (sig === state.bannerSig) return;
     state.bannerSig = sig;
     if (!sig) { statusArea.replaceChildren(); return; }
+    if (info.kind === 'live') {
+      statusArea.replaceChildren(h('div.wait-banner', { role: 'status' },
+        h('span.wait-icon', icon('clock')),
+        h('div.wait-text',
+          h('strong', 'An earlier live chat, kept readable'),
+          h('p', 'Live chats were replaced by CodaClauda sessions in 0.4: replies stream, Stop interrupts, and a session resumes after a restart. Start one to keep going.'),
+          h('button.btn.small.primary.wait-action', { type: 'button', onclick: () => openNewChat({ agent: info.provider === 'codex' ? 'codex' : 'claude' }) }, icon('plus'), 'Start a session'))));
+      return;
+    }
     const seen = last.status === 'seen';
     const offline = info.status === 'offline';
     statusArea.replaceChildren(h(`div.wait-banner${seen ? '.seen' : ''}`, { role: 'status' },
@@ -678,13 +1078,12 @@ export function mount(root, ctx) {
     if (mode === 'home') {
       const mailAgents = store.agents.filter(a => a.kind === 'mailbox');
       const working = mailAgents.find(a => a.status === 'active') || mailAgents.find(a => a.status === 'idle') || mailAgents[0] || null;
-      const claude = store.board.endpoints.find(e => e.agent === 'claude') || null;
-      const codex = store.board.endpoints.find(e => e.agent === 'codex') || null;
       const active = store.agents.filter(a => a.status === 'active').length;
-      data = { working, claude, codex, active };
-      sig = JSON.stringify(['home', working?.address, working?.name, working?.status, claude?.id, codex?.id, active]);
+      const chatFirst = Boolean(store.prefs.chatFirst);
+      data = { working, active, chatFirst, available: sessions.available };
+      sig = JSON.stringify(['home', working?.address, working?.name, working?.status, active, chatFirst, sessions.available]);
     } else if (mode === 'thread') {
-      sig = JSON.stringify(['thread', info.id, info.name, info.kind, info.provider, info.status, info.workspace, JSON.stringify(info.look)]);
+      sig = JSON.stringify(['thread', info.id, info.name, info.kind, info.provider, info.status, info.workspace, info.access, info.project?.name, JSON.stringify(info.look)]);
     }
     if (sig === state.heroSig) return;
     state.heroSig = sig;
@@ -692,41 +1091,49 @@ export function mount(root, ctx) {
     preserveFocus(heroArea, () => heroArea.replaceChildren(...(mode === 'home' ? [buildHome(data)] : mode === 'thread' ? [buildIntro(info)] : [])));
   }
 
-  function buildHome({ working, claude, codex, active }) {
+  function buildHome({ working, active, chatFirst, available }) {
     const card = ({ iconName, tone, title, text, run }) => h(`button.hero-card.${tone}`, { type: 'button', 'aria-label': title, onclick: run },
       h('span.hero-card-icon', icon(iconName)), h('span.hero-card-text', h('strong', title), h('span', text)), icon('arrowRight', 'hero-card-arrow'));
-    const liveCard = (endpoint, provider) => card({
-      iconName: 'bolt', tone: provider, title: `Start a live chat with ${providerName(provider)}`,
-      text: endpoint ? `Fresh ${provider === 'claude' ? 'Claude Code' : 'Codex'} session per message · ~30–90 s` : `Connect ${provider === 'claude' ? 'Claude Code' : 'Codex'} in Agent setup → Dedicated connections`,
-      run: () => (endpoint ? startLive(endpoint.id) : navigate('settings')),
-    });
+    const off = available === false ? UNAVAILABLE_TEXT : '';
     return h('div.chat-hero',
       h('div.hero-mark', icon('chat')),
       h('h1', 'Talk to your ', h('span.gradient-text', 'agents')),
-      h('p.hero-lead', 'Message an existing desktop chat through the shared board — it replies when it next checks in — or start a live chat that spins up a fresh Claude or Codex session for every message.'),
+      h('p.hero-lead', 'Start a Claude Code or Codex session that works in your project and streams its replies here, put both in one shared thread, or message an existing desktop chat. It replies when it next checks in.'),
       h('div.hero-grid',
+        card({ iconName: 'bolt', tone: 'claude', title: 'Start a Claude Code session', text: off || 'Streams here · Stop any time · resumes after a restart', run: () => openNewChat({ agent: 'claude' }) }),
+        card({ iconName: 'bolt', tone: 'codex', title: 'Start a Codex session', text: off || 'Streams here · Stop any time · resumes after a restart', run: () => openNewChat({ agent: 'codex' }) }),
+        card({ iconName: 'agents', tone: 'accent', title: 'Both: shared project thread', text: off || 'Claude and Codex in one thread · @claude / @codex to pick', run: () => openNewChat({ agent: 'both' }) }),
         card({
-          iconName: 'chat-inbox', tone: 'accent', title: 'Ask for a status update',
+          iconName: 'chat-inbox', tone: 'success', title: 'Ask a desktop chat for a status update',
           text: working ? `${working.name} · ${STATUS_LABEL[working.status] || ''}` : 'Pick a desktop chat to ask',
           run: () => { if (!working) { openNewChat(); return; } select(`mail:${working.address}`); prefill(STATUS_PROMPT); },
         }),
-        liveCard(claude, 'claude'),
-        liveCard(codex, 'codex'),
-        card({ iconName: 'city', tone: 'success', title: "See who's working in the City", text: active ? `${active} agent${active === 1 ? '' : 's'} working right now` : 'Walk the streets of your projects', run: () => navigate('city') })),
-      h('p.hero-foot', 'A message is information, not permission — only you authorize actions.'));
+        chatFirst ? null : card({ iconName: 'city', tone: 'neutral', title: "See who's working in the City", text: active ? `${active} agent${active === 1 ? '' : 's'} working right now` : 'Walk the streets of your projects', run: () => navigate('city') })),
+      h('p.hero-foot', 'A message is information, not permission — only you authorize actions. ', ACCESS_NOTE));
   }
 
   function buildIntro(info) {
+    if (info.kind === 'session') {
+      const level = levelInfo(info.access);
+      const where = info.workspace ? [' in ', h('span.mono', info.workspace)] : '';
+      return h('div.thread-intro',
+        info.shared ? pairPortraits(56) : portrait(info.look, { size: 72, provider: info.provider }),
+        h('h2', info.title),
+        h('div.intro-mode', h(`span.acc-tag.${level.id}`, level.long), info.project ? pill(info.project.name, 'neutral') : null),
+        h('p', info.shared
+          ? ['Claude Code and Codex share this thread', where, '. Start a message with @claude or @codex to talk to one; otherwise both answer, and each one is told what the other said since it last spoke.']
+          : [`${providerLabel(info.provider, true)} works`, where, ` with ${level.long.toLowerCase()} access. Replies stream here; Stop interrupts a turn and the session stays resumable.`]),
+        h('div.intro-chips', (info.shared ? SHARED_STARTERS : SESSION_STARTERS).map(text => h('button.intro-chip', { type: 'button', onclick: () => prefill(text) }, text))));
+    }
     const live = info.kind === 'live';
-    const who = info.provider === 'other' ? info.name : providerName(info.provider);
     return h('div.thread-intro',
       portrait(info.look, { size: 72, provider: info.provider, status: live ? undefined : info.status }),
       h('h2', info.name),
-      h('div.intro-mode', live ? pill('Live · ~30–90 s per reply', 'accent') : pill(`Mailbox · ${STATUS_LABEL[info.status] || 'Powered down'}`, info.status === 'active' ? 'success' : 'neutral')),
+      h('div.intro-mode', live ? pill('Earlier live chat · read only', 'neutral') : pill(`Desktop chat · ${STATUS_LABEL[info.status] || 'Powered down'}`, info.status === 'active' ? 'success' : 'neutral')),
       h('p', live
-        ? [`Each message starts a fresh ${who} session`, info.workspace ? [' in ', h('span.mono', info.workspace)] : '', '. It reads the recent conversation, answers in about 30–90 seconds, then exits.']
+        ? 'This live chat has no messages. Live chats were replaced by CodaClauda sessions; start a session from New chat.'
         : `${info.name} is an existing desktop chat. Your message is saved to the shared board and it waits until they check their inbox. Their schedule may vary and sending does not wake them.`),
-      h('div.intro-chips', (live ? LIVE_STARTERS : MAIL_STARTERS).map(text => h('button.intro-chip', { type: 'button', onclick: () => prefill(text) }, text))));
+      live ? null : h('div.intro-chips', MAIL_STARTERS.map(text => h('button.intro-chip', { type: 'button', onclick: () => prefill(text) }, text))));
   }
 
   /* ----- scrolling ----- */
@@ -787,11 +1194,18 @@ export function mount(root, ctx) {
     stopDictation();
     state.threadId = id || null;
     state.subjectEditing = false;
-    state.firstUnread = id ? store.threadMessages(id).find(m => m.role === 'agent' && m.status === 'unread')?.id || null : null;
+    state.resOverlay = false;
+    markViewing();
+    state.firstUnread = id && !isSessionThread(id) ? store.threadMessages(id).find(m => m.role === 'agent' && m.status === 'unread')?.id || null : null;
     if (narrow.matches) state.sideOpen = false;
     applySide();
     renderAll({ load: true });
     if (focus && id) focusComposer();
+  }
+
+  function markViewing() {
+    const info = state.visible && !root.hidden ? threadInfo() : null;
+    sessions.view(info?.kind === 'session' ? info.sessions.map(s => s.id) : []);
   }
 
   function threadForAgent(agentId) {
@@ -799,42 +1213,138 @@ export function mount(root, ctx) {
     if (agent?.kind === 'mailbox') return `mail:${agent.address}`;
     const endpointId = agent?.endpointId || (String(agentId).startsWith('endpoint:') ? String(agentId).slice(9) : null);
     if (endpointId) {
+      // Live chats were replaced by sessions: open an earlier one if it exists, never make a new one.
       const existing = store.threads().find(t => t.kind === 'live' && t.agentId === `endpoint:${endpointId}`);
-      return existing ? existing.id : store.createLiveThread(endpointId);
+      return existing ? existing.id : null;
     }
     return `mail:${agentId}`;
   }
 
-  function startLive(endpointId) { select(store.createLiveThread(endpointId)); }
+  const segmented = (items, current, onpick, label) => {
+    const buttons = items.map(item => h('button', { type: 'button', 'aria-pressed': String(item.id === current), dataset: { id: item.id }, title: item.title || '', onclick: () => { for (const b of buttons) b.setAttribute('aria-pressed', String(b === buttons[items.indexOf(item)])); onpick(item.id); } }, item.label));
+    return h('div.segmented', { role: 'group', 'aria-label': label }, buttons);
+  };
 
-  function openNewChat(focus) {
+  /** New chat: a CodaClauda session (Claude Code, Codex or both in one shared thread) or an existing desktop chat. */
+  function openNewChat(preset = {}) {
     const mailAgents = store.agents.filter(a => a.kind === 'mailbox');
-    const endpoints = store.board.endpoints;
-    let dialog = null;
+    const projects = store.projects;
+    const filtered = filterProject();
+    const pick = {
+      agent: ['claude', 'codex', 'both'].includes(preset.agent) ? preset.agent : 'claude',
+      projectId: (filtered?.path && filtered.id) || projects.find(p => p.path)?.id || '',
+      title: '',
+    };
+    let dialog = null, starting = false;
     const row = (look, provider, status, title, sub, extra, run) => h('button.newchat-row', { type: 'button', onclick: () => { dialog?.close(); run(); } },
       portrait(look, { size: 36, provider, status }), h('span.newchat-text', h('strong', title), h('span', sub)), extra, icon('arrowRight', 'newchat-arrow'));
+
+    const accessLine = h('div.newchat-access');
+    const errorLine = h('p.newchat-error', { role: 'alert', hidden: true });
+    const startBtn = h('button.btn.primary.newchat-start', { type: 'button', onclick: () => start() }, icon('play'), 'Start');
+    const projectPicker = h('select.select', { 'aria-label': 'Project', onchange: event => { pick.projectId = event.currentTarget.value; refresh(); } },
+      projects.map(p => h('option', { value: p.id, disabled: !p.path }, p.path ? p.name : `${p.name} · no local folder (clone it in Projects)`)));
+    projectPicker.value = pick.projectId;
+    const titleInput = h('input.input', { type: 'text', maxLength: 120, placeholder: 'Optional', 'aria-label': 'Title', oninput: event => { pick.title = event.currentTarget.value; },
+      onkeydown: event => { if (event.key === 'Enter') { event.preventDefault(); start(); } } });
+    function refresh() {
+      const project = store.project(pick.projectId);
+      const access = project ? store.projectAccess(project.id) : null;
+      const level = levelInfo(access?.level);
+      accessLine.replaceChildren(...(project
+        ? [h(`span.acc-tag.${level.id}`, level.long), h('span', ` ${level.rule} Browser control (Playwright) ${access.playwright ? 'on' : 'off'}. Change both in the chat's resources panel or in Projects; a change applies to the next session.`)]
+        : [h('span', 'Pick a project with a local folder.')]));
+      startBtn.disabled = starting || sessions.available !== true || !project?.path;
+    }
+    async function start() {
+      const project = store.project(pick.projectId);
+      if (starting || sessions.available !== true || !project?.path) return;
+      starting = true; errorLine.hidden = true; refresh();
+      startBtn.replaceChildren(h('span.spinner'), 'Starting…');
+      try {
+        const id = await startConversation(pick.agent, project, pick.title.trim());
+        dialog?.close();
+        if (id) select(id);
+      } catch (error) {
+        errorLine.hidden = false; errorLine.textContent = `Couldn't start: ${error?.message || error}`;
+      } finally {
+        starting = false; startBtn.replaceChildren(icon('play'), 'Start'); refresh();
+      }
+    }
+
+    const agentPicker = segmented([
+      { id: 'claude', label: 'Claude Code' },
+      { id: 'codex', label: 'Codex' },
+      { id: 'both', label: 'Both: shared thread', title: 'One Claude Code and one Codex session in one conversation' },
+    ], pick.agent, id => { pick.agent = id; }, 'Agent');
+    const localCount = projects.filter(p => p.path).length;
+    const sessionBody = sessions.available === false
+      ? h('div.newchat-empty', h('strong', `${UNAVAILABLE_TEXT}.`), h('span', 'This window has no session engine, so it can only message desktop chats.'), sessions.reason ? h('span.field-hint', sessions.reason) : null)
+      : !localCount
+        ? h('div.newchat-empty', h('span', 'Sessions run in a project folder on this PC. Link a folder or clone a repo first.'),
+          h('button.btn.small', { type: 'button', onclick: () => { dialog?.close(); navigate('projects'); } }, icon('projects'), 'Open Projects'))
+        : h('div.newchat-form',
+          h('div.field', h('span', 'Agent'), agentPicker),
+          h('label.field', h('span', 'Project'), projectPicker),
+          h('label.field', h('span', 'Title'), titleInput),
+          accessLine, errorLine,
+          h('div.newchat-actions', startBtn));
+    const sessionSection = h('section.newchat-section',
+      h('header', h('h3', 'Start a CodaClauda session'), pill('Streams here', 'accent')),
+      h('p.field-hint', 'Runs Claude Code or Codex in the project folder on your own subscription. Stop interrupts a turn; the session resumes after a restart.'),
+      sessionBody);
     const mailboxSection = h('section.newchat-section',
       h('header', h('h3', 'Message an existing desktop chat'), pill('Async', 'neutral')),
-      h('p.field-hint', 'Saved to the shared board. The chat reads it when it next checks its inbox (schedules vary) and replies there.'),
+      h('p.field-hint', "Saved to the shared board. The chat reads it when it next checks its inbox (schedules vary) and replies there. CodaClauda can't wake or stream it."),
       mailAgents.length
         ? h('div.newchat-list', mailAgents.map(a => row(a.look, a.provider, a.status, a.name, `${STATUS_LABEL[a.status] || ''} · ${a.lastSeenAt ? `seen ${timeAgo(a.lastSeenAt)}` : 'not seen yet'}`, providerPill(a.provider), () => select(`mail:${a.address}`))))
         : h('div.newchat-empty', 'No desktop chats have registered a mailbox yet. An agent appears here after it runs the mailbox register command from docs/MAILBOX.md.'));
-    const liveSectionNode = h('section.newchat-section',
-      h('header', h('h3', 'Start a live chat'), pill('~30–90 s', 'accent')),
-      h('p.field-hint', 'Each message starts a fresh dedicated session in the endpoint’s workspace, answers, then exits.'),
-      endpoints.length
-        ? h('div.newchat-list', endpoints.map(e => {
-          const provider = e.agent === 'claude' || e.agent === 'codex' ? e.agent : 'other';
-          const needsAuth = e.auth_status && e.auth_status !== 'authenticated';
-          return row(store.agent(`endpoint:${e.id}`)?.look || agentAvatar(`endpoint:${e.id}`, provider, e.label || e.id), provider, undefined, e.label || e.id,
-            `Fresh ${providerName(provider)} session per message, ~30–90 s${e.workspace ? ` · ${shownPath(e.workspace)}` : ''}`,
-            needsAuth ? pill('Sign-in needed', 'warning') : providerPill(provider), () => startLive(e.id));
-        }))
-        : h('div.newchat-empty', h('span', 'No live endpoints yet. Connect Claude Code or Codex in Agent setup → Dedicated connections to start live chats.'),
-          h('button.btn.small', { type: 'button', onclick: () => { dialog?.close(); navigate('settings'); } }, icon('settings'), 'Open Settings')));
-    const body = h('div.newchat', focus === 'live' ? [liveSectionNode, mailboxSection] : [mailboxSection, liveSectionNode]);
-    dialog = modal({ title: 'New chat', body, actions: [{ label: 'Cancel', kind: 'ghost' }] });
-    requestAnimationFrame(() => dialog.querySelector('.newchat-row')?.focus());
+    refresh();
+    dialog = modal({ title: 'New chat', body: h('div.newchat', sessionSection, mailboxSection), actions: [{ label: 'Cancel', kind: 'ghost' }], wide: true });
+    requestAnimationFrame(() => (dialog.querySelector('.newchat-form .segmented [aria-pressed="true"]') || dialog.querySelector('.newchat-row'))?.focus());
+  }
+
+  /** Starts one session, or two with one sharedId for "Both"; returns the thread id to open. */
+  async function startConversation(agent, project, title) {
+    const access = store.projectAccess(project.id);
+    const base = { projectId: project.id, cwd: project.path, access: access.level, playwright: access.playwright };
+    if (agent !== 'both') {
+      const s = await sessions.start({ ...base, provider: agent, title: title || `${providerLabel(agent, true)} · ${project.name}` });
+      return threadIdFor(s);
+    }
+    const sharedId = crypto.randomUUID();
+    const results = await Promise.allSettled(['claude', 'codex'].map(provider => sessions.start({ ...base, provider, title: title || `${project.name} · shared thread`, sharedId })));
+    const started = results.filter(r => r.status === 'fulfilled');
+    const failed = results.map((r, i) => (r.status === 'rejected' ? `${providerLabel(i ? 'codex' : 'claude')}: ${r.reason?.message || r.reason}` : null)).filter(Boolean);
+    if (!started.length) throw new Error(failed.join(' · '));
+    if (failed.length) toast(`Only one agent started. ${failed.join(' · ')}`, { kind: 'error', timeout: 9000 });
+    return `pair:${sharedId}`;
+  }
+
+  function confirmClose(info) {
+    const both = info.sessions.length > 1;
+    modal({
+      title: both ? 'Close both sessions?' : 'Close this session?',
+      body: `This ends the agent process${both ? 'es' : ''} now${info.running ? ' and stops the reply in progress' : ''}. The history stays here, and sending a new message resumes the session.`,
+      actions: [
+        { label: 'Cancel', kind: 'ghost' },
+        { label: both ? 'Close both' : 'Close session', kind: 'danger', run: async () => {
+          const results = await Promise.allSettled(info.sessions.map(s => sessions.close(s.id)));
+          const failed = results.filter(r => r.status === 'rejected');
+          if (failed.length) toast(`Couldn't close: ${failed[0].reason?.message || failed[0].reason}`, { kind: 'error' });
+          else toast(both ? 'Both sessions closed' : 'Session closed', { kind: 'success', timeout: 2200 });
+        } },
+      ],
+    });
+  }
+
+  async function stopSessions(list, button) {
+    if (!list.length) return;
+    if (button) button.disabled = true;
+    const results = await Promise.allSettled(list.map(s => sessions.stop(s.id)));
+    const failed = results.filter(r => r.status === 'rejected');
+    if (failed.length) { toast(`Couldn't stop: ${failed[0].reason?.message || failed[0].reason}`, { kind: 'error' }); if (button) button.disabled = false; }
+    else toast('Stopping…', { timeout: 1800 });
   }
 
   function confirmDelete(info) {
@@ -863,12 +1373,28 @@ export function mount(root, ctx) {
     return d;
   }
 
+  /** Single session: busy while its turn runs. Shared thread: busy only when every target of the draft is. */
+  function sessionBusy(info, text = draft(info.id)?.text || '') {
+    if (info?.kind !== 'session') return false;
+    if (!info.shared) return sessions.running(info.sessions[0].id);
+    const targets = info.sessions.filter(s => routeMessage(text).targets.includes(s.provider));
+    return targets.length > 0 && targets.some(s => sessions.running(s.id));
+  }
+  function routeNote(info) {
+    const route = routeMessage(draft(info.id)?.text || '');
+    const present = new Set(info.sessions.map(s => s.provider));
+    const to = route.targets.filter(t => present.has(t));
+    const label = to.length > 1 ? 'Claude + Codex' : to.length ? providerLabel(to[0]) : 'nobody (that agent is not in this thread)';
+    return `Sends to ${label}. ${ROUTE_HINT}`;
+  }
+
   function updateComposer({ load = false } = {}) {
     const info = threadInfo();
-    composerWrap.hidden = !info;
-    if (!info) return;
+    composerWrap.hidden = !info || info.kind === 'live';
+    if (!info || info.kind === 'live') return;
     const d = draft();
     const mailbox = info.kind === 'mailbox';
+    const session = info.kind === 'session';
     const sending = state.sending.has(info.id);
     if (load) {
       textarea.value = d.text;
@@ -876,7 +1402,9 @@ export function mount(root, ctx) {
       renderTray(); renderReply(); renderError();
       autoGrow();
     }
-    textarea.placeholder = `Message ${info.name}…`;
+    textarea.placeholder = session
+      ? info.shared ? 'Message both, or start with @claude or @codex…' : `Message ${providerLabel(info.provider, true)}…`
+      : `Message ${info.name}…`;
     textarea.readOnly = sending;
     composer.classList.toggle('is-sending', sending);
     kindToggle.hidden = !mailbox || Boolean(d.replyTo);
@@ -884,18 +1412,22 @@ export function mount(root, ctx) {
     fyiBtn.setAttribute('aria-pressed', String(!d.needsReply));
     subjectWrap.hidden = !mailbox;
     if (mailbox && !state.subjectEditing) refreshSubjectChip();
-    const run = info.kind === 'live' ? activeRun(info.id) : null;
-    sendBtn.hidden = Boolean(run);
-    stopBtn.hidden = !run;
-    if (run && stopBtn.dataset.request !== run.requestId) { stopBtn.dataset.request = run.requestId; stopBtn.disabled = false; }
+    const running = session && info.running;
+    const busy = session && sessionBusy(info);
+    sendBtn.hidden = Boolean(busy && !info.shared);
+    stopBtn.hidden = !running;
+    if (running && stopBtn.dataset.request !== info.id) { stopBtn.dataset.request = info.id; stopBtn.disabled = false; }
+    if (!running) stopBtn.dataset.request = '';
     refreshSendState();
-    const who = info.provider === 'other' ? info.name : providerName(info.provider);
+    const level = session ? levelInfo(info.access) : null;
     const note = mailbox
       ? `Saved to the shared board — ${info.name} reads it at their next inbox check (schedules vary; sending doesn't wake them). A message is information, not permission.`
-      : run ? `${who} is answering — press Stop to cancel.` : `Starts a fresh ${who} session for this message — replies in ~30–90 s.`;
+      : info.shared ? routeNote(info)
+        : running ? `${providerLabel(info.provider, true)} is answering — press Stop to interrupt. The session stays resumable.`
+          : `${providerLabel(info.provider, true)}${info.project ? ` in ${info.project.name}` : ''} · ${level.long}${info.sessionStatus === 'stopped' ? ' · closed: sending resumes it' : ''}`;
     if (note !== state.noteSig) {
       state.noteSig = note;
-      modeNote.replaceChildren(h('span.note-text', note), h('span.composer-keys', 'Enter to send · Shift+Enter for a new line'));
+      modeNote.replaceChildren(h(`span.note-text${info.shared ? '.route-hint' : ''}`, note), h('span.composer-keys', 'Enter to send · Shift+Enter for a new line'));
     }
   }
 
@@ -946,14 +1478,16 @@ export function mount(root, ctx) {
   }
   function onDraftChanged() {
     autoGrow();
-    if (!state.subjectEditing && threadInfo()?.kind === 'mailbox') refreshSubjectChip();
-    refreshSendState();
+    const info = threadInfo();
+    if (!state.subjectEditing && info?.kind === 'mailbox') refreshSubjectChip();
+    if (info?.kind === 'session') updateComposer(); else refreshSendState();
   }
 
   function onComposerKey(event) {
     if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.isComposing) {
       event.preventDefault();
-      if (activeRun(state.threadId)) { toast('A reply is still in progress — wait for it or press Stop.'); return; }
+      const info = threadInfo();
+      if (info?.kind === 'session' ? sessionBusy(info) : activeRun(state.threadId)) { toast('A reply is still in progress — wait for it or press Stop.'); return; }
       send();
     } else if (event.key === 'Escape') {
       const d = draft();
@@ -1103,7 +1637,8 @@ export function mount(root, ctx) {
     if (!info || !d || state.sending.has(id)) return;
     const text = d.text.trim();
     if (!text && !d.files.length) { focusComposer(); return; }
-    if (info.kind === 'live' && activeRun(id)) { toast('A reply is still in progress — wait for it or press Stop.'); return; }
+    if (info.kind === 'live') { toast('Earlier live chats are read only. Start a session from New chat.'); return; }
+    if (info.kind === 'session' && sessionBusy(info, text)) { toast('A reply is still in progress — wait for it or press Stop.'); return; }
     stopDictation();
     state.sending.add(id);
     d.error = null;
@@ -1112,7 +1647,7 @@ export function mount(root, ctx) {
     try {
       const saved = await saveFiles(d, id);
       if (info.kind === 'mailbox') await sendMailbox(info, d, text, saved);
-      else await sendLive(info, d, text, saved);
+      else await sendSession(info, text, saved);
       ok = true;
     } catch (error) {
       d.error = { message: error?.message || String(error || 'Unknown error') };
@@ -1184,29 +1719,25 @@ export function mount(root, ctx) {
     await store.post({ ...payload, id: d.pending.id });
   }
 
-  async function sendLive(info, d, text, saved) {
-    const count = () => store.desktop.chats.threads[info.id]?.messages.length || 0;
-    const before = count();
-    const message = text || `Please take a look at the attached file${saved.length > 1 ? 's' : ''}: ${saved.map(a => a.name).join(', ')}`;
-    try {
-      await store.liveSend(info.id, message, saved.map(a => (a.text != null ? { name: a.name, path: a.path, text: a.text } : { name: a.name, path: a.path })));
-    } catch (error) {
-      // The message already landed in the thread as a failed run (with Retry); the draft can go.
-      if (count() > before) { toast(`${providerName(info.provider)} couldn't start: ${error?.message || error}`, { kind: 'error' }); return; }
-      throw error;
-    }
-  }
-
-  async function retryLive(m, threadId) {
-    if (activeRun(threadId)) { toast('A reply is already in progress.'); return; }
-    const raw = store.desktop.chats.threads[threadId];
-    if (!raw) return;
-    const index = raw.messages.findIndex(x => x.id === m.id);
-    const owner = raw.messages.slice(0, index).findLast(x => x.role === 'owner');
-    if (!owner) { toast('Nothing to retry.'); return; }
-    state.forceBottom = true;
-    try { await store.liveSend(threadId, owner.text, (owner.attachments || []).map(a => ({ name: a.name, path: a.path }))); }
-    catch (error) { toast(`Retry failed: ${error?.message || error}`, { kind: 'error' }); }
+  /** Sends to a session, or routes a shared-thread message (@claude / @codex / @both) and gives each
+   *  target a short block of what the other agent said since it last spoke. */
+  async function sendSession(info, text, saved) {
+    const attachments = saved.map(a => ({ path: a.path, name: a.name }));
+    const filesNote = saved.length ? `Please take a look at the attached file${saved.length > 1 ? 's' : ''}: ${saved.map(a => a.name).join(', ')}` : '';
+    if (!info.shared) { await sessions.send(info.sessions[0].id, text || filesNote, attachments); return; }
+    const route = routeMessage(text);
+    const body = route.text || filesNote;
+    if (!body) throw new Error('Write a message after the @mention.');
+    const targets = info.sessions.filter(s => route.targets.includes(s.provider));
+    if (!targets.length) throw new Error(`${providerLabel(route.mention)} isn't in this thread.`);
+    const transcript = mergeShared(info.sessions.map(s => sessions.transcript(s.id).items));
+    const results = await Promise.allSettled(targets.map(s => {
+      const context = sharedContext(transcript, s.provider);
+      return sessions.send(s.id, context ? `${context}\n\n${body}` : body, attachments);
+    }));
+    const failed = results.map((r, i) => (r.status === 'rejected' ? `${providerLabel(targets[i].provider)}: ${r.reason?.message || r.reason}` : null)).filter(Boolean);
+    if (failed.length === targets.length) throw new Error(failed.join(' · '));
+    if (failed.length) toast(`Not delivered to ${failed.join(' · ')}`, { kind: 'error', timeout: 9000 });
   }
 
   async function stopRun(requestId, button) {
@@ -1272,11 +1803,13 @@ export function mount(root, ctx) {
   function show(params = {}) {
     state.visible = true;
     state.restoreOnShow = true; // a hidden scroller can lose its offset; put it back from memory
+    sessions.refresh();
     let target = null;
     if (params.thread) target = params.thread;
     else if (params.agentId || params.agent) target = threadForAgent(params.agentId || params.agent);
     if (target && target !== state.threadId) select(target, { focus: false });
     else renderAll({ load: state.renderedThread === undefined });
+    if ((params.agentId || params.agent) && !target) openNewChat();
     autoGrow();
     if (typeof params.compose === 'string' && params.compose && state.threadId) prefill(params.compose);
     else if (state.threadId) requestAnimationFrame(() => { if (state.visible && !root.contains(document.activeElement)) focusComposer(); });
@@ -1284,6 +1817,7 @@ export function mount(root, ctx) {
   function hide() {
     rememberScroll();
     state.visible = false;
+    sessions.view([]);
     stopDictation();
     syncTicker();
     state.dragDepth = 0;

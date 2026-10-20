@@ -191,7 +191,7 @@ export class TalkPanel {
     if (modeSig !== this.sigs.mode) {
       this.sigs.mode = modeSig;
       this.mode.replaceChildren(live
-        ? h('span.city-talk-pill.live', { title: 'Each message starts a fresh dedicated agent session that reads this conversation, answers in about 30–90 seconds, then exits.' }, icon('bolt'), h('b', 'Live'), ' · new session per message')
+        ? h('span.city-talk-pill.live', { title: 'Live chats were replaced by CodaClauda sessions in 0.4. Earlier live chats stay readable in Chat.' }, icon('clock'), h('b', 'Earlier live chat'), ' · read only')
         : h('span.city-talk-pill.mailbox', { title: 'An existing desktop chat. Messages wait until it checks its inbox; its schedule may vary and sending does not wake it. A message is information, not permission.' }, icon('clock'), h('b', 'Mailbox'), ' · replies when it checks in'),
       ...(info.missing ? [pill('Endpoint no longer on the board', 'warning')] : []));
     }
@@ -374,17 +374,9 @@ export class TalkPanel {
     if (d.pending?.sig !== sig) d.pending = { sig, id: `owner-${crypto.randomUUID()}` };   // a retry of the same message is idempotent on the board
     await this.store.post({ ...payload, id: d.pending.id });
   }
-  async sendLive(info, d, text) {
-    let id = info.id;
-    if (!id) { id = this.store.createLiveThread(info.endpointId); this.thread.id = id; }   // what Chat does when you open this agent
-    const count = () => this.store.desktop.chats.threads[id]?.messages.length || 0;
-    const before = count();
-    try { await this.store.liveSend(id, text, []); }
-    catch (error) {
-      // The message already landed in the thread as a failed run; the draft can go.
-      if (count() > before) { toast(`${providerName(info.provider)} couldn't start: ${error?.message || error}`, { kind: 'error' }); return; }
-      throw error;
-    }
+  async sendLive() {
+    // Live chats were replaced by sessions (0.4): earlier ones stay readable; a new conversation starts a session in Chat.
+    throw new Error('Live chats were replaced by sessions. Start one in Chat → New chat.');
   }
   async stop(requestId, button) {
     if (button) button.disabled = true;

@@ -1,8 +1,11 @@
 /* Projects: link Desktop folders and GitHub repos, then choose where each one
  * shows up (a lane on the Board, a building in the City). Rows are keyed by
  * project id and rebuilt only when their content changes; the Board/City
- * switches are updated in place so long lists stay fast and focus is kept. */
+ * switches are updated in place so long lists stay fast and focus is kept.
+ * Each row also shows the project's access level for sessions CodaClauda starts (access.js:
+ * Full or Read only), and the toolbar can apply one level to every matching project. */
 import { openNewProjectDialog } from '../newproject.js';
+import { LEVELS, ACCESS_NOTE, levelInfo } from '../access.js';
 
 const FILTERS = [
   { id: 'all', label: 'All', test: () => true },
@@ -146,7 +149,7 @@ export function mount(root, ctx) {
       menu.append(h(`button.proj-menu-item${item.danger ? '.danger' : ''}`, {
         type: 'button', role: 'menuitem', disabled: Boolean(item.disabled), title: item.title || '',
         onclick: () => { closeMenu(); item.run(); },
-      }, icon(item.icon), h('span', item.label)));
+      }, item.swatch ? h('span.proj-menu-swatch', { 'aria-hidden': 'true', style: { '--lc': item.swatch } }) : icon(item.icon), h('span', item.label)));
     }
     document.body.append(menu);
     const rect = anchor.getBoundingClientRect();
@@ -213,6 +216,7 @@ export function mount(root, ctx) {
   });
   const countsNode = h('span.proj-counts');
   const bulkButton = h('button.btn.small', { type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: event => openBulkMenu(event.currentTarget) }, icon('eye'), h('span.bulk-label', 'Visibility'), icon('chevronDown'));
+  const accessButton = h('button.btn.small', { type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: event => openAccessMenu(event.currentTarget) }, icon('shield'), h('span.bulk-label', 'Apply to all projects'), icon('chevronDown'));
 
   const sortButton = (key, label) => h('button.proj-sort', { type: 'button', dataset: { sort: key }, onclick: () => { state.sort = state.sort === key ? 'size' : key; schedule(); } }, label, icon('arrowDown', 'proj-sort-icon'));
   const headCells = {
@@ -231,13 +235,14 @@ export function mount(root, ctx) {
   const toolbar = h('div.proj-toolbar',
     h('div.segmented', { role: 'group', 'aria-label': 'Filter projects' }, filterButtons),
     h('div.proj-search', icon('search'), searchInput),
-    h('div.proj-toolbar-end', countsNode, bulkButton));
+    h('div.proj-toolbar-end', countsNode, accessButton, bulkButton));
   const pagePrev = h('button.btn.ghost.small', { type: 'button', 'aria-label': 'Previous page of projects', onclick: () => goPage(-1) }, 'Previous');
   const pageNext = h('button.btn.ghost.small', { type: 'button', 'aria-label': 'Next page of projects', onclick: () => goPage(1) }, 'Next');
   const pageRange = h('span.proj-pager-range', { 'aria-live': 'polite' });
   const pager = h('nav.proj-pager', { 'aria-label': 'Project list pages', hidden: true }, pageRange, h('div.proj-pager-controls', pagePrev, pageNext));
   const listEmpty = h('div.proj-list-empty', { hidden: true });
-  const mainArea = h('div.proj-main', toolbar, listNode, pager, listEmpty);
+  const accessNote = h('p.proj-access-note', icon('shield'), h('span', h('strong', 'Access'), ' is Full (no prompts) for your own projects and Read only for anyone else\'s by default. ', ACCESS_NOTE, ' A change applies to the next session started in the project.'));
+  const mainArea = h('div.proj-main', accessNote, toolbar, listNode, pager, listEmpty);
   const firstRun = h('div.proj-first-run', { hidden: true });
 
   root.classList.add('projects-view');
@@ -323,6 +328,9 @@ export function mount(root, ctx) {
     bulkButton.disabled = !shown.length;
     bulkButton.querySelector('.bulk-label').textContent = shown.length === projects.length ? 'Visibility' : `Visibility (${shown.length} matching)`;
     bulkButton.title = `Show or hide all ${shown.length === projects.length ? plural(shown.length, 'project') : `${shown.length} matching ${shown.length === 1 ? 'project' : 'projects'}`} at once${shown.length > PAGE_SIZE ? ', on every page' : ''}`;
+    accessButton.disabled = !shown.length;
+    accessButton.querySelector('.bulk-label').textContent = shown.length === projects.length ? 'Apply to all projects' : `Apply to ${shown.length} matching`;
+    accessButton.title = `Set the access level of ${shown.length === projects.length ? `all ${plural(shown.length, 'project')}` : `all ${shown.length} matching`} at once`;
 
     // Filter, search or sort changes return to the first page; data changes clamp to the last page.
     const pageSig = JSON.stringify([state.filter, query, state.sort]);
@@ -346,7 +354,7 @@ export function mount(root, ctx) {
     const keep = new Set();
     pageRows.forEach((project, index) => {
       keep.add(project.id);
-      const info = { linked: isLinkedLocal(project, linked), manifest: isFromManifest(project, fromManifest), agents: agentsByHome.get(project.id) || [], scanning: Boolean(project.path && scanning.has(normalizePath(project.path))) };
+      const info = { linked: isLinkedLocal(project, linked), manifest: isFromManifest(project, fromManifest), agents: agentsByHome.get(project.id) || [], scanning: Boolean(project.path && scanning.has(normalizePath(project.path))), access: store.projectAccess(project.id) };
       const sig = rowSignature(project, info);
       let entry = rows.get(project.id);
       if (!entry || entry.sig !== sig) {
@@ -434,6 +442,7 @@ export function mount(root, ctx) {
       m.loc, m.files, m.commits, m.commits7d, m.floors, m.footprint, m.glow, m.lastActivityAt ? timeAgo(m.lastActivityAt) : '',
       p.scannedAt || 0, Boolean(p.stats?.git), info.linked, info.manifest, info.scanning,
       info.agents.map(a => [a.id, a.name, a.provider, a.look]),
+      info.access.level, info.access.explicit, info.access.playwright,
     ]);
   }
 
@@ -542,8 +551,52 @@ export function mount(root, ctx) {
     node.append(nameCell, sourceCell, codeCell, activityCell,
       h('div.proj-cell.col-switch', { role: 'cell' }, boardSwitch),
       h('div.proj-cell.col-switch', { role: 'cell' }, citySwitch),
-      h('div.proj-cell.col-menu', { role: 'cell' }, menuButton));
+      h('div.proj-cell.col-menu', { role: 'cell' }, menuButton),
+      accessStrip(p, info));
     return { node, board: boardInput, city: cityInput, hiddenTag: node.querySelector('.proj-hidden-tag') };
+  }
+
+  /** Second line of a row: the access level for sessions CodaClauda starts here. */
+  function accessStrip(p, info) {
+    const a = info.access;
+    const levels = h('div.acc-levels', { role: 'group', 'aria-label': `Access level for ${p.name}` }, LEVELS.map(level => h(`button.acc-level.${level.id}`, {
+      type: 'button', 'aria-pressed': String(a.level === level.id), dataset: { fk: `lvl-${level.id}` }, style: { '--lc': level.color },
+      title: a.level === level.id ? `${level.long} (current): ${level.rule}` : `Set ${p.name} to ${level.long}: ${level.rule}`,
+      onclick: () => { if (store.projectAccess(p.id).level !== level.id) saveAccess([p], { level: level.id }, `${p.name}: ${level.long}`); },
+    }, h('span.acc-dot', { 'aria-hidden': 'true' }), h('span', level.label))));
+    return h('div.proj-access', { role: 'cell', 'aria-label': `Access for ${p.name}: ${levelInfo(a.level).long}` },
+      h('span.proj-access-label', icon('shield'), 'Access'), levels,
+      h('span.proj-access-hint', a.explicit ? levelInfo(a.level).rule : `${levelInfo(a.level).rule} Default for ${a.level === 'full' ? 'your own projects' : "projects you don't own"}.`),
+      a.playwright ? h('span.pill.proj-tag', { title: 'Playwright MCP browser control is on for new sessions here' }, 'Browser control on') : null,
+      p.path ? null : h('span.proj-access-hint', 'No local folder: clone it to run sessions.'));
+  }
+
+  function openAccessMenu(anchor) {
+    const n = shownProjects.length, everything = n === store.projects.length;
+    const scope = everything ? `all ${n}` : `all ${n} matching`;
+    const hint = `Applies to ${everything ? `all ${plural(n, 'project')}` : `all ${n} matching ${n === 1 ? 'project' : 'projects'}`}${n > PAGE_SIZE ? ', on every page' : ''}, from the next session started in each.`;
+    openMenu(anchor, [
+      { hint },
+      ...LEVELS.map(level => ({ swatch: level.color, label: `Set ${scope} to ${level.long}`, run: () => bulkAccess({ level: level.id }, `Set to ${level.long}`) })),
+    ], `Access: ${hint.charAt(0).toLowerCase()}${hint.slice(1)}`);
+  }
+
+  async function saveAccess(list, patch, what) {
+    try { await store.setProjectAccessMany(list.map(p => [p.id, patch])); toast(`${what}. Applies to the next session started there.`, { kind: 'success', timeout: 4000 }); return true; }
+    catch (error) { toast(error.message || String(error), { kind: 'error', timeout: 8000 }); return false; }
+  }
+
+  /** One strict save for every matching project, with Undo back to each one's own level. */
+  async function bulkAccess(patch, what) {
+    const list = shownProjects.slice();
+    if (!list.length) return;
+    const before = list.map(p => [p.id, store.projectAccess(p.id).level]);
+    try { await store.setProjectAccessMany(list.map(p => [p.id, patch])); }
+    catch (error) { toast(error.message || String(error), { kind: 'error', timeout: 8000 }); return; }
+    toast(`${what}: ${plural(list.length, 'project')}. Applies to the next session started in each.`, {
+      kind: 'success', timeout: 7000,
+      action: { label: 'Undo', run: () => store.setProjectAccessMany(before.map(([id, level]) => [id, { level }])).catch(error => toast(error.message || String(error), { kind: 'error', timeout: 8000 })) },
+    });
   }
 
   function openRowMenu(anchor, id) {
@@ -556,7 +609,7 @@ export function mount(root, ctx) {
       p.path ? { icon: 'folder', label: 'Open folder', run: () => openExternal(p.path) } : null,
       p.url || p.repo || pendingGithub(p) ? { icon: 'external', label: 'Open on GitHub', run: () => openExternal(p.url || `https://github.com/${p.repo?.full_name || pendingGithub(p)}`) } : null,
       { icon: 'tag', label: 'Rename & aliases', run: () => renameProject(p) },
-      { icon: 'city', label: 'Show in City', disabled: !p.visible.city, title: p.visible.city ? '' : 'Hidden from the City', run: () => navigate('city', { focusProject: p.id }) },
+      store.prefs.chatFirst ? null : { icon: 'city', label: 'Show in City', disabled: !p.visible.city, title: p.visible.city ? '' : 'Hidden from the City', run: () => navigate('city', { focusProject: p.id }) },
       'sep',
       { icon: 'unlink', label: 'Unlink…', danger: true, run: () => unlinkProject(p) },
     ], `Actions for ${p.name}`);

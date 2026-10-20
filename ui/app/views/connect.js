@@ -600,9 +600,9 @@ export function mount(root, ctx) {
   }
 
   const connCard = h('details.card.cx-advanced', { ontoggle: event => { if (event.currentTarget.open) discover().catch(() => {}); } },
-    h('summary', icon('plug'), h('span.cx-summary-text', h('strong', 'Dedicated connections'), h('small', 'Advanced · Claude Code / Codex CLIs that CodaClauda starts fresh for live chats and dedicated tasks.'))),
+    h('summary', icon('plug'), h('span.cx-summary-text', h('strong', 'Dedicated connections'), h('small', 'Advanced · Claude Code / Codex CLIs that CodaClauda starts fresh for dedicated tasks. Chat sessions need none of these.'))),
     h('div.cx-advanced-body',
-      h('div.cx-section-head', h('p.muted', 'Live chat in the Chat view uses these connections. Each uses the provider CLI’s existing sign-in; nothing here launches model work.'), h('span.cx-spacer'), rescanButton),
+      h('div.cx-section-head', h('p.muted', 'Dedicated tasks use these connections (live chats were replaced by sessions in Chat). Each uses the provider CLI’s existing sign-in; nothing here launches model work.'), h('span.cx-spacer'), rescanButton),
       connList));
 
   /* ---------- board controls (the 0.2 tools' pause, recovery and DGXBridge calls) ---------- */

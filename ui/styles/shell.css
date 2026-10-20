@@ -4,6 +4,8 @@ html, body { height: 100%; margin: 0; }
 body { background: var(--bg); color: var(--text); font: 14px/1.5 var(--font-ui); -webkit-font-smoothing: antialiased; overflow: hidden; }
 button, input, select, textarea { font: inherit; color: inherit; }
 [hidden] { display: none !important; }
+/* Chat-first layout (Settings): the City's entry points step aside; navigate('city') still works. */
+.chat-first .city-entry { display: none !important; }
 a { color: var(--accent-2); }
 ::selection { background: var(--accent-soft); }
 :focus-visible { outline: none; box-shadow: var(--focus); border-radius: var(--radius-xs); }

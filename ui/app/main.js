@@ -29,12 +29,18 @@ function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
 }
 
+/** Rail views: Chat-first layout (Settings) hides the City; navigate('city') still works. */
+const railViews = () => VIEWS.filter(view => !(store.prefs.chatFirst && view.id === 'city'));
+let railSig = '';
+
 function renderRail() {
   const rail = $('#rail');
+  const views = railViews();
+  railSig = views.map(v => v.id).join();
   const item = view => h('button.rail-item', { type: 'button', dataset: { view: view.id }, title: view.label, 'aria-label': view.label, onclick: () => navigate(view.id) }, icon(view.icon), h('span.rail-label', view.label), h('span.rail-badge', { hidden: true }));
   clear(rail,
     h('a.rail-brand', { href: '#', title: 'CodaClauda', onclick: event => { event.preventDefault(); navigate('chat'); } }, h('img', { src: 'brand.svg', alt: '', width: 34, height: 34 })),
-    h('div.rail-group', VIEWS.map(item)),
+    h('div.rail-group', views.map(item)),
     h('div.rail-spacer'),
     h('div.rail-group', FOOTER_VIEWS.map(item)),
   );
@@ -128,7 +134,11 @@ function onNotify({ messages }) {
 async function boot() {
   applyTheme('dark');
   renderRail(); renderTopbar();
-  store.on('change', () => { renderTopbar(); updateBadges(); });
+  store.on('change', () => {
+    document.documentElement.classList.toggle('chat-first', Boolean(store.prefs.chatFirst));
+    if (railViews().map(v => v.id).join() !== railSig) renderRail();
+    renderTopbar(); updateBadges();
+  });
   store.on('sync', () => renderTopbar());
   store.on('notify', onNotify);
   // Pinch / Ctrl+wheel never zooms the whole app window (the City handles its own zoom).
@@ -142,15 +152,18 @@ async function boot() {
   });
   document.addEventListener('keydown', event => {
     if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
-    const index = Number(event.key) - 1;
-    if (index >= 0 && index < VIEWS.length) { event.preventDefault(); navigate(VIEWS[index].id); }
+    const index = Number(event.key) - 1, views = railViews();
+    if (index >= 0 && index < views.length) { event.preventDefault(); navigate(views[index].id); }
   });
   // Deep links: #view or #view?key=value&key2=value2 (e.g. #chat?thread=mail:codex-claudacoda)
   const [initial, query = ''] = location.hash.slice(1).split('?');
   const initialParams = Object.fromEntries(new URLSearchParams(query));
   // Views render immediately and fill in as the store loads (they listen for 'change').
-  navigate(ALL.some(v => v.id === initial) ? initial : 'chat', initialParams);
-  await store.loadDesktop();
+  // A #city deep link waits for the saved prefs: the Chat-first layout opens Chat instead.
+  const known = ALL.some(v => v.id === initial);
+  if (initial === 'city') await store.loadDesktop();
+  navigate(known && !(initial === 'city' && store.prefs.chatFirst) ? initial : 'chat', initialParams);
+  if (initial !== 'city') await store.loadDesktop();
   applyTheme(store.prefs.theme || 'dark');
   store.emit('change');
   store.start().then(() => {
