@@ -2,6 +2,9 @@
  *
  * Display events (Tauri 'session://event' and session_history):
  *   { id, turnId, kind: 'user'|'delta'|'message'|'tool'|'status'|'error'|'done', text?, tool?{name,summary}, status?, error?, at }
+ *   0.4.1 adds kind 'wake' { from, subject } (a board message woke the session) and kind 'queued' { count }.
+ *   A wake turn's 'user' event carries the engine's wake text (WAKE_PREFIX…); it is shown inside the
+ *   wake line, never as a message from Ben.
  * buildTranscript turns one session's events into display items; mergeShared joins the two
  * sessions of a shared project thread into one conversation; routeMessage and sharedContext
  * implement the @claude / @codex / @both routing and the "what the other agent said" block. */
@@ -36,6 +39,16 @@ export function routeMessage(input) {
 /** The owner text without a leading shared-thread context block. */
 export const stripContext = text => String(text ?? '').replace(CONTEXT_RE, '');
 
+/** The engine's wake turn: "New board message from <from> (<kind>): <subject>\n\n<body>…" */
+export const WAKE_PREFIX = 'New board message from ';
+/** { from, kind, subject } for a wake turn's text, or null for anything else. */
+export function parseWakeText(text) {
+  const value = String(text ?? '');
+  if (!value.startsWith(WAKE_PREFIX)) return null;
+  const m = /^New board message from (.+?) \(([^)\n]*)\): ([^\n]*)/.exec(value);
+  return m ? { from: m[1], kind: m[2], subject: m[3] } : { from: '', kind: '', subject: '' };
+}
+
 /** Drop streamed deltas that a finished 'message' of the same turn already covers. */
 export function compactEvents(events) {
   const lastMessage = new Map();
@@ -44,12 +57,13 @@ export function compactEvents(events) {
 }
 
 /** One session's events → { items, openTurn, lastAt }.
- *  items: { key, kind: 'owner'|'agent'|'tools'|'error', provider, sessionId, turnId, at, text?, streaming?, tools?, targets? }.
+ *  items: { key, kind: 'owner'|'agent'|'tools'|'error'|'wake', provider, sessionId, turnId, at, text?, streaming?, tools?, targets?, from?, subject?, body? }.
  *  openTurn: the turnId of a user turn with no 'done' yet (null when none). */
 export function buildTranscript(events, { provider = '', sessionId = '' } = {}) {
   const items = [];
   const turns = new Map();   // turnId -> { agent: n, tools: n, err: n, last: item, done }
-  let openTurn = null, lastAt = 0, users = 0;
+  const openWakes = [];      // wake items still waiting for their turn's text
+  let openTurn = null, lastAt = 0, users = 0, wakes = 0;
   const turnOf = id => { const key = id ?? ''; if (!turns.has(key)) turns.set(key, { agent: 0, tools: 0, err: 0, last: null, done: false }); return turns.get(key); };
   for (const e of Array.isArray(events) ? events : []) {
     if (!e || typeof e !== 'object') continue;
@@ -57,7 +71,28 @@ export function buildTranscript(events, { provider = '', sessionId = '' } = {}) 
     const t = turnOf(turnId);
     if (at) lastAt = Math.max(lastAt, at);
     const base = { provider, sessionId, turnId, at };
-    if (e.kind === 'user') {
+    const wakeText = e.kind === 'user' ? parseWakeText(e.text) : null;
+    if (e.kind === 'wake') {
+      const item = { ...base, key: `${sessionId}:w:${turnId || `${at}-${wakes}`}`, kind: 'wake', from: String(e.from || ''), subject: String(e.subject || ''), body: '' };
+      wakes += 1;
+      items.push(item); openWakes.push(item);
+    } else if (e.kind === 'user' && (wakeText || (turnId && openWakes.some(w => w.turnId === turnId)))) {
+      // The wake turn itself: fold its text into the wake line (it was not written by Ben).
+      const exact = turnId ? openWakes.findIndex(w => w.turnId === turnId) : -1;
+      const i = exact >= 0 ? exact : wakeText ? 0 : -1;
+      let item = i >= 0 ? openWakes.splice(i, 1)[0] : null;
+      if (!item) {
+        item = { ...base, key: `${sessionId}:w:${turnId || `${at}-${wakes}`}`, kind: 'wake', from: wakeText?.from || '', subject: wakeText?.subject || '', body: '' };
+        wakes += 1;
+        items.push(item);
+      }
+      item.body = String(e.text ?? '');
+      if (!item.turnId) item.turnId = turnId;
+      if (!item.from && wakeText?.from) item.from = wakeText.from;
+      if (!item.subject && wakeText?.subject) item.subject = wakeText.subject;
+      users += 1;
+      t.last = item; t.done = false; openTurn = turnId || openTurn;
+    } else if (e.kind === 'user') {
       const item = { ...base, key: `${sessionId}:u:${turnId || users}`, kind: 'owner', text: stripContext(e.text), targets: [provider] };
       users += 1;
       items.push(item); t.last = item; t.done = false; openTurn = turnId || openTurn;

@@ -393,6 +393,29 @@
 .newchat-start { min-width: 110px; }
 .newchat-empty strong { color: var(--text); }
 
+/* 0.4.1: wake on mail, send queue */
+.msg-wake { display: flex; justify-content: center; margin: 14px auto 0; max-width: 100%; color: var(--muted); font-size: 12.5px; }
+.wake-line, .wake-details summary { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; padding: 4px 12px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface-2); }
+.wake-details { max-width: min(640px, 100%); }
+.wake-details summary { cursor: pointer; list-style: none; }
+.wake-details summary::-webkit-details-marker { display: none; }
+.wake-details summary:hover { background: var(--surface-hover); }
+.wake-details summary:focus-visible { outline: none; box-shadow: var(--focus); }
+.msg-wake .icon { flex: none; width: 14px; height: 14px; color: var(--warning); }
+.wake-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wake-text strong { color: var(--text-2); font-weight: 650; }
+.msg-wake .msg-time { flex: none; }
+.wake-body { margin: 8px 0 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text-2); font: 12px/1.5 var(--font-mono); text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
+.wake-mark { display: inline-flex; margin-left: 4px; }
+.wake-mark .icon { width: 11px; height: 11px; }
+.queue-chip { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px; border-radius: var(--radius-pill); background: var(--accent-soft); color: var(--accent-2); font-size: 12px; font-weight: 650; white-space: nowrap; }
+.queue-chip .icon { width: 13px; height: 13px; }
+.msg-status.queued { color: var(--accent-2); }
+.res-wake { display: grid; gap: 8px; margin-top: 4px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.res-wake-label { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.res-wake-label .icon { width: 14px; height: 14px; color: var(--warning); }
+.res-wake-off { font-size: 12px; }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 1240px) {
   .composer-keys, .mode-detail { display: none; }

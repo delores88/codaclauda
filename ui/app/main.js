@@ -3,12 +3,15 @@ import { store } from './store.js';
 import * as ui from './ui.js';
 import * as bridge from './bridge.js';
 import { pendingRequests } from './approvals.js';
+import { sessions } from './sessions.js';
+import { schedules } from './schedules.js';
 const { h, icon, $, clear, portrait, toast, timeAgo } = ui;
 
 const VIEWS = [
   { id: 'chat', label: 'Chat', icon: 'chat', load: () => import('./views/chat.js') },
   { id: 'board', label: 'Message board', icon: 'board', load: () => import('./views/board.js') },
   { id: 'tasks', label: 'Tasks', icon: 'tasks', load: () => import('./views/tasks.js') },
+  { id: 'schedules', label: 'Schedules', icon: 'clock', load: () => import('./views/schedules.js') },
   { id: 'city', label: 'City', icon: 'city', load: () => import('./views/city.js') },
   { id: 'agents', label: 'Agents', icon: 'agents', load: () => import('./views/agents.js') },
   { id: 'connect', label: 'Agent setup', icon: 'agentAdd', load: () => import('./views/connect.js') },
@@ -104,9 +107,10 @@ export async function navigate(id, params = {}) {
 }
 
 /* Gentle two-note chime made with WebAudio (no audio assets). */
-let audio;
+let audio, lastChime = 0;
 function chime() {
-  if (!store.prefs.sound) return;
+  if (!store.prefs.sound || Date.now() - lastChime < 1500) return;
+  lastChime = Date.now();
   try {
     audio ||= new AudioContext();
     const now = audio.currentTime;
@@ -131,6 +135,29 @@ function onNotify({ messages }) {
   });
 }
 
+/* A session turn finished while that session was not on screen (a wake, a schedule run, or a
+ * reply Ben stopped watching): the same toast and chime as a new message. */
+async function onSessionFinish({ id, status, session }) {
+  if (!store.prefs.notify) return;
+  chime();
+  bridge.desktop.attention().catch(() => {});
+  if (!session && !sessions.session(id)) await sessions.refresh().catch(() => {});   // e.g. a schedule's new session
+  const s = session || sessions.session(id);
+  const title = s?.title || 'A session';
+  const failed = status === 'failed' || status === 'error';
+  toast(failed ? `${title}: the turn ended with an error` : `${title} finished`, {
+    kind: failed ? 'error' : 'info', timeout: 9000,
+    action: { label: 'Open', run: () => navigate('chat', { thread: s?.sharedId ? `pair:${s.sharedId}` : `sess:${id}` }) },
+  });
+}
+
+function onScheduleEvent(e) {
+  if (e?.kind !== 'error' || !store.prefs.notify) return;
+  const name = schedules.schedule(e.id)?.name || 'A schedule';
+  const reason = e.run?.error ? `: ${String(e.run.error).slice(0, 160)}` : '';
+  toast(`${name} couldn't run${reason}`, { kind: 'error', timeout: 9000, action: { label: 'Open', run: () => navigate('schedules') } });
+}
+
 async function boot() {
   applyTheme('dark');
   renderRail(); renderTopbar();
@@ -141,6 +168,8 @@ async function boot() {
   });
   store.on('sync', () => renderTopbar());
   store.on('notify', onNotify);
+  sessions.on('finish', onSessionFinish);
+  schedules.on('event', onScheduleEvent);
   // Pinch / Ctrl+wheel never zooms the whole app window (the City handles its own zoom).
   document.addEventListener('wheel', event => { if (event.ctrlKey) event.preventDefault(); }, { capture: true, passive: false });
   // Safety net: an external http(s) link anywhere in the app opens in the browser, never inside this window.
@@ -166,6 +195,9 @@ async function boot() {
   if (initial !== 'city') await store.loadDesktop();
   applyTheme(store.prefs.theme || 'dark');
   store.emit('change');
+  // Session events and schedule events are heard from launch, whichever view is open.
+  sessions.refresh();
+  schedules.refresh();
   store.start().then(() => {
     // First launch with agents but no approvals yet: offer the one-click standing approval once.
     const agents = store.agents.filter(a => a.kind === 'mailbox');

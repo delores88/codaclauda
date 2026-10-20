@@ -95,7 +95,7 @@ export const desktop = {
   /** → { schedules: [...] } */
   scheduleList: () => invoke('schedule_list'),
   /** Creates when there is no id, else updates → { schedule } */
-  scheduleSave: schedule => invoke('schedule_save', { schedule: schedule || {} }),
+  scheduleSave: arg => invoke('schedule_save', { schedule: (arg && typeof arg.schedule === 'object' ? arg.schedule : arg) || {} }),   // accepts {schedule} or the bare schedule
   /** → { deleted: true } */
   scheduleDelete: arg => invoke('schedule_delete', { id: sessionId(arg) }),
   /** Runs once now, whatever the cadence → { run } */
