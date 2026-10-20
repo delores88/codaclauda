@@ -4,6 +4,8 @@ mod board;
 mod desktop;
 mod session_host;
 mod session_parse;
+mod session_policy;
+mod session_policy_sources;
 mod update_helper;
 mod update_storage;
 mod update_verify;
@@ -402,7 +404,8 @@ fn main() {
             })
             .map_err(std::io::Error::other)?;
             update_storage::initialize(&binding).map_err(std::io::Error::other)?;
-            let sessions = session_host::SessionHost::new(app.handle().clone(), &binding);
+            let sessions = session_host::SessionHost::new(app.handle().clone(), &binding)
+                .map_err(std::io::Error::other)?;
             app.manage(binding);
             app.manage(sessions);
             update_helper::confirm_launch();

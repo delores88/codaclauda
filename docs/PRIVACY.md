@@ -1,10 +1,10 @@
 # CodaClauda privacy and local data
 
 CodaClauda is a DeloresAI desktop utility for owner-authorized coordination between
-Claude Code and Codex. This document describes the 0.3 source implementation,
-including the preserved Classic tools. Source review does not establish native
-acceptance, publication or Marketplace admission; the candidate remains subject
-to installed checks and the owner's release approval.
+Claude Code and Codex. This document describes the 0.4.0 candidate source,
+including the preserved scoped-request and mailbox tools. Source review does not
+establish native acceptance, publication or Marketplace admission; those require
+separate release evidence.
 
 ## Data used for a request
 
@@ -36,13 +36,41 @@ offline or wholly on-device model workflow. Claude Code and Codex are separately
 installed products with their own accounts, subscriptions, policies and retention.
 CodaClauda bundles no model and does not require direct API credits as a fallback.
 
-In the new Chat view, Mailbox mode remains passive. The separate Live mode starts
-a fresh dedicated read-only request for every send, rather than attaching to an
-existing conversation or keeping one provider session alive. It includes up to
-12 recent UI messages, truncated to 4,000 characters each, plus bounded attachment
-text or saved local paths. The combined prompt is capped at 200,000 characters.
-Previously displayed conversation text can therefore be sent again as context.
-Polling a running request reads its receipts; it does not resume a provider.
+The Chat view distinguishes CodaClauda-owned sessions from passive desktop chats.
+Owned sessions start the separately installed Claude Code or Codex CLI in the
+chosen project. Prompts, included attachment text or paths, tool results and
+provider conversation context can reach that provider. A later owner send
+continues the saved provider conversation, including after idle shutdown or
+restarting the app. The app does not attach to unrelated desktop conversations.
+There is no automatic mailbox wake or scheduled model work in this release.
+
+Owned Claude sessions support personal Pro or Max authentication only; Team,
+Enterprise and unknown subscription types are unsupported. The app checks for
+managed system files/directories, registry settings and the remote policy cache
+in the configuration directory reported by Claude's supported login status.
+It checks presence without reading policy contents and refuses launch when a
+source is present or its absence cannot be verified. It does not change or
+bypass managed policy.
+
+A Both conversation contains one session per provider. A leading `@claude` or
+`@codex` sends to that provider; `@both` or no mention sends to both. Bounded recent
+peer replies and owner messages can be included in subsequent prompts, so
+content from one provider can be sent to the other. Two targeted providers can
+consume usage on both accounts. Peer text is untrusted context, not new owner
+authorization.
+
+Access is fixed when an owned session starts. Full enables provider-native
+filesystem and command tools without permission prompts under the user's
+account. Read only uses restricted provider tools and filesystem policy.
+These settings do not control terminal or desktop sessions started elsewhere,
+and a spending prohibition is an owner instruction, not a payment-system block.
+Browser control is not available in 0.4.0. This release does not launch a browser
+MCP server or acquire its executable packages. No Windows MCP is included.
+
+Earlier Live chat records remain readable. That separate workflow started a
+fresh dedicated read-only request for each send, with up to 12 recent messages
+truncated to 4,000 characters each and bounded attachments. Polling legacy
+request receipts does not resume a provider.
 
 Files attached in Chat are copied locally before sending. Small text attachments
 may be included in the mailbox body or dedicated provider prompt; other files
@@ -83,7 +111,7 @@ The mailbox uses its own file and lock and does not migrate legacy request data.
 Its body limit is 32 KiB of UTF-8. Recognized credential patterns are refused
 before storage, but the scan cannot recognize every secret: never post credentials.
 
-The 0.3 desktop writes `<board>/desktop-ui/ui-state.json`, including UI chat
+The desktop writes `<board>/desktop-ui/ui-state.json`, including UI chat
 copies, linked project metadata, agent display preferences, task overrides,
 avatar parameters, avatar-request references, City layout and preferences. It also
 stores thread filing and pins, permission scopes and agent addresses, stated
@@ -95,6 +123,23 @@ limited to 8 MiB; the optional `desktop-ui/projects.manifest.json` is limited to
 metadata discovery/refresh. Attachment copies, up to 25 MiB each, are stored
 under `desktop-ui/attachments/<date>/` with unique sanitized filenames.
 
+Owned sessions additionally write `desktop-ui/sessions.json` and
+`desktop-ui/sessions/<id>.jsonl`. These hold project paths, access settings,
+provider conversation IDs, owner prompts, completed replies, tool summaries and
+status/error events. Streamed text chunks are not individually persisted. When
+a display log grows beyond 5 MiB, older complete entries are trimmed to retain
+roughly the latest half; the local display log is therefore not a complete
+audit transcript. The provider's independent conversation history may retain
+more. Registry entries have no automatic expiry. Closing a session stops its
+app-owned process and preserves its record and local history. Idle process
+shutdown after ten minutes also preserves them. Interrupted turns are not
+automatically replayed on restart.
+
+Owned-session prompts, replies and tool summaries are not generally redacted
+or screened by the mailbox credential scan before sending, display or local
+storage. They can therefore contain secrets that an owner or provider included.
+Keep these logs private and do not include secrets in a session.
+
 Desktop state, WebView localStorage and attachment copies have no automatic
 expiry, including permission records. Reported-use messages follow mailbox
 retention and do not form a complete audit history. The mailbox's 30-day pruning
@@ -102,6 +147,8 @@ does not purge those copies or the legacy request history. Deleting a Live chat
 from the UI removes that UI thread, not
 its underlying requests or saved attachments. A board backup can therefore
 include private text and files that no longer appear in a mailbox inbox.
+The 30-day mailbox retention does not apply to owned session history or provider
+history.
 
 Before deleting local data, stop active requests and close CodaClauda, then
 preserve any unmerged worktrees or receipts you need. Remove the selected board
@@ -194,12 +241,13 @@ does not copy authentication between products. API-key/provider environment
 fallbacks are removed from launched provider environments. Sign-in and account
 changes remain in each provider's official interface.
 
-Each CodaClauda-owned request gets a private capability for its stdio MCP server.
+Each legacy scoped request gets a private capability for its stdio MCP server.
 That capability authorizes only the active request and inherited owner grant;
 it is not a provider credential. Known credential patterns and request
 capabilities are redacted from returned text. Redaction is a secondary safeguard,
 not a guarantee that arbitrary text contains no secret. Scoped file tools also
 reject recognizable secret/internal paths and out-of-project references.
+Those scoped-request safeguards do not describe the owned-session display logs.
 
 Registered conversations use separate expiring, revocable MCP capabilities.
 The board stores their hashes; private setup configuration contains the secret
@@ -247,7 +295,7 @@ Expired authorization requires approval again. The updater does not fall back to
 unsigned metadata or a direct GitHub installer download.
 
 The installer is designed to preserve the selected coordination board,
-connections and history; the 0.3 rename upgrade requires its own installed receipt.
+connections and history; each version's upgrade requires its own installed receipt.
 Provider CLIs and optional DGXBridge manage their own updates independently. Before
 replacement or rollback, stop active requests and preserve local state and
 unmerged work. Backward compatibility with an older release is not assumed.

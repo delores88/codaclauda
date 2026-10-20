@@ -3,16 +3,18 @@
 //! normalized events to the webview on `session://event`, and keeps the
 //! registry (`sessions.json`) and per-session display logs
 //! (`sessions/<id>.jsonl`) next to `ui-state.json`. API-key variables are
-//! stripped from every launch so billing stays on the subscriptions, and no
-//! credential is read, printed or written.
+//! stripped from every launch. Supported personal authentication and effective
+//! provider policy are checked before dispatch; credentials are never copied.
 
 use crate::session_parse::{self, Out};
+use crate::session_policy;
 use crate::{board, error};
 use coord_core::adapters::{self, OwnedProcess};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
@@ -41,8 +43,6 @@ const TEXT_LIMIT: usize = 256 * 1024;
 const STDERR_TAIL: usize = 4096;
 const HISTORY_DEFAULT: u64 = 500;
 const HISTORY_MAX: u64 = 5000;
-/// Registry `latest` on 2026-10-20 (GET registry.npmjs.org/@playwright/mcp/latest).
-const PLAYWRIGHT_MCP: &str = "@playwright/mcp@0.0.83";
 /// Removed from every launch environment (coord-core already strips these and more).
 const STRIPPED_ENV: &[&str] = &[
     "ANTHROPIC_API_KEY",
@@ -64,8 +64,17 @@ const CODEX_QUIET: &[&str] = &[
 
 type Failure = (&'static str, String);
 
+fn require_browser_disabled(playwright: bool) -> Result<(), String> {
+    if playwright {
+        return Err("Browser control is unavailable in CodaClauda 0.4.0. Start a new session without browser control.".into());
+    }
+    Ok(())
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn now_ms() -> u64 {
@@ -201,6 +210,11 @@ struct Proc {
     next_id: AtomicU64,
     stderr: Arc<Mutex<String>>,
     expected_exit: AtomicBool,
+    failure: Mutex<Option<String>>,
+    completed_turns: Mutex<HashSet<String>>,
+    /// Held until a completed turn or confirmed process exit. The updater takes
+    /// this same board lease exclusively before it permits replacement.
+    runtime_lease: Mutex<Option<Arc<File>>>,
 }
 
 impl Proc {
@@ -217,20 +231,71 @@ impl Proc {
     }
 }
 
-/// Graceful end: close stdin, give the provider a moment, then end the job.
-fn shutdown(proc: Arc<Proc>) {
-    proc.expected_exit.store(true, Ordering::SeqCst);
+/// No new process may reuse a capacity slot until the previous owned process
+/// has actually exited. Job termination also stops its helper descendants.
+fn retire(proc: &Arc<Proc>) -> bool {
+    proc.kill();
     lock(&proc.input).take();
+    lock(&proc.pending).clear();
+    for _ in 0..50 {
+        if matches!(lock(&proc.child).try_wait(), Ok(Some(_))) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+fn spawn_owned(
+    exe: &Path,
+    args: &[OsString],
+    cwd: &Path,
+    provider: Provider,
+    generation: u64,
+    lease: Arc<File>,
+) -> Result<(Arc<Proc>, File), String> {
+    let mut child = OwnedProcess::spawn(exe, args, cwd, &launch_env())
+        .map_err(|e| format!("Could not start {}: {e:#}", provider.label()))?;
+    let (Some(stdin), Some(stdout), Some(stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        let _ = child.terminate();
+        return Err(format!("{} started without its pipes.", provider.label()));
+    };
+    let (sender, lines) = mpsc::channel::<String>();
     thread::spawn(move || {
-        let end = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < end {
-            if matches!(lock(&proc.child).try_wait(), Ok(Some(_))) {
+        let mut stdin = stdin;
+        for line in lines {
+            let written = stdin
+                .write_all(line.as_bytes())
+                .and_then(|_| stdin.write_all(b"\n"))
+                .and_then(|_| stdin.flush());
+            if written.is_err() {
                 break;
             }
-            thread::sleep(Duration::from_millis(100));
         }
-        let _ = lock(&proc.child).terminate();
     });
+    let tail = Arc::new(Mutex::new(String::new()));
+    {
+        let tail = tail.clone();
+        thread::spawn(move || drain_stderr(stderr, tail));
+    }
+    Ok((
+        Arc::new(Proc {
+            generation,
+            provider,
+            child: Mutex::new(child),
+            input: Mutex::new(Some(sender)),
+            pending: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            stderr: tail,
+            expected_exit: AtomicBool::new(false),
+            failure: Mutex::new(None),
+            completed_turns: Mutex::new(HashSet::new()),
+            runtime_lease: Mutex::new(Some(lease)),
+        }),
+        stdout,
+    ))
 }
 
 struct Live {
@@ -242,6 +307,57 @@ struct Turn {
     id: String,
     provider_turn: Option<String>,
     stopping: bool,
+    dispatched: bool,
+    start_pending: bool,
+    completion: Option<String>,
+    _lease: Arc<File>,
+}
+
+impl Turn {
+    fn complete(&mut self, status: String) -> Option<String> {
+        if self.start_pending {
+            self.completion = Some(status);
+            None
+        } else {
+            Some(status)
+        }
+    }
+
+    fn acknowledge(
+        &mut self,
+        completed: &HashSet<String>,
+        provider_turn: &str,
+    ) -> Result<Option<String>, String> {
+        if !accept_codex_turn(self, completed, Some(provider_turn)) {
+            return Err(
+                "Codex returned conflicting turn identities; its process will be stopped.".into(),
+            );
+        }
+        self.start_pending = false;
+        Ok(self.completion.take())
+    }
+}
+
+/// Notifications and turn/start responses may interleave. Remember completed
+/// provider IDs so late output cannot bind a newly admitted local turn.
+fn accept_codex_turn(
+    turn: &mut Turn,
+    completed: &HashSet<String>,
+    provider_turn: Option<&str>,
+) -> bool {
+    let Some(provider_turn) = provider_turn.filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    if completed.contains(provider_turn) {
+        return false;
+    }
+    match &turn.provider_turn {
+        Some(current) => current == provider_turn,
+        None => {
+            turn.provider_turn = Some(provider_turn.to_owned());
+            true
+        }
+    }
 }
 
 #[derive(Default)]
@@ -249,12 +365,76 @@ struct State {
     records: Vec<Record>,
     live: HashMap<String, Live>,
     turns: HashMap<String, Turn>,
+    launching: HashMap<String, String>,
+}
+
+impl State {
+    fn reserve_launch(
+        &mut self,
+        id: &str,
+        turn_id: &str,
+    ) -> Result<Option<(String, Live)>, String> {
+        if !self
+            .turns
+            .get(id)
+            .is_some_and(|t| t.id == turn_id && !t.stopping)
+        {
+            return Err("This turn was stopped before the agent could start.".into());
+        }
+        if self.live.contains_key(id) || self.launching.contains_key(id) {
+            return Err("This agent already has a process or launch in progress.".into());
+        }
+        let victim = if self.live.len() + self.launching.len() >= MAX_LIVE {
+            let oldest = self.live.iter()
+                .filter(|(id, _)| !self.turns.contains_key(*id))
+                .min_by_key(|(_, live)| live.last_used)
+                .map(|(id, _)| id.clone())
+                .ok_or_else(|| format!("{MAX_LIVE} agents are already working. Wait for one to finish or stop one, then send again."))?;
+            self.live.remove(&oldest).map(|live| (oldest, live))
+        } else {
+            None
+        };
+        self.launching.insert(id.to_owned(), turn_id.to_owned());
+        Ok(victim)
+    }
+
+    fn release_launch(&mut self, id: &str, turn_id: &str) {
+        if self.launching.get(id).is_some_and(|turn| turn == turn_id) {
+            self.launching.remove(id);
+        }
+    }
+
+    fn accepts_launch(&self, id: &str, turn_id: &str) -> bool {
+        self.launching.get(id).is_some_and(|turn| turn == turn_id)
+            && self
+                .turns
+                .get(id)
+                .is_some_and(|turn| turn.id == turn_id && !turn.stopping)
+    }
+}
+
+struct LaunchReservation {
+    inner: Arc<Inner>,
+    id: String,
+    turn_id: String,
+}
+
+impl Drop for LaunchReservation {
+    fn drop(&mut self) {
+        lock(&self.inner.state).release_launch(&self.id, &self.turn_id);
+    }
 }
 
 struct Inner {
     app: tauri::AppHandle,
     dir: PathBuf,
+    board: PathBuf,
+    _host_lease: File,
     state: Mutex<State>,
+    /// Serializes output attribution with close/send/replacement. A generation
+    /// check followed by an unlocked mutation would still permit stale output.
+    lifecycle: Mutex<()>,
+    storage_failure: Mutex<Option<String>>,
     executables: Mutex<HashMap<Provider, PathBuf>>,
     log_lock: Mutex<()>,
     generation: AtomicU64,
@@ -266,16 +446,26 @@ pub(crate) struct SessionHost {
 }
 
 impl SessionHost {
-    pub(crate) fn new(app: tauri::AppHandle, board: &board::BoardBinding) -> Self {
+    pub(crate) fn new(app: tauri::AppHandle, board: &board::BoardBinding) -> Result<Self, String> {
+        let dir = crate::desktop::ui_dir(board);
+        ensure_dirs(&dir).map_err(|e| format!("Session storage is unavailable: {e}"))?;
+        let host_lease = lease_file(&dir.join("sessions-host.lock"))?;
+        FileExt::try_lock_exclusive(&host_lease).map_err(|_| {
+            "CodaClauda is already open on this board. Use the existing window.".to_owned()
+        })?;
         let inner = Arc::new(Inner {
             app,
-            dir: crate::desktop::ui_dir(board),
+            dir,
+            board: board.state_dir().to_owned(),
+            _host_lease: host_lease,
             state: Mutex::new(State::default()),
+            lifecycle: Mutex::new(()),
+            storage_failure: Mutex::new(None),
             executables: Mutex::new(HashMap::new()),
             log_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
         });
-        inner.load();
+        inner.load()?;
         let reaper = inner.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -283,7 +473,7 @@ impl SessionHost {
                 reaper.reap_idle();
             }
         });
-        Self { inner }
+        Ok(Self { inner })
     }
 }
 
@@ -296,6 +486,12 @@ fn ensure_dirs(dir: &Path) -> std::io::Result<()> {
             Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
             _ => {}
         }
+        if !fs::metadata(&path)?.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "Session storage contains a non-directory path.",
+            ));
+        }
     }
     Ok(())
 }
@@ -307,6 +503,84 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// Match the updater's lock-file sharing rules: readers/writers may open it,
+/// but Windows must not allow its identity to be replaced while it is held.
+fn lease_file(path: &Path) -> Result<File, String> {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err("The session lease cannot be a link.".into());
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x00200000).share_mode(3);
+    }
+    let file = options
+        .open(path)
+        .map_err(|e| format!("Session lease is unavailable: {e}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("Session lease is unavailable: {e}"))?;
+    if !metadata.is_file() {
+        return Err("The session lease is not a regular file.".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err("The session lease cannot be a reparse point.".into());
+        }
+    }
+    Ok(file)
+}
+
+fn runtime_lease(board: &Path) -> Result<Arc<File>, String> {
+    let file = lease_file(&board.join("session-runtime.lock"))?;
+    FileExt::try_lock_shared(&file).map_err(|_| {
+        "An update is replacing CodaClauda. Wait for it to finish before sending.".to_owned()
+    })?;
+    Ok(Arc::new(file))
+}
+
+fn read_registry(path: &Path) -> Result<Vec<Record>, String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("Could not read the saved sessions: {e}")),
+    };
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+        "The saved sessions registry is unreadable; its bytes have been preserved.".to_owned()
+    })?;
+    if value["schema"] != "codaclauda.sessions/1" {
+        return Err(
+            "The saved sessions registry has an unsupported schema; it has been preserved.".into(),
+        );
+    }
+    let records: Vec<Record> = serde_json::from_value(value["sessions"].clone()).map_err(|_| {
+        "The saved sessions registry has invalid records; it has been preserved.".to_owned()
+    })?;
+    let mut seen = std::collections::HashSet::new();
+    if records
+        .iter()
+        .any(|r| !valid_id(&r.id) || Provider::parse(&r.provider).is_none() || !seen.insert(&r.id))
+    {
+        return Err("The saved sessions registry has invalid or duplicate identities; it has been preserved.".into());
+    }
+    Ok(records)
+}
+
+fn save_registry(dir: &Path, records: &[Record]) -> Result<(), String> {
+    ensure_dirs(dir).map_err(|e| format!("Could not prepare session storage: {e}"))?;
+    let bytes =
+        serde_json::to_vec_pretty(&json!({"schema": "codaclauda.sessions/1", "sessions": records}))
+            .map_err(|e| format!("Could not encode saved sessions: {e}"))?;
+    write_atomic(&dir.join(REGISTRY_FILE), &bytes)
+        .map_err(|e| format!("Could not save sessions.json: {e}"))
 }
 
 /// Keeps the newest half of an oversized display log, on a line boundary.
@@ -326,23 +600,9 @@ impl Inner {
         self.dir.join(LOG_DIR).join(format!("{id}.jsonl"))
     }
 
-    fn load(&self) {
+    fn load(&self) -> Result<(), String> {
         let path = self.dir.join(REGISTRY_FILE);
-        let mut records: Vec<Record> = match fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes)
-                .ok()
-                .and_then(|v| serde_json::from_value(v["sessions"].clone()).ok())
-            {
-                Some(records) => records,
-                None => {
-                    // Keep an unreadable registry for inspection instead of overwriting it.
-                    let _ = fs::rename(&path, self.dir.join("sessions.json.unreadable"));
-                    Vec::new()
-                }
-            },
-            Err(_) => Vec::new(),
-        };
-        records.retain(|r| valid_id(&r.id) && Provider::parse(&r.provider).is_some());
+        let mut records = read_registry(&path)?;
         let mut interrupted = Vec::new();
         for record in &mut records {
             if record.status == "running" {
@@ -353,7 +613,7 @@ impl Inner {
         let mut state = lock(&self.state);
         state.records = records;
         if !interrupted.is_empty() {
-            self.save(&state);
+            self.save(&state)?;
         }
         drop(state);
         for (id, turn) in interrupted {
@@ -362,26 +622,29 @@ impl Inner {
                 turn.as_deref(),
                 "done",
                 json!({"status": "interrupted", "text": "CodaClauda closed during this reply; the agent may have finished part of the work."}),
-            ));
+            ))?;
         }
+        Ok(())
     }
 
-    fn save(&self, state: &State) {
-        let result = (|| -> std::io::Result<()> {
-            ensure_dirs(&self.dir)?;
-            let bytes = serde_json::to_vec_pretty(
-                &json!({"schema": "codaclauda.sessions/1", "sessions": state.records}),
-            )?;
-            write_atomic(&self.dir.join(REGISTRY_FILE), &bytes)
-        })();
-        if let Err(e) = result {
-            eprintln!("CodaClauda could not save sessions.json: {e}");
-        }
+    fn storage_error(&self, message: &str) {
+        *lock(&self.storage_failure) = Some(message.to_owned());
+        let _ = self
+            .app
+            .emit(EVENT, event("", None, "error", json!({"error": message})));
     }
 
-    fn append(&self, ev: &Value) {
+    fn save(&self, state: &State) -> Result<(), String> {
+        let result = save_registry(&self.dir, &state.records);
+        if let Err(message) = &result {
+            self.storage_error(message);
+        }
+        result
+    }
+
+    fn append(&self, ev: &Value) -> Result<(), String> {
         let Some(id) = ev["id"].as_str().filter(|id| valid_id(id)) else {
-            return;
+            return Err("Invalid session event identity.".into());
         };
         let _guard = lock(&self.log_lock);
         let path = self.log_path(id);
@@ -392,30 +655,57 @@ impl Inner {
             }
             let mut line = serde_json::to_vec(ev)?;
             line.push(b'\n');
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)?
-                .write_all(&line)
+            let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+            file.write_all(&line)?;
+            file.sync_data()
         })();
-        if let Err(e) = result {
-            eprintln!("CodaClauda could not append a session event: {e}");
+        let result = result.map_err(|e| format!("Could not save the session history: {e}"));
+        if let Err(message) = &result {
+            self.storage_error(message);
         }
+        result
     }
 
     /// Emits to the webview; deltas and status changes are not persisted.
     fn publish(&self, ev: Value, persist: bool) {
         if persist {
-            self.append(&ev);
+            if let Err(message) = self.append(&ev) {
+                if let Some(id) = ev["id"].as_str() {
+                    if let Some(proc) = lock(&self.state).live.get(id).map(|l| l.proc.clone()) {
+                        *lock(&proc.failure) = Some(message.clone());
+                        proc.kill();
+                    }
+                }
+                let _ = self.app.emit(
+                    EVENT,
+                    event(
+                        ev["id"].as_str().unwrap_or(""),
+                        ev["turnId"].as_str(),
+                        "error",
+                        json!({"error": message}),
+                    ),
+                );
+            }
         }
         let _ = self.app.emit(EVENT, ev);
     }
 
-    fn with_record<T>(&self, id: &str, change: impl FnOnce(&mut Record) -> T) -> Option<T> {
+    fn with_record<T>(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut Record) -> T,
+    ) -> Result<Option<T>, String> {
         let mut state = lock(&self.state);
-        let result = state.records.iter_mut().find(|r| r.id == id).map(change)?;
-        self.save(&state);
-        Some(result)
+        let Some(index) = state.records.iter().position(|r| r.id == id) else {
+            return Ok(None);
+        };
+        let previous = state.records[index].clone();
+        let result = change(&mut state.records[index]);
+        if let Err(error) = self.save(&state) {
+            state.records[index] = previous;
+            return Err(error);
+        }
+        Ok(Some(result))
     }
 
     fn current_turn(&self, id: &str) -> Option<(String, bool)> {
@@ -430,6 +720,15 @@ impl Inner {
             .turns
             .get(id)
             .is_some_and(|t| t.id == turn_id && !t.stopping)
+    }
+
+    async fn wait_stopped(&self, id: &str, turn_id: &str) {
+        loop {
+            if !self.turn_active(id, turn_id) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Ends the session's current turn (or only `only`). Returns false when
@@ -469,7 +768,7 @@ impl Inner {
             if let Some(live) = state.live.get_mut(id) {
                 live.last_used = Instant::now();
             }
-            self.save(&state);
+            let _ = self.save(&state);
             (turn, status.to_owned(), shown)
         };
         if let Some(message) = failure.filter(|_| status != "interrupted") {
@@ -486,9 +785,65 @@ impl Inner {
         true
     }
 
+    /// A transport failure is ambiguous once a child exists. Keep its turn and
+    /// updater lease until the stdout supervisor confirms process termination.
+    fn fail_turn(&self, id: &str, turn_id: &str, message: String) {
+        let _lifecycle = lock(&self.lifecycle);
+        let proc = {
+            let state = lock(&self.state);
+            if !state.turns.get(id).is_some_and(|t| t.id == turn_id) {
+                return;
+            }
+            state.live.get(id).map(|live| live.proc.clone())
+        };
+        if let Some(proc) = proc {
+            *lock(&proc.failure) = Some(message);
+            proc.kill();
+        } else {
+            self.finish_turn(id, Some(turn_id), "failed", Some(message), "error");
+        }
+    }
+
     // --------------------------------------------------------- provider output
 
-    fn handle(&self, id: &str, proc: &Arc<Proc>, out: Out) {
+    fn handle(&self, id: &str, proc: &Arc<Proc>, out: Out, envelope: &Value) {
+        let _lifecycle = lock(&self.lifecycle);
+        if !lock(&self.state)
+            .live
+            .get(id)
+            .is_some_and(|live| live.proc.generation == proc.generation)
+        {
+            return;
+        }
+        if proc.expected_exit.load(Ordering::SeqCst) {
+            return;
+        }
+        if proc.provider == Provider::Codex
+            && !matches!(&out, Out::Response { .. } | Out::ServerRequest { .. })
+        {
+            let mut state = lock(&self.state);
+            let thread = envelope["params"]["threadId"].as_str();
+            if thread.is_none()
+                || !state
+                    .records
+                    .iter()
+                    .any(|record| record.id == id && record.thread_id.as_deref() == thread)
+            {
+                return;
+            }
+            let provider_turn = envelope["params"]["turnId"]
+                .as_str()
+                .or_else(|| envelope["params"]["turn"]["id"].as_str());
+            let Some(turn) = state.turns.get_mut(id) else {
+                return;
+            };
+            if !turn.dispatched {
+                return;
+            }
+            if !accept_codex_turn(turn, &lock(&proc.completed_turns), provider_turn) {
+                return;
+            }
+        }
         match out {
             Out::Response { id: call, result } => {
                 if let Some(sender) = lock(&proc.pending).remove(&call) {
@@ -527,7 +882,10 @@ impl Inner {
                     _ => false,
                 };
                 if changed {
-                    self.save(&state);
+                    if let Err(message) = self.save(&state) {
+                        *lock(&proc.failure) = Some(message);
+                        proc.kill();
+                    }
                 }
             }
             Out::TurnStarted(provider_turn) => {
@@ -537,7 +895,10 @@ impl Inner {
             }
             Out::Delta(text) => {
                 if let Some((turn, _)) = self.current_turn(id) {
-                    self.publish(event(id, Some(&turn), "delta", json!({"text": text})), false);
+                    self.publish(
+                        event(id, Some(&turn), "delta", json!({"text": text})),
+                        false,
+                    );
                 }
             }
             Out::Message(text) => {
@@ -579,9 +940,37 @@ impl Inner {
                 ),
             },
             Out::Done(status) => {
-                self.finish_turn(id, None, &status, None, "idle");
+                if lock(&proc.failure).is_some() {
+                    return; // a timed-out/failed transport must quiesce first
+                }
+                self.complete_provider_turn(id, proc, status);
             }
         }
+    }
+
+    /// A terminal notification does not authorize process reuse while its
+    /// turn/start RPC is still ambiguous. Its eventual timeout must retire the
+    /// same turn, never a later request on this process.
+    fn complete_provider_turn(&self, id: &str, proc: &Arc<Proc>, status: String) {
+        let (provider_turn, status) = {
+            let mut state = lock(&self.state);
+            let Some(turn) = state.turns.get_mut(id) else {
+                return;
+            };
+            let Some(status) = turn.complete(status) else {
+                return;
+            };
+            (turn.provider_turn.clone(), status)
+        };
+        if let Some(provider_turn) = provider_turn {
+            let mut completed = lock(&proc.completed_turns);
+            completed.insert(provider_turn);
+            if completed.len() >= 4096 {
+                proc.kill();
+            }
+        }
+        lock(&proc.runtime_lease).take();
+        self.finish_turn(id, None, &status, None, "idle");
     }
 
     fn read_stdout(self: Arc<Self>, id: String, proc: Arc<Proc>, stdout: File) {
@@ -591,12 +980,29 @@ impl Inner {
             let Ok(value) = serde_json::from_slice::<Value>(&line) else {
                 continue;
             };
+            if proc.provider == Provider::Claude
+                && value["type"] == "system"
+                && value["subtype"] == "init"
+            {
+                let policy = lock(&self.state)
+                    .records
+                    .iter()
+                    .find(|r| r.id == id)
+                    .map(|r| r.access.clone());
+                if let Some(access) = policy {
+                    if let Err(message) = session_policy::verify_claude_init(&value, &access) {
+                        *lock(&proc.failure) = Some(message);
+                        proc.kill();
+                        continue;
+                    }
+                }
+            }
             let outputs = match proc.provider {
                 Provider::Claude => session_parse::parse_claude(&value),
                 Provider::Codex => session_parse::parse_codex(&value),
             };
             for out in outputs {
-                self.handle(&id, &proc, out);
+                self.handle(&id, &proc, out, &value);
             }
         }
         self.exited(&id, &proc);
@@ -613,8 +1019,27 @@ impl Inner {
         }
         // Also ends any MCP helper the provider left in its job.
         let _ = lock(&proc.child).terminate();
+        if code.is_none() {
+            for _ in 0..50 {
+                if let Ok(Some(exit)) = lock(&proc.child).try_wait() {
+                    code = Some(exit);
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
         lock(&proc.pending).clear();
         lock(&proc.input).take();
+        let _lifecycle = lock(&self.lifecycle);
+        if code.is_none() {
+            // Retain the process entry and runtime lease if termination could
+            // not be confirmed: neither sends nor the updater may race it.
+            self.publish(event(id, None, "error", json!({
+                "error": "The agent process has not confirmed it stopped. Close CodaClauda before updating or retrying."
+            })), false);
+            return;
+        }
+        lock(&proc.runtime_lease).take();
         let current = {
             let mut state = lock(&self.state);
             let current = state
@@ -627,6 +1052,10 @@ impl Inner {
             current
         };
         if !current {
+            return;
+        }
+        if let Some(message) = lock(&proc.failure).take() {
+            self.finish_turn(id, None, "failed", Some(message), "error");
             return;
         }
         if proc.expected_exit.load(Ordering::SeqCst) {
@@ -664,41 +1093,31 @@ impl Inner {
         Ok(found)
     }
 
-    /// At most MAX_LIVE provider processes: close the least recently used idle one.
-    fn make_room(&self, except: &str) -> Result<(), String> {
-        let victim = {
-            let mut state = lock(&self.state);
-            if state.live.len() < MAX_LIVE || state.live.contains_key(except) {
-                return Ok(());
+    /// Reserve admission under the same lock that counts live and pending
+    /// processes. Discovery and process creation cannot overbook this slot.
+    fn reserve_launch(
+        self: &Arc<Self>,
+        id: &str,
+        turn_id: &str,
+    ) -> Result<LaunchReservation, String> {
+        let _lifecycle = lock(&self.lifecycle);
+        let victim = lock(&self.state).reserve_launch(id, turn_id)?;
+        if let Some((old_id, live)) = victim {
+            if !retire(&live.proc) {
+                let mut state = lock(&self.state);
+                state.live.insert(old_id, live);
+                state.release_launch(id, turn_id);
+                return Err(
+                    "An idle agent has not confirmed it stopped. Close CodaClauda before retrying."
+                        .into(),
+                );
             }
-            let oldest = state
-                .live
-                .iter()
-                .filter(|(id, _)| !state.turns.contains_key(*id))
-                .min_by_key(|(_, live)| live.last_used)
-                .map(|(id, _)| id.clone());
-            match oldest {
-                Some(id) => state.live.remove(&id),
-                None => {
-                    return Err(format!(
-                        "{MAX_LIVE} agents are already working. Wait for one to finish or stop one, then send again."
-                    ));
-                }
-            }
-        };
-        if let Some(live) = victim {
-            shutdown(live.proc);
         }
-        Ok(())
-    }
-
-    fn write_mcp_config(&self, id: &str) -> Result<PathBuf, String> {
-        let path = self.dir.join(LOG_DIR).join(format!("{id}.mcp.json"));
-        let config = json!({"mcpServers": {"playwright": {"command": "cmd", "args": ["/c", "npx", "-y", PLAYWRIGHT_MCP]}}});
-        ensure_dirs(&self.dir)
-            .and_then(|_| write_atomic(&path, &serde_json::to_vec_pretty(&config)?))
-            .map_err(|e| format!("Could not write the browser-control configuration: {e}"))?;
-        Ok(path)
+        Ok(LaunchReservation {
+            inner: self.clone(),
+            id: id.into(),
+            turn_id: turn_id.into(),
+        })
     }
 
     async fn launch(
@@ -706,9 +1125,14 @@ impl Inner {
         record: &Record,
         provider: Provider,
         turn_id: &str,
+        lease: Arc<File>,
     ) -> Result<Arc<Proc>, String> {
+        require_browser_disabled(record.playwright)?;
+        let reservation = Arc::new(self.reserve_launch(&record.id, turn_id)?);
         let exe = self.executable(provider).await?;
-        self.make_room(&record.id)?;
+        if !lock(&self.state).accepts_launch(&record.id, turn_id) {
+            return Err("This turn was stopped before the agent could start.".into());
+        }
         let cwd = PathBuf::from(&record.cwd);
         if !cwd.is_absolute() || !cwd.is_dir() {
             return Err(format!(
@@ -718,62 +1142,42 @@ impl Inner {
         }
         let args = match provider {
             Provider::Claude => {
-                let mcp = if record.playwright {
-                    Some(self.write_mcp_config(&record.id)?)
-                } else {
-                    None
-                };
-                claude_args(record, &uuid_v4(), mcp.as_deref())
+                self.claude_preflight(record, &exe, lease.clone(), reservation.clone())
+                    .await?;
+                claude_args(record, &uuid_v4())
             }
-            Provider::Codex => codex_args(record),
-        };
-        let mut child = OwnedProcess::spawn(&exe, &args, &cwd, &launch_env())
-            .map_err(|e| format!("Could not start {}: {e:#}", provider.label()))?;
-        let (Some(stdin), Some(stdout), Some(stderr)) =
-            (child.stdin.take(), child.stdout.take(), child.stderr.take())
-        else {
-            let _ = child.terminate();
-            return Err(format!("{} started without its pipes.", provider.label()));
-        };
-        let (sender, lines) = mpsc::channel::<String>();
-        thread::spawn(move || {
-            let mut stdin = stdin;
-            for line in lines {
-                let written = stdin
-                    .write_all(line.as_bytes())
-                    .and_then(|_| stdin.write_all(b"\n"))
-                    .and_then(|_| stdin.flush());
-                if written.is_err() {
-                    break;
-                }
+            Provider::Codex => {
+                let overrides = self
+                    .codex_preflight(record, &exe, lease.clone(), reservation.clone())
+                    .await?;
+                codex_args(&overrides)
             }
-            // Dropping stdin here gives the provider EOF.
-        });
-        let tail = Arc::new(Mutex::new(String::new()));
-        {
-            let tail = tail.clone();
-            thread::spawn(move || drain_stderr(stderr, tail));
-        }
-        let proc = Arc::new(Proc {
-            generation: self.generation.fetch_add(1, Ordering::SeqCst) + 1,
-            provider,
-            child: Mutex::new(child),
-            input: Mutex::new(Some(sender)),
-            pending: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
-            stderr: tail,
-            expected_exit: AtomicBool::new(false),
-        });
-        let replaced = lock(&self.state).live.insert(
-            record.id.clone(),
-            Live {
-                proc: proc.clone(),
-                last_used: Instant::now(),
-            },
-        );
-        if let Some(old) = replaced {
-            shutdown(old.proc);
-        }
+        };
+        let (proc, stdout) = {
+            let _lifecycle = lock(&self.lifecycle);
+            let mut state = lock(&self.state);
+            if !state.accepts_launch(&record.id, turn_id) {
+                return Err("This turn was stopped while the agent was starting.".into());
+            }
+            // Admission and spawn share the close/stop gate.
+            let (proc, stdout) = spawn_owned(
+                &exe,
+                &args,
+                &cwd,
+                provider,
+                self.generation.fetch_add(1, Ordering::SeqCst) + 1,
+                lease,
+            )?;
+            state.release_launch(&record.id, turn_id);
+            state.live.insert(
+                record.id.clone(),
+                Live {
+                    proc: proc.clone(),
+                    last_used: Instant::now(),
+                },
+            );
+            (proc, stdout)
+        };
         {
             let inner = self.clone();
             let reader = proc.clone();
@@ -782,12 +1186,180 @@ impl Inner {
         }
         if provider == Provider::Codex {
             if let Err(message) = self.codex_handshake(record, &proc, turn_id).await {
-                self.finish_turn(&record.id, Some(turn_id), "failed", Some(message.clone()), "error");
+                *lock(&proc.failure) = Some(message.clone());
                 proc.kill();
                 return Err(message);
             }
         }
         Ok(proc)
+    }
+
+    async fn claude_preflight(
+        &self,
+        record: &Record,
+        exe: &Path,
+        lease: Arc<File>,
+        reservation: Arc<LaunchReservation>,
+    ) -> Result<(), String> {
+        crate::session_policy_sources::ensure_claude_system_unmanaged()?;
+        let configured = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty());
+        let config_dirs = if let Some(configured) = configured {
+            vec![PathBuf::from(configured)]
+        } else {
+            ["USERPROFILE", "HOME"]
+                .iter()
+                .filter_map(|name| std::env::var_os(name).filter(|v| !v.is_empty()))
+                .map(|home| PathBuf::from(home).join(".claude"))
+                .collect::<Vec<_>>()
+        };
+        if config_dirs.is_empty() {
+            return Err(
+                "Claude's configuration directory could not be checked before sign-in inspection."
+                    .into(),
+            );
+        }
+        for config_dir in config_dirs {
+            crate::session_policy_sources::ensure_claude_unmanaged(&config_dir)?;
+        }
+        let (proc, mut stdout) = {
+            let _lifecycle = lock(&self.lifecycle);
+            if !lock(&self.state).accepts_launch(&record.id, &reservation.turn_id) {
+                return Err("This turn was stopped before Claude sign-in inspection.".into());
+            }
+            spawn_owned(
+                exe,
+                &session_policy::claude_auth_args(&record.access),
+                Path::new(&record.cwd),
+                Provider::Claude,
+                self.generation.fetch_add(1, Ordering::SeqCst) + 1,
+                lease,
+            )?
+        };
+        lock(&proc.input).take();
+        let (sender, receiver) = oneshot::channel();
+        let turn_id = reservation.turn_id.clone();
+        {
+            let reader = proc.clone();
+            thread::spawn(move || {
+                let _reservation = reservation;
+                let mut bytes = Vec::new();
+                let result = Read::by_ref(&mut stdout)
+                    .take(1024 * 1024 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| "Could not read Claude sign-in status.".to_owned())
+                    .and_then(|_| {
+                        if bytes.len() > 1024 * 1024 {
+                            Err("Claude sign-in status exceeded its output limit.".to_owned())
+                        } else {
+                            serde_json::from_slice::<Value>(&bytes).map_err(|_| {
+                                "Claude returned an unreadable sign-in status.".to_owned()
+                            })
+                        }
+                    });
+                let _ = sender.send(result);
+                while !retire(&reader) {
+                    thread::sleep(Duration::from_secs(1));
+                }
+            });
+        }
+        let result = tokio::select! {
+            result = tokio::time::timeout(Duration::from_secs(20), receiver) => match result {
+                Ok(Ok(result)) => result,
+                _ => Err("Claude did not return its sign-in status in time.".into()),
+            },
+            _ = self.wait_stopped(&record.id, &turn_id) =>
+                Err("This turn stopped during Claude sign-in inspection.".into()),
+        };
+        let retiring = proc.clone();
+        let stopped = tauri::async_runtime::spawn_blocking(move || retire(&retiring))
+            .await
+            .map_err(|_| {
+                "Claude sign-in inspection could not confirm process termination.".to_owned()
+            })?;
+        if !stopped {
+            return Err("Claude sign-in inspection has not confirmed it stopped. Close CodaClauda before retrying.".into());
+        }
+        let auth = result?;
+        session_policy::verify_claude_auth(&auth)?;
+        let config_dir = auth["configDirectory"].as_str().ok_or(
+            "Claude did not identify its configuration directory; session launch was refused.",
+        )?;
+        crate::session_policy_sources::ensure_claude_unmanaged(Path::new(config_dir))
+    }
+
+    /// Resolve inherited server names without creating or resuming a provider
+    /// thread. This child owns the same admission slot and update lease.
+    async fn codex_preflight(
+        &self,
+        record: &Record,
+        exe: &Path,
+        lease: Arc<File>,
+        reservation: Arc<LaunchReservation>,
+    ) -> Result<Vec<String>, String> {
+        let (proc, stdout) = {
+            let _lifecycle = lock(&self.lifecycle);
+            if !lock(&self.state).accepts_launch(&record.id, &reservation.turn_id) {
+                return Err("This turn was stopped before Codex policy inspection.".into());
+            }
+            spawn_owned(
+                exe,
+                &codex_args(&[]),
+                Path::new(&record.cwd),
+                Provider::Codex,
+                self.generation.fetch_add(1, Ordering::SeqCst) + 1,
+                lease,
+            )?
+        };
+        let turn_id = reservation.turn_id.clone();
+        {
+            let reader = proc.clone();
+            thread::spawn(move || {
+                // Keep admission and the board host alive even if an ambiguous
+                // termination makes the requesting async task return early.
+                let _reservation = reservation;
+                for line in BufReader::new(stdout).split(b'\n') {
+                    let Ok(line) = line else { break };
+                    let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+                        continue;
+                    };
+                    for out in session_parse::parse_codex(&value) {
+                        if let Out::Response { id, result } = out {
+                            if let Some(sender) = lock(&reader.pending).remove(&id) {
+                                let _ = sender.send(result);
+                            }
+                        }
+                    }
+                }
+                while !retire(&reader) {
+                    thread::sleep(Duration::from_secs(1));
+                }
+            });
+        }
+        let operation = async {
+            initialize_codex(&proc).await?;
+            let config = rpc(
+                &proc,
+                "config/read",
+                json!({"includeLayers": false, "cwd": record.cwd}),
+            )
+            .await?;
+            session_policy::codex_preflight_overrides(&config)
+        };
+        let result = tokio::select! {
+            result = operation => result,
+            _ = self.wait_stopped(&record.id, &turn_id) =>
+                Err("This turn stopped during Codex policy inspection.".into()),
+        };
+        let retiring = proc.clone();
+        let stopped = tauri::async_runtime::spawn_blocking(move || retire(&retiring))
+            .await
+            .map_err(|_| {
+                "Codex policy inspection could not confirm process termination.".to_owned()
+            })?;
+        if !stopped {
+            return Err("Codex policy inspection has not confirmed it stopped. Close CodaClauda before retrying.".into());
+        }
+        result
     }
 
     async fn codex_handshake(
@@ -796,14 +1368,27 @@ impl Inner {
         proc: &Arc<Proc>,
         turn_id: &str,
     ) -> Result<(), String> {
-        rpc(
-            proc,
-            "initialize",
-            json!({"clientInfo": {"name": "codaclauda", "title": "CodaClauda", "version": env!("CARGO_PKG_VERSION")},
-                   "capabilities": {"experimentalApi": false, "optOutNotificationMethods": CODEX_QUIET}}),
-        )
-        .await?;
-        proc.write(json!({"method": "initialized"}).to_string())?;
+        initialize_codex(proc).await?;
+        let config = self
+            .turn_rpc(
+                &record.id,
+                turn_id,
+                proc,
+                "config/read",
+                json!({"includeLayers": false, "cwd": record.cwd}),
+            )
+            .await?;
+        session_policy::verify_codex_config(&config)?;
+        let account = self
+            .turn_rpc(
+                &record.id,
+                turn_id,
+                proc,
+                "account/read",
+                json!({"refreshToken": false}),
+            )
+            .await?;
+        session_policy::verify_codex_account(&account)?;
         let mut base = json!({"cwd": record.cwd, "sandbox": sandbox_mode(&record.access), "approvalPolicy": "never"});
         if let Some(model) = &record.model {
             base["model"] = json!(model);
@@ -818,7 +1403,10 @@ impl Inner {
                 let mut params = base.clone();
                 params["threadId"] = json!(thread);
                 params["excludeTurns"] = json!(true);
-                match rpc(proc, "thread/resume", params).await {
+                match self
+                    .turn_rpc(&record.id, turn_id, proc, "thread/resume", params)
+                    .await
+                {
                     Ok(result) => result,
                     Err(problem) => {
                         self.publish(
@@ -830,11 +1418,17 @@ impl Inner {
                             ),
                             true,
                         );
-                        thread_start(proc, base).await?
+                        base["serviceName"] = json!("codaclauda");
+                        self.turn_rpc(&record.id, turn_id, proc, "thread/start", base)
+                            .await?
                     }
                 }
             }
-            None => thread_start(proc, base).await?,
+            None => {
+                base["serviceName"] = json!("codaclauda");
+                self.turn_rpc(&record.id, turn_id, proc, "thread/start", base)
+                    .await?
+            }
         };
         let thread = result["thread"]["id"]
             .as_str()
@@ -844,10 +1438,60 @@ impl Inner {
             .as_str()
             .unwrap_or(&thread)
             .to_owned();
+        let _lifecycle = lock(&self.lifecycle);
+        if !lock(&self.state)
+            .live
+            .get(&record.id)
+            .is_some_and(|live| live.proc.generation == proc.generation)
+            || !self.turn_active(&record.id, turn_id)
+        {
+            return Err("This turn was stopped while Codex was connecting.".into());
+        }
         self.with_record(&record.id, |r| {
             r.thread_id = Some(thread);
             r.provider_session_id = Some(session);
-        });
+        })?;
+        Ok(())
+    }
+
+    async fn turn_rpc(
+        &self,
+        id: &str,
+        turn_id: &str,
+        proc: &Arc<Proc>,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        let (call, receiver) = {
+            let _lifecycle = lock(&self.lifecycle);
+            self.check_dispatch(id, turn_id, proc)?;
+            if method == "turn/start" {
+                if let Some(turn) = lock(&self.state).turns.get_mut(id) {
+                    turn.dispatched = true;
+                    turn.start_pending = true;
+                }
+            }
+            begin_rpc(proc, method, params)?
+        };
+        await_rpc(proc, method, call, receiver).await
+    }
+
+    /// Caller holds lifecycle so a close/stop cannot cross input admission.
+    fn check_dispatch(&self, id: &str, turn_id: &str, proc: &Arc<Proc>) -> Result<(), String> {
+        let state = lock(&self.state);
+        if !state
+            .turns
+            .get(id)
+            .is_some_and(|turn| turn.id == turn_id && !turn.stopping)
+            || !state
+                .live
+                .get(id)
+                .is_some_and(|live| live.proc.generation == proc.generation)
+            || proc.expected_exit.load(Ordering::SeqCst)
+            || lock(&proc.failure).is_some()
+        {
+            return Err("This turn stopped before the agent could receive it.".into());
+        }
         Ok(())
     }
 
@@ -859,6 +1503,8 @@ impl Inner {
 
     async fn start(&self, args: Value) -> Result<Value, Failure> {
         let invalid = |m: &str| ("INVALID_ARGUMENTS", m.to_owned());
+        require_browser_disabled(args["playwright"].as_bool().unwrap_or(false))
+            .map_err(|message| ("BROWSER_UNAVAILABLE", message))?;
         let provider = Provider::parse(args["provider"].as_str().unwrap_or(""))
             .ok_or_else(|| invalid("provider must be claude or codex."))?;
         let access = match args["access"].as_str() {
@@ -881,7 +1527,13 @@ impl Inner {
         let short = |value: &Value, limit: usize| {
             value
                 .as_str()
-                .map(|s| s.trim().chars().filter(|c| !c.is_control()).take(limit).collect::<String>())
+                .map(|s| {
+                    s.trim()
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(limit)
+                        .collect::<String>()
+                })
                 .filter(|s| !s.is_empty())
         };
         let word = |value: &Value| -> Result<Option<String>, Failure> {
@@ -889,7 +1541,8 @@ impl Inner {
                 None => Ok(None),
                 Some(s)
                     if s.len() <= 80
-                        && s.chars().all(|c| c.is_ascii_alphanumeric() || "-._[]:/".contains(c)) =>
+                        && s.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "-._[]:/".contains(c)) =>
                 {
                     Ok(Some(s.to_owned()))
                 }
@@ -899,9 +1552,14 @@ impl Inner {
         let model = word(&args["model"])?;
         let effort = word(&args["effort"])?;
         let shared_id = short(&args["sharedId"], 128);
+        let _lease =
+            runtime_lease(&self.board).map_err(|message| ("SESSION_UNAVAILABLE", message))?;
         self.executable(provider)
             .await
             .map_err(|message| ("AGENT_UNAVAILABLE", message))?;
+        if let Some(message) = lock(&self.storage_failure).clone() {
+            return Err(("STORAGE_FAILED", message));
+        }
         let now = now_ms();
         let record = Record {
             id: format!("s_{}", random_hex(8)),
@@ -918,7 +1576,7 @@ impl Inner {
             last_activity_at: now,
             shared: shared_id.is_some(),
             shared_id,
-            playwright: args["playwright"].as_bool().unwrap_or(false),
+            playwright: false,
             model,
             effort,
             turn_id: None,
@@ -926,7 +1584,10 @@ impl Inner {
         {
             let mut state = lock(&self.state);
             state.records.push(record.clone());
-            self.save(&state);
+            if let Err(message) = self.save(&state) {
+                state.records.pop();
+                return Err(("STORAGE_FAILED", message));
+            }
         }
         Ok(json!({"session": record}))
     }
@@ -937,6 +1598,10 @@ impl Inner {
         text: String,
         attachments: Vec<Attachment>,
     ) -> Result<Value, Failure> {
+        let _lifecycle = lock(&self.lifecycle);
+        if let Some(message) = lock(&self.storage_failure).clone() {
+            return Err(("STORAGE_FAILED", message));
+        }
         if text.trim().is_empty() && attachments.is_empty() {
             return Err(("INVALID_ARGUMENTS", "Type a message first.".into()));
         }
@@ -946,13 +1611,33 @@ impl Inner {
                 "The message or its attachment list is too large.".into(),
             ));
         }
-        if attachments.iter().any(|a| !Path::new(&a.path).is_absolute()) {
-            return Err(("INVALID_ARGUMENTS", "Attachments need absolute paths.".into()));
+        if attachments
+            .iter()
+            .any(|a| !Path::new(&a.path).is_absolute())
+        {
+            return Err((
+                "INVALID_ARGUMENTS",
+                "Attachments need absolute paths.".into(),
+            ));
         }
         let turn_id = format!("t_{}", random_hex(6));
+        let lease =
+            runtime_lease(&self.board).map_err(|message| ("SESSION_UNAVAILABLE", message))?;
+        let user_event = event(
+            &id,
+            Some(&turn_id),
+            "user",
+            json!({"text": text, "attachments": attachments}),
+        );
         let (record, proc) = {
             let mut state = lock(&self.state);
-            if state.turns.contains_key(&id) {
+            if state.turns.contains_key(&id)
+                || state.launching.contains_key(&id)
+                || state
+                    .live
+                    .get(&id)
+                    .is_some_and(|live| live.proc.expected_exit.load(Ordering::SeqCst))
+            {
                 return Err((
                     "SESSION_BUSY",
                     "This agent is still replying. Stop it or wait for it to finish.".into(),
@@ -961,34 +1646,40 @@ impl Inner {
             let Some(record) = state.records.iter_mut().find(|r| r.id == id) else {
                 return Err(("SESSION_NOT_FOUND", "That chat no longer exists.".into()));
             };
+            require_browser_disabled(record.playwright)
+                .map_err(|message| ("BROWSER_UNAVAILABLE", message))?;
+            let previous = record.clone();
             record.status = "running".into();
             record.turn_id = Some(turn_id.clone());
             record.last_activity_at = now_ms();
             let record = record.clone();
+            if let Err(message) = self.save(&state).and_then(|_| self.append(&user_event)) {
+                if let Some(current) = state.records.iter_mut().find(|r| r.id == id) {
+                    *current = previous;
+                }
+                let _ = self.save(&state);
+                return Err(("STORAGE_FAILED", message));
+            }
             state.turns.insert(
                 id.clone(),
                 Turn {
                     id: turn_id.clone(),
                     provider_turn: None,
                     stopping: false,
+                    dispatched: false,
+                    start_pending: false,
+                    completion: None,
+                    _lease: lease.clone(),
                 },
             );
             let proc = state.live.get_mut(&id).map(|live| {
                 live.last_used = Instant::now();
+                *lock(&live.proc.runtime_lease) = Some(lease.clone());
                 live.proc.clone()
             });
-            self.save(&state);
             (record, proc)
         };
-        self.publish(
-            event(
-                &id,
-                Some(&turn_id),
-                "user",
-                json!({"text": text, "attachments": attachments}),
-            ),
-            true,
-        );
+        self.publish(user_event, false);
         self.publish(
             event(&id, Some(&turn_id), "status", json!({"status": "running"})),
             false,
@@ -997,10 +1688,10 @@ impl Inner {
         let turn = turn_id.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(message) = inner
-                .deliver(&record, proc, &turn, &text, &attachments)
+                .deliver(&record, proc, &turn, &text, &attachments, lease)
                 .await
             {
-                inner.finish_turn(&record.id, Some(&turn), "failed", Some(message), "error");
+                inner.fail_turn(&record.id, &turn, message);
             }
         });
         Ok(json!({"accepted": true, "turnId": turn_id}))
@@ -1013,21 +1704,29 @@ impl Inner {
         turn_id: &str,
         text: &str,
         attachments: &[Attachment],
+        lease: Arc<File>,
     ) -> Result<(), String> {
         let provider = Provider::parse(&record.provider).ok_or("Unknown provider.")?;
         let proc = match proc {
             Some(proc) => proc,
-            None => self.launch(record, provider, turn_id).await?,
+            None => self.launch(record, provider, turn_id, lease).await?,
         };
         if !self.turn_active(&record.id, turn_id) {
             return Ok(()); // stopped while the agent was starting
         }
         let prompt = with_attachments(text, attachments);
         match provider {
-            Provider::Claude => proc.write(
-                json!({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": prompt}]}, "parent_tool_use_id": null})
-                    .to_string(),
-            ),
+            Provider::Claude => {
+                let _lifecycle = lock(&self.lifecycle);
+                self.check_dispatch(&record.id, turn_id, &proc)?;
+                if let Some(turn) = lock(&self.state).turns.get_mut(&record.id) {
+                    turn.dispatched = true;
+                }
+                proc.write(
+                    json!({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": prompt}]}, "parent_tool_use_id": null})
+                        .to_string(),
+                )
+            }
             Provider::Codex => {
                 let thread = lock(&self.state)
                     .records
@@ -1046,11 +1745,27 @@ impl Inner {
                 if let Some(model) = &record.model {
                     params["model"] = json!(model);
                 }
-                let result = rpc(&proc, "turn/start", params).await?;
-                if let Some(provider_turn) = result["turn"]["id"].as_str() {
-                    if let Some(turn) = lock(&self.state).turns.get_mut(&record.id) {
-                        turn.provider_turn.get_or_insert(provider_turn.to_owned());
-                    }
+                let result = self
+                    .turn_rpc(&record.id, turn_id, &proc, "turn/start", params)
+                    .await?;
+                let provider_turn = result["turn"]["id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .ok_or("Codex did not identify its accepted turn.")?;
+                let _lifecycle = lock(&self.lifecycle);
+                let completion = {
+                    let mut state = lock(&self.state);
+                    let Some(turn) = state
+                        .turns
+                        .get_mut(&record.id)
+                        .filter(|turn| turn.id == turn_id)
+                    else {
+                        return Ok(());
+                    };
+                    turn.acknowledge(&lock(&proc.completed_turns), provider_turn)?
+                };
+                if let Some(status) = completion {
+                    self.complete_provider_turn(&record.id, &proc, status);
                 }
                 Ok(())
             }
@@ -1058,6 +1773,7 @@ impl Inner {
     }
 
     fn stop(self: &Arc<Self>, id: &str) -> Result<Value, Failure> {
+        let _lifecycle = lock(&self.lifecycle);
         let (turn_id, provider_turn, proc, thread) = {
             let mut state = lock(&self.state);
             let Some(thread) = state
@@ -1088,15 +1804,16 @@ impl Inner {
             }
             Provider::Codex => {
                 if let (Some(thread), Some(provider_turn)) = (thread, provider_turn) {
-                    let proc = proc.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let _ = rpc(
-                            &proc,
-                            "turn/interrupt",
-                            json!({"threadId": thread, "turnId": provider_turn}),
-                        )
-                        .await;
-                    });
+                    // The grace timer owns interruption failure. A separate RPC
+                    // timeout must not retire a later turn on this same process.
+                    let call = proc.next_id.fetch_add(1, Ordering::SeqCst);
+                    let _ = proc.write(
+                        json!({
+                            "id": call, "method": "turn/interrupt",
+                            "params": {"threadId": thread, "turnId": provider_turn}
+                        })
+                        .to_string(),
+                    );
                 }
             }
         }
@@ -1106,6 +1823,7 @@ impl Inner {
         let id = id.to_owned();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(STOP_GRACE).await;
+            let _lifecycle = lock(&inner.lifecycle);
             if lock(&inner.state)
                 .turns
                 .get(&id)
@@ -1118,17 +1836,29 @@ impl Inner {
     }
 
     fn close(&self, id: &str) -> Result<Value, Failure> {
+        let _lifecycle = lock(&self.lifecycle);
         let (live, turn) = {
             let mut state = lock(&self.state);
             let Some(record) = state.records.iter_mut().find(|r| r.id == id) else {
                 return Err(("SESSION_NOT_FOUND", "That chat no longer exists.".into()));
             };
             record.status = "stopped".into();
-            record.turn_id = None;
-            let live = state.live.remove(id);
-            let turn = state.turns.remove(id);
-            self.save(&state);
-            (live, turn)
+            let proc = state.live.get(id).map(|live| live.proc.clone());
+            let turn = if proc.is_some() {
+                if let Some(turn) = state.turns.get_mut(id) {
+                    turn.stopping = true;
+                }
+                None
+            } else {
+                state.turns.remove(id)
+            };
+            if proc.is_none() {
+                if let Some(record) = state.records.iter_mut().find(|r| r.id == id) {
+                    record.turn_id = None;
+                }
+            }
+            let _ = self.save(&state);
+            (proc, turn)
         };
         if let Some(turn) = turn {
             self.publish(
@@ -1136,9 +1866,14 @@ impl Inner {
                 true,
             );
         }
-        self.publish(event(id, None, "status", json!({"status": "stopped"})), false);
-        if let Some(live) = live {
-            shutdown(live.proc);
+        self.publish(
+            event(id, None, "status", json!({"status": "stopped"})),
+            false,
+        );
+        if let Some(proc) = live {
+            // Keep this generation and its turn until exit is confirmed. An
+            // immediate new send cannot overlap the closing process.
+            proc.kill();
         }
         Ok(json!({"closed": true}))
     }
@@ -1168,27 +1903,31 @@ impl Inner {
     }
 
     fn reap_idle(&self) {
-        let victims: Vec<Live> = {
-            let mut state = lock(&self.state);
-            let idle: Vec<String> = state
+        let _lifecycle = lock(&self.lifecycle);
+        let victims: Vec<(String, Arc<Proc>)> = {
+            let state = lock(&self.state);
+            state
                 .live
                 .iter()
                 .filter(|(id, live)| {
                     !state.turns.contains_key(*id) && live.last_used.elapsed() > IDLE_LIMIT
                 })
-                .map(|(id, _)| id.clone())
-                .collect();
-            idle.iter().filter_map(|id| state.live.remove(id)).collect()
+                .map(|(id, live)| (id.clone(), live.proc.clone()))
+                .collect()
         };
-        for live in victims {
-            shutdown(live.proc);
+        for (id, proc) in victims {
+            if retire(&proc) {
+                lock(&self.state).live.remove(&id);
+            }
         }
     }
 }
 
 // ------------------------------------------------------------------ helpers
 
-async fn rpc(proc: &Arc<Proc>, method: &str, params: Value) -> Result<Value, String> {
+type RpcReceiver = oneshot::Receiver<Result<Value, String>>;
+
+fn begin_rpc(proc: &Arc<Proc>, method: &str, params: Value) -> Result<(u64, RpcReceiver), String> {
     let call = proc.next_id.fetch_add(1, Ordering::SeqCst);
     let (sender, receiver) = oneshot::channel();
     lock(&proc.pending).insert(call, sender);
@@ -1198,19 +1937,51 @@ async fn rpc(proc: &Arc<Proc>, method: &str, params: Value) -> Result<Value, Str
         lock(&proc.pending).remove(&call);
         return Err(problem);
     }
-    match tokio::time::timeout(RPC_WAIT, receiver).await {
+    Ok((call, receiver))
+}
+
+async fn await_rpc(
+    proc: &Arc<Proc>,
+    method: &str,
+    call: u64,
+    receiver: RpcReceiver,
+) -> Result<Value, String> {
+    await_rpc_for(proc, method, call, receiver, RPC_WAIT).await
+}
+
+async fn await_rpc_for(
+    proc: &Arc<Proc>,
+    method: &str,
+    call: u64,
+    receiver: RpcReceiver,
+    wait: Duration,
+) -> Result<Value, String> {
+    match tokio::time::timeout(wait, receiver).await {
         Ok(Ok(result)) => result.map_err(|e| format!("Codex rejected {method}: {e}")),
         Ok(Err(_)) => Err(format!("Codex stopped before answering {method}.")),
         Err(_) => {
             lock(&proc.pending).remove(&call);
-            Err(format!("Codex did not answer {method} in time."))
+            let message = format!(
+                "Codex did not answer {method} in time. Its process is being stopped before another turn can start."
+            );
+            *lock(&proc.failure) = Some(message.clone());
+            proc.kill();
+            Err(message)
         }
     }
 }
 
-async fn thread_start(proc: &Arc<Proc>, mut params: Value) -> Result<Value, String> {
-    params["serviceName"] = json!("codaclauda");
-    rpc(proc, "thread/start", params).await
+async fn rpc(proc: &Arc<Proc>, method: &str, params: Value) -> Result<Value, String> {
+    let (call, receiver) = begin_rpc(proc, method, params)?;
+    await_rpc(proc, method, call, receiver).await
+}
+
+async fn initialize_codex(proc: &Arc<Proc>) -> Result<(), String> {
+    rpc(proc, "initialize", json!({
+        "clientInfo": {"name": "codaclauda", "title": "CodaClauda", "version": env!("CARGO_PKG_VERSION")},
+        "capabilities": {"experimentalApi": false, "optOutNotificationMethods": CODEX_QUIET}
+    })).await?;
+    proc.write(json!({"method": "initialized"}).to_string())
 }
 
 fn drain_stderr(mut stderr: File, tail: Arc<Mutex<String>>) {
@@ -1235,7 +2006,7 @@ fn launch_env() -> BTreeMap<OsString, OsString> {
     let mut env = adapters::subscription_environment();
     env.retain(|name, _| {
         let name = name.to_string_lossy().to_ascii_uppercase();
-        !STRIPPED_ENV.contains(&name.as_str())
+        !STRIPPED_ENV.contains(&name.as_str()) && session_policy::retain_launch_env(&name)
     });
     env
 }
@@ -1256,12 +2027,7 @@ fn sandbox_policy(access: &str) -> Value {
     }
 }
 
-fn claude_args(record: &Record, fresh_session: &str, mcp: Option<&Path>) -> Vec<OsString> {
-    let mode = if record.access == "full" {
-        "bypassPermissions"
-    } else {
-        "plan"
-    };
+fn claude_args(record: &Record, fresh_session: &str) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "-p",
         "--input-format",
@@ -1270,14 +2036,10 @@ fn claude_args(record: &Record, fresh_session: &str, mcp: Option<&Path>) -> Vec<
         "stream-json",
         "--verbose",
         "--include-partial-messages",
-        "--disable-slash-commands",
-        "--permission-mode",
-        mode,
-        "--permission-prompts",
-        "none",
     ]
     .map(OsString::from)
     .into();
+    args.extend(session_policy::claude_policy_args(&record.access));
     if let Some(model) = &record.model {
         args.extend(["--model".into(), model.into()]);
     }
@@ -1288,30 +2050,18 @@ fn claude_args(record: &Record, fresh_session: &str, mcp: Option<&Path>) -> Vec<
         Some(session) => args.extend(["--resume".into(), session.into()]),
         None => args.extend(["--session-id".into(), fresh_session.into()]),
     }
-    // Variadic flag: keep it last.
-    if let Some(path) = mcp {
-        args.extend(["--mcp-config".into(), path.as_os_str().to_owned()]);
-    }
     args
 }
 
-fn codex_args(record: &Record) -> Vec<OsString> {
-    let mut args: Vec<OsString> = [
-        "app-server",
-        "--listen",
-        "stdio://",
-        "-c",
-        "forced_login_method=\"chatgpt\"",
-    ]
-    .map(OsString::from)
-    .into();
-    if record.playwright {
-        args.extend([
-            "-c".into(),
-            "mcp_servers.playwright.command=\"cmd\"".into(),
-            "-c".into(),
-            format!("mcp_servers.playwright.args=[\"/c\",\"npx\",\"-y\",\"{PLAYWRIGHT_MCP}\"]").into(),
-        ]);
+fn codex_args(overrides: &[String]) -> Vec<OsString> {
+    let mut args: Vec<OsString> = ["app-server", "--listen", "stdio://"]
+        .map(OsString::from)
+        .into();
+    for setting in session_policy::codex_base_overrides()
+        .iter()
+        .chain(overrides.iter())
+    {
+        args.extend(["-c".into(), setting.into()]);
     }
     args
 }
@@ -1363,7 +2113,12 @@ fn scan(root: &Path, name: &str, depth: usize, out: &mut Vec<PathBuf>) {
         if kind.is_symlink() {
             continue;
         }
-        if kind.is_file() && entry.file_name().to_string_lossy().eq_ignore_ascii_case(name) {
+        if kind.is_file()
+            && entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(name)
+        {
             out.push(entry.path());
         } else if kind.is_dir() {
             scan(&entry.path(), name, depth - 1, out);
@@ -1383,8 +2138,8 @@ fn path_version(path: &Path) -> Vec<u64> {
         .unwrap_or_default()
 }
 
-/// Newest signed-in desktop-app bundle (or PATH install), using coord-core's
-/// read-only probe. No model request is made.
+/// Locate a desktop-app bundle or PATH executable using metadata only.
+/// Fresh isolated authentication and effective-policy checks belong to launch.
 fn discover(provider: Provider) -> Result<PathBuf, String> {
     let var = |name: &str| {
         std::env::var_os(name)
@@ -1395,12 +2150,19 @@ fn discover(provider: Provider) -> Result<PathBuf, String> {
     match provider {
         Provider::Claude => {
             if let Some(roaming) = var("APPDATA") {
-                scan(&roaming.join("Claude").join("claude-code"), provider.exe(), 3, &mut found);
+                scan(
+                    &roaming.join("Claude").join("claude-code"),
+                    provider.exe(),
+                    3,
+                    &mut found,
+                );
             }
             if let Some(local) = var("LOCALAPPDATA") {
                 if let Ok(packages) = fs::read_dir(local.join("Packages")) {
                     for package in packages.flatten().filter(|p| {
-                        p.file_name().to_string_lossy().starts_with("AnthropicPBC.Claude_")
+                        p.file_name()
+                            .to_string_lossy()
+                            .starts_with("AnthropicPBC.Claude_")
                     }) {
                         scan(
                             &package.path().join("LocalCache/Roaming/Claude/claude-code"),
@@ -1412,12 +2174,22 @@ fn discover(provider: Provider) -> Result<PathBuf, String> {
                 }
             }
             if let Some(profile) = var("USERPROFILE") {
-                scan(&profile.join(".local").join("bin"), provider.exe(), 1, &mut found);
+                scan(
+                    &profile.join(".local").join("bin"),
+                    provider.exe(),
+                    1,
+                    &mut found,
+                );
             }
         }
         Provider::Codex => {
             if let Some(local) = var("LOCALAPPDATA") {
-                scan(&local.join("OpenAI/Codex/bin"), provider.exe(), 2, &mut found);
+                scan(
+                    &local.join("OpenAI/Codex/bin"),
+                    provider.exe(),
+                    2,
+                    &mut found,
+                );
             }
         }
     }
@@ -1441,33 +2213,11 @@ fn discover(provider: Provider) -> Result<PathBuf, String> {
         seen.insert(key)
     });
     found.sort_by_key(|p| std::cmp::Reverse(path_version(p)));
-    let mut best: Option<(Vec<u64>, PathBuf)> = None;
-    let mut problem = None;
-    for candidate in found.iter().take(4) {
-        match adapters::probe(provider.name(), candidate) {
-            Ok(result) if result["authenticated"] == true => {
-                let version = session_parse::parse_version(result["version"].as_str().unwrap_or(""));
-                if !path_version(candidate).is_empty() {
-                    best = Some((version, candidate.clone()));
-                    break; // sorted newest first
-                }
-                if best.as_ref().is_none_or(|(v, _)| version > *v) {
-                    best = Some((version, candidate.clone()));
-                }
-            }
-            Ok(_) => problem = Some("it is not signed in to a subscription".to_owned()),
-            Err(e) => problem = Some(e.to_string()),
-        }
-    }
-    best.map(|(_, path)| path).ok_or_else(|| match provider {
-        Provider::Claude => format!(
-            "Claude Code is not ready{}. Open the Claude desktop app and sign in, then try again.",
-            problem.map(|p| format!(" ({p})")).unwrap_or_default()
-        ),
-        Provider::Codex => format!(
-            "Codex is not ready{}. Open the Codex app and sign in with ChatGPT, then try again.",
-            problem.map(|p| format!(" ({p})")).unwrap_or_default()
-        ),
+    found.into_iter().next().ok_or_else(|| {
+        format!(
+            "{} could not be found. Install its desktop app or CLI, then try again.",
+            provider.label()
+        )
     })
 }
 
@@ -1545,7 +2295,7 @@ mod tests {
             last_activity_at: 0,
             shared: false,
             shared_id: None,
-            playwright: true,
+            playwright: false,
             model: None,
             effort: None,
             turn_id: None,
@@ -1554,25 +2304,276 @@ mod tests {
 
     #[test]
     fn launch_arguments_follow_the_access_level() {
-        let full: Vec<String> = claude_args(&record("claude", "full"), "u", Some(Path::new("m.json")))
+        let full: Vec<String> = claude_args(&record("claude", "full"), "u")
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(full.windows(2).any(|w| w == ["--permission-mode", "bypassPermissions"]));
+        assert!(
+            full.windows(2)
+                .any(|w| w == ["--permission-mode", "bypassPermissions"])
+        );
         assert!(full.contains(&"--disable-slash-commands".to_owned()));
-        assert_eq!(full[full.len() - 2..], ["--mcp-config", "m.json"]);
-        let read: Vec<String> = claude_args(&record("claude", "read"), "u", None)
+        assert!(!full.contains(&"--mcp-config".to_owned()));
+        let read: Vec<String> = claude_args(&record("claude", "read"), "u")
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(read.windows(2).any(|w| w == ["--permission-mode", "plan"]));
+        assert!(read.contains(&"--restricted".to_owned()));
         assert!(read.windows(2).any(|w| w == ["--session-id", "u"]));
-        let codex: Vec<String> = codex_args(&record("codex", "read"))
+        let codex: Vec<String> = codex_args(&[])
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(codex.contains(&"forced_login_method=\"chatgpt\"".to_owned()));
+        assert!(!codex.iter().any(|arg| arg.contains("mcp_servers.")));
+        let probe = codex_args(&[]);
+        assert!(
+            !probe
+                .iter()
+                .any(|arg| arg.to_string_lossy().contains("mcp_servers."))
+        );
         assert!(valid_id("s_0123456789abcdef") && !valid_id("s_../../x"));
         assert_eq!(uuid_v4().len(), 36);
+    }
+
+    #[test]
+    fn persisted_browser_requests_are_preserved_but_cannot_be_dispatched() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut saved = record("claude", "full");
+        saved.playwright = true;
+        save_registry(dir.path(), &[saved]).unwrap();
+        let loaded = read_registry(&dir.path().join(REGISTRY_FILE)).unwrap();
+        assert!(loaded[0].playwright);
+        assert!(
+            require_browser_disabled(loaded[0].playwright)
+                .unwrap_err()
+                .contains("unavailable")
+        );
+        assert!(require_browser_disabled(false).is_ok());
+    }
+
+    #[test]
+    fn only_one_host_can_load_a_boards_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions-host.lock");
+        let first = lease_file(&path).unwrap();
+        FileExt::try_lock_exclusive(&first).unwrap();
+        let second = lease_file(&path).unwrap();
+        assert!(FileExt::try_lock_exclusive(&second).is_err());
+        drop(first);
+        FileExt::try_lock_exclusive(&second).unwrap();
+    }
+
+    #[test]
+    fn update_excludes_turn_admission_until_every_owner_releases() {
+        let dir = tempfile::tempdir().unwrap();
+        let turn = runtime_lease(dir.path()).unwrap();
+        let process = turn.clone();
+        let another_turn = runtime_lease(dir.path()).unwrap();
+        let updater = lease_file(&dir.path().join("session-runtime.lock")).unwrap();
+        assert!(FileExt::try_lock_exclusive(&updater).is_err());
+        drop(turn);
+        drop(another_turn);
+        assert!(FileExt::try_lock_exclusive(&updater).is_err());
+        drop(process);
+        FileExt::try_lock_exclusive(&updater).unwrap();
+        assert!(runtime_lease(dir.path()).is_err());
+        drop(updater);
+        assert!(runtime_lease(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn malformed_and_duplicate_registries_are_preserved_and_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(REGISTRY_FILE);
+        assert!(read_registry(&path).unwrap().is_empty());
+        let records = [record("codex", "read"), record("codex", "read")];
+        for bytes in [
+            b"{broken".to_vec(),
+            serde_json::to_vec(&json!({"schema": "unknown", "sessions": []})).unwrap(),
+            serde_json::to_vec(&json!({"schema": "codaclauda.sessions/1", "sessions": records}))
+                .unwrap(),
+        ] {
+            fs::write(&path, &bytes).unwrap();
+            assert!(read_registry(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn registry_write_errors_are_returned_without_replacing_existing_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = vec![record("claude", "read")];
+        save_registry(dir.path(), &saved).unwrap();
+        let previous = fs::read(dir.path().join(REGISTRY_FILE)).unwrap();
+        // An unexpected non-directory at the display-log path must fail
+        // before the registry can be replaced or a turn can be dispatched.
+        fs::remove_dir(dir.path().join(LOG_DIR)).unwrap();
+        fs::write(dir.path().join(LOG_DIR), b"preserve me").unwrap();
+        assert!(save_registry(dir.path(), &[]).is_err());
+        assert_eq!(fs::read(dir.path().join(REGISTRY_FILE)).unwrap(), previous);
+        assert_eq!(
+            read_registry(&dir.path().join(REGISTRY_FILE))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    fn queued_turn(id: &str, lease: Arc<File>) -> Turn {
+        Turn {
+            id: id.into(),
+            provider_turn: None,
+            stopping: false,
+            dispatched: false,
+            start_pending: false,
+            completion: None,
+            _lease: lease,
+        }
+    }
+
+    #[test]
+    fn simultaneous_launches_cannot_overbook_pending_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = runtime_lease(dir.path()).unwrap();
+        let mut state = State::default();
+        for n in 0..8 {
+            state
+                .turns
+                .insert(format!("s{n}"), queued_turn("t", lease.clone()));
+        }
+        let state = Arc::new(Mutex::new(state));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let attempts: Vec<_> = (0..8)
+            .map(|n| {
+                let state = state.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    lock(&state).reserve_launch(&format!("s{n}"), "t").is_ok()
+                })
+            })
+            .collect();
+        let admitted = attempts
+            .into_iter()
+            .map(|attempt| attempt.join().unwrap())
+            .filter(|admitted| *admitted)
+            .count();
+        assert_eq!(admitted, MAX_LIVE);
+        assert_eq!(lock(&state).launching.len(), MAX_LIVE);
+    }
+
+    #[test]
+    fn cancelled_launch_and_stale_cleanup_cannot_target_a_new_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = runtime_lease(dir.path()).unwrap();
+        let mut state = State::default();
+        state
+            .turns
+            .insert("s".into(), queued_turn("old", lease.clone()));
+        assert!(state.reserve_launch("s", "old").is_ok());
+        state.turns.remove("s"); // close while discovery is outstanding
+        assert!(!state.accepts_launch("s", "old"));
+        state.turns.insert("s".into(), queued_turn("new", lease));
+        assert!(state.reserve_launch("s", "new").is_err());
+        state.release_launch("s", "old"); // the old startup has quiesced
+        assert!(state.reserve_launch("s", "new").is_ok());
+        state.release_launch("s", "old"); // delayed old cleanup
+        assert!(state.accepts_launch("s", "new"));
+        assert!(!state.accepts_launch("s", "old"));
+    }
+
+    #[test]
+    fn delayed_provider_notifications_cannot_complete_or_rebind_a_later_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = runtime_lease(dir.path()).unwrap();
+        let mut completed = HashSet::new();
+        let mut first = queued_turn("local-1", lease.clone());
+        assert!(accept_codex_turn(
+            &mut first,
+            &completed,
+            Some("provider-1")
+        ));
+        completed.insert(first.provider_turn.unwrap());
+        let mut second = queued_turn("local-2", lease);
+        // Old turn/started, output and completion share this identity gate,
+        // including before the new turn/start response has arrived.
+        assert!(!accept_codex_turn(
+            &mut second,
+            &completed,
+            Some("provider-1")
+        ));
+        assert!(second.provider_turn.is_none());
+        assert!(!accept_codex_turn(&mut second, &completed, None));
+        assert!(accept_codex_turn(
+            &mut second,
+            &completed,
+            Some("provider-2")
+        ));
+        assert!(!accept_codex_turn(
+            &mut second,
+            &completed,
+            Some("provider-1")
+        ));
+        assert_eq!(second.provider_turn.as_deref(), Some("provider-2"));
+    }
+
+    #[test]
+    fn terminal_event_before_start_reply_keeps_the_turn_and_update_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut turn = queued_turn("local", runtime_lease(dir.path()).unwrap());
+        turn.start_pending = true;
+        turn.dispatched = true;
+        let completed = HashSet::new();
+        assert!(accept_codex_turn(&mut turn, &completed, Some("provider")));
+        assert!(turn.complete("completed".into()).is_none());
+        assert!(turn.start_pending);
+        let updater = lease_file(&dir.path().join("session-runtime.lock")).unwrap();
+        assert!(FileExt::try_lock_exclusive(&updater).is_err());
+        assert_eq!(
+            turn.acknowledge(&completed, "provider").unwrap().as_deref(),
+            Some("completed")
+        );
+        drop(turn);
+        FileExt::try_lock_exclusive(&updater).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn ambiguous_rpc_timeout_retires_owned_child_and_keeps_lease_until_quiescent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("cmd.exe");
+        // A local pipe consumer, never a provider or model. It deliberately
+        // accepts input without replying to exercise the real timeout path.
+        let args = ["/d", "/q", "/c", "more > nul"].map(OsString::from);
+        let (proc, _stdout) = spawn_owned(
+            &cmd,
+            &args,
+            dir.path(),
+            Provider::Codex,
+            1,
+            runtime_lease(dir.path()).unwrap(),
+        )
+        .unwrap();
+        let (call, receiver) = begin_rpc(&proc, "turn/start", json!({})).unwrap();
+        let error = await_rpc_for(
+            &proc,
+            "turn/start",
+            call,
+            receiver,
+            Duration::from_millis(30),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("did not answer"));
+        assert!(proc.expected_exit.load(Ordering::SeqCst));
+        assert!(lock(&proc.failure).is_some());
+        let updater = lease_file(&dir.path().join("session-runtime.lock")).unwrap();
+        assert!(FileExt::try_lock_exclusive(&updater).is_err());
+        assert!(retire(&proc));
+        lock(&proc.runtime_lease).take();
+        FileExt::try_lock_exclusive(&updater).unwrap();
     }
 }

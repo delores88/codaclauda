@@ -1,7 +1,7 @@
 # CodaClauda
 
-An owner-controlled Windows desktop utility for Claude and Codex coordination:
-passive mailboxes for existing chats, and separate bounded delegated work. Published
+An owner-controlled Windows desktop workspace for Claude and Codex:
+owned CLI sessions, passive mailboxes for existing chats, and bounded delegated work. Published
 by **DeloresAI**. First-party source is [MIT licensed](LICENSE), copyright
 Ben Van Dorn / DeloresAI. [Public source](https://github.com/delores88/codaclauda).
 
@@ -9,25 +9,29 @@ Coordinates OpenAI Codex and Claude Code agents. Not affiliated with or endorsed
 by Anthropic or OpenAI.
 
 CodaClauda combines a Rust/Tauri desktop app, a JSON CLI and a request-bound stdio
-MCP server. You choose the agent, project, allowed paths, request types and limits.
-Questions and reviews are read-only. Delegated edits use a separate Git worktree;
+MCP server. Owned sessions keep a Claude Code or Codex conversation inside the app,
+with the project and access level chosen when the session starts. The separate
+scoped-request workflow lets you choose allowed paths, request types and limits.
+Its questions and reviews are read-only. Its delegated edits use a separate Git worktree;
 the returned diff is never merged automatically. Requests and receipts remain on
 the local coordination board.
 
 ## Current status
 
-[Version 0.3.2](https://github.com/delores88/codaclauda/releases/tag/v0.3.2)
-is the published release, displayed as **CodaClauda**. It was accepted into the
-ordinary, non-featured MIT Marketplace catalog on October 16, 2026. Its in-place
-installation preserved the board and connections; bounded native navigation and
-the authenticated Marketplace-served installer hash have separate receipts.
+[Version 0.3.3](https://github.com/delores88/codaclauda/releases/tag/v0.3.3)
+is published and Marketplace-accepted, displayed as **CodaClauda**, with ordinary
+MIT distribution. Its installed workflow, native listing and authenticated
+Marketplace-served installer hash have separate receipts. The Marketplace
+editorially selected it for its carousel; the original non-featured presentation
+expectation was not met. That external presentation exception is separate from
+artifact acceptance.
 
-Version 0.3.3 is in preparation, adding contributor islands and optional City
-weather alongside small interface fixes. The owner has authorized the release
-workflow after the required checks. A clean build and installed checks are
-separate from source review; see [the 0.3.3 release plan](docs/RELEASE-0.3.3.md).
-The interface instructions below describe the **0.3.3 candidate**. New candidate
-features do not establish verified behavior of the released 0.3.2 build.
+Version 0.4.0 is in preparation. It adds owned Claude Code and Codex sessions,
+streamed replies, shared two-agent chats and project access settings. The owner
+has authorized the release workflow after required checks. Source review, build,
+installed acceptance, publication and Marketplace acceptance are separate; see
+[the lean 0.4.0 release plan](docs/RELEASE-0.4.0.md). The instructions below describe
+the **0.4.0 candidate**, not verified behavior of the installed 0.3.3 release.
 
 The released passive mailbox supports named addresses, durable questions and
 replies, acknowledgments, bounded waits and atomic shared-resource claims.
@@ -52,7 +56,30 @@ utility is free: it does not require direct API credits or bundle a model.
 Claude/Codex subscriptions and optional Spark hardware are separate products
 with their own costs and terms.
 
-In the 0.3.3 candidate, open **Agent setup** in the sidebar. Choose an agent label
+Owned Claude sessions currently support personal Claude Pro or Max accounts.
+Team, Enterprise and unknown subscription types are unsupported. Launch is
+refused when a managed settings source or remote policy cache is present, or
+its absence cannot be verified. CodaClauda does not change or bypass that policy.
+
+For a new owned conversation, link a local folder under **Projects**, then open
+**Chat → Start a session**. Choose Claude, Codex or Both. Replies and tool activity
+stream into the app. A follow-up continues the same provider conversation; it
+does not attach to an existing desktop-app chat. In Both, a leading `@claude` or
+`@codex` targets one provider; `@both` or no mention targets both and can consume
+usage on both plans. Recent peer replies are included as untrusted context.
+Owned-session prompts, replies and tool summaries are stored locally without
+general secret redaction or the mailbox credential scan; never include secrets.
+
+New sessions inherit the project's **Full** or **Read only** setting. Full allows
+the provider's native tools without permission prompts, including file changes
+and commands under your account. Read only restricts the provider's available
+tools and filesystem writes. Local folders and `delores88` repositories default
+to Full; other projects default to Read only. Changing a project's setting applies
+to new sessions, not an already-running conversation or another app.
+Browser control is not available in 0.4.0.
+Owned sessions do not automatically wake on mailbox messages or schedules.
+
+For an existing desktop chat, open **Agent setup** in the sidebar. Choose an agent label
 and mailbox address, then copy the join prompt into a Claude Code or Codex chat
 that can run the local CLI. The prompt uses this installation's CLI and board
 paths to register a passive mailbox. Copying it does not start a provider session,
@@ -100,30 +127,33 @@ paginated, and the Tasks view provides a paginated table and request details.
 Each request selects a primary agent and up to three permitted peers in the same
 workspace; an agent's directory contains only those selected connections.
 
-## The 0.3.3 candidate desktop interface
+## The 0.4.0 candidate desktop interface
 
 Use the left sidebar to move between these views:
 
 | View | What you can do |
 | --- | --- |
-| **Chat** | Read and send a mailbox conversation, or explicitly choose a separate Live request. Read Markdown, highlighted code, math and attachments. |
+| **Chat** | Start or continue an owned Claude/Codex session, route a shared Both chat, or send a passive message to a registered desktop chat. Read Markdown, highlighted code, math and attachments. Earlier Live chats remain readable. |
 | **Message board** | Read messages grouped by project, follow reply threads, file or pin threads locally, and post a message. |
 | **Approvals** | Save standing-permission records, prepare text to paste into each agent's chat, and review requests and reported uses. |
 | **Tasks** | Review work and resource claims in a board or a paginated table. Active dedicated-request details offer **Cancel request** and **Stop request tree**. |
-| **City** | Explore linked projects and agent activity in 3D, or open Talk with an agent. The conversation identifies passive Mailbox or a fresh-session Live request. The Spark side reports configured DGXBridge status. |
+| **City** | Explore linked projects and agent activity in 3D, or open passive Mailbox Talk. Earlier Live chats remain read-only; start new owned conversations in Chat. The Spark side reports configured DGXBridge status. |
 | **Agents** | Find agent labels, addresses and connection status, then open a conversation. |
 | **Agent setup** | Prepare a passive mailbox join prompt; use Advanced for dedicated connections, task prompts, Grant & send and Board controls. |
-| **Projects** | Link local folders, inspect project metadata and choose which projects appear in the City. The table has fixed-size pages; bulk visibility actions apply to all matching projects, including other pages. |
+| **Projects** | Link local folders, inspect metadata, set access for new owned sessions and choose projects for the City. Bulk actions apply to all matching projects, including other pages. |
 | **My avatar** | Customize your local avatar, suggest its appearance from a photo, or explicitly ask an agent to help. |
 | **Settings** | Change appearance and alerts, inspect board details, or use Updates to check, approve, download and explicitly install an available update. |
 
 **Mailbox** conversations remain passive. Messages wait until the recipient
-checks its inbox; schedules vary and posting does not wake it. **Live**
-chat is a different workflow: each send starts a fresh dedicated read-only
-provider request, including up to 12 prior messages with bounded text. It does
-not attach to an existing chat or keep a continuous provider session alive.
-The same distinction applies to **City → Talk**: check its Mailbox or Live label
-before sending. A saved mailbox message is not evidence of a reply, and a
+checks its inbox; schedules vary and posting does not wake it. **CodaClauda
+sessions** instead own a provider process and continue its conversation. Up to
+three provider processes can be live; idle processes close after ten minutes
+and a later send resumes their saved provider conversation. Stop interrupts only
+the app-owned work; closing a session preserves history. After an interrupted
+app run, unfinished turns are reported as interrupted and are not replayed.
+Earlier **Live** chats used a fresh read-only request per send and remain a
+separate history. Check the conversation label before sending.
+A saved mailbox message is not evidence of a reply, and a
 downloaded update is not installed until setup and restart succeed.
 
 Project grouping uses message text and agents' home projects. Manual filing and

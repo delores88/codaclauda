@@ -104,21 +104,33 @@ class Sessions extends EventTarget {
   /** Loads a session's display log once (then live events keep it current). A failed load retries after 15 s at most. */
   async load(id) {
     const existing = this.logs.get(id);
+    if (existing?.state === 'loading') return existing.loading;
     if (existing && (existing.state !== 'error' || Date.now() - existing.failedAt < 15e3)) return;
     const log = { state: 'loading', events: [], buffer: [], version: 0, error: '', cache: null };
     this.logs.set(id, log);
+    log.loading = (async () => {
+      try {
+        const data = await desktop.sessionHistory({ id, limit: HISTORY_LIMIT });
+        const events = (Array.isArray(data?.events) ? data.events : []).filter(e => e && typeof e === 'object');
+        const seen = new Set(events.map(eventSig));
+        log.events = compactEvents([...events, ...log.buffer.filter(e => !seen.has(eventSig(e)))]);
+        log.state = 'loaded';
+      } catch (error) {
+        log.state = 'error'; log.error = error?.message || String(error); log.failedAt = Date.now();
+      }
+      log.buffer = []; log.version += 1;
+      this.changed();
+    })();
     this.changed();
-    try {
-      const data = await desktop.sessionHistory({ id, limit: HISTORY_LIMIT });
-      const events = (Array.isArray(data?.events) ? data.events : []).filter(e => e && typeof e === 'object');
-      const seen = new Set(events.map(eventSig));
-      log.events = compactEvents([...events, ...log.buffer.filter(e => !seen.has(eventSig(e)))]);
-      log.state = 'loaded';
-    } catch (error) {
-      log.state = 'error'; log.error = error?.message || String(error); log.failedAt = Date.now();
-    }
-    log.buffer = []; log.version += 1;
-    this.changed();
+    return log.loading;
+  }
+
+  /** Wait for persisted history before constructing a shared prompt; an unavailable log is not an empty one. */
+  async loadedTranscript(id) {
+    await this.load(id);
+    const transcript = this.transcript(id);
+    if (transcript.state !== 'loaded') throw new Error(`Couldn't load this conversation's history: ${transcript.error || 'History is unavailable.'}`);
+    return transcript;
   }
 
   /** { items, openTurn, lastAt } for a loaded session, plus its pending (sent, not yet echoed) messages. */
@@ -159,11 +171,14 @@ class Sessions extends EventTarget {
       const data = await desktop.sessionSend({ id, text, ...(attachments.length ? { attachments } : {}) });
       entry.turnId = data?.turnId || null;
       const s = this.session(id);
-      if (s && s.status !== 'running') { s.status = 'running'; s.lastActivityAt = Date.now(); }
+      // A user echo removes the optimistic entry. Any later terminal event must win
+      // over this command response, which may arrive after a fast reply or launch failure.
+      if (s && this.pending.get(id)?.includes(entry) && s.status !== 'running') { s.status = 'running'; s.lastActivityAt = Date.now(); }
       return data;
     } catch (error) {
       const list = this.pending.get(id) || [];
-      list.splice(list.indexOf(entry), 1);
+      const index = list.indexOf(entry);
+      if (index >= 0) list.splice(index, 1);
       throw error;
     } finally { this.changed(); }
   }

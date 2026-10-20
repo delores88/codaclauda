@@ -59,7 +59,8 @@ test('disclosures separate passive delivery, dedicated chat, local copies and ex
   assert.match(manifest.privacy.retention, /30 days.*subsequent mailbox operations/);
   assert.match(manifest.privacy.retention, /Legacy request.*until the owner removes them/);
   assert.match(manifest.privacy.retention, /attachment copies.*no automatic expiry/);
-  assert.match(manifest.description, /Live chat mode starts a fresh dedicated read-only provider request for each send/);
+  assert.match(manifest.description, /Owned sessions start.*continue the saved provider conversation/);
+  assert.match(manifest.description, /Earlier Live chats used a fresh dedicated read-only request per send/);
   assert.match(manifest.description, /not independent proof of agent presence or task completion/);
   assert.match(manifest.description, /Attachments and desktop chat copies.*not covered by the mailbox credential scan/);
   assert.match(manifest.privacy.dataLeavesDevice, /creation sends the chosen name, description and visibility to GitHub/);
@@ -69,6 +70,10 @@ test('disclosures separate passive delivery, dedicated chat, local copies and ex
   assert.deepEqual(manifest.integrations.filter(({ required }) => required).map(({ name }) => name), ['Microsoft Edge WebView2']);
   assert.equal(manifest.updater.mode, 'coordinated');
   assert.deepEqual(manifest.permissions.domains, ['deloresai.com', 'api.github.com', 'github.com', 'api.met.no', 'nominatim.openstreetmap.org']);
+  assert.match(manifest.description, /Browser control is not available in 0\.4\.0/);
+  assert.deepEqual(manifest.executableDownloads, []);
+  assert.doesNotMatch(JSON.stringify(manifest.integrations), /Playwright|Node\.js|npm/);
+  assert.doesNotMatch(manifest.description + manifest.privacy.dataLeavesDevice + manifest.updater.coordination, /npx|@playwright|registry\.npmjs\.org/);
   assert.match(manifest.description, /3D project city/);
   assert.match(manifest.privacy.dataLeavesDevice, /Local photo matching.*explicit avatar-help request saves the photo and shares its local path/);
   assert.doesNotMatch(manifest.description, /Claude push requires|Codex push requires/);
