@@ -32,7 +32,7 @@ class Wake extends EventTarget {
     if (this._loading) return this._loading;
     this._loading = (async () => {
       try { const data = await desktop.wakeSettingsGet(); this.enabled = data?.enabled !== false; this.error = ''; }
-      catch (error) { this.error = error?.message || String(error); }
+      catch (error) { this.enabled = null; this.error = error?.message || String(error); }
       finally { this._loading = null; }
       this.changed();
     })();
@@ -40,11 +40,17 @@ class Wake extends EventTarget {
   }
 
   async setEnabled(enabled) {
-    const data = await desktop.wakeSettingsSet({ enabled: Boolean(enabled) });
-    this.enabled = data && typeof data.enabled === 'boolean' ? data.enabled : Boolean(enabled);
-    this.error = '';
-    this.changed();
-    return this.enabled;
+    try {
+      const data = await desktop.wakeSettingsSet({ enabled: Boolean(enabled) });
+      if (typeof data?.enabled !== 'boolean') throw new Error('Wake settings did not confirm the change.');
+      this.enabled = data.enabled;
+      this.error = '';
+      return this.enabled;
+    } catch (error) {
+      this.enabled = null;
+      this.error = error?.message || String(error);
+      throw error;
+    } finally { this.changed(); }
   }
 
   /** Sessions with wake on, other than `exceptId`. */

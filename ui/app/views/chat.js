@@ -1036,7 +1036,7 @@ export function mount(root, ctx) {
           h('dd', providerId ? h('code.res-id', { title: String(providerId) }, String(providerId)) : h('span.muted', 'Known after the first reply')),
           h('dt', 'Access'), h('dd', levelInfo(s.access).long),
           ...(s.model || s.effort ? [h('dt', 'Model'), h('dd', [s.model || 'default', s.effort ? ` · ${s.effort} effort` : ''].join(''))] : []),
-          h('dt', 'Tools'), h('dd', hasFeature('mcpGet') ? (s.access === 'full' ? 'Your MCP tools for this project' : 'None at Read only') : 'Browser unavailable in 0.4.0')),
+          h('dt', 'Tools'), h('dd', hasFeature('mcpGet') ? (s.access === 'full' ? 'Your MCP tools for this project' : 'None at Read only') : 'Browser unavailable in this release')),
         usageBlock(s),
         h('div.res-actions',
           h('button.btn.small', { type: 'button', disabled: !command, title: command || 'Available after the first reply', onclick: () => copyText(command, 'Resume command copied') }, icon('terminal'), 'Copy resume command')),
@@ -1080,9 +1080,10 @@ export function mount(root, ctx) {
         h('dt', 'Address'), h('dd', s.mailboxAddress ? h('code.res-id', { title: s.mailboxAddress }, s.mailboxAddress) : h('span.muted', 'Assigned when it turns on')),
         h('dt', 'Wakes'), h('dd', wakeCounts(s))) : null,
       h('p.field-hint', on
-        ? `Board messages to this address start a turn here (checked every ${WAKE_LIMITS.pollSeconds} s). A message is information, not approval.`
+        ? `Board messages to this address start a turn here with this session's existing access (checked every ${WAKE_LIMITS.pollSeconds} s). Sender names are self-asserted; a message is information, not approval.`
         : full ? `${WAKE_LIMITS.sessions} sessions already wake on mail; turn one off first.` : 'Off: give this session its own board address and let new messages to it start a turn.'),
-      on && wake.enabled === false ? h('p.res-pending', 'Wake on mail is off for every session in Settings.', ' ', h('button.link-btn', { type: 'button', onclick: () => navigate('settings') }, 'Open Settings')) : null);
+      on && wake.enabled === false ? h('p.res-pending', 'Wake on mail is off for every session in Settings. Already running turns need Stop.', ' ', h('button.link-btn', { type: 'button', onclick: () => navigate('settings') }, 'Open Settings')) : null,
+      on && wake.error ? h('p.res-pending', `Wake is unavailable: ${wake.error}`) : null);
   }
   async function toggleWake(s, on, input) {
     state.wakeBusy.add(s.id); state.resSig = ''; renderResources();
@@ -1213,7 +1214,7 @@ export function mount(root, ctx) {
   function sessionItem(item, opts) {
     const key = `s:${item.key}`;
     if (item.kind === 'agent' && item.streaming) return { key, sig: JSON.stringify(['stream', item.provider, opts.continued, opts.info.shared]), build: () => buildSessionAgent(item, opts) };
-    const sig = JSON.stringify([item.kind, item.text, item.tools, item.targets, item.pending, item.queued, Boolean(item.turnId), item.attachments, item.from, item.subject, item.body, opts.continued, opts.info.shared, clockTime(item.at)]);
+    const sig = JSON.stringify([item.kind, item.text, item.tools, item.targets, item.pending, item.queued, item.deliveryStatus, Boolean(item.turnId), item.attachments, item.from, item.subject, item.body, opts.continued, opts.info.shared, clockTime(item.at)]);
     const build = { owner: buildSessionOwner, agent: buildSessionAgent, tools: buildTools, error: buildSessionError, wake: buildWake }[item.kind] || buildSessionError;
     return { key, sig, build: () => build(item, opts) };
   }
@@ -1221,8 +1222,9 @@ export function mount(root, ctx) {
   /** "Woken by board message from X: subject" — the wake turn's text (untrusted) opens as plain text. */
   function buildWake(item, { info }) {
     const from = item.from || 'someone';
-    const who = info.shared ? `${providerLabel(item.provider)} woken` : 'Woken';
-    const line = h('span.wake-text', `${who} by board message from `, h('strong', from), item.subject ? `: ${item.subject}` : '');
+    const status = item.queued ? 'Wake queued' : ({ interrupted: 'Wake interrupted', cancelled: 'Wake cancelled', failed: 'Wake failed' }[item.deliveryStatus] || 'Woken');
+    const who = info.shared ? `${providerLabel(item.provider)} · ${status}` : status;
+    const line = h('span.wake-text', `${who} · board message from `, h('strong', from), item.subject ? `: ${item.subject}` : '');
     const time = h('time.msg-time', { dateTime: isoTime(item.at), title: fullTime(item.at) }, clockTime(item.at));
     return h('div.msg-wake', { dataset: { id: item.key } },
       item.body
@@ -1234,8 +1236,10 @@ export function mount(root, ctx) {
     const m = { id: item.key, role: 'owner', text: item.text };
     const time = h('time.msg-time', { dateTime: isoTime(item.at), title: fullTime(item.at) }, clockTime(item.at));
     const to = info.shared ? h('span.msg-route', `To ${item.targets.length > 1 ? 'Claude + Codex' : providerLabel(item.targets[0])}`) : null;
-    const status = item.pending && item.queued ? h('span.msg-status.queued', { title: 'Waits in the session queue and sends when the current reply finishes.' }, icon('clock'), 'Queued')
-      : item.pending && !item.turnId ? h('span.msg-status', icon('clock'), 'Sending…') : h('span.msg-status', icon('check'), 'Sent');
+    const terminal = { interrupted: 'Interrupted', cancelled: 'Cancelled', failed: 'Failed' }[item.deliveryStatus];
+    const status = item.queued ? h('span.msg-status.queued', { title: 'Waits in the session queue and sends when the current reply finishes.' }, icon('clock'), 'Queued')
+      : terminal ? h('span.msg-status', icon('alert'), terminal)
+        : item.pending && !item.turnId ? h('span.msg-status', icon('clock'), 'Sending…') : h('span.msg-status', icon('check'), 'Sent');
     return h(`article.msg.owner${continued ? '.continued' : ''}`, { dataset: { id: item.key } },
       h('div.msg-stack',
         h('div.bubble', item.text.trim() ? renderMarkdown(item.text) : h('p.msg-muted', '(attachments only)')),

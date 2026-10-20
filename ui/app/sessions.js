@@ -11,7 +11,7 @@
  * 0.5: records gain worktreePath, branch and usage { input, output, cached, costUsd, contextPct }; a
  * 'usage' event updates usage live. fork / handoff / compact go through features.js (feature-detected). */
 import { desktop } from './bridge.js';
-import { buildTranscript, compactEvents, stripContext, parseWakeText, toMs } from './session-model.js';
+import { buildTranscript, compactEvents, stripContext, toMs } from './session-model.js';
 import { call as callFeature } from './features.js';
 
 const NEEDED = ['sessionList', 'sessionStart', 'sessionSend', 'sessionStop', 'sessionClose', 'sessionHistory', 'onSessionEvent'];
@@ -59,9 +59,10 @@ class Sessions extends EventTarget {
         // Live 'usage' events may also be newer than a record without usage.
         this.list = fresh.map(s => {
           const old = known.get(s.id);
-          const merged = old && toMs(old.lastActivityAt) > toMs(s.lastActivityAt) ? { ...s, status: old.status, lastActivityAt: old.lastActivityAt } : s;
+          const merged = old && toMs(old.lastActivityAt) > toMs(s.lastActivityAt) ? { ...s, status: old.status, turnId: old.turnId, lastActivityAt: old.lastActivityAt } : s;
           return old?.usage && !s.usage ? { ...merged, usage: old.usage } : merged;
         });
+        for (const s of fresh) if (Number.isFinite(s.queued)) this.queuedCounts.set(s.id, Math.max(0, s.queued));
         this.setAvailable(true);
         await this.listen();
       } catch (error) {
@@ -107,15 +108,18 @@ class Sessions extends EventTarget {
     }
     const queuedStatus = e.kind === 'status' && typeof e.status === 'string' ? QUEUED_STATUS.exec(e.status) : null;
     if (e.kind === 'queued' || queuedStatus) this.queuedCounts.set(e.id, Math.max(0, Number(queuedStatus ? queuedStatus[1] : e.count) || 0));
-    else if (e.kind === 'status' && e.status !== 'running') this.queuedCounts.delete(e.id);   // idle, stopped or error: nothing waits
     if (s) {
       s.lastActivityAt = e.at || Date.now();
-      if (e.kind === 'status' && typeof e.status === 'string' && !queuedStatus) s.status = e.status;
-      else if (e.kind === 'done') { if (s.status === 'running') s.status = 'idle'; }
-      else if (e.kind === 'user' || e.kind === 'delta' || e.kind === 'tool') s.status = 'running';
+      if (e.kind === 'status' && typeof e.status === 'string' && !queuedStatus) {
+        s.status = e.status;
+        s.turnId = e.status === 'running' ? (e.turnId || s.turnId) : null;
+      } else if (e.kind === 'done') {
+        if (!s.turnId || s.turnId === e.turnId) { if (s.status === 'running') s.status = 'idle'; s.turnId = null; }
+      } else if ((e.kind === 'user' && e.queued !== true) || e.kind === 'delta' || e.kind === 'tool') {
+        s.status = 'running'; s.turnId = e.turnId || s.turnId;
+      }
       else if (e.kind === 'wake') {
-        const w = s.wakes && typeof s.wakes === 'object' ? s.wakes : {};
-        s.wakes = { hour: (Number(w.hour) || 0) + 1, day: (Number(w.day) || 0) + 1, total: (Number(w.total) || 0) + 1 };
+        if (e.wakes && typeof e.wakes === 'object') s.wakes = { ...e.wakes };
       }
     }
     if (!s || e.kind === 'done' || e.kind === 'status' || e.kind === 'wake') this.scheduleRefresh();   // provider ids arrive after the first turn
@@ -124,7 +128,7 @@ class Sessions extends EventTarget {
       if (e.kind === 'user') {
         // A wake turn is the engine's, not one of Ben's pending messages.
         const i = pending.findIndex(p => p.turnId && p.turnId === e.turnId);
-        const loose = parseWakeText(e.text) ? -1 : pending.findIndex(p => !p.turnId || stripContext(p.text) === stripContext(e.text));
+        const loose = e.origin?.kind ? -1 : pending.findIndex(p => !p.turnId || stripContext(p.text) === stripContext(e.text));
         if (i >= 0 || loose >= 0) pending.splice(i >= 0 ? i : loose, 1);
       } else if (e.kind === 'done' || e.kind === 'error') for (const p of pending) if (p.turnId && p.turnId === e.turnId) p.done = true;
     }
@@ -221,7 +225,7 @@ class Sessions extends EventTarget {
       const s = this.session(id);
       // A user echo removes the optimistic entry. Any later terminal event must win
       // over this command response, which may arrive after a fast reply or launch failure.
-      if (s && this.pending.get(id)?.includes(entry) && s.status !== 'running') { s.status = 'running'; s.lastActivityAt = Date.now(); }
+      if (s && !entry.queued && this.pending.get(id)?.includes(entry) && s.status !== 'running') { s.status = 'running'; s.turnId = entry.turnId; s.lastActivityAt = Date.now(); }
       return data;
     } catch (error) {
       const list = this.pending.get(id) || [];

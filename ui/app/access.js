@@ -19,7 +19,7 @@ export const LEVELS = [
 ];
 export const LEVEL_IDS = LEVELS.map(l => l.id);
 export const ACCESS_NOTE = "These access controls apply to sessions CodaClauda starts. Desktop chats and terminal sessions follow their own app's permissions. Spending still requires your explicit authorization.";
-export const BROWSER_UNAVAILABLE = 'Browser control is not available in 0.4.0.';
+export const BROWSER_UNAVAILABLE = 'Browser control is not available in this release.';
 export const levelInfo = id => LEVELS.find(l => l.id === id) || LEVELS[1];
 
 /** 'full' | 'read' for a stored value (older 'read-only' reads as 'read'); anything else → null. */

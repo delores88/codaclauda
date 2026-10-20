@@ -97,7 +97,7 @@ class Schedules extends EventTarget {
     if (!quiet) this.changed();
     try {
       const data = await desktop.scheduleRuns({ id, limit: entry.limit });
-      entry.runs = mergeRuns([], Array.isArray(data?.runs) ? data.runs : []).slice(0, entry.limit);
+      entry.runs = mergeRuns(entry.runs, Array.isArray(data?.runs) ? data.runs : []).slice(0, entry.limit);
       entry.state = 'loaded'; entry.error = '';
     } catch (error) {
       entry.state = 'error'; entry.error = error?.message || String(error);

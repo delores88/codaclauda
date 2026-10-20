@@ -10,8 +10,8 @@ test('wake: the wake event and its turn text make one wake line, not a message f
   const { items, openTurn } = buildTranscript([
     { kind: 'user', turnId: 't0', text: 'hi', at: T },
     { kind: 'done', turnId: 't0', at: T + 10 },
-    { kind: 'wake', from: 'codex-claudacoda', subject: 'Build red?', at: T + 20 },
-    { kind: 'user', turnId: 't1', text, at: T + 30 },
+    { kind: 'wake', turnId: 't1', from: 'codex-claudacoda', subject: 'Build red?', at: T + 20 },
+    { kind: 'user', turnId: 't1', text, origin: { kind: 'wake', from: 'codex-claudacoda', subject: 'Build red?' }, at: T + 30 },
   ], { provider: 'claude', sessionId: 'a' });
   assert.deepEqual(items.map(x => x.kind), ['owner', 'wake']);
   assert.equal(items[1].from, 'codex-claudacoda');

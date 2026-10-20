@@ -72,3 +72,35 @@ test('a history failure prevents preparing a shared prompt with silently empty c
   await assert.rejects(sessions.loadedTranscript('a'), /History read failed/);
   assert.equal(sessions.transcript('a').state, 'error');
 });
+
+test('queued wake echo and interrupted waiting turn do not replace the active turn', () => {
+  const sessions = client();
+  sessions.onEvent({ id: 'a', kind: 'status', turnId: 'active', status: 'running', at: T + 1 });
+  sessions.onEvent({ id: 'a', kind: 'queued', count: 2, at: T + 2 });
+  sessions.onEvent({ id: 'a', kind: 'user', turnId: 'waiting', queued: true, origin: { kind: 'wake' }, text: 'Wait', at: T + 3 });
+  assert.equal(sessions.session('a').turnId, 'active');
+  sessions.onEvent({ id: 'a', kind: 'done', turnId: 'waiting', status: 'interrupted', at: T + 4 });
+  assert.equal(sessions.running('a'), true);
+  assert.equal(sessions.session('a').turnId, 'active');
+  assert.equal(sessions.queued('a'), 2);
+  sessions.onEvent({ id: 'a', kind: 'queued', count: 1, at: T + 5 });
+  assert.equal(sessions.queued('a'), 1);
+});
+
+test('registry refresh restores waiting counts and preserves a newer active turn', async t => {
+  const sessions = client();
+  sessions._listening = true;
+  sessions.onEvent({ id: 'a', kind: 'status', turnId: 'active', status: 'running', at: T + 2 });
+  stub(t, 'sessionList', async () => ({ sessions: [{ id: 'a', provider: 'claude', status: 'idle', turnId: null, lastActivityAt: T, queued: 3 }] }));
+  await sessions.refresh();
+  assert.equal(sessions.queued('a'), 3);
+  assert.equal(sessions.session('a').turnId, 'active');
+  assert.equal(sessions.running('a'), true);
+});
+
+test('automation user echo cannot consume an owner optimistic message', () => {
+  const sessions = client();
+  sessions.pending.set('a', [{ localId: 'p', text: 'same', turnId: null }]);
+  for (const kind of ['wake', 'schedule']) sessions.onEvent({ id: 'a', kind: 'user', turnId: kind, text: 'same', queued: true, origin: { kind }, at: T + 1 });
+  assert.equal(sessions.pending.get('a').length, 1);
+});

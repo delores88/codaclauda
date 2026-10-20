@@ -18,20 +18,18 @@ the local coordination board.
 
 ## Current status
 
-[Version 0.3.3](https://github.com/delores88/codaclauda/releases/tag/v0.3.3)
-is published and Marketplace-accepted, displayed as **CodaClauda**, with ordinary
-MIT distribution. Its installed workflow, native listing and authenticated
-Marketplace-served installer hash have separate receipts. The Marketplace
-editorially selected it for its carousel; the original non-featured presentation
-expectation was not met. That external presentation exception is separate from
-artifact acceptance.
+[Version 0.4.0](https://github.com/delores88/codaclauda/releases/tag/v0.4.0)
+is published, locally installed and Marketplace-accepted. Bounded installed
+workflows passed with Claude and Codex. Its final authenticated
+Marketplace-served file check remains a separate open evidence item because the
+available Marketplace client could not validate the release signing key.
 
-Version 0.4.0 is in preparation. It adds owned Claude Code and Codex sessions,
-streamed replies, shared two-agent chats and project access settings. The owner
-has authorized the release workflow after required checks. Source review, build,
-installed acceptance, publication and Marketplace acceptance are separate; see
-[the lean 0.4.0 release plan](docs/RELEASE-0.4.0.md). The instructions below describe
-the **0.4.0 candidate**, not verified behavior of the installed 0.3.3 release.
+Version 0.4.1 is in preparation from the reviewed 0.4.0 base. It adds queues for
+busy owned sessions, opt-in wake on mailbox messages and in-app schedules.
+Build, installation, actual workflow acceptance and Marketplace admission have
+separate receipts; see [the 0.4.1 release plan](docs/RELEASE-0.4.1.md).
+The instructions below describe the **0.4.1 candidate**. They do not establish
+that this candidate is already installed or published.
 
 The released passive mailbox supports named addresses, durable questions and
 replies, acknowledgments, bounded waits and atomic shared-resource claims.
@@ -76,8 +74,21 @@ and commands under your account. Read only restricts the provider's available
 tools and filesystem writes. Local folders and `delores88` repositories default
 to Full; other projects default to Read only. Changing a project's setting applies
 to new sessions, not an already-running conversation or another app.
-Browser control is not available in 0.4.0.
-Owned sessions do not automatically wake on mailbox messages or schedules.
+Browser control is not available in 0.4.1.
+
+A send to a busy owned session waits in its queue, up to ten waiting messages.
+Queued work is not automatically replayed after an interrupted app run.
+**Wake on mail** is an optional per-session setting, with a global switch in
+Settings. When enabled, the open app can send incoming mailbox content to that
+owned provider session. Sender labels are not verified identities, and incoming
+messages do not grant new permissions. Turn wake off when you do not want it to
+consume provider usage. Existing desktop-chat mailboxes remain passive.
+
+**Schedules** can send a saved prompt to an owned provider session at an interval
+or a daily local time. They run only while CodaClauda is open; there is no operating
+system background scheduler. Catch-up is optional. Review the selected project,
+provider and access before enabling a schedule. Disabling future runs does not
+replace Stop for an already-running turn.
 
 For an existing desktop chat, open **Agent setup** in the sidebar. Choose an agent label
 and mailbox address, then copy the join prompt into a Claude Code or Codex chat
@@ -127,13 +138,14 @@ paginated, and the Tasks view provides a paginated table and request details.
 Each request selects a primary agent and up to three permitted peers in the same
 workspace; an agent's directory contains only those selected connections.
 
-## The 0.4.0 candidate desktop interface
+## The 0.4.1 candidate desktop interface
 
 Use the left sidebar to move between these views:
 
 | View | What you can do |
 | --- | --- |
 | **Chat** | Start or continue an owned Claude/Codex session, route a shared Both chat, or send a passive message to a registered desktop chat. Read Markdown, highlighted code, math and attachments. Earlier Live chats remain readable. |
+| **Schedules** | Configure an owned-session prompt, interval or daily time, optional catch-up and future-run enablement; inspect run outcomes. |
 | **Message board** | Read messages grouped by project, follow reply threads, file or pin threads locally, and post a message. |
 | **Approvals** | Save standing-permission records, prepare text to paste into each agent's chat, and review requests and reported uses. |
 | **Tasks** | Review work and resource claims in a board or a paginated table. Active dedicated-request details offer **Cancel request** and **Stop request tree**. |

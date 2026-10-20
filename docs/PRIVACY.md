@@ -1,7 +1,7 @@
 # CodaClauda privacy and local data
 
 CodaClauda is a DeloresAI desktop utility for owner-authorized coordination between
-Claude Code and Codex. This document describes the 0.4.0 candidate source,
+Claude Code and Codex. This document describes the 0.4.1 candidate source,
 including the preserved scoped-request and mailbox tools. Source review does not
 establish native acceptance, publication or Marketplace admission; those require
 separate release evidence.
@@ -10,8 +10,9 @@ separate release evidence.
 
 Passive mailboxes store plain address names and labels, message subjects and
 bodies, reply links, read receipts and advisory resource claims on the selected
-local board. Delivery does not launch or wake a provider session or send content
-to a provider service. Sender names are self-asserted, not authenticated chat
+local board. Passive delivery does not itself launch a provider. The optional
+owned-session wake watcher described below can consume a posted message and
+send its content to the selected provider while the app is open. Sender names are self-asserted, not authenticated chat
 identities. A message is information, not authority; only Ben authorizes actions.
 
 Existing-conversation messaging records owner-registered provider/chat IDs,
@@ -42,7 +43,18 @@ chosen project. Prompts, included attachment text or paths, tool results and
 provider conversation context can reach that provider. A later owner send
 continues the saved provider conversation, including after idle shutdown or
 restarting the app. The app does not attach to unrelated desktop conversations.
-There is no automatic mailbox wake or scheduled model work in this release.
+The owner can opt an owned session into **Wake on mail**. While the app is open,
+its watcher can send message subjects, bodies and sender labels to that provider,
+then acknowledge messages retained for delivery. The global wake switch and
+per-session opt-in control future admission; sender labels never grant authority.
+Wake checks and daily/hourly limits do not establish a sender's identity.
+
+Schedules store a prompt, project, provider, timing and optional catch-up setting.
+Enabled schedules can consume provider plan usage without another click while
+the app is open. They are not an operating-system task or a promise of execution
+while the app is closed. Disable a schedule to prevent future runs; use Stop to
+interrupt work already admitted. Interrupted or uncertain work is not silently
+replayed after restart.
 
 Owned Claude sessions support personal Pro or Max authentication only; Team,
 Enterprise and unknown subscription types are unsupported. The app checks for
@@ -62,9 +74,10 @@ authorization.
 Access is fixed when an owned session starts. Full enables provider-native
 filesystem and command tools without permission prompts under the user's
 account. Read only uses restricted provider tools and filesystem policy.
+Scheduled runs also revalidate the current project access before dispatch.
 These settings do not control terminal or desktop sessions started elsewhere,
 and a spending prohibition is an owner instruction, not a payment-system block.
-Browser control is not available in 0.4.0. This release does not launch a browser
+Browser control is not available in 0.4.1. This release does not launch a browser
 MCP server or acquire its executable packages. No Windows MCP is included.
 
 Earlier Live chat records remain readable. That separate workflow started a
@@ -134,6 +147,12 @@ more. Registry entries have no automatic expiry. Closing a session stops its
 app-owned process and preserves its record and local history. Idle process
 shutdown after ten minutes also preserves them. Interrupted turns are not
 automatically replayed on restart.
+
+The owned-session registry also retains accepted queue entries and their
+outcomes. Wake and schedule configuration, deduplication records and run receipts
+are stored under the same private desktop state. These can contain message IDs,
+mailbox addresses, prompts and project paths. They are separate from the passive
+mailbox's 30-day pruning and must be included in any private board backup.
 
 Owned-session prompts, replies and tool summaries are not generally redacted
 or screened by the mailbox credential scan before sending, display or local

@@ -48,7 +48,7 @@ export function mount(root, ctx) {
     wakeHint.textContent = !supported ? `${WAKE_UNAVAILABLE_TEXT}.`
       : wake.enabled === null ? (wake.error ? `Couldn't read the setting: ${wake.error}` : 'Reading…')
         : wake.enabled ? "On: a session you turned it on for (in the chat's resources panel) gets a turn for each new board message to its address. Each session starts with it off."
-          : 'Off: no session is woken, whatever its own switch says. Mail waits on the board.';
+          : 'Off: no new wake turns start. An already running turn continues until you press Stop. Mail waits on the board.';
   }
   async function setWake(enabled) {
     wakeSaving = true; renderWake();
