@@ -13,13 +13,19 @@
  *   live     live:<id>  earlier live chats (0.3), replaced by sessions: kept readable, not sendable.
  * A message is information, not permission. Message content is untrusted and is only
  * rendered through markdown.js or textContent. Re-renders are keyed by id + signature so scroll
- * position, focus, drafts and open UI survive store updates. */
+ * position, focus, drafts and open UI survive store updates.
+ * 0.5 (each feature-detected through features.js): Fork and Hand off on agent messages; pinned
+ * conversations and project sections; search across every session's history; model, effort and a
+ * separate git worktree in New chat; a Code panel (diff, apply, discard, PR and CI); usage, context
+ * and compact meters; per-project MCP tools and CLAUDE.md / AGENTS.md from the resources panel. */
 import { renderMarkdown, plainText } from '../markdown.js';
 import { agentAvatar } from '../avatar/spec.js';
 import { sessions, UNAVAILABLE_TEXT, QUEUE_LIMIT } from '../sessions.js';
-import { mergeShared, routeMessage, sharedContext, resumeCommand, providerLabel, toMs as eventMs } from '../session-model.js';
+import { mergeShared, routeMessage, sharedContext, resumeCommand, providerLabel, searchTranscript, otherProvider, toMs as eventMs } from '../session-model.js';
 import { LEVELS, ACCESS_NOTE, BROWSER_UNAVAILABLE, levelInfo } from '../access.js';
 import { wake, wakeCounts, WAKE_LIMITS, WAKE_UNAVAILABLE_TEXT } from '../wake.js';
+import { has as hasFeature, call as callFeature, normalizeUsage, tokens, money, patchLines, repoOf } from '../features.js';
+import { openInstructions, openMcpTools, MCP_NOTE } from '../project-tools.js';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'needs-owner']);
 const MAX_FILES = 10;
@@ -57,6 +63,12 @@ const SHARED_STARTERS = [
   "@codex What's failing in the build right now?",
 ];
 const ROUTE_HINT = '@claude → Claude only · @codex → Codex only · @both or no mention → both';
+/* New chat pickers. The engine passes model as --model (Claude) or the turn's model (Codex) and effort as
+ * --effort (Claude) or the turn's effort (Codex); blank keeps the CLI's own default. */
+const MODEL_SUGGESTIONS = { claude: ['opus', 'sonnet', 'haiku'], codex: [] };
+const EFFORTS = [{ id: '', label: 'Default' }, { id: 'low', label: 'Low' }, { id: 'medium', label: 'Medium' }, { id: 'high', label: 'High' }];
+const MODEL_RE = /^[A-Za-z0-9._:/[\]-]{0,80}$/;
+const CLAUDE_NO_COMPACT = 'Claude compacts its context by itself when it fills up. There is no compact-now for Claude here, because slash commands are disabled in CodaClauda sessions.';
 
 /* ---------- pure helpers ---------- */
 const providerName = provider => PROVIDER_NAME[provider] || 'Agent';
@@ -163,6 +175,11 @@ export function mount(root, ctx) {
     'chat-inbox': '<path d="M3 13h5l1.5 3h5L16 13h5"/><path d="M5.6 5h12.8L21 13v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6Z"/>',
     'chat-sidebar': '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9.5 4v16"/>',
     'chat-panel': '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M14.5 4v16M17 8.5h1.5M17 12h1.5"/>',
+    pushpin: '<path d="M9 4h6l-1 6 4 3v2H6v-2l4-3Z"/><path d="M12 15v6"/>',
+    fork: '<circle cx="6" cy="5" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="12" cy="19" r="2"/><path d="M6 7v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V7M12 12v5"/>',
+    handoff: '<path d="M4 8h13l-4-4M20 16H7l4 4"/>',
+    branch: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M18 10a6 6 0 0 1-6 6H6"/>',
+    gauge: '<path d="M4 17a8 8 0 1 1 16 0"/><path d="m12 17 4-6"/>',
   });
 
   const narrow = matchMedia('(max-width: 1000px)');
@@ -183,7 +200,23 @@ export function mount(root, ctx) {
     resPinned: true, resOverlay: false,   // resources column (wide) / popover (narrow)
     openTools: new Set(),       // tool groups the owner expanded
     wakeBusy: new Set(),        // session ids with a Wake on mail change in flight
+    pinRows: new Map(),         // pinned list row cache
+    searchCache: new Map(),     // session id -> { q, version, snippet } (history search)
+    code: new Map(),            // session id -> { diff, diffState, diffError, pr, prState, prError, busy }
+    ci: new Map(),              // project id -> { state, runs, error }
+    mcp: new Map(),             // project id -> { state, servers, error }
+    meterBusy: new Set(),       // session ids with a compact in flight
+    actionBusy: new Set(),      // session ids with a fork or hand-off in flight
+    extraVersion: 0,            // bumps when code / ci / mcp state changes (resources signature)
   };
+  const pins = () => new Set(Array.isArray(store.prefs.chatPins) ? store.prefs.chatPins : []);
+  const grouped = () => store.prefs.chatGroup === 'project';
+  function togglePin(id) {
+    const set = pins();
+    if (set.has(id)) set.delete(id); else set.add(id);
+    store.setPref('chatPins', [...set]);
+    state.headSig = '';
+  }
 
   /* ---------- sidebar ---------- */
   const projectSelect = h('select.select.side-project', {
@@ -191,10 +224,17 @@ export function mount(root, ctx) {
     onchange: event => { store.setPref('chatProject', event.currentTarget.value); schedule(); },
   });
   const searchInput = h('input.input.side-search-input', {
-    type: 'search', placeholder: 'Search chats', 'aria-label': 'Search chats', autocomplete: 'off', spellcheck: 'false',
-    oninput: event => { state.search = event.currentTarget.value; renderSidebar(); },
+    type: 'search', placeholder: 'Search chats and messages', 'aria-label': 'Search chats', autocomplete: 'off', spellcheck: 'false',
+    title: 'Searches titles and the full history of every session, Claude Code and Codex, on this PC',
+    oninput: event => { state.search = event.currentTarget.value; loadForSearch(); renderSidebar(); },
     onkeydown: onSearchKey,
   });
+  const pinnedList = h('div.thread-list');
+  const pinnedSection = h('section.side-section.side-pinned', { hidden: true },
+    h('header.side-section-head', icon('pushpin', 'side-head-icon'), h('span', 'Pinned')),
+    pinnedList);
+  const groupBtn = iconButton('projects', 'Group sessions by project', () => { store.setPref('chatGroup', grouped() ? 'recent' : 'project'); }, 'side-add side-group-btn');
+  const searchNote = h('p.side-hint.search-note', { hidden: true, role: 'status' });
   const sessionList = h('div.thread-list');
   const mailList = h('div.thread-list');
   const liveList = h('div.thread-list');
@@ -206,7 +246,7 @@ export function mount(root, ctx) {
   const mailEmpty = h('div.side-empty', { hidden: true }, 'No desktop chats on the board yet. They appear here once an agent registers a mailbox.');
   const searchEmpty = h('div.side-empty.search-empty', { hidden: true });
   const sessionSection = h('section.side-section',
-    h('header.side-section-head', h('span', 'CodaClauda sessions'), sessionCount, iconButton('plus', 'Start a session', () => openNewChat(), 'side-add')),
+    h('header.side-section-head', h('span', 'CodaClauda sessions'), sessionCount, groupBtn, iconButton('plus', 'Start a session', () => openNewChat(), 'side-add')),
     h('p.side-hint', 'Claude Code and Codex · replies stream here'),
     sessionList, sessionEmpty);
   const mailSection = h('section.side-section',
@@ -223,7 +263,7 @@ export function mount(root, ctx) {
     h('div.side-head', h('h2', 'Chats'), h('button.btn.primary.small.new-chat-btn', { type: 'button', title: 'Start a new conversation', onclick: () => openNewChat() }, icon('plus'), 'New chat')),
     h('div.side-filter', icon('projects'), projectSelect),
     h('div.side-search', icon('search'), searchInput, h('kbd', 'Ctrl K')),
-    h('nav.side-scroll', { 'aria-label': 'Conversations', onkeydown: onListKey }, sessionSection, mailSection, liveSection, searchEmpty));
+    h('nav.side-scroll', { 'aria-label': 'Conversations', onkeydown: onListKey }, searchNote, pinnedSection, sessionSection, mailSection, liveSection, searchEmpty));
 
   /* ---------- conversation ---------- */
   const head = h('header.chat-head');
@@ -465,16 +505,57 @@ export function mount(root, ctx) {
     return false;
   }
 
+  /* History search: every session's display log is loaded once a query has two or more characters,
+   * then searched in memory (cached per log version). */
+  function loadForSearch() {
+    if (state.search.trim().length < 2 || sessions.available !== true) return;
+    for (const s of sessions.list) sessions.load(s.id);
+  }
+  function historyHit(c, q) {
+    if (q.length < 2) return '';
+    for (const s of c.sessions) {
+      const version = sessions.logs.get(s.id)?.version ?? -1;
+      let cached = state.searchCache.get(s.id);
+      if (!cached || cached.q !== q || cached.version !== version) {
+        const t = sessions.transcript(s.id);
+        const hit = t.state === 'loaded' ? searchTranscript(t.items, q) : null;
+        cached = { q, version, snippet: hit ? `${c.shared ? `${providerLabel(hit.item.provider)}: ` : ''}${hit.snippet}` : '' };
+        state.searchCache.set(s.id, cached);
+      }
+      if (cached.snippet) return cached.snippet;
+    }
+    return '';
+  }
+  /** Session rows, with a header before each project's rows when grouping by project. */
+  function groupRows(entries) {
+    const groups = new Map();
+    for (const e of entries) {
+      const key = e.c.project?.id || `cwd:${String(e.c.cwd || '').toLowerCase()}`;
+      if (!groups.has(key)) groups.set(key, { key, name: e.c.project?.name || baseName(e.c.cwd) || 'No project', rows: [] });
+      groups.get(key).rows.push(e.item);
+    }
+    return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name)).flatMap(g => [
+      { key: `grp:${g.key}`, sig: JSON.stringify([g.name, g.rows.length]), build: () => h('div.side-group-head', { role: 'presentation' }, icon('folder'), h('span.side-group-name', g.name), h('span.side-count', String(g.rows.length))) },
+      ...g.rows,
+    ]);
+  }
+
   function renderSidebar() {
     renderProjectSelect();
     const q = state.search.trim().toLowerCase();
     const project = filterProject();
     const threads = store.threads();
-    const mail = [], live = [], owned = [];
+    const pinned = pins();
+    const mail = [], live = [], owned = [], pinnedItems = [];
     for (const c of conversations()) {
       if (!inProject(project, { projectId: c.projectId, cwd: c.cwd })) continue;
-      if (q && !`${c.title}\n${c.project?.name || ''}\n${c.cwd || ''}\n${c.sessions.map(s => s.provider).join(' ')}`.toLowerCase().includes(q)) continue;
-      owned.push(sessionRowItem(c, q));
+      let snippet = '';
+      if (q && !`${c.title}\n${c.project?.name || ''}\n${c.cwd || ''}\n${c.sessions.map(s => `${s.provider} ${s.branch || ''}`).join(' ')}`.toLowerCase().includes(q)) {
+        snippet = historyHit(c, q);
+        if (!snippet) continue;
+      }
+      const item = sessionRowItem(c, q, snippet, pinned.has(c.id));
+      if (pinned.has(c.id)) pinnedItems.push(item); else owned.push({ c, item });
     }
     for (const t of threads) {
       if (!inProject(project, t.kind === 'live' ? { endpointId: String(t.agentId).replace(/^endpoint:/, '') } : { agentId: t.agentId })) continue;
@@ -488,14 +569,24 @@ export function mount(root, ctx) {
           snippet = snippetAround(`${hit.subject ? `${hit.subject} — ` : ''}${hit.text || ''}`, q);
         }
       }
-      (t.kind === 'live' ? live : mail).push(rowItem(t, snippet, q));
+      const isPinned = t.kind !== 'live' && pinned.has(t.id);
+      (isPinned ? pinnedItems : t.kind === 'live' ? live : mail).push(rowItem(t, snippet, q, isPinned));
     }
     const focused = side.contains(document.activeElement) ? document.activeElement.dataset?.thread : null;
     const liveShown = state.liveOpen || Boolean(q) || live.some(item => item.key === state.threadId);
-    reconcile(sessionList, owned, state.sessionRows);
+    const groupOn = grouped() && !project && !q;
+    reconcile(pinnedList, pinnedItems, state.pinRows);
+    reconcile(sessionList, groupOn ? groupRows(owned) : owned.map(e => e.item), state.sessionRows);
     reconcile(mailList, mail, state.mailRows);
     reconcile(liveList, liveShown ? live : [], state.liveRows);
     if (focused && !side.contains(document.activeElement)) side.querySelector(`[data-thread="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+    pinnedSection.hidden = !pinnedItems.length;
+    groupBtn.setAttribute('aria-pressed', String(grouped()));
+    groupBtn.title = grouped() ? 'Show sessions by most recent' : 'Group sessions by project';
+    groupBtn.setAttribute('aria-label', groupBtn.title);
+    const searching = q.length >= 2 ? sessions.list.filter(s => sessions.logs.get(s.id)?.state === 'loading').length : 0;
+    searchNote.hidden = !searching;
+    if (searching) searchNote.textContent = `Searching message history… ${searching} conversation${searching === 1 ? '' : 's'} still loading`;
     sessionCount.textContent = owned.length ? String(owned.length) : '';
     mailCount.textContent = mail.length ? String(mail.length) : '';
     liveCount.textContent = live.length ? String(live.length) : '';
@@ -506,7 +597,8 @@ export function mount(root, ctx) {
     mailEmpty.textContent = project && threads.some(t => t.kind === 'mailbox')
       ? `No desktop chats work on ${project.name} right now.`
       : 'No desktop chats on the board yet. They appear here once an agent registers a mailbox.';
-    const emptySig = JSON.stringify([sessions.available, Boolean(project), owned.length, Boolean(q)]);
+    const sessionTotal = owned.length + pinnedItems.filter(item => isSessionThread(item.key)).length;
+    const emptySig = JSON.stringify([sessions.available, Boolean(project), sessionTotal, Boolean(q)]);
     if (sessionEmpty.dataset.sig !== emptySig) {
       sessionEmpty.dataset.sig = emptySig;
       sessionEmpty.replaceChildren(...(sessions.available === false
@@ -514,12 +606,12 @@ export function mount(root, ctx) {
         : sessions.available === null ? [h('span', 'Loading sessions…')]
           : [h('span', project ? 'No sessions in this project yet.' : 'No sessions yet.'), h('button.link-btn', { type: 'button', onclick: () => openNewChat() }, 'Start one')]));
     }
-    sessionEmpty.hidden = Boolean(owned.length) || Boolean(q);
+    sessionEmpty.hidden = Boolean(sessionTotal) || Boolean(q);
     sessionSection.hidden = Boolean(q) && !owned.length;
     mailSection.hidden = Boolean(q) && !mail.length;
     liveSection.hidden = !live.length;
-    searchEmpty.hidden = !q || owned.length + mail.length + live.length > 0;
-    if (!searchEmpty.hidden) searchEmpty.textContent = `No chats match “${state.search.trim()}”.`;
+    searchEmpty.hidden = !q || owned.length + mail.length + live.length + pinnedItems.length > 0;
+    if (!searchEmpty.hidden) searchEmpty.textContent = searching ? 'Searching…' : `No chats or messages match “${state.search.trim()}”.`;
   }
 
   function pairPortraits(size, status) {
@@ -536,39 +628,40 @@ export function mount(root, ctx) {
     }
     return best ? `${c.shared ? `${providerLabel(best.provider)}: ` : ''}${plainText(best.text, 90)}` : '';
   }
-  function sessionRowItem(c, q) {
+  function sessionRowItem(c, q, snippet = '', pinned = false) {
     const selected = c.id === state.threadId;
     const d = state.drafts.get(c.id);
     const draftText = !selected && d?.text.trim() ? plainText(d.text, 70) : '';
     const who = c.shared ? 'Claude + Codex' : providerLabel(c.sessions[0].provider, true);
     const where = c.project?.name || baseName(c.cwd);
-    const preview = c.running ? `${who} is working…` : lastAgentText(c) || `${who}${where ? ` · ${where}` : ''}`;
+    const preview = snippet || (c.running ? `${who} is working…` : lastAgentText(c) || `${who}${where ? ` · ${where}` : ''}`);
     const time = c.lastAt ? timeAgo(c.lastAt) : '';
     const status = dotStatus(c.status);
     const level = levelInfo(c.access);
     const waking = c.sessions.some(s => s.wake === true);
-    const sig = JSON.stringify([c.title, preview, time, c.unread, status, selected, draftText, q, c.shared, c.sessions[0].provider, c.access, waking]);
+    const branch = c.sessions.find(s => s.worktreePath && s.branch)?.branch || '';
+    const sig = JSON.stringify([c.title, preview, time, c.unread, status, selected, draftText, q, c.shared, c.sessions[0].provider, c.access, waking, pinned, branch, Boolean(snippet)]);
     return {
       key: c.id, sig,
       build: () => {
         const tag = h(`span.acc-tag.${level.id}`, { title: `${level.long}: ${level.rule}` }, level.label, waking ? h('span.wake-mark', { title: 'Wakes on mail' }, icon('bell')) : null);
         return h(`button.thread-row.session-row${selected ? '.selected' : ''}${c.unread ? '.unread' : ''}`, {
           type: 'button', 'aria-current': selected ? 'true' : null, dataset: { thread: c.id },
-          title: `${c.title} — ${who}${where ? ` in ${where}` : ''} · ${level.long}`,
+          title: `${c.title} — ${who}${where ? ` in ${where}` : ''} · ${level.long}${branch ? ` · worktree branch ${branch}` : ''}${pinned ? ' · pinned' : ''}`,
           onclick: () => select(c.id),
         },
         c.shared ? pairPortraits(24, status) : portrait(sessionLook(c.sessions[0].provider), { size: 36, provider: c.sessions[0].provider, status }),
         h('span.thread-text',
-          h('span.thread-top', h('span.thread-title', highlight(c.title, q)), h('span.thread-time', time)),
+          h('span.thread-top', h('span.thread-title', highlight(c.title, q)), branch ? h('span.wt-mark', { title: `Worktree branch ${branch}` }, icon('branch')) : null, h('span.thread-time', time)),
           h('span.thread-bottom',
-            draftText ? h('span.thread-preview', h('span.draft-tag', 'Draft: '), draftText) : h('span.thread-preview', preview),
+            draftText ? h('span.thread-preview', h('span.draft-tag', 'Draft: '), draftText) : h(`span.thread-preview${snippet ? '.hit' : ''}`, snippet ? highlight(preview, q) : preview),
             tag,
             c.unread ? h('span.unread-dot', { 'aria-label': 'New reply' }) : null)));
       },
     };
   }
 
-  function rowItem(t, snippet, q) {
+  function rowItem(t, snippet, q, pinned = false) {
     const agent = store.agent(t.agentId);
     const endpoint = t.kind === 'live' ? store.board.endpoints.find(e => `endpoint:${e.id}` === t.agentId) : null;
     const name = agent?.name || endpoint?.label || t.title;
@@ -579,7 +672,7 @@ export function mount(root, ctx) {
     const preview = snippet || plainText(t.preview, 90);
     const time = t.lastAt ? timeAgo(t.lastAt) : '';
     const status = t.kind === 'mailbox' ? t.status : t.status === 'active' ? 'active' : undefined;
-    const sig = JSON.stringify([t.title, preview, time, t.unread, status, selected, draftText, q, t.provider, name, JSON.stringify(look)]);
+    const sig = JSON.stringify([t.title, preview, time, t.unread, status, selected, draftText, q, t.provider, name, JSON.stringify(look), pinned]);
     return {
       key: t.id, sig,
       build: () => h(`button.thread-row${selected ? '.selected' : ''}${t.unread ? '.unread' : ''}`, {
@@ -640,12 +733,16 @@ export function mount(root, ctx) {
   function renderHead() {
     const info = threadInfo();
     const chatFirst = Boolean(store.prefs.chatFirst);
-    const sig = JSON.stringify(info ? [info.id, info.name, info.title, info.provider, info.status, statusText(info), JSON.stringify(info.look), info.kind, info.access, info.running] : 0) + sideVisible() + resVisible() + chatFirst;
+    const pinned = Boolean(info) && pins().has(info.id);
+    const sig = JSON.stringify(info ? [info.id, info.name, info.title, info.provider, info.status, statusText(info), JSON.stringify(info.look), info.kind, info.access, info.running, pinned,
+      info.kind === 'session' ? info.sessions.map(s => [s.provider, s.usage || null, s.branch || '', Boolean(s.worktreePath)]) : 0] : 0) + sideVisible() + resVisible() + chatFirst;
     if (sig === state.headSig) return;
     state.headSig = sig;
     preserveFocus(head, () => {
       const toggle = iconButton('chat-sidebar', 'Toggle chat list', toggleSide, 'side-toggle');
       toggle.setAttribute('aria-expanded', String(sideVisible()));
+      const pinBtn = info && info.kind !== 'live' ? iconButton('pushpin', pinned ? 'Unpin this conversation' : 'Pin this conversation', () => { togglePin(info.id); renderHead(); renderSidebar(); }, `pin-toggle${pinned ? ' pinned' : ''}`) : null;
+      pinBtn?.setAttribute('aria-pressed', String(pinned));
       if (!info) {
         head.replaceChildren(toggle, h('div.head-text', h('div.head-title', h('strong.head-name', 'Chat')), h('div.head-sub', 'Pick a conversation or start a new one')),
           h('button.btn.small.gradient', { type: 'button', onclick: () => openNewChat() }, icon('plus'), 'New chat'));
@@ -661,9 +758,10 @@ export function mount(root, ctx) {
           info.shared ? pairPortraits(30, info.status) : portrait(info.look, { size: 38, provider: info.provider, status: info.status }),
           h('div.head-text',
             h('div.head-title', h('strong.head-name', { title: info.title }, info.title), ...(info.shared ? info.sessions.map(s => providerPill(s.provider)) : [providerPill(info.provider)])),
-            h('div.head-sub', h('span.head-status', statusText(info)))),
+            h('div.head-sub', h('span.head-status', statusText(info)), ...info.sessions.filter(s => s.worktreePath && s.branch).map(s => h('span.head-branch', { title: `Works in its own git worktree: ${shownPath(s.worktreePath)}` }, icon('branch'), s.branch)))),
+          ...[headMeters(info)].filter(Boolean),
           accessPill,
-          h('div.head-actions', res, iconButton('power', info.shared ? 'Close both sessions' : 'Close session', () => confirmClose(info))));
+          h('div.head-actions', pinBtn, res, iconButton('power', info.shared ? 'Close both sessions' : 'Close session', () => confirmClose(info))));
         return;
       }
       const live = info.kind === 'live';
@@ -677,10 +775,233 @@ export function mount(root, ctx) {
           ? h('span.mode-pill.live', { tabindex: '0', title: 'An earlier live chat from CodaClauda 0.3. Live chats were replaced by sessions; this one stays readable.' }, icon('clock'), h('b', 'Earlier live chat'), h('span.mode-detail', '· read only'))
           : h('span.mode-pill.mailbox', { tabindex: '0', title: "An existing desktop chat. Messages wait until it checks its inbox; its schedule may vary, and CodaClauda can't wake or stream it. A message is information, not permission." }, icon('clock'), h('b', 'Desktop chat'), h('span.mode-detail', '· replies when it checks in')),
         h('div.head-actions',
+          pinBtn,
           chatFirst ? null : iconButton('city', 'Show in City', () => navigate('city', { focusAgent: info.agentId })),
           iconButton('agents', 'Agent details', () => navigate('agents', { agent: info.agentId })),
           live ? iconButton('trash', 'Delete chat', () => confirmDelete(info)) : null));
     });
+  }
+
+  /* ----- usage meters (0.5): tokens, the Claude cost estimate and the context fill ----- */
+  const hasUsage = u => Boolean(u.total || u.cached || u.contextPct != null || u.costUsd != null);
+  const gauge = pct => h('span.mini-gauge', { 'aria-hidden': 'true' }, h('span', { style: { '--pct': `${Math.round(pct)}%` } }));
+  function usageTitle(s, u) {
+    return [
+      `${providerLabel(s.provider, true)} usage in this session`,
+      `${u.input.toLocaleString()} input · ${u.output.toLocaleString()} output${u.cached ? ` · ${u.cached.toLocaleString()} cached` : ''} tokens`,
+      u.contextPct != null ? `Context ${Math.round(u.contextPct)}% full` : 'Context fill not reported yet',
+      s.provider === 'claude' ? (u.costUsd != null ? `Cost estimate ${money(u.costUsd)}: Claude's own estimate, not an invoice` : 'No cost estimate yet') : 'Codex reports tokens; a subscription has no per-turn price',
+    ].join('\n');
+  }
+  function headMeters(info) {
+    const chips = info.sessions.map(s => {
+      const u = normalizeUsage(s.usage);
+      if (!hasUsage(u)) return null;
+      const parts = [u.contextPct != null ? `${Math.round(u.contextPct)}%` : null, `${tokens(u.total)} tokens`, s.provider === 'claude' && u.costUsd != null ? `${money(u.costUsd)} estimate` : null].filter(Boolean);
+      return h(`button.meter-chip.${s.provider}${u.contextPct >= 80 ? '.high' : ''}`, {
+        type: 'button', title: usageTitle(s, u), 'aria-label': `${providerLabel(s.provider)} usage: ${parts.join(', ')}`,
+        onclick: () => { if (!resVisible()) toggleResources(); },
+      }, u.contextPct != null ? gauge(u.contextPct) : icon('gauge'), info.shared ? h('b', providerLabel(s.provider)) : null, h('span', parts.join(' · ')));
+    }).filter(Boolean);
+    return chips.length ? h('div.head-meters', chips) : null;
+  }
+  function usageBlock(s) {
+    const u = normalizeUsage(s.usage);
+    const claude = s.provider === 'claude';
+    const busy = state.meterBusy.has(s.id);
+    const compact = claude
+      ? h('p.field-hint', CLAUDE_NO_COMPACT)
+      : hasFeature('compact')
+        ? h('div.res-actions', h('button.btn.small', {
+          type: 'button', disabled: busy || sessions.running(s.id), title: sessions.running(s.id) ? 'Wait for the current turn to finish' : 'Codex summarizes the conversation so far to free context',
+          onclick: () => compactSession(s),
+        }, busy ? h('span.spinner') : icon('gauge'), busy ? 'Compacting…' : 'Compact now'))
+        : null;
+    return h('div.res-usage',
+      h('div.res-row', h('span.res-wake-label', icon('gauge'), 'Usage'), u.costUsd != null && claude ? h('span.cost-tag', { title: "Claude's own estimate from its result events, not an invoice" }, `${money(u.costUsd)} estimate`) : null),
+      hasUsage(u)
+        ? h('dl.res-facts',
+          h('dt', 'Tokens'), h('dd', `${tokens(u.input)} in · ${tokens(u.output)} out${u.cached ? ` · ${tokens(u.cached)} cached` : ''}`),
+          claude ? null : h('dt', 'Cost'), claude ? null : h('dd', 'Plan usage: no per-turn price'))
+        : h('p.field-hint', 'Shown after the first reply.'),
+      h('div.ctx-meter', { title: u.contextPct != null ? `Context ${Math.round(u.contextPct)}% full` : 'Context fill not reported yet' },
+        h('span.ctx-label', 'Context'),
+        h(`span.ctx-bar${u.contextPct >= 80 ? '.high' : ''}`, h('span', { style: { '--pct': `${Math.round(u.contextPct ?? 0)}%` } })),
+        h('span.ctx-value', u.contextPct != null ? `${Math.round(u.contextPct)}%` : '—')),
+      compact);
+  }
+  async function compactSession(s) {
+    state.meterBusy.add(s.id); state.resSig = ''; renderResources();
+    try { await sessions.compact(s.id); toast('Codex is compacting its context', { kind: 'success', timeout: 3200 }); }
+    catch (error) { toast(error?.code === 'COMPACT_UNSUPPORTED' ? `${providerLabel(s.provider, true)} can't compact here.` : `Couldn't compact: ${error?.message || error}`, { kind: 'error', timeout: 7000 }); }
+    finally { state.meterBusy.delete(s.id); state.resSig = ''; renderResources(); }
+  }
+
+  /* ----- Code panel (0.5): a session in its own git worktree ----- */
+  const bump = () => { state.extraVersion += 1; state.resSig = ''; schedule(); };
+  const codeState = id => { if (!state.code.has(id)) state.code.set(id, { diff: null, diffState: 'idle', diffError: '', pr: null, prState: 'idle', prError: '', busy: '' }); return state.code.get(id); };
+  async function loadDiff(s) {
+    const c = codeState(s.id);
+    if (c.diffState === 'loading' || !hasFeature('diff')) return;
+    c.diffState = 'loading'; bump();
+    try { c.diff = await callFeature('diff', { id: s.id }); c.diffState = 'loaded'; c.diffError = ''; }
+    catch (error) { c.diffState = 'error'; c.diffError = error?.message || String(error); }
+    bump();
+  }
+  async function loadPr(s) {
+    const c = codeState(s.id);
+    if (c.prState === 'loading' || !hasFeature('prStatus')) return;
+    c.prState = 'loading'; bump();
+    try { c.pr = await callFeature('prStatus', { id: s.id }); c.prState = 'loaded'; c.prError = ''; }
+    catch (error) { c.prState = 'error'; c.prError = error?.message || String(error); }
+    bump();
+  }
+  function codeBlock(s, info) {
+    const c = codeState(s.id);
+    if (c.diffState === 'idle') queueMicrotask(() => loadDiff(s));
+    if (c.prState === 'idle' && hasFeature('prStatus')) queueMicrotask(() => loadPr(s));
+    const files = Array.isArray(c.diff?.files) ? c.diff.files : [];
+    const adds = files.reduce((n, f) => n + (Number(f.additions) || 0), 0);
+    const dels = files.reduce((n, f) => n + (Number(f.deletions) || 0), 0);
+    const running = sessions.running(s.id);
+    const busy = Boolean(c.busy);
+    const statusLetter = st => ({ added: 'A', modified: 'M', deleted: 'D', renamed: 'R', untracked: 'U', copied: 'C' }[String(st || '').toLowerCase()] || String(st || '?').slice(0, 1).toUpperCase());
+    const diffBody = c.diffState === 'loading' && !c.diff ? h('p.field-hint', h('span.spinner'), ' Reading the diff…')
+      : c.diffState === 'error' ? h('p.res-pending', `Couldn't read the diff: ${c.diffError}`)
+        : !files.length ? h('p.field-hint', 'No changes in the worktree yet.')
+          : [
+            h('p.code-sum', `${files.length} file${files.length === 1 ? '' : 's'} changed · `, h('span.add', `+${adds}`), ' ', h('span.del', `−${dels}`)),
+            h('ul.code-files', files.slice(0, 200).map(f => h('li', { title: `${f.path} (${f.status || 'changed'})` },
+              h(`span.code-st.${String(f.status || '').toLowerCase()}`, statusLetter(f.status)),
+              h('span.code-path', String(f.path || '')),
+              h('span.add', `+${Number(f.additions) || 0}`), h('span.del', `−${Number(f.deletions) || 0}`)))),
+            c.diff?.patch ? h('details.code-patch-wrap', h('summary', 'Patch'), h('pre.code-patch', patchLines(c.diff.patch).map(line => h(`span.pl.${line.kind}`, `${line.text}\n`)))) : null,
+            c.diff?.truncated ? h('p.field-hint', 'The patch is long, so it was cut short. Open the worktree folder to see everything.') : null,
+          ];
+    const pr = c.pr;
+    const prBody = !hasFeature('prStatus') ? null
+      : c.prState === 'error' ? h('p.res-pending', `Couldn't read the PR: ${c.prError}`)
+        : pr?.url ? h('div.code-pr',
+          h('div.res-row', h('a.res-link', { href: pr.url, title: pr.url }, pr.url.replace(/^https:\/\/github\.com\//, '')), pr.state ? pill(String(pr.state).toLowerCase(), /merged/i.test(pr.state) ? 'success' : /closed/i.test(pr.state) ? 'neutral' : 'accent') : null),
+          Array.isArray(pr.checks) && pr.checks.length
+            ? h('ul.code-checks', pr.checks.slice(0, 30).map(k => { const tone = checkTone(k); return h(`li.${tone}`, h(`span.status-dot.${tone === 'ok' ? 'active' : tone === 'bad' ? 'error' : 'idle'}`), h('span.code-path', String(k.name || 'check')), h('span.muted', String(k.conclusion || k.status || ''))); }))
+            : h('p.field-hint', 'No CI checks reported yet.'))
+          : c.prState === 'loaded' ? h('p.field-hint', 'No pull request for this branch yet.') : null;
+    return h('section.res-block.res-code',
+      h('h4', icon('branch'), 'Code', info.shared ? providerPill(s.provider) : null),
+      h('dl.res-facts',
+        h('dt', 'Branch'), h('dd', h('code.res-id', { title: s.branch || '' }, s.branch || '—')),
+        h('dt', 'Worktree'), h('dd', h('code.res-id', { title: shownPath(s.worktreePath) }, shownPath(s.worktreePath)))),
+      h('div.res-actions',
+        h('button.btn.small.ghost', { type: 'button', onclick: () => bridge.desktop.openExternal(s.worktreePath).catch(() => copyText(shownPath(s.worktreePath), 'Path copied')) }, icon('folder'), 'Open'),
+        hasFeature('diff') ? h('button.btn.small.ghost', { type: 'button', disabled: c.diffState === 'loading', onclick: () => { loadDiff(s); if (hasFeature('prStatus')) loadPr(s); } }, icon('refresh'), 'Refresh') : null),
+      hasFeature('diff') ? diffBody : h('p.field-hint', 'This build cannot show the diff.'),
+      h('div.res-actions.code-actions',
+        hasFeature('apply') ? h('button.btn.small.primary', { type: 'button', disabled: busy || running, title: running ? 'Wait for the current turn to finish' : 'Commit the worktree and merge it into the original branch', onclick: () => applyWorktree(s, info) }, icon('check'), 'Apply') : null,
+        hasFeature('prCreate') ? h('button.btn.small', { type: 'button', disabled: busy || running || Boolean(pr?.url), title: pr?.url ? 'This branch already has a pull request' : 'Push the branch and open a pull request with gh', onclick: () => createPr(s, info) }, icon('github'), 'Create PR') : null,
+        hasFeature('discard') ? h('button.btn.small.ghost.danger-text', { type: 'button', disabled: busy || running, onclick: () => discardWorktree(s) }, icon('trash'), 'Discard') : null),
+      c.busy ? h('p.field-hint', h('span.spinner'), ` ${c.busy}`) : null,
+      prBody);
+  }
+  const checkTone = k => (/^(success|neutral|skipped)$/i.test(k.conclusion || '') ? 'ok' : /^(failure|cancelled|timed_out|action_required|startup_failure)$/i.test(k.conclusion || '') ? 'bad' : 'wait');
+  async function codeAction(s, label, key, args, done) {
+    const c = codeState(s.id);
+    c.busy = label; bump();
+    try { const data = await callFeature(key, args); done(data); }
+    catch (error) { toast(`${label.replace(/…$/, '')} failed: ${error?.message || error}`, { kind: 'error', timeout: 9000 }); }
+    finally { c.busy = ''; bump(); }
+  }
+  function applyWorktree(s, info) {
+    const input = h('textarea.input', { rows: 3, maxLength: 2000, 'aria-label': 'Commit message' });
+    input.value = `${info.title}\n\nApplied from CodaClauda worktree ${s.branch || ''}`.trim();   // a textarea's text is its value, not an attribute
+    modal({
+      title: 'Apply the worktree?',
+      body: h('div.pt-body', h('p', `Commits everything in ${s.branch || 'the worktree'} with this message and merges it into the project's original branch.`), h('label.field', h('span', 'Commit message'), input)),
+      actions: [{ label: 'Cancel', kind: 'ghost' }, { label: 'Commit and merge', kind: 'primary', run: () => {
+        const message = input.value.trim();
+        if (!message) { input.focus(); return false; }
+        codeAction(s, 'Applying…', 'apply', { id: s.id, message }, data => {
+          toast(data?.merged ? `Merged ${data.branch || s.branch || 'the worktree'} into the original branch` : data?.committed ? `Committed on ${data.branch || s.branch}; not merged` : 'Nothing to commit', { kind: data?.merged || data?.committed ? 'success' : 'info', timeout: 6000 });
+          loadDiff(s);
+        });
+        return true;
+      } }],
+    });
+  }
+  function discardWorktree(s) {
+    modal({
+      title: 'Discard this worktree?',
+      body: `Deletes the worktree folder and its branch ${s.branch || ''}, with every change in it that was not applied. The conversation stays.`,
+      actions: [{ label: 'Cancel', kind: 'ghost' }, { label: 'Discard', kind: 'danger', run: () => {
+        codeAction(s, 'Discarding…', 'discard', { id: s.id }, () => { toast('Worktree discarded', { kind: 'success', timeout: 3200 }); state.code.delete(s.id); sessions.scheduleRefresh(200); });
+      } }],
+    });
+  }
+  function createPr(s, info) {
+    const title = h('input.input', { type: 'text', maxLength: 200, value: info.title, 'aria-label': 'Pull request title' });
+    const body = h('textarea.input', { rows: 6, maxLength: 20000, 'aria-label': 'Pull request description', placeholder: 'What changed and why' });
+    modal({
+      title: 'Create a pull request', wide: true,
+      body: h('div.pt-body', h('p', `Pushes ${s.branch || 'the branch'} to GitHub and opens a pull request with gh.`), h('label.field', h('span', 'Title'), title), h('label.field', h('span', 'Description'), body)),
+      actions: [{ label: 'Cancel', kind: 'ghost' }, { label: 'Push and create PR', kind: 'primary', run: () => {
+        if (!title.value.trim()) { title.focus(); return false; }
+        codeAction(s, 'Pushing and creating the PR…', 'prCreate', { id: s.id, title: title.value.trim(), body: body.value }, data => {
+          toast(`Pull request #${data?.number ?? ''} created`, { kind: 'success', timeout: 9000, action: data?.url ? { label: 'Open', run: () => bridge.desktop.openExternal(data.url).catch(() => copyText(data.url, 'Link copied')) } : undefined });
+          codeState(s.id).prState = 'idle'; loadPr(s);
+        });
+        return true;
+      } }],
+    });
+  }
+
+  /* ----- project tools and CI (0.5) ----- */
+  async function loadMcp(project) {
+    if (!hasFeature('mcpGet') || state.mcp.get(project.id)?.state === 'loading') return;
+    state.mcp.set(project.id, { state: 'loading', servers: [], error: '' });
+    try { const data = await callFeature('mcpGet', { projectId: project.id }); state.mcp.set(project.id, { state: 'loaded', servers: Array.isArray(data?.servers) ? data.servers : [], error: '' }); }
+    catch (error) { state.mcp.set(project.id, { state: 'error', servers: [], error: error?.message || String(error) }); }
+    bump();
+  }
+  async function loadCi(project, repo) {
+    if (state.ci.get(project.id)?.state === 'loading') return;
+    state.ci.set(project.id, { state: 'loading', runs: state.ci.get(project.id)?.runs || [], error: '' }); bump();
+    try { const data = await callFeature('ciStatus', { projectId: project.id, repo }); state.ci.set(project.id, { state: 'loaded', runs: Array.isArray(data?.runs) ? data.runs : [], error: '' }); }
+    catch (error) { state.ci.set(project.id, { state: 'error', runs: [], error: error?.message || String(error) }); }
+    bump();
+  }
+  function toolsBlock(info) {
+    const project = info.project;
+    const mcp = project ? state.mcp.get(project.id) : null;
+    if (project && hasFeature('mcpGet') && !mcp) queueMicrotask(() => loadMcp(project));
+    const names = (mcp?.servers || []).map(s => String(s?.name || '')).filter(Boolean);
+    const full = info.access === 'full';
+    const onSaved = servers => { state.mcp.set(project.id, { state: 'loaded', servers, error: '' }); bump(); };
+    return h('section.res-block', h('h4', icon('plug'), 'Tools & instructions'),
+      !hasFeature('mcpGet') ? h('p.field-hint', BROWSER_UNAVAILABLE)
+        : mcp?.state === 'error' ? h('p.res-pending', `Couldn't read MCP tools: ${mcp.error}`)
+          : h('p.field-hint', names.length ? `MCP tools: ${names.join(', ')}.` : 'No MCP tools for this project.', ' ', full ? (names.length ? 'Sessions started at Full access get them; this one started before any change you make now.' : '') : 'This chat is Read only, so it gets none.'),
+      project ? h('div.res-actions',
+        h('button.btn.small', { type: 'button', title: MCP_NOTE, onclick: () => openMcpTools(ctx, project, { onSaved }) }, icon('plug'), 'MCP tools'),
+        project.path ? h('button.btn.small', { type: 'button', title: 'Edit CLAUDE.md and AGENTS.md at the project root', onclick: () => openInstructions(ctx, project) }, icon('file'), 'CLAUDE.md / AGENTS.md') : null)
+        : h('p.field-hint', 'Link this folder as a project to manage its tools.'));
+  }
+  function ciBlock(project) {
+    const repo = repoOf(project);
+    if (!repo || !hasFeature('ciStatus')) return null;
+    const ci = state.ci.get(project.id);
+    const runs = ci?.runs || [];
+    return h('div.res-ci',
+      h('div.res-row', h('span.res-wake-label', icon('refresh'), 'CI'),
+        h('button.btn.small.ghost', { type: 'button', disabled: ci?.state === 'loading', onclick: () => loadCi(project, repo) }, ci?.state === 'loading' ? h('span.spinner') : icon('refresh'), ci ? 'Refresh' : 'Check CI')),
+      ci?.state === 'error' ? h('p.res-pending', `Couldn't read CI: ${ci.error}`)
+        : ci?.state === 'loaded' && !runs.length ? h('p.field-hint', 'No workflow runs on GitHub.')
+          : runs.length ? h('ul.code-checks', runs.slice(0, 6).map(r => {
+            const tone = checkTone(r);
+            return h(`li.${tone}`, { title: `${r.name || 'run'} · ${r.branch || ''} · ${r.conclusion || r.status || ''}${r.at ? ` · ${fullTime(r.at)}` : ''}` },
+              h(`span.status-dot.${tone === 'ok' ? 'active' : tone === 'bad' ? 'error' : 'idle'}`),
+              r.url ? h('a.code-path', { href: r.url }, String(r.name || 'run')) : h('span.code-path', String(r.name || 'run')),
+              h('span.muted', `${r.branch ? `${r.branch} · ` : ''}${r.at ? timeAgo(r.at) : ''}`));
+          })) : null);
   }
 
   /* ----- connected resources (sessions only): a right column, or a popover on narrow windows ----- */
@@ -694,8 +1015,8 @@ export function mount(root, ctx) {
     const project = info.project;
     const access = project ? store.projectAccess(project.id) : null;
     const sig = JSON.stringify([info.id, project?.id, project?.name, project?.path, project?.url, access?.level, info.access,
-      wake.enabled, wake.sessionSupported(), wake.count(), [...state.wakeBusy],
-      info.sessions.map(s => [s.id, s.provider, s.status, s.access, s.providerSessionId, s.threadId, s.cwd, sessions.running(s.id), s.wake, s.mailboxAddress, s.wakes])]);
+      wake.enabled, wake.sessionSupported(), wake.count(), [...state.wakeBusy], state.extraVersion, [...state.meterBusy],
+      info.sessions.map(s => [s.id, s.provider, s.status, s.access, s.providerSessionId, s.threadId, s.cwd, sessions.running(s.id), s.wake, s.mailboxAddress, s.wakes, s.usage || null, s.worktreePath || '', s.branch || ''])]);
     if (sig === state.resSig) return;
     state.resSig = sig;
     const block = (iconName, title, ...body) => h('section.res-block', h('h4', icon(iconName), title), ...body);
@@ -714,24 +1035,29 @@ export function mount(root, ctx) {
           h('dt', 'Session ID'),
           h('dd', providerId ? h('code.res-id', { title: String(providerId) }, String(providerId)) : h('span.muted', 'Known after the first reply')),
           h('dt', 'Access'), h('dd', levelInfo(s.access).long),
-          h('dt', 'Browser'), h('dd', 'Unavailable in 0.4.0')),
+          ...(s.model || s.effort ? [h('dt', 'Model'), h('dd', [s.model || 'default', s.effort ? ` · ${s.effort} effort` : ''].join(''))] : []),
+          h('dt', 'Tools'), h('dd', hasFeature('mcpGet') ? (s.access === 'full' ? 'Your MCP tools for this project' : 'None at Read only') : 'Browser unavailable in 0.4.0')),
+        usageBlock(s),
         h('div.res-actions',
           h('button.btn.small', { type: 'button', disabled: !command, title: command || 'Available after the first reply', onclick: () => copyText(command, 'Resume command copied') }, icon('terminal'), 'Copy resume command')),
         wakeBlock(s));
     };
+    const repoLink = project?.url || (project?.repo ? `https://github.com/${project.repo.full_name}` : repoOf(project) ? `https://github.com/${repoOf(project)}` : '');
     preserveFocus(resPanel, () => resPanel.replaceChildren(
       h('header.res-head', h('h3', 'Connected resources'), iconButton('close', 'Hide connected resources', toggleResources, 'res-close')),
       block('folder', 'Workspace',
         cwd ? h('code.res-path', { title: shownPath(cwd) }, shownPath(cwd)) : h('p.muted', 'No folder recorded'),
         cwd ? h('div.res-actions', h('button.btn.small', { type: 'button', onclick: () => bridge.desktop.openExternal(cwd).catch(() => copyText(cwd, 'Path copied')) }, icon('folder'), 'Open folder'),
           h('button.btn.small.ghost', { type: 'button', onclick: () => copyText(shownPath(cwd), 'Path copied') }, icon('copy'), 'Copy path')) : null),
-      ...(project?.url || project?.repo ? [block('github', 'GitHub',
-        h('a.res-link', { href: project.url || `https://github.com/${project.repo.full_name}`, title: project.url || '' }, project.repo?.full_name || project.url))] : []),
+      ...info.sessions.filter(s => s.worktreePath).map(s => codeBlock(s, info)),
+      ...(repoLink ? [block('github', 'GitHub',
+        h('a.res-link', { href: repoLink, title: repoLink }, project.repo?.full_name || repoOf(project) || repoLink),
+        ciBlock(project))] : []),
       block('shield', 'Access',
         levelPicker || h('p', level.long),
         h('p.field-hint', `This chat runs with ${level.long.toLowerCase()} (${level.rule.toLowerCase().replace(/\.$/, '')}).`,
           project && access.level !== info.access ? h('strong.res-pending', ` ${project.name} is now ${levelInfo(access.level).long}: applies to the next session started there.`) : ' A change applies to the next session started in this project, not to this one.')),
-      block('external', 'Browser control', h('p.field-hint', BROWSER_UNAVAILABLE)),
+      toolsBlock(info),
       ...info.sessions.map(sessionCard),
       h('p.res-note', icon('alert'), h('span', "A session you open in a terminal with the resume command runs outside CodaClauda's access level and its stop and memory limits.")),
       h('div.res-actions.res-end', h('button.btn.small.ghost', { type: 'button', onclick: () => confirmClose(info) }, icon('power'), info.shared ? 'Close both sessions' : 'Close session'))));
@@ -923,7 +1249,7 @@ export function mount(root, ctx) {
     const content = item.streaming
       ? h('div.stream-text', item.text)
       : item.text.trim() ? renderMarkdown(item.text) : h('p.msg-muted', '(empty message)');
-    const m = { id: item.key, role: 'agent', text: item.streaming ? '' : item.text };
+    const m = { id: item.key, role: 'agent', text: item.streaming ? '' : item.text, sessionId: item.sessionId, provider };
     return h(`article.msg.agent.session-msg${continued ? '.continued' : ''}${item.streaming ? '.running' : ''}`, { dataset: { id: item.key } },
       h('div.msg-avatar', continued ? h('time.msg-gutter-time', { title: fullTime(item.at) }, shortTime(item.at)) : portrait(sessionLook(provider), { size: 32, provider })),
       h('div.msg-main',
@@ -1065,7 +1391,48 @@ export function mount(root, ctx) {
     if (fromAgent && info.kind === 'mailbox') {
       tools.push(h('button.tool-btn.labelled', { type: 'button', title: 'Reply to this message', 'aria-label': 'Reply to this message', onclick: () => startReply(m, info) }, icon('reply'), h('span', 'Reply')));
     }
+    if (fromAgent && info.kind === 'session' && m.sessionId) {
+      const s = info.sessions.find(x => x.id === m.sessionId);
+      if (s && hasFeature('fork')) {
+        tools.push(h('button.tool-btn.labelled', {
+          type: 'button', 'aria-label': 'Fork this conversation', disabled: state.actionBusy.has(s.id),
+          title: `Fork: a new ${providerLabel(s.provider, true)} session that carries this whole conversation, so you can try another direction without changing this one`,
+          onclick: event => forkConversation(s, event.currentTarget),
+        }, icon('fork'), h('span', 'Fork')));
+      }
+      if (s && !info.shared && hasFeature('handoff')) {
+        const to = otherProvider(s.provider);
+        tools.push(h('button.tool-btn.labelled', {
+          type: 'button', 'aria-label': `Hand off to ${providerLabel(to)}`, disabled: state.actionBusy.has(s.id),
+          title: `Start ${providerLabel(to, true)} on this project with a summary of the latest exchanges (about 6,000 characters) as its first turn`,
+          onclick: event => handOff(s, to, event.currentTarget),
+        }, icon('handoff'), h('span', `Hand off to ${providerLabel(to)}`)));
+      }
+    }
     return tools.length ? h('div.msg-tools', { role: 'toolbar', 'aria-label': 'Message actions' }, tools) : null;
+  }
+
+  async function forkConversation(s, button) {
+    if (state.actionBusy.has(s.id)) return;
+    state.actionBusy.add(s.id);
+    if (button) button.disabled = true;
+    try {
+      const fork = await sessions.fork(s.id);
+      toast(`Forked into “${fork.title || 'a new session'}”. The original is unchanged.`, { kind: 'success', timeout: 5000 });
+      select(threadIdFor(fork));
+    } catch (error) { toast(`Couldn't fork: ${error?.message || error}`, { kind: 'error', timeout: 8000 }); }
+    finally { state.actionBusy.delete(s.id); if (button) button.disabled = false; }
+  }
+  async function handOff(s, to, button) {
+    if (state.actionBusy.has(s.id)) return;
+    state.actionBusy.add(s.id);
+    if (button) button.disabled = true;
+    try {
+      const next = await sessions.handoff(s.id, to);
+      toast(`${providerLabel(to, true)} took over with a summary of this conversation`, { kind: 'success', timeout: 5000 });
+      select(threadIdFor(next));
+    } catch (error) { toast(`Couldn't hand off: ${error?.message || error}`, { kind: 'error', timeout: 8000 }); }
+    finally { state.actionBusy.delete(s.id); if (button) button.disabled = false; }
   }
 
   async function copyWithFeedback(button, text, label) {
@@ -1285,7 +1652,7 @@ export function mount(root, ctx) {
     const pick = {
       agent: ['claude', 'codex', 'both'].includes(preset.agent) ? preset.agent : 'claude',
       projectId: (filtered?.path && filtered.id) || projects.find(p => p.path)?.id || '',
-      title: '',
+      title: '', model: '', effort: '', worktree: false,
     };
     let dialog = null, starting = false;
     const row = (look, provider, status, title, sub, extra, run) => h('button.newchat-row', { type: 'button', onclick: () => { dialog?.close(); run(); } },
@@ -1299,22 +1666,51 @@ export function mount(root, ctx) {
     projectPicker.value = pick.projectId;
     const titleInput = h('input.input', { type: 'text', maxLength: 120, placeholder: 'Optional', 'aria-label': 'Title', oninput: event => { pick.title = event.currentTarget.value; },
       onkeydown: event => { if (event.key === 'Enter') { event.preventDefault(); start(); } } });
+    /* Model and effort (one agent at a time; a shared thread uses each CLI's defaults). */
+    const modelList = h('datalist#newchat-models');
+    const modelInput = h('input.input', { type: 'text', maxLength: 80, list: 'newchat-models', placeholder: 'Default', 'aria-label': 'Model', autocomplete: 'off', spellcheck: 'false',
+      oninput: event => { pick.model = event.currentTarget.value.trim(); refresh(); },
+      onkeydown: event => { if (event.key === 'Enter') { event.preventDefault(); start(); } } });
+    const effortPicker = segmented(EFFORTS.map(e => ({ id: e.id, label: e.label, title: e.id ? `${e.label} reasoning effort` : "The CLI's own default" })), pick.effort, id => { pick.effort = id; }, 'Effort');
+    const modelHint = h('span.field-hint');
+    const modelRow = h('div.newchat-pair', h('label.field', h('span', 'Model'), modelInput, modelList), h('div.field', h('span', 'Effort'), effortPicker));
+    /* Separate worktree: only for one agent in a git project, and only when this build can diff and apply it. */
+    const worktreeInput = h('input', { type: 'checkbox', 'aria-label': 'Separate worktree', onchange: event => { pick.worktree = event.currentTarget.checked; } });
+    const worktreeHint = h('span.field-hint');
+    const worktreeRow = h('label.newchat-check', worktreeInput, h('span.newchat-check-text', h('strong', icon('branch'), 'Separate worktree'), worktreeHint));
+    const isGit = project => Boolean(project?.stats?.git);
     function refresh() {
       const project = store.project(pick.projectId);
       const access = project ? store.projectAccess(project.id) : null;
       const level = levelInfo(access?.level);
       accessLine.replaceChildren(...(project
-        ? [h(`span.acc-tag.${level.id}`, level.long), h('span', ` ${level.rule} Change access in the chat's resources panel or in Projects; a change applies to the next session. ${BROWSER_UNAVAILABLE}`)]
+        ? [h(`span.acc-tag.${level.id}`, level.long), h('span', ` ${level.rule} Change access in the chat's resources panel or in Projects; a change applies to the next session.${hasFeature('mcpGet') ? (level.id === 'full' ? ' Your MCP tools for this project come along.' : '') : ` ${BROWSER_UNAVAILABLE}`}`)]
         : [h('span', 'Pick a project with a local folder.')]));
-      startBtn.disabled = starting || sessions.available !== true || !project?.path;
+      const single = pick.agent !== 'both';
+      const suggestions = single ? MODEL_SUGGESTIONS[pick.agent] : [];
+      if (modelList.dataset.agent !== pick.agent) { modelList.dataset.agent = pick.agent; modelList.replaceChildren(...suggestions.map(v => h('option', { value: v }))); }
+      modelRow.hidden = !single;
+      modelInput.placeholder = pick.agent === 'claude' ? 'Default (opus, sonnet, haiku or a full name)' : "Default (from your Codex config)";
+      const badModel = !MODEL_RE.test(pick.model);
+      modelHint.textContent = !single ? 'Both agents start with their own default model and effort.' : badModel ? 'Use letters, digits and . _ - : / [ ] only.' : "Blank uses the CLI's default. A name the CLI doesn't know fails at the first reply.";
+      modelHint.classList.toggle('bad', single && badModel);
+      const canWorktree = hasFeature('diff') && single && isGit(project);
+      worktreeRow.hidden = !hasFeature('diff') || !project?.path;
+      worktreeInput.disabled = !canWorktree;
+      if (!canWorktree) { worktreeInput.checked = false; pick.worktree = false; }
+      worktreeHint.textContent = !isGit(project) ? `${project?.name || 'This project'} isn't a scanned git repository, so it can't have its own worktree.`
+        : !single ? 'A shared thread runs both agents in the project folder.'
+          : 'Works on a new branch codaclauda/<id> in its own folder, so it never collides with other chats. Review, apply or discard from the Code panel.';
+      startBtn.disabled = starting || sessions.available !== true || !project?.path || (single && badModel);
     }
     async function start() {
       const project = store.project(pick.projectId);
       if (starting || sessions.available !== true || !project?.path) return;
+      if (pick.agent !== 'both' && !MODEL_RE.test(pick.model)) return;
       starting = true; errorLine.hidden = true; refresh();
       startBtn.replaceChildren(h('span.spinner'), 'Starting…');
       try {
-        const id = await startConversation(pick.agent, project, pick.title.trim());
+        const id = await startConversation(pick.agent, project, pick.title.trim(), pick.agent === 'both' ? {} : { model: pick.model, effort: pick.effort, worktree: pick.worktree });
         dialog?.close();
         if (id) select(id);
       } catch (error) {
@@ -1328,7 +1724,7 @@ export function mount(root, ctx) {
       { id: 'claude', label: 'Claude Code' },
       { id: 'codex', label: 'Codex' },
       { id: 'both', label: 'Both: shared thread', title: 'One Claude Code and one Codex session in one conversation' },
-    ], pick.agent, id => { pick.agent = id; }, 'Agent');
+    ], pick.agent, id => { pick.agent = id; refresh(); }, 'Agent');
     const localCount = projects.filter(p => p.path).length;
     const sessionBody = sessions.available === false
       ? h('div.newchat-empty', h('strong', `${UNAVAILABLE_TEXT}.`), h('span', 'This window has no session engine, so it can only message desktop chats.'), sessions.reason ? h('span.field-hint', sessions.reason) : null)
@@ -1339,6 +1735,8 @@ export function mount(root, ctx) {
           h('div.field', h('span', 'Agent'), agentPicker),
           h('label.field', h('span', 'Project'), projectPicker),
           h('label.field', h('span', 'Title'), titleInput),
+          modelRow, modelHint,
+          worktreeRow,
           accessLine, errorLine,
           h('div.newchat-actions', startBtn));
     const sessionSection = h('section.newchat-section',
@@ -1357,11 +1755,12 @@ export function mount(root, ctx) {
   }
 
   /** Starts one session, or two with one sharedId for "Both"; returns the thread id to open. */
-  async function startConversation(agent, project, title) {
+  async function startConversation(agent, project, title, { model = '', effort = '', worktree = false } = {}) {
     const access = store.projectAccess(project.id);
     const base = { projectId: project.id, cwd: project.path, access: access.level, playwright: false };
     if (agent !== 'both') {
-      const s = await sessions.start({ ...base, provider: agent, title: title || `${providerLabel(agent, true)} · ${project.name}` });
+      const extra = { ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(worktree ? { worktree: true } : {}) };
+      const s = await sessions.start({ ...base, ...extra, provider: agent, title: title || `${providerLabel(agent, true)} · ${project.name}` });
       return threadIdFor(s);
     }
     const sharedId = crypto.randomUUID();

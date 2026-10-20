@@ -7,9 +7,12 @@
  * a turn ends in a session that is not on screen (main.js shows the toast and chime).
  * 0.4.1: session_send queues while a turn runs (at most QUEUE_LIMIT per session; 'queued' events carry
  * the count), and 'wake' events mark a turn started by a board message. Agent text is untrusted; views
- * render it through markdown.js or textContent only. Transcripts never go through the desktop UI state file. */
+ * render it through markdown.js or textContent only. Transcripts never go through the desktop UI state file.
+ * 0.5: records gain worktreePath, branch and usage { input, output, cached, costUsd, contextPct }; a
+ * 'usage' event updates usage live. fork / handoff / compact go through features.js (feature-detected). */
 import { desktop } from './bridge.js';
 import { buildTranscript, compactEvents, stripContext, parseWakeText, toMs } from './session-model.js';
+import { call as callFeature } from './features.js';
 
 const NEEDED = ['sessionList', 'sessionStart', 'sessionSend', 'sessionStop', 'sessionClose', 'sessionHistory', 'onSessionEvent'];
 const HISTORY_LIMIT = 4000;
@@ -53,7 +56,12 @@ class Sessions extends EventTarget {
         const fresh = Array.isArray(data?.sessions) ? data.sessions.filter(s => s && typeof s.id === 'string') : [];
         // Keep a locally newer status (from live events) when the registry lags behind.
         const known = new Map(this.list.map(s => [s.id, s]));
-        this.list = fresh.map(s => { const old = known.get(s.id); return old && toMs(old.lastActivityAt) > toMs(s.lastActivityAt) ? { ...s, status: old.status, lastActivityAt: old.lastActivityAt } : s; });
+        // Live 'usage' events may also be newer than a record without usage.
+        this.list = fresh.map(s => {
+          const old = known.get(s.id);
+          const merged = old && toMs(old.lastActivityAt) > toMs(s.lastActivityAt) ? { ...s, status: old.status, lastActivityAt: old.lastActivityAt } : s;
+          return old?.usage && !s.usage ? { ...merged, usage: old.usage } : merged;
+        });
         this.setAvailable(true);
         await this.listen();
       } catch (error) {
@@ -93,6 +101,10 @@ class Sessions extends EventTarget {
     const e = raw && typeof raw === 'object' && raw.payload && typeof raw.payload === 'object' ? raw.payload : raw;
     if (!e || typeof e.id !== 'string' || typeof e.kind !== 'string') return;
     const s = this.session(e.id);
+    if (e.kind === 'usage') {   // token and context meters only: no transcript line, no unread mark
+      if (s && e.usage && typeof e.usage === 'object') { s.usage = { ...(s.usage || {}), ...e.usage }; this.changed(); }
+      return;
+    }
     const queuedStatus = e.kind === 'status' && typeof e.status === 'string' ? QUEUED_STATUS.exec(e.status) : null;
     if (e.kind === 'queued' || queuedStatus) this.queuedCounts.set(e.id, Math.max(0, Number(queuedStatus ? queuedStatus[1] : e.count) || 0));
     else if (e.kind === 'status' && e.status !== 'running') this.queuedCounts.delete(e.id);   // idle, stopped or error: nothing waits
@@ -183,7 +195,7 @@ class Sessions extends EventTarget {
     return s?.status === 'running' || (this.pending.get(id) || []).some(p => !p.done);
   }
 
-  /** { provider, projectId, cwd, access, title, playwright, model?, effort?, sharedId? } → session */
+  /** { provider, projectId, cwd, access, title, playwright, model?, effort?, sharedId?, worktree? } → session */
   async start(options) {
     const data = await desktop.sessionStart(options);
     const s = data?.session;
@@ -217,6 +229,24 @@ class Sessions extends EventTarget {
       if (index >= 0) list.splice(index, 1);
       throw error;
     } finally { this.changed(); }
+  }
+
+  /** A new session that carries this conversation (session_fork) → its record. */
+  async fork(id) { return this.adopt(await callFeature('fork', { id }), 'The fork did not start.'); }
+
+  /** The other provider takes over in a new session whose first turn is the engine's summary. */
+  async handoff(id, toProvider) { return this.adopt(await callFeature('handoff', { id, toProvider }), 'The hand-off did not start.'); }
+
+  /** Codex compacts its context now; Claude answers COMPACT_UNSUPPORTED. */
+  async compact(id) { return callFeature('compact', { id }); }
+
+  adopt(data, failure) {
+    const s = data?.session;
+    if (!s || typeof s.id !== 'string') throw new Error(failure);
+    this.list = [...this.list.filter(x => x.id !== s.id), s];
+    this.changed();
+    this.scheduleRefresh(600);
+    return s;
   }
 
   async stop(id) { await desktop.sessionStop({ id }); }

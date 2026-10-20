@@ -4,6 +4,7 @@
 import { updatePresentation } from '../../view-model.js';
 import { weatherSettings } from './settings-weather.js';
 import { wake, WAKE_CAPS_TEXT, WAKE_UNAVAILABLE_TEXT } from '../wake.js';
+import { has as hasFeature, call as callFeature, validNtfyUrl, UNSUPPORTED_TEXT } from '../features.js';
 
 const UPDATE_LABELS = { check: 'Check for updates', status: 'Read updater status', authorize: 'Approve in browser', poll: 'Check approval', download: 'Download update', install: 'Install update' };
 const UPDATE_MESSAGES = {
@@ -54,6 +55,81 @@ export function mount(root, ctx) {
     finally { wakeSaving = false; renderWake(); }
   }
   wake.on('change', renderWake);
+
+  /* ---------- Phone notifications (0.5): the engine posts to an ntfy topic URL on turn finish or error ---------- */
+  const note = { state: 'idle', saved: null, error: '', busy: '' };
+  const ntfyInput = h('input.input.ntfy-input', {
+    type: 'url', placeholder: 'https://ntfy.sh/a-long-random-topic', 'aria-label': 'ntfy topic URL', spellcheck: 'false', autocomplete: 'off',
+    oninput: () => renderNotify(), onkeydown: event => { if (event.key === 'Enter') { event.preventDefault(); saveNotify(); } },
+  });
+  const finishInput = h('input', { type: 'checkbox', 'aria-label': 'Push when a turn finishes', onchange: () => saveNotify() });
+  const errorInput = h('input', { type: 'checkbox', 'aria-label': 'Push when a turn ends with an error', onchange: () => saveNotify() });
+  const saveBtn = h('button.btn.small.primary', { type: 'button', onclick: () => saveNotify() }, icon('check'), 'Save');
+  const testBtn = h('button.btn.small', { type: 'button', onclick: () => testNotify() }, icon('bell'), 'Send test');
+  const notifyStatus = h('span.field-hint.ntfy-status', { role: 'status' });
+  const notifyCard = h('section.card.settings-card.notify-card',
+    h('h2.panel-title', 'Phone notifications'),
+    h('p.muted', 'Optional push to your phone through ntfy (free and open source). Install the ntfy app, subscribe to a long, hard-to-guess topic and paste its https URL here. CodaClauda posts a short notice when a session turn finishes or fails, and only then; the in-app toast and chime stay as they are.'),
+    h('div.ntfy-row', ntfyInput, saveBtn, testBtn),
+    notifyStatus,
+    h('div.setting-row', h('div.setting-text', h('strong', 'When a turn finishes'), h('span.field-hint', 'A reply is ready, including wakes and scheduled runs.')), h('label.switch', finishInput, h('span'))),
+    h('div.setting-row', h('div.setting-text', h('strong', 'When a turn ends with an error')), h('label.switch', errorInput, h('span'))),
+    h('p.field-hint', 'Anyone who knows the topic can read what is posted to it. The test button posts once, only when you press it.'));
+  function renderNotify() {
+    const supported = hasFeature('notifyGet') && hasFeature('notifySet');
+    const loaded = note.state === 'loaded';
+    const check = validNtfyUrl(ntfyInput.value);
+    const savedUrl = note.saved?.ntfyUrl || '';
+    const dirty = loaded && (check.ok ? check.url : ntfyInput.value.trim()) !== savedUrl;
+    for (const input of [ntfyInput, finishInput, errorInput]) input.disabled = !supported || !loaded || Boolean(note.busy);
+    saveBtn.disabled = !supported || !loaded || !dirty || !check.ok || Boolean(note.busy);
+    testBtn.disabled = !hasFeature('notifyTest') || !loaded || !savedUrl || !check.ok || Boolean(note.busy);
+    testBtn.title = !hasFeature('notifyTest') ? 'This build has no test command' : !savedUrl ? 'Save a topic URL first' : 'Post one test notice to the saved topic now';
+    notifyStatus.classList.toggle('bad', !check.ok || note.state === 'error');
+    notifyStatus.textContent = !supported ? `${UNSUPPORTED_TEXT}: phone notifications are not in this build.`
+      : note.state === 'error' ? `Couldn't read the setting: ${note.error}`
+        : !loaded ? 'Reading…'
+          : !check.ok ? check.error
+            : note.busy ? note.busy
+              : dirty ? 'Not saved yet.'
+                : savedUrl ? `On: posts to ${savedUrl}${!note.saved.onFinish && !note.saved.onError ? ' — but both switches are off' : ''}.` : 'Off: no topic URL.';
+  }
+  async function loadNotify() {
+    if (!hasFeature('notifyGet')) { renderNotify(); return; }
+    try {
+      note.saved = await callFeature('notifyGet');
+      note.state = 'loaded'; note.error = '';
+      ntfyInput.value = note.saved?.ntfyUrl || '';
+      finishInput.checked = note.saved?.onFinish === true;
+      errorInput.checked = note.saved?.onError === true;
+    } catch (error) { note.state = 'error'; note.error = error?.message || String(error); }
+    renderNotify();
+  }
+  async function saveNotify() {
+    if (note.busy || note.state !== 'loaded') return false;
+    const check = validNtfyUrl(ntfyInput.value);
+    if (!check.ok) { renderNotify(); ntfyInput.focus(); return false; }
+    note.busy = 'Saving…'; renderNotify();
+    try {
+      const saved = await callFeature('notifySet', { ntfyUrl: check.url || null, onFinish: finishInput.checked, onError: errorInput.checked });
+      note.saved = saved && typeof saved === 'object' ? saved : { ntfyUrl: check.url || null, onFinish: finishInput.checked, onError: errorInput.checked };
+      ntfyInput.value = note.saved.ntfyUrl || '';
+      finishInput.checked = note.saved.onFinish === true; errorInput.checked = note.saved.onError === true;
+      ui.toast(note.saved.ntfyUrl ? 'Phone notifications saved' : 'Phone notifications off', { kind: 'success', timeout: 2600 });
+      return true;
+    } catch (error) {
+      ui.toast(`Couldn't save phone notifications: ${error?.message || error}`, { kind: 'error', timeout: 8000 });
+      finishInput.checked = note.saved?.onFinish === true; errorInput.checked = note.saved?.onError === true;
+      return false;
+    } finally { note.busy = ''; renderNotify(); }
+  }
+  async function testNotify() {
+    if (note.busy || !hasFeature('notifyTest') || !note.saved?.ntfyUrl) return;
+    note.busy = 'Sending a test…'; renderNotify();
+    try { await callFeature('notifyTest'); ui.toast('Test notice sent. Check your phone.', { kind: 'success', timeout: 4000 }); }
+    catch (error) { ui.toast(`The test didn't send: ${error?.message || error}`, { kind: 'error', timeout: 8000 }); }
+    finally { note.busy = ''; renderNotify(); }
+  }
 
   /* ---------- Updates (persistent node; survives page re-renders) ---------- */
   const upd = { data: updatePresentation(), updating: false, reading: false, generation: 0, pollStarted: null, pollStopped: false, error: '' };
@@ -152,6 +228,7 @@ export function mount(root, ctx) {
         h('div.setting-row', h('div.setting-text', h('strong', 'City graphics'), h('span.field-hint', 'Low turns off shadows for slower PCs.')),
           h('div.segmented', ['high', 'low'].map(q => h('button', { type: 'button', 'aria-pressed': String(store.prefs.cityQuality === q), onclick: () => { store.setPref('cityQuality', q); render(); } }, q === 'high' ? 'High' : 'Low')))),
       ),
+      notifyCard,
       wakeCard,
       weatherCard.node,
       updatesCard,
@@ -176,10 +253,11 @@ export function mount(root, ctx) {
     ));
     renderUpdates();
     renderWake();
+    renderNotify();
   }
   render();
   return {
-    show() { visible = true; render(); updateOperation('status'); wake.load(); },
+    show() { visible = true; render(); updateOperation('status'); wake.load(); if (note.state !== 'loaded') loadNotify(); },
     hide() { visible = false; },
   };
 }

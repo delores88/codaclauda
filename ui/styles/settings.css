@@ -8,3 +8,10 @@
 .info-row { display: contents; }
 .info-row dt { color: var(--muted); }
 .info-row dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 0.5 phone notifications */
+.ntfy-row { display: flex; align-items: center; gap: 8px; }
+.ntfy-row .input { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 12.5px; }
+.settings-card .ntfy-row .btn { justify-self: auto; }
+.ntfy-status { margin-top: -6px; overflow-wrap: anywhere; }
+.ntfy-status.bad { color: var(--danger); }
+@media (max-width: 640px) { .ntfy-row { flex-wrap: wrap; } }
