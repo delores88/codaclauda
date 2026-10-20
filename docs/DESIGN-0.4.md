@@ -234,7 +234,7 @@ States: `starting → ready ⇄ running ⇄ awaiting-approval → ready → dorm
 
 **Start** (`SessionManager::start`):
 1. Canonicalise the project path. It must be a directory, not a link or reparse point, not inside the board, and the board must not be inside it. Derive `project.key` (the lower-cased canonical path) and read the policy. A project with no entry is **Read only**.
-2. Choose the executable from the cached probe (§2.7). Require `auth_status` signed-in in subscription mode, or else return `NOT_SIGNED_IN` with an "Open sign-in in terminal" action. For Codex below Full access, `windowsSandbox/readiness` must be `ready`, or else return `SANDBOX_NOT_READY` with a "Set up sandbox" action that Ben clicks (`windowsSandbox/setupStart`).
+2. Choose the executable from the cached probe (§2.7). Require `auth_status` signed-in in subscription mode, or else return `NOT_SIGNED_IN` with an "Open sign-in in terminal" action. For Codex below Full access the sandbox readiness check (the `windowsSandbox/readiness` method) must report `ready`, or else return `SANDBOX_NOT_READY` with a "Set up sandbox" action that Ben clicks (`windowsSandbox/setupStart`).
 3. Allocate the sid, the mailbox address (`<provider>-<project-slug>-<4hex>`, registered in process through `mailbox::api(store,"register",…)`), the capability and the Claude UUID. Persist the record as `starting`.
 4. Admission (§2.6). If there is no room, mark it `queued` with a reason. FIFO order; Stop cancels.
 5. Spawn into a job (`process::OwnedProcess::spawn_interactive`) with the launch environment (§3) and the level's flags (§4).
