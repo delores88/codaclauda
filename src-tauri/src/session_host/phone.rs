@@ -124,7 +124,11 @@ impl Book {
     }
     fn complete_push(&mut self, source: &str, ntfy_id: Result<&str, &Failure>, refused: bool, recipient: Option<&str>) {
         if let Some(receipt) = self.outbound.get_mut(source) {
-            receipt.state = match ntfy_id { Ok(_) if refused => "refused", Ok(_) => "sent", Err(_) => "unknown" }.into();
+            receipt.state = match ntfy_id {
+                Ok(_) if refused => "refused", Ok(_) => "sent",
+                Err(("PHONE_PUSH_FAILED" | "PHONE_CLIENT_UNAVAILABLE", _)) => "failed",
+                Err(_) => "unknown",
+            }.into();
         }
         match ntfy_id {
             Ok(id) => {
@@ -397,16 +401,50 @@ fn published_id(bytes: &[u8]) -> Result<String, Failure> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| failure("PHONE_PUSH_UNKNOWN", UNKNOWN_PUSH))?;
     value["id"].as_str().filter(|id| valid_event_id(id)).map(str::to_owned).ok_or_else(|| failure("PHONE_PUSH_UNKNOWN", UNKNOWN_PUSH))
 }
+struct PushOutcome {
+    result: Result<String, Failure>,
+    http_status: Option<u16>,
+    attempted: bool,
+}
+impl PushOutcome {
+    fn receipt(&self, id: &str, refused: bool) -> Value {
+        let (status, message) = match &self.result {
+            Ok(_) if refused => ("refused", SCAN_REFUSAL),
+            Ok(_) => ("sent", "ntfy accepted the notice. Check your phone; display on the phone is not confirmed."),
+            Err(("PHONE_PUSH_FAILED" | "PHONE_CLIENT_UNAVAILABLE", text)) => ("failed", text.as_str()),
+            Err((_, text)) => ("unknown", text.as_str()),
+        };
+        json!({"id": id, "status": status, "message": message, "ntfyId": self.result.as_ref().ok(), "httpStatus": self.http_status, "attempted": self.attempted})
+    }
+}
+pub(super) fn refused_publication(id: &str, message: &str) -> Value {
+    json!({"id": id, "status": "refused", "message": message, "ntfyId": null, "httpStatus": null, "attempted": false})
+}
+fn publish_tags(tag: &str) -> String {
+    if tag.is_empty() { APP_TAG.to_owned() } else { format!("{APP_TAG},{tag}") }
+}
+fn response_outcome(status: u16, bytes: Result<&[u8], Failure>) -> PushOutcome {
+    let result = if !(200..300).contains(&status) {
+        Err(failure("PHONE_PUSH_FAILED", "ntfy returned an unsuccessful HTTP response. The notice was not retried; check the phone before sending another notice."))
+    } else {
+        bytes.and_then(published_id).map_err(|_| failure("PHONE_PUSH_UNKNOWN", UNKNOWN_PUSH))
+    };
+    PushOutcome { result, http_status: Some(status), attempted: true }
+}
 /// The only HTTP publish site. The tag suppresses a self-message even if the
 /// app closes after ntfy accepts it but before its ID receipt is persisted.
-async fn push(url: &str, title: &str, body: &str, tag: &str) -> Result<String, Failure> {
-    let client = notify::client().ok_or_else(|| failure("PHONE_NETWORK_FAILED", "The HTTPS client is unavailable."))?;
-    let tags = if tag.is_empty() { APP_TAG.to_owned() } else { format!("{APP_TAG},{tag}") };
-    let response = client.post(url).header("Title", title).header("Tags", tags).body(body.to_owned()).send().await
-        .map_err(|_| failure("PHONE_PUSH_UNKNOWN", UNKNOWN_PUSH))?;
-    if !response.status().is_success() { return Err(failure("PHONE_PUSH_FAILED", "ntfy refused a phone message. It was not retried; check the phone and board.")); }
-    let bytes = bounded_body(response, 64 * 1024).await.map_err(|_| failure("PHONE_PUSH_UNKNOWN", UNKNOWN_PUSH))?;
-    published_id(&bytes)
+async fn push(url: &str, title: &str, body: &str, tag: &str) -> PushOutcome {
+    let Some(client) = notify::client() else {
+        return PushOutcome { result: Err(failure("PHONE_CLIENT_UNAVAILABLE", "The HTTPS client is unavailable. No notice was sent.")), http_status: None, attempted: false };
+    };
+    let response = match client.post(url).header("Title", title).header("Tags", publish_tags(tag)).body(body.to_owned()).send().await {
+        Ok(response) => response,
+        Err(_) => return PushOutcome { result: Err(failure("PHONE_PUSH_UNKNOWN", UNKNOWN_PUSH)), http_status: None, attempted: true },
+    };
+    let status = response.status().as_u16();
+    if !response.status().is_success() { return response_outcome(status, Ok(&[])); }
+    let bytes = bounded_body(response, 64 * 1024).await;
+    response_outcome(status, bytes.as_deref().map_err(|_| failure("PHONE_PUSH_UNKNOWN", UNKNOWN_PUSH)))
 }
 
 impl Inner {
@@ -477,16 +515,25 @@ impl Inner {
         self.change_phone(|book| { book.inbound.get_mut(&id).unwrap().done = true; book.last_id = Some(item.id.clone()); Ok(()) })
     }
     /// Called under phone_gate, so URL changes/disable cannot race publication.
-    async fn phone_publish_locked(&self, url: &str, publication: Publication) -> Result<(), Failure> {
+    pub(super) async fn phone_publish_locked(&self, url: &str, publication: Publication) -> Result<Value, Failure> {
         let prepared = self.change_phone(|b| begin_push(b, &publication))?;
         if let Some((title, body, refused)) = prepared {
             let outcome = push(url, &title, &body, publication.tag).await;
-            self.change_phone(|b| {
-                b.complete_push(&publication.id, outcome.as_deref(), refused, publication.recipient.as_deref());
+            let mut receipt = outcome.receipt(&publication.id, refused);
+            if self.change_phone(|b| {
+                b.complete_push(&publication.id, outcome.result.as_deref(), refused, publication.recipient.as_deref());
                 Ok(())
-            })?;
+            }).is_err() {
+                // The durable pre-dispatch receipt still prevents replay. Never
+                // describe a post-dispatch save failure as "nothing was sent".
+                receipt["status"] = json!("unknown");
+                receipt["message"] = json!("The outcome could not be saved. The notice may have been sent and will not be retried automatically. Check your phone and repair phone receipt storage.");
+            }
+            return Ok(receipt);
         }
-        Ok(())
+        let book = lock(&self.phone);
+        let state = book.outbound.get(&publication.id).map(|r| r.state.as_str()).unwrap_or("unknown");
+        Ok(json!({"id": publication.id, "status": if state == "sending" { "unknown" } else { state }, "message": "This notice already has an attempt receipt. It was not sent again.", "ntfyId": null, "httpStatus": null, "attempted": false}))
     }
     /// Finish/error/wake warnings use this same tagged, scanned, durable path.
     /// Their own notify switches are independent of the inbound-message switch.

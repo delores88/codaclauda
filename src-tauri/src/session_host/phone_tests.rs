@@ -364,3 +364,70 @@ fn malformed_or_unsupported_phone_state_is_refused_without_replacing_its_bytes()
     assert_eq!(read_book(&path).err().unwrap().0, "PHONE_STORAGE_FAILED");
     assert_eq!(fs::read(&path).unwrap(), bytes);
 }
+
+#[test]
+fn manual_test_notice_is_tagged_receipted_once_and_never_changes_reply_routing() {
+    let (dir, _store, mut book) = fixture();
+    let path = dir.path().join(FILE);
+    book.last_recipient = Some("codex-claudacoda".into());
+    book.settings(false).unwrap(); // The owner's manual test is independent of this switch.
+    let notice = notify::test_publication();
+    assert!(notice.id.starts_with("test:"));
+    assert_ne!(notice.id, notify::test_publication().id);
+    assert!(notice.recipient.is_none());
+    let (title, body, refused) = begin_push(&mut book, &notice).unwrap().unwrap();
+    assert_eq!(title, "CodaClauda");
+    assert_eq!(body, "CodaClauda phone notification test. If you can read this on your phone, this notice arrived.");
+    assert!(!refused);
+    assert_eq!(publish_tags(notice.tag), APP_TAG);
+    persist(&path, &book).unwrap();
+    assert_eq!(read_book(&path).unwrap().outbound[&notice.id].state, "sending");
+    let accepted = response_outcome(200, Ok(br#"{"id":"testposted","event":"message"}"#));
+    let receipt = accepted.receipt(&notice.id, refused);
+    assert_eq!(receipt["status"], "sent");
+    assert_eq!(receipt["httpStatus"], 200);
+    assert_eq!(receipt["ntfyId"], "testposted");
+    assert_eq!(receipt["attempted"], true);
+    assert!(receipt["message"].as_str().unwrap().contains("not confirmed"));
+    book.complete_push(&notice.id, accepted.result.as_deref(), refused, notice.recipient.as_deref());
+    persist(&path, &book).unwrap();
+    let mut restarted = read_book(&path).unwrap();
+    assert!(begin_push(&mut restarted, &notice).unwrap().is_none());
+    assert_eq!(restarted.last_recipient.as_deref(), Some("codex-claudacoda"));
+    let echo = incoming("testposted", &body);
+    assert!(restarted.own(&echo));
+    assert!(!prepare(&mut restarted, &echo, &choices(), |_| panic!("test notice became a turn")).unwrap());
+    assert!(restarted.inbound.is_empty());
+}
+
+#[test]
+fn manual_test_http_failure_and_uncertainty_return_receipts_without_replaying_attempts() {
+    let (dir, _store, mut book) = fixture();
+    let path = dir.path().join(FILE);
+    let outcomes = [
+        (response_outcome(429, Ok(b"untrusted server body is never echoed")), "failed", Some(429)),
+        (response_outcome(200, Ok(b"missing response id")), "unknown", Some(200)),
+        (response_outcome(200, Err(failure("PHONE_RESPONSE_TOO_LARGE", "not forwarded"))), "unknown", Some(200)),
+        (PushOutcome { result: Err(failure("PHONE_PUSH_UNKNOWN", UNKNOWN_PUSH)), http_status: None, attempted: true }, "unknown", None),
+    ];
+    for (outcome, status, http_status) in outcomes {
+        let notice = notify::test_publication();
+        begin_push(&mut book, &notice).unwrap().unwrap();
+        persist(&path, &book).unwrap();
+        let receipt = outcome.receipt(&notice.id, false);
+        assert_eq!(receipt["status"], status);
+        assert_eq!(receipt["httpStatus"], json!(http_status));
+        assert_eq!(receipt["attempted"], true);
+        assert!(receipt["ntfyId"].is_null());
+        assert!(!receipt.to_string().contains("untrusted server body"));
+        book.complete_push(&notice.id, outcome.result.as_deref(), false, None);
+        persist(&path, &book).unwrap();
+        book = read_book(&path).unwrap();
+        assert_eq!(book.outbound[&notice.id].state, status);
+        assert!(begin_push(&mut book, &notice).unwrap().is_none());
+    }
+    let refused = refused_publication("test:unsent", "Save an ntfy topic URL before sending a test. No notice was sent.");
+    assert_eq!(refused["status"], "refused");
+    assert_eq!(refused["attempted"], false);
+    assert!(refused["httpStatus"].is_null());
+}

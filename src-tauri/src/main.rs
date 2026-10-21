@@ -485,6 +485,7 @@ fn main() {
             session_host::mcp::mcp_servers_set,
             session_host::notify::notify_settings_get,
             session_host::notify::notify_settings_set,
+            session_host::notify::notify_test,
             session_host::phone::phone_settings_get,
             session_host::phone::phone_settings_set,
             session_host::limits::session_limits_get,

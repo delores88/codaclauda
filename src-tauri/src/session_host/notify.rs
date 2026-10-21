@@ -11,6 +11,13 @@ use std::{fs, sync::OnceLock, time::Duration};
 const NOTIFY_FILE: &str = "notify.json";
 const URL_LIMIT: usize = 512;
 
+/// Fixed owner-triggered test: no caller-supplied URL, body or routing identity.
+pub(super) fn test_publication() -> Publication {
+    Publication { id: format!("test:{}", random_hex(16)), title: "CodaClauda".into(),
+        subject: "Phone notification test".into(), body: "CodaClauda phone notification test. If you can read this on your phone, this notice arrived.".into(),
+        limit: 160, tag: "", recipient: None }
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct Settings {
@@ -60,6 +67,7 @@ pub(super) fn client() -> Option<&'static reqwest::Client> {
                 .timeout(Duration::from_secs(15))
                 .connect_timeout(Duration::from_secs(8))
                 .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .build()
                 .ok()
         })
@@ -158,6 +166,23 @@ pub(crate) async fn notify_settings_set(
     let inner = host(&app);
     let _gate = inner.phone_gate.lock().await;
     reply(inner.notify_set(ntfy_url, on_finish.unwrap_or(false), on_error.unwrap_or(false)))
+}
+
+/// Owner webview command only; not exposed to the CLI, board or provider MCP.
+#[tauri::command]
+pub(crate) async fn notify_test(app: tauri::AppHandle) -> Value {
+    let inner = host(&app);
+    let _gate = inner.phone_gate.lock().await;
+    let publication = test_publication();
+    let id = publication.id.clone();
+    let Some(url) = inner.phone_reply_url() else {
+        return reply(Ok(super::phone::refused_publication(&id, "Save an ntfy topic URL before sending a test. No notice was sent.")));
+    };
+    // A failed pre-dispatch save refuses without HTTP. Post-dispatch failures
+    // return an unknown receipt from the shared path and are never retried.
+    let receipt = inner.phone_publish_locked(&url, publication).await
+        .unwrap_or_else(|(_, message)| super::phone::refused_publication(&id, &message));
+    reply(Ok(receipt))
 }
 
 #[cfg(test)]

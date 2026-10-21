@@ -23,6 +23,39 @@ const UPDATE_MESSAGES = {
 const PHASE_KIND = { available: 'accent', 'approval-pending': 'warning', authorized: 'accent', ready: 'success', downloaded: 'success', current: 'success', 'up-to-date': 'success', error: 'danger', unavailable: 'neutral' };
 const POLL_LIMIT = 10 * 60e3;
 
+export function phoneTestReady(note, inputUrl) {
+  const check = validNtfyUrl(inputUrl);
+  return hasFeature('notifyTest') && note.state === 'loaded' && !note.busy
+    && Boolean(note.saved?.ntfyUrl) && check.ok && check.url === note.saved.ntfyUrl;
+}
+
+/** A native send receipt says whether ntfy accepted the test, not whether a phone displayed it. */
+export function phoneTestResult(receipt) {
+  const http = Number.isInteger(receipt?.httpStatus) && receipt.httpStatus >= 100 && receipt.httpStatus <= 599 ? ` (HTTP ${receipt.httpStatus})` : '';
+  const explanation = typeof receipt?.message === 'string' && receipt.message.trim() ? ` ${receipt.message.trim()}` : '';
+  const accepted = receipt?.attempted === true && typeof receipt.id === 'string' && Boolean(receipt.id.trim())
+    && typeof receipt.ntfyId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(receipt.ntfyId)
+    && Number.isInteger(receipt.httpStatus) && receipt.httpStatus >= 200 && receipt.httpStatus < 300;
+  if (receipt?.status === 'sent' && accepted) return { status: 'sent', kind: 'success', text: `ntfy accepted the test${http}. Check your phone; phone delivery is not confirmed.` };
+  if (receipt?.status === 'refused') return { status: 'refused', kind: 'error', text: `Test refused${receipt.attempted === false ? ' before sending' : ''}.${explanation} No automatic retry.` };
+  if (receipt?.status === 'failed') return { status: 'failed', kind: 'error', text: `${receipt.attempted === true ? `ntfy returned an unsuccessful HTTP response${http}; check your phone` : 'The test could not be sent'}.${explanation} No automatic retry.` };
+  return { status: 'unknown', kind: 'error', text: 'Test outcome unknown: it may have been sent. Check your phone and saved receipts before sending another test. No automatic retry.' };
+}
+
+/** The actual Send test click handler. Reading settings never calls this action. */
+export function phoneTestAction(note, inputUrl, render, toast) {
+  return async () => {
+    if (!phoneTestReady(note, inputUrl())) return;
+    note.busy = 'Sending one test…'; note.testResult = null; render();
+    try { note.testResult = phoneTestResult(await callFeature('notifyTest')); }
+    catch { note.testResult = phoneTestResult(null); }
+    finally {
+      note.busy = ''; render();
+      toast(note.testResult.text, { kind: note.testResult.kind, timeout: 9000 });
+    }
+  };
+}
+
 export function mount(root, ctx) {
   const { store, ui, bridge, navigate } = ctx;
   const { h, icon } = ui;
@@ -67,21 +100,23 @@ export function mount(root, ctx) {
   wake.on('change', renderWake);
 
   /* ---------- Phone notifications (0.5): the engine posts to an ntfy topic URL on turn finish or error ---------- */
-  const note = { state: 'idle', saved: null, error: '', busy: '' };
+  const note = { state: 'idle', saved: null, error: '', busy: '', testResult: null };
   const ntfyInput = h('input.input.ntfy-input', {
     type: 'url', placeholder: 'https://ntfy.sh/a-long-random-topic', 'aria-label': 'ntfy topic URL', spellcheck: 'false', autocomplete: 'off',
     oninput: () => renderNotify(), onkeydown: event => { if (event.key === 'Enter') { event.preventDefault(); saveNotify(); } },
   });
   const finishInput = h('input', { type: 'checkbox', 'aria-label': 'Push when a turn finishes', onchange: () => saveNotify() });
   const errorInput = h('input', { type: 'checkbox', 'aria-label': 'Push when a turn ends with an error', onchange: () => saveNotify() });
+  const testNotify = phoneTestAction(note, () => ntfyInput.value, renderNotify, ui.toast);
   const saveBtn = h('button.btn.small.primary', { type: 'button', onclick: () => saveNotify() }, icon('check'), 'Save');
   const testBtn = h('button.btn.small', { type: 'button', onclick: () => testNotify() }, icon('bell'), 'Send test');
   const notifyStatus = h('span.field-hint.ntfy-status', { role: 'status' });
+  const testStatus = h('span.field-hint.ntfy-status', { role: 'status', 'aria-live': 'polite', hidden: true });
   const notifyCard = h('section.card.settings-card.notify-card',
     h('h2.panel-title', 'Phone'),
     h('p.muted', 'Install the free ntfy app on your phone, subscribe to a long random topic, and save its https URL here once. Use that same topic to message your agents and read their replies. No SMS, phone number, or paid service is needed.'),
     h('div.ntfy-row', ntfyInput, saveBtn, testBtn),
-    notifyStatus,
+    notifyStatus, testStatus,
     h('div.setting-row', h('div.setting-text', h('strong', 'When a turn finishes'), h('span.field-hint', 'A reply is ready, including wakes and scheduled runs.')), h('label.switch', finishInput, h('span'))),
     h('div.setting-row', h('div.setting-text', h('strong', 'When a turn ends with an error')), h('label.switch', errorInput, h('span'))),
     h('p.field-hint', 'These two switches control turn notifications; they do not turn agent replies off. Anyone who knows the topic can read and send messages. Keep the URL private.'),
@@ -94,8 +129,11 @@ export function mount(root, ctx) {
     const dirty = loaded && (check.ok ? check.url : ntfyInput.value.trim()) !== savedUrl;
     for (const input of [ntfyInput, finishInput, errorInput]) input.disabled = !supported || !loaded || Boolean(note.busy);
     saveBtn.disabled = !supported || !loaded || !dirty || !check.ok || Boolean(note.busy);
-    testBtn.disabled = !hasFeature('notifyTest') || !loaded || !savedUrl || !check.ok || Boolean(note.busy);
-    testBtn.title = !hasFeature('notifyTest') ? 'This build has no test command' : !savedUrl ? 'Save a topic URL first' : 'Post one test notice to the saved topic now';
+    testBtn.disabled = !phoneTestReady(note, ntfyInput.value);
+    testBtn.title = !hasFeature('notifyTest') ? 'This build has no test command' : !savedUrl ? 'Save a topic URL first' : dirty ? 'Save the changed topic URL before sending a test' : 'Post one test notice to the saved topic now';
+    testStatus.hidden = !note.testResult;
+    testStatus.textContent = note.testResult?.text || '';
+    testStatus.classList.toggle('bad', Boolean(note.testResult && note.testResult.status !== 'sent'));
     notifyStatus.classList.toggle('bad', !check.ok || note.state === 'error');
     notifyStatus.textContent = !supported ? `${UNSUPPORTED_TEXT}: phone notifications are not in this build.`
       : note.state === 'error' ? `Couldn't read the setting: ${note.error}`
@@ -123,6 +161,7 @@ export function mount(root, ctx) {
     note.busy = 'Saving…'; renderNotify();
     try {
       const saved = await callFeature('notifySet', { ntfyUrl: check.url || null, onFinish: finishInput.checked, onError: errorInput.checked });
+      if ((saved?.ntfyUrl || '') !== (note.saved?.ntfyUrl || '')) note.testResult = null;
       note.saved = saved && typeof saved === 'object' ? saved : { ntfyUrl: check.url || null, onFinish: finishInput.checked, onError: errorInput.checked };
       ntfyInput.value = note.saved.ntfyUrl || '';
       finishInput.checked = note.saved.onFinish === true; errorInput.checked = note.saved.onError === true;
@@ -135,14 +174,6 @@ export function mount(root, ctx) {
       return false;
     } finally { note.busy = ''; renderNotify(); }
   }
-  async function testNotify() {
-    if (note.busy || !hasFeature('notifyTest') || !note.saved?.ntfyUrl) return;
-    note.busy = 'Sending a test…'; renderNotify();
-    try { await callFeature('notifyTest'); ui.toast('Test notice sent. Check your phone.', { kind: 'success', timeout: 4000 }); }
-    catch (error) { ui.toast(`The test didn't send: ${error?.message || error}`, { kind: 'error', timeout: 8000 }); }
-    finally { note.busy = ''; renderNotify(); }
-  }
-
   /* ---------- Updates (persistent node; survives page re-renders) ---------- */
   const upd = { data: updatePresentation(), updating: false, reading: false, generation: 0, pollStarted: null, pollStopped: false, error: '' };
   const phaseNode = h('span.pill', 'Not checked');

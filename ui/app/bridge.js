@@ -189,6 +189,8 @@ export const desktop = {
   notifySettingsGet: () => invoke('notify_settings_get'),
   /** ntfyUrl must be https (null or '' turns push off) → { ntfyUrl, onFinish, onError } */
   notifySettingsSet: ({ ntfyUrl = null, onFinish = false, onError = false } = {}) => invoke('notify_settings_set', { ntfyUrl: ntfyUrl || null, onFinish: Boolean(onFinish), onError: Boolean(onError) }),
+  /** One owner-triggered synthetic test to the saved URL; no destination/body arguments. Returns a durable send receipt, not phone delivery. */
+  notifyTest: () => invoke('notify_test'),
   /** Owner-only phone messaging (0.6.1): { enabled, topicUrl|null, lastRecipient|null, recipients:[{address,label}], lastError|null }. Uses notify.ntfyUrl. */
   phoneSettingsGet: () => invoke('phone_settings_get'),
   phoneSettingsSet: ({ enabled } = {}) => invoke('phone_settings_set', { enabled: Boolean(enabled) }),

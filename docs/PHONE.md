@@ -29,6 +29,14 @@ to choose an agent**. CodaClauda never chooses the most recently active agent
 as a fallback. It remembers the last agent whose phone message was confirmed
 by ntfy for the current URL. Changing the topic starts a new conversation.
 
+**Send test** sends one fixed CodaClauda notice to the saved topic. Save any URL
+edit first. The result reports ntfy's HTTP outcome and message identifier when
+available; acceptance by ntfy does not prove display on your phone. An unknown
+outcome may already have arrived, so inspect the topic before choosing to send
+another test. Tests are tagged as CodaClauda messages, never routed to an agent,
+and never retried automatically. The button works independently of the messaging
+and turn-notification switches.
+
 You can also publish in your phone browser by opening the topic URL. The
 official ntfy guides cover [phone subscriptions and publishing](https://docs.ntfy.sh/subscribe/phone/)
 and [the web app](https://docs.ntfy.sh/subscribe/web/). Publishing button
