@@ -257,7 +257,7 @@ export function mount(root, ctx) {
     h('div.cx-invite-head',
       h('span.cx-invite-art', icon('agentAdd')),
       h('div', h('h2.panel-title#cx-invite-title', 'Bring a new desktop chat onto the board'),
-        h('p.muted', 'CodaClauda can’t start a chat for you. Open a new chat in the Claude Code or Codex desktop app and paste this prompt; the chat registers itself and joins.'))),
+        h('p.muted', 'For a chat in the Claude Code or Codex desktop app: open it there and paste this prompt; the chat registers itself and joins. To start a new agent that works inside CodaClauda, use Chat instead.'))),
     h('ol.cx-steps',
       h('li', h('b', '1'), h('span', h('strong', 'Describe the chat'), h('small', 'App, project and what it will do.'))),
       h('li', h('b', '2'), h('span', h('strong', 'Copy the prompt'), h('small', 'It carries your real CLI and board paths.'))),

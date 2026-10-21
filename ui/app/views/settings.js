@@ -50,7 +50,7 @@ export function mount(root, ctx) {
       : wake.enabled === null ? (wake.error ? `Couldn't read the setting: ${wake.error}` : 'Reading…')
         : wake.enabled ? "On: a session with wake on (each new session starts with it on; switch it in the chat's resources panel) gets a turn for each new board message to its address. There is no limit on how many sessions wake."
           : 'Off: no new wake turns start. An already running turn continues until you press Stop. Mail waits on the board.';
-    wakeGuard.textContent = wake.loopGuard ? `${guardText(wake.loopGuard)} Change it in Limits below.` : '';
+    wakeGuard.textContent = wake.loopGuard ? `${guardText(wake.loopGuard)} Change it in Limits above.` : '';
   }
   async function setWake(enabled) {
     wakeSaving = true; renderWake();

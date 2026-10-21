@@ -49,7 +49,7 @@ export function limitsSettings({ ui, bridge, store }) {
     },
     {
       key: 'concurrent', label: 'Board requests at once',
-      hint: `Dedicated board requests (questions, reviews, delegations) that run together; the rest wait in order. A request blocked waiting on a teammate it asked does not count, so nested handoffs keep moving; if it resumes while that teammate still runs, both count and the total can briefly pass this number. ${MEMORY_HINT}`,
+      hint: `Dedicated board requests (questions, reviews, delegations) that run together; the rest wait in order. A request blocked waiting on a teammate it asked does not count, so nested handoffs keep moving; it resumes only into a free slot, so the total never passes this number. ${MEMORY_HINT}`,
       supported: () => true,
       read: async () => {
         try { return (await bridge.rpc('policy'))?.concurrent; }
