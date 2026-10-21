@@ -7,21 +7,21 @@
 //! credential file is opened and nothing is copied or changed.
 //!
 //! 0.6: each row carries its `providerSessionId` (Claude: the file stem; Codex:
-//! the `session_meta` id), and `session_adopt` starts a CodaClauda session that
-//! resumes that exact conversation (Claude `--resume <id>`, Codex
-//! `thread/resume <id>`) at the project's current access, Read when the folder
-//! is neither a linked project nor the owner's own. Only file names are
-//! matched to find a conversation; its contents are never read here.
+//! the `session_meta` id), and `session_adopt` starts a CodaClauda session from
+//! that conversation at the project's current access, Read when the folder is
+//! neither a linked project nor the owner's own. Only file names are matched to
+//! find a conversation; its contents are never read here.
 //!
-//! Continue is refused while another app may still write the conversation
-//! (it changed in the last 15 minutes, or a Codex thread is bound for Wake
-//! by mail in `desktop_queue.rs`), so one conversation never has two writers.
-//! The refusal offers Fork instead: a separate, labeled copy made on its
-//! first launch by the existing fork path (Claude `--resume <id>
-//! --fork-session`, Codex `thread/fork`); the original is never changed.
-//! Neither action wakes or updates the other app's window.
+//! A conversation file or process snapshot does not establish that no other
+//! app still writes it, so another app's conversation is never continued in
+//! place. Continue (the default mode, or "fork") makes a separate, labeled copy
+//! on its first launch by the existing fork path (Claude `--resume <id>
+//! --fork-session`, Codex `thread/fork`); the original is never changed. Mode
+//! "continue" only returns the CodaClauda session that already holds the
+//! conversation and otherwise refuses with OWNERSHIP_UNKNOWN. Neither wakes or
+//! updates the other app's window.
 
-use super::{Failure, Inner, Provider, Record, desktop_queue, host, lock, now_ms, random_hex, reply};
+use super::{Failure, Inner, Provider, Record, host, lock, now_ms, random_hex, reply};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -382,38 +382,24 @@ fn adopt_access(ui: &Result<Option<Value>, String>, cwd: &str, profile: Option<&
     (None, if own { "full" } else { "read" })
 }
 
-/// "continue" (the default) resumes the conversation itself; "fork" makes a copy.
+/// The default (no mode, "" or "fork") makes a separate copy; "continue" asks
+/// for the conversation itself, which only a CodaClauda session already holding
+/// it can give.
 fn fork_mode(mode: Option<&str>) -> Result<bool, Failure> {
     match mode.map(str::trim) {
-        None | Some("") | Some("continue") => Ok(false),
-        Some("fork") => Ok(true),
+        None | Some("") | Some("fork") => Ok(true),
+        Some("continue") => Ok(false),
         Some(_) => Err(("INVALID_ARGUMENTS", "mode must be continue or fork.".into())),
     }
 }
 
-fn ago_text(ms: u64) -> String {
-    match ms / 60_000 {
-        0 => "less than a minute".into(),
-        1 => "1 minute".into(),
-        n => format!("{n} minutes"),
-    }
-}
-
-/// Continue would give the conversation a second writer while another app
-/// may still be using it: it changed in the last 15 minutes, or (Codex) it is
-/// bound for Wake by mail. Each refusal names Fork instead.
-fn continue_refusal(provider: Provider, modified: u64, now: u64, bound: Option<&str>) -> Option<Failure> {
-    let label = provider.label();
-    if let Some(address) = bound {
-        return Some(("CONVERSATION_BOUND", format!(
-            "This {label} conversation wakes by mail in its own app (bound to {address}). Continuing it here too would give it two writers. Turn off Wake by mail for it first, or choose Fork instead for a separate copy."
-        )));
-    }
-    let ago = now.saturating_sub(modified);
-    (ago < ACTIVE_MS).then(|| ("CONVERSATION_ACTIVE", format!(
-        "This {label} conversation changed {} ago, so it may still be open in another app. Continuing it here at the same time would give it two writers. Close it there and continue once it has had no changes for 15 minutes, or choose Fork instead for a separate copy.",
-        ago_text(ago)
-    )))
+/// Continuing in place needs known exclusive writer ownership, which a
+/// conversation file or process snapshot alone does not establish.
+fn ownership_unknown(provider: Provider) -> Failure {
+    ("OWNERSHIP_UNKNOWN", format!(
+        "CodaClauda can't confirm that no other app still writes this {} conversation, so it doesn't continue it in place. Continue makes a separate, labeled copy instead; the original stays as it is in its own app.",
+        provider.label()
+    ))
 }
 
 impl Inner {
@@ -441,28 +427,21 @@ impl Inner {
         if let Some(record) = existing.filter(|_| !copy) {
             return Ok(json!({"session": record, "existing": true}));
         }
+        // Nothing here shows which app still writes the conversation, so it is
+        // never continued in place; the default copy is offered instead.
+        if !copy {
+            return Err(ownership_unknown(provider));
+        }
         let wanted = session.to_owned();
-        let found = tauri::async_runtime::spawn_blocking(move || {
-            let path = match provider {
-                Provider::Claude => claude_transcript(&wanted),
-                Provider::Codex => codex_rollout(&wanted),
-            }?;
-            // The file's last change only; its contents are not read.
-            Some(fs::symlink_metadata(&path).map_or(0, |meta| modified_ms(&meta)))
+        let found = tauri::async_runtime::spawn_blocking(move || match provider {
+            // Found by name only; its contents are not read.
+            Provider::Claude => claude_transcript(&wanted).is_some(),
+            Provider::Codex => codex_rollout(&wanted).is_some(),
         })
         .await
         .map_err(|_| ("SCAN_FAILED", "Looking for that conversation stopped unexpectedly.".to_owned()))?;
-        let Some(modified) = found else {
+        if !found {
             return Err(("SESSION_NOT_FOUND", format!("That {} conversation is no longer on this PC.", provider.label())));
-        };
-        if !copy {
-            let bound = match provider {
-                Provider::Codex => desktop_queue::bound_address(&self.dir, session).map_err(|m| ("BINDINGS_UNREADABLE", m))?,
-                Provider::Claude => None,
-            };
-            if let Some(refusal) = continue_refusal(provider, modified, now_ms(), bound.as_deref()) {
-                return Err(refusal);
-            }
         }
         let ui = super::schedule::read_json(&self.dir.join("ui-state.json"), 8 * 1024 * 1024);
         let profile = env_dir("USERPROFILE").map(|p| p.to_string_lossy().into_owned());
@@ -470,18 +449,11 @@ impl Inner {
         let title = title
             .map(|t| t.trim().chars().filter(|c| !c.is_control()).take(200).collect::<String>())
             .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| format!("{} conversation{}", provider.label(), if copy { " (copy)" } else { "" }));
-        if copy {
-            return self.adopt_copy(provider, session, cwd, project_id, access, title).await;
-        }
-        self.start(json!({
-            "provider": provider.name(), "projectId": project_id, "cwd": cwd, "access": access, "title": title,
-            "adoptedFrom": {"provider": provider.name(), "providerSessionId": session},
-        }))
-        .await
+            .unwrap_or_else(|| format!("{} conversation (copy)", provider.label()));
+        self.adopt_copy(provider, session, cwd, project_id, access, title).await
     }
 
-    /// Fork instead: a new CodaClauda session whose first launch copies the
+    /// Continue as a copy: a new CodaClauda session whose first launch copies the
     /// conversation through the existing fork path; the original is untouched
     /// and keeps its own app. A copy is never bound to or confused with it.
     async fn adopt_copy(
@@ -530,8 +502,9 @@ impl Inner {
 }
 
 /// { provider, providerSessionId, cwd, title?, mode? } → { session, existing?, copy? }:
-/// continue an existing Claude Code or Codex conversation as a CodaClauda
-/// session, or (mode "fork") start a separate copy of it.
+/// start a separate, labeled CodaClauda copy of an existing Claude Code or
+/// Codex conversation (the default, or mode "fork"). Mode "continue" returns
+/// the CodaClauda session that already holds it, else OWNERSHIP_UNKNOWN.
 #[tauri::command]
 pub(crate) async fn session_adopt(
     app: tauri::AppHandle,
@@ -547,6 +520,7 @@ pub(crate) async fn session_adopt(
 
 #[cfg(test)]
 mod tests {
+    use super::super::desktop_queue;
     use super::*;
 
     #[test]
@@ -591,20 +565,21 @@ mod tests {
     }
 
     #[test]
-    fn continue_is_refused_while_recently_active_or_bound_and_offers_a_copy() {
-        let now = 100 * 60_000;
-        let active = continue_refusal(Provider::Claude, now - 4 * 60_000, now, None).unwrap();
-        assert_eq!(active.0, "CONVERSATION_ACTIVE");
-        assert!(active.1.contains("changed 4 minutes ago") && active.1.contains("Fork instead"));
-        assert!(continue_refusal(Provider::Codex, now - 15 * 60_000, now, None).is_none());
-        // A bound Codex thread is refused however long it has been idle.
-        let bound = continue_refusal(Provider::Codex, now - 90 * 60_000, now, Some("codex-desk")).unwrap();
-        assert_eq!(bound.0, "CONVERSATION_BOUND");
-        assert!(bound.1.contains("codex-desk") && bound.1.contains("Fork instead"));
-        assert_eq!((fork_mode(None), fork_mode(Some("continue")), fork_mode(Some("fork"))), (Ok(false), Ok(false), Ok(true)));
-        assert!(fork_mode(Some("resume-original")).is_err());
+    fn continue_makes_a_copy_and_refuses_in_place_without_known_ownership() {
+        // The default, "" and "fork" make a copy; only "continue" asks for the conversation itself.
+        assert_eq!(
+            (fork_mode(None), fork_mode(Some("")), fork_mode(Some("fork")), fork_mode(Some("continue"))),
+            (Ok(true), Ok(true), Ok(true), Ok(false))
+        );
+        assert_eq!(fork_mode(Some("resume-original")).unwrap_err().0, "INVALID_ARGUMENTS");
+        // Without a CodaClauda session holding it, continuing in place is refused and names the copy.
+        let refusal = ownership_unknown(Provider::Codex);
+        assert_eq!(refusal.0, "OWNERSHIP_UNKNOWN");
+        assert!(refusal.1.contains("this Codex conversation") && refusal.1.contains("doesn't continue it in place"));
+        assert!(refusal.1.contains("separate, labeled copy") && refusal.1.contains("the original stays as it is"));
+        assert!(ownership_unknown(Provider::Claude).1.contains("this Claude Code conversation"));
 
-        // The binding adopt checks is the owner's saved Wake by mail binding.
+        // The owner's saved Wake by mail binding for a Codex thread.
         let dir = tempfile::tempdir().unwrap();
         let thread = "0199a8f2-1c2d-7e3f-8a9b-0c1d2e3f4a5b";
         assert_eq!(desktop_queue::bound_address(dir.path(), thread).unwrap(), None);
@@ -612,7 +587,7 @@ mod tests {
             "cwd": "C:\\work\\app", "projectId": "local:c:/work", "boundAt": 1, "cursor": 0, "last": null}]});
         fs::write(dir.path().join("desktop-bindings.json"), saved.to_string()).unwrap();
         assert_eq!(desktop_queue::bound_address(dir.path(), thread).unwrap().as_deref(), Some("codex-desk"));
-        // Unreadable bindings refuse Continue rather than guess there is no other writer.
+        // Unreadable bindings are an error, never read as unbound.
         fs::write(dir.path().join("desktop-bindings.json"), b"{not json").unwrap();
         assert!(desktop_queue::bound_address(dir.path(), thread).is_err());
     }

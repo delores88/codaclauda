@@ -5,9 +5,9 @@
  *                 (asleep = no live process), the board claims it holds and who started it (0.5);
  *   On this PC    Claude Code and Codex sessions found on disk (external_sessions_list), metadata
  *                 only: provider, folder, last change and whether it changed in the last 15 minutes.
- *                 0.6: "Continue in CodaClauda" (session_adopt) resumes one as a wake-on CodaClauda session; it is
- *                 refused while the conversation changed in the last 15 minutes or (Codex) wakes by mail, and
- *                 "Fork instead" starts a separate, labeled copy. Neither wakes the other app's window.
+ *                 0.6: "Continue as a copy" (session_adopt, mode 'fork') starts a wake-on CodaClauda chat holding a
+ *                 separate, labeled copy of the conversation so far. The original is never continued in place
+ *                 (its writer is unknown); it stays untouched in its own app, whose window is not woken.
  *                 0.6 Codex rows: "Wake by mail" binds a board address to that existing chat (desktop_bind);
  *                 new mail then reaches it through Codex's own `codex queue` command, and the row shows the
  *                 last delivery receipt and Unbind. Bindings whose chat is not listed still show, so Unbind is
@@ -17,7 +17,7 @@ import { sessions, UNAVAILABLE_TEXT } from '../sessions.js';
 import { schedules, SCHEDULES_UNAVAILABLE_TEXT } from '../schedules.js';
 import { providerLabel, toMs } from '../session-model.js';
 import { cadenceText, untilText, runStatus } from '../schedule-model.js';
-import { has as hasFeature, call as callFeature, normalizeUsage, tokens, wakeAddressChoices, normalizeBindings, deliveryText, continueBlock, CONTINUE_REFUSALS } from '../features.js';
+import { has as hasFeature, call as callFeature, normalizeUsage, tokens, wakeAddressChoices, normalizeBindings, deliveryText } from '../features.js';
 import { agentAvatar } from '../avatar/spec.js';
 
 const baseName = path => String(path || '').split(/[\\/]/).filter(Boolean).pop() || '';
@@ -205,7 +205,7 @@ export function mount(root, ctx) {
     const project = store.projects.find(p => p.path && shownPath(p.path).toLowerCase().replace(/[\\/]+$/, '') === shownPath(e.cwd).toLowerCase().replace(/[\\/]+$/, ''));
     const binding = bindingFor(e);
     const actions = [
-      canAdopt(e) ? h('button.btn.small', { type: 'button', disabled: state.adopting.has(e.providerSessionId), title: 'Continue this conversation as a CodaClauda session with wake on. The other app is not woken and shows the new turns only after it reopens the conversation.', onclick: () => adopt(e, project) }, state.adopting.has(e.providerSessionId) ? h('span.spinner') : icon('chat'), 'Continue in CodaClauda') : null,
+      canAdopt(e) ? h('button.btn.small', { type: 'button', disabled: state.adopting.has(e.providerSessionId), title: "Start a CodaClauda chat holding a copy of this conversation so far, with wake on, at the project's current access. The original stays untouched in its own app, which is not woken.", onclick: () => adopt(e, project) }, state.adopting.has(e.providerSessionId) ? h('span.spinner') : icon('chat'), 'Continue as a copy') : null,
       canWake(e) && !binding ? h('button.btn.small', { type: 'button', disabled: state.binding.has(e.providerSessionId), title: "Notify this existing Codex chat through Codex's own queue command when board mail arrives for its address", onclick: () => wakeByMail(e, project) }, state.binding.has(e.providerSessionId) ? h('span.spinner') : icon('bell'), 'Wake by mail') : null,
       binding && hasFeature('desktopUnbind') ? unbindButton(binding) : null,
       e.cwd ? h('button.btn.small.ghost', { type: 'button', onclick: () => ctx.bridge.desktop.openExternal(e.cwd).catch(() => ui.copyText(shownPath(e.cwd), 'Path copied')) }, icon('folder'), 'Folder') : null,
@@ -299,46 +299,33 @@ export function mount(root, ctx) {
     render(true);
   }
 
-  /* 0.6: continue a conversation found on this PC. The provider's own resume appends to the same
-   * conversation; CodaClauda never edits the transcript and never wakes the other app, which shows the new
-   * turns only after it reopens the conversation. Continue is refused while the other app may still write it
-   * (changed in the last 15 minutes, or bound for Wake by mail); Fork instead is a separate, labeled copy. */
+  /* 0.6: continue a conversation found on this PC as a copy. A conversation file or process snapshot does not
+   * establish that no other app still writes it, so CodaClauda never continues it in place: the provider's own
+   * fork copies it into a new, labeled CodaClauda chat. The transcript is never edited and the other app is not woken. */
   function canAdopt(e) {
     return hasFeature('adopt') && !e.owned && Boolean(e.providerSessionId) && Boolean(e.cwd) && (e.provider === 'claude' || e.provider === 'codex');
   }
   function adopt(e, project) {
-    const block = continueBlock(e, bindingFor(e));
-    if (block) return offerFork(e, project, block.text);
     ui.modal({
-      title: 'Continue in CodaClauda?',
-      body: `CodaClauda resumes this ${providerLabel(e.provider, true)} conversation in ${shownPath(e.cwd)} as its own session with wake on, at the project's current access (Read when the folder is not one of your projects). Board mail then wakes that CodaClauda session, not the other app, and the other app shows these turns only after you reopen the conversation there, so don't use both at once. Fork instead starts a separate copy and leaves the original as it is.`,
-      actions: [{ label: 'Cancel' }, { label: 'Fork instead', run: () => runAdopt(e, project, 'fork') }, { label: 'Continue here', kind: 'primary', run: () => runAdopt(e, project, 'continue') }],
+      title: 'Continue as a copy?',
+      body: `CodaClauda starts a new chat holding a copy of this ${providerLabel(e.provider, true)} conversation so far, in ${shownPath(e.cwd)}, labeled as a copy, with wake on, at the project's current access (Read when the folder is not one of your projects). Board mail wakes the copy, not the other app. The original stays untouched in its own app, which is not woken.`,
+      actions: [{ label: 'Cancel' }, { label: 'Start the copy', kind: 'primary', run: () => runAdopt(e, project) }],
     });
   }
-  function offerFork(e, project, why) {
-    ui.modal({
-      title: 'Fork instead?',
-      body: `${why} A fork is a new CodaClauda chat holding a copy of the conversation so far, labeled as a copy; the original stays as it is in its own app.`,
-      actions: [{ label: 'Cancel' }, { label: 'Fork instead', kind: 'primary', run: () => runAdopt(e, project, 'fork') }],
-    });
-  }
-  async function runAdopt(e, project, mode = 'continue') {
+  async function runAdopt(e, project) {
     const id = e.providerSessionId;
     if (state.adopting.has(id)) return;
     state.adopting.add(id); render(true);
     const name = project?.name || e.projectHint || baseName(e.cwd) || providerLabel(e.provider, true);
     try {
-      const data = await callFeature('adopt', { provider: e.provider, providerSessionId: id, cwd: e.cwd, title: `${name} (${mode === 'fork' ? 'copy' : 'continued'})`, mode });
+      const data = await callFeature('adopt', { provider: e.provider, providerSessionId: id, cwd: e.cwd, title: `${name} (copy)`, mode: 'fork' });
       const s = data?.session;
       await sessions.refresh();
-      toast(data?.copy ? 'Started a separate copy in CodaClauda; the original conversation is unchanged'
-        : data?.existing ? 'Already continued in CodaClauda; opening it'
-          : `Continued in CodaClauda at ${s?.access === 'full' ? 'Full' : 'Read'} access. The other app shows these turns only after you reopen it there.`, { kind: 'success', timeout: 4200 });
+      toast(`Started a copy in CodaClauda at ${s?.access === 'full' ? 'Full' : 'Read'} access; the original conversation is unchanged`, { kind: 'success', timeout: 4200 });
       loadExternal(true);
       if (s?.id) navigate('chat', { thread: threadIdFor(s) });
     } catch (error) {
-      if (CONTINUE_REFUSALS.includes(error?.code)) offerFork(e, project, error.message);
-      else toast(`Couldn't ${mode === 'fork' ? 'fork' : 'continue'} it: ${error?.message || error}`, { kind: 'error', timeout: 8000 });
+      toast(error?.code === 'OWNERSHIP_UNKNOWN' ? error.message : `Couldn't start the copy: ${error?.message || error}`, { kind: 'error', timeout: 8000 });
     } finally { state.adopting.delete(id); render(true); }
   }
 

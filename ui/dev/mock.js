@@ -888,40 +888,30 @@ const v05Handlers = {
     const mine = sessions().sessions.filter(s => s.providerSessionId && !FAKE_EXTERNAL_IDS.includes(s.providerSessionId)).map(s => ({ provider: s.provider, cwd: s.cwd, projectHint: s.cwd.split(/[\\/]/).pop(), modifiedAt: s.lastActivityAt, active: at - s.lastActivityAt < 15 * 60e3, owned: owned.has(s.providerSessionId), providerSessionId: s.providerSessionId }));
     return { sessions: [...fake, ...mine].sort((a, b) => b.modifiedAt - a.modifiedAt) };
   },
-  /* 0.6 (H6): resume that exact provider conversation as a CodaClauda session, wake on, at the project's
-   * current access (Read when the folder is not a linked project). Like external.rs: an existing CodaClauda
-   * session is returned as is; Continue is refused while the conversation is bound for Wake by mail
-   * (CONVERSATION_BOUND, checked first) or changed in the last 15 minutes (CONVERSATION_ACTIVE); mode 'fork'
-   * starts a separate copy (no provider ids, forkFrom = the original, adoptedFrom.copy) and never touches it. */
+  /* 0.6 (H6): Continue as a copy, like external.rs. The default (or mode 'fork') starts a separate copy as a
+   * CodaClauda session, wake on, at the project's current access (Read when the folder is not a linked project):
+   * no provider ids, forkFrom = the original, adoptedFrom.copy; the original is never touched. Mode 'continue'
+   * returns the CodaClauda session that already holds the conversation, else OWNERSHIP_UNKNOWN. */
   session_adopt: input => {
     const a = input?.args && typeof input.args === 'object' ? input.args : input || {};
     if (!['claude', 'codex'].includes(a.provider)) throw coded('INVALID_ARGUMENTS', 'provider must be claude or codex.');
     if (!/^[A-Za-z0-9._:-]{1,128}$/.test(String(a.providerSessionId || ''))) throw coded('INVALID_ARGUMENTS', 'That is not a Claude Code or Codex conversation id.');
     if (a.mode != null && !['', 'continue', 'fork'].includes(String(a.mode).trim())) throw coded('INVALID_ARGUMENTS', 'mode must be continue or fork.');
-    const fork = String(a.mode || '').trim() === 'fork';
+    const fork = String(a.mode || '').trim() !== 'continue';
     const existing = sessions().sessions.find(s => s.provider === a.provider && (s.providerSessionId === a.providerSessionId || s.threadId === a.providerSessionId));
     if (existing && !fork) return { session: listed(existing), existing: true };   // never a second writer
+    if (!fork) throw coded('OWNERSHIP_UNKNOWN', `CodaClauda can't confirm that no other app still writes this ${agentName(a.provider)} conversation, so it doesn't continue it in place. Continue makes a separate, labeled copy instead; the original stays as it is in its own app.`);
     const row = v05Handlers.external_sessions_list().sessions.find(e => e.provider === a.provider && e.providerSessionId === a.providerSessionId);
     if (!row) throw coded('SESSION_NOT_FOUND', `That ${agentName(a.provider)} conversation is no longer on this PC.`);
     if (!/^[A-Za-z]:\\/.test(String(a.cwd || ''))) throw coded('PROJECT_MISSING', `${a.cwd || 'That folder'} is not an existing project folder.`);
-    if (!fork) {
-      const bound = a.provider === 'codex' ? mockBindings().find(b => b.threadId === a.providerSessionId) : null;
-      if (bound) throw coded('CONVERSATION_BOUND', `This ${agentName(a.provider)} conversation wakes by mail in its own app (bound to ${bound.address}). Continuing it here too would give it two writers. Turn off Wake by mail for it first, or choose Fork instead for a separate copy.`);
-      if (Date.now() - row.modifiedAt < 15 * 60e3) throw coded('CONVERSATION_ACTIVE', `This ${agentName(a.provider)} conversation changed less than 15 minutes ago, so it may still be open in another app. Continuing it here at the same time would give it two writers. Close it there and continue once it has had no changes for 15 minutes, or choose Fork instead for a separate copy.`);
-    }
     const linked = (readJson('mock.desktop', null)?.projects?.local || []).find(p => mockPath(p.path) === mockPath(a.cwd));
     const level = linked ? readJson('mock.desktop', null)?.projectAccess?.[`local:${mockPath(a.cwd)}`]?.level || 'full' : 'read';
-    const title = String(a.title || '').trim().slice(0, 200) || `${agentName(a.provider)} conversation${fork ? ' (copy)' : ''}`;
+    const title = String(a.title || '').trim().slice(0, 200) || `${agentName(a.provider)} conversation (copy)`;
     const { session } = sessionHandlers.session_start({ args: { provider: a.provider, projectId: linked ? `local:${mockPath(a.cwd)}` : a.cwd, cwd: a.cwd, access: level, title } });
     const record = findSession(session.id);
-    if (fork) {
-      Object.assign(record, { forkFrom: a.providerSessionId, adoptedFrom: { provider: a.provider, providerSessionId: a.providerSessionId, copy: true } });
-      saveSessions();
-      return { session: listed(record), copy: true };
-    }
-    Object.assign(record, { providerSessionId: a.providerSessionId, threadId: a.provider === 'codex' ? a.providerSessionId : null, adoptedFrom: { provider: a.provider, providerSessionId: a.providerSessionId } });
+    Object.assign(record, { forkFrom: a.providerSessionId, adoptedFrom: { provider: a.provider, providerSessionId: a.providerSessionId, copy: true } });
     saveSessions();
-    return { session: listed(record) };
+    return { session: listed(record), copy: true };
   },
   /* 0.6 Wake by mail for an existing Codex desktop chat (desktop_queue.rs). Owner only. Like the engine: the address
    * must be registered on the board, not reserved and not a CodaClauda session's; the thread must be a Codex

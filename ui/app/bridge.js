@@ -150,11 +150,11 @@ export const desktop = {
   /** Other Claude Code / Codex sessions on this machine, metadata only →
    *  { sessions: [{ provider, cwd, projectHint, modifiedAt, active (modified < 15 min ago), owned (started by CodaClauda) }] } */
   externalSessionsList: () => invoke('external_sessions_list'),
-  /** 0.6: continue that exact conversation as a CodaClauda session (Claude --resume / Codex thread/resume), wake on,
-   *  at the project's current access (Read outside linked or own folders) → { session, existing? }. The other app is not
-   *  woken and shows the new turns only after it reopens the conversation. Continue is refused with CONVERSATION_ACTIVE
-   *  (the file changed < 15 min ago) or CONVERSATION_BOUND (a Codex thread with Wake by mail on); mode 'fork' instead
-   *  starts a separate, labeled copy (Claude --fork-session / Codex thread/fork) and leaves the original alone → { session, copy: true } */
+  /** 0.6: continue a conversation found on this PC as a separate, labeled copy (Claude --resume --fork-session /
+   *  Codex thread/fork), wake on, at the project's current access (Read outside linked or own folders) → { session, copy: true }.
+   *  The original is never changed and its app is not woken. mode 'continue' only returns a conversation CodaClauda already
+   *  holds as a session ({ session, existing: true }); otherwise it is refused with OWNERSHIP_UNKNOWN, because CodaClauda
+   *  can't establish that no other app still writes it. */
   sessionAdopt: ({ provider, providerSessionId, cwd, title = null, mode = null }) => invoke('session_adopt', { provider, providerSessionId, cwd, title: title || null, mode: mode || null }),
   /** 0.6 Wake by mail for an existing Codex desktop chat (src-tauri/src/session_host/desktop_queue.rs). New board mail for a
    *  bound address runs Codex's own `codex queue --thread <id> --message <notice>` once per batch: counts and sender names only,

@@ -3391,7 +3391,7 @@ fn launch_env() -> BTreeMap<OsString, OsString> {
 
 /// 0.6: an adopted Codex conversation that `thread/resume` answered with a
 /// different thread id was continued as a copy (as Claude reports its own).
-/// A Fork-instead copy (`adoptedFrom.copy`) is a copy by design, never flagged.
+/// A copy (`adoptedFrom.copy`, what Continue makes since 0.6) is never flagged.
 fn codex_resumed_as_copy(adopted: Option<&Value>, resumed: Option<&str>, returned: &str) -> bool {
     resumed.is_some_and(|thread| thread != returned)
         && adopted.is_some_and(|a| a["copy"] != true && a["providerSessionId"].as_str() == resumed)
@@ -3639,7 +3639,7 @@ pub(crate) async fn session_list(app: tauri::AppHandle) -> Value {
 pub(crate) async fn session_start(app: tauri::AppHandle, mut args: Value) -> Value {
     let inner = host(&app);
     // Only a team start (team.rs) records who started a session, and only
-    // session_adopt (external.rs) names a conversation to continue.
+    // session_adopt (external.rs) names a conversation it copies.
     if let Some(fields) = args.as_object_mut() {
         fields.remove("startedBy");
         fields.remove("adoptedFrom");
@@ -3746,7 +3746,7 @@ mod tests {
         // Already moved to the new id: said once, not on every later launch.
         assert!(!codex_resumed_as_copy(Some(&adopted), Some("0199a8f2-0000-7e3f-8a9b-0c1d2e3f4a5b"), "x"));
         let fork_copy = json!({"provider": "codex", "providerSessionId": original, "copy": true});
-        assert!(!codex_resumed_as_copy(Some(&fork_copy), Some(original), "x"), "Fork instead is a copy by design");
+        assert!(!codex_resumed_as_copy(Some(&fork_copy), Some(original), "x"), "a Continue copy is a copy by design");
         assert!(!codex_resumed_as_copy(None, Some(original), "x"));
     }
 

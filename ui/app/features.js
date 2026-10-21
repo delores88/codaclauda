@@ -14,8 +14,9 @@
  *   prStatus           session_pr_status({ id }) → { url|null, state|null, checks:[{ name, status, conclusion }] }
  *   compact            session_compact({ id }) → { ok: true } | error COMPACT_UNSUPPORTED
  *   external           external_sessions_list() → { sessions:[{ provider, cwd, projectHint, modifiedAt, active, owned, providerSessionId }] }
- *   adopt              session_adopt({ provider, providerSessionId, cwd, title?, mode?: 'continue'|'fork' }) → { session, existing?, copy? } (0.6);
- *                      Continue refuses CONVERSATION_ACTIVE (changed < 15 min ago) and CONVERSATION_BOUND (Codex, Wake by mail on)
+ *   adopt              session_adopt({ provider, providerSessionId, cwd, title?, mode?: 'fork'|'continue' }) → { session, existing?, copy? } (0.6);
+ *                      the default (or 'fork') makes a separate, labeled copy; 'continue' returns the CodaClauda session that
+ *                      already holds the conversation, else error OWNERSHIP_UNKNOWN (never continued in place)
  *   desktopBindings    desktop_bindings_get() → { bindings:[{ address, provider, threadId, cwd, projectId, boundAt, cursor, last }], wakeEnabled, pollSeconds } (0.6)
  *   desktopBind        desktop_bind({ address, threadId }) → { binding, bindings } (0.6, owner only)
  *   desktopUnbind      desktop_unbind({ address }) → { unbound, bindings } (0.6)
@@ -163,7 +164,7 @@ export function patchLines(patch, limit = 4000) {
   return out;
 }
 
-/* ---------- 0.6 Wake by mail for Codex desktop chats and Continue / Fork instead ---------- */
+/* ---------- 0.6 Wake by mail for Codex desktop chats ---------- */
 
 /** Board addresses that are never a desktop chat's own inbox. */
 export const RESERVED_ADDRESSES = ['owner', 'codaclauda-team'];
@@ -221,11 +222,3 @@ export function deliveryText(receipt) {
     .filter(Boolean).join('\n');
   return { tone: RECEIPT_TONE[receipt.status] || 'bad', text, title };
 }
-
-/** Why Continue in CodaClauda would be refused for this row (mirrors external.rs), else null. Fork instead is always possible. */
-export function continueBlock(row, binding) {
-  if (binding) return { code: 'CONVERSATION_BOUND', text: `This Codex conversation wakes by mail in its own app (bound to ${binding.address}). Continuing it here too would give it two writers. Turn off Wake by mail for it first, or choose Fork instead for a separate copy.` };
-  if (row?.active) return { code: 'CONVERSATION_ACTIVE', text: 'This conversation changed in the last 15 minutes, so it may still be open in another app. Continuing it here at the same time would give it two writers. Close it there and continue once it has had no changes for 15 minutes, or choose Fork instead for a separate copy.' };
-  return null;
-}
-export const CONTINUE_REFUSALS = ['CONVERSATION_ACTIVE', 'CONVERSATION_BOUND'];

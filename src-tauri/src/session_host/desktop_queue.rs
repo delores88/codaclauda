@@ -158,7 +158,9 @@ fn settle(path: &Path, binding: &Binding, through: u64, receipt: Option<Receipt>
     })
 }
 
-/// The board address a Codex thread is bound to, if any (adopt refuses it).
+/// The board address a Codex thread is bound to, if any. Tests only: Continue
+/// always makes a copy now, so nothing at run time needs it (Codex 844).
+#[cfg(test)]
 pub(super) fn bound_address(dir: &Path, thread: &str) -> Result<Option<String>, String> {
     let _guard = lock(&FILE);
     Ok(load(&dir.join(BINDINGS_FILE))?

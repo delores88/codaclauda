@@ -67,13 +67,16 @@ test('the preview mock has every changed command, with the engine shapes', () =>
   assert.deepEqual(Object.keys(bound.binding).sort(), ['address', 'boundAt', 'cursor', 'cwd', 'last', 'projectId', 'provider', 'threadId']);
   assert.equal(bound.binding.projectId, 'local:c:/users/ben/desktop');
   assert.deepEqual(desktop.desktop_bindings_get().bindings.map(b => b.address), ['codex-desktop-chat']);
-  // Continue: bound is refused first, then recently active; Fork makes a labeled copy without provider ids.
+  // Continue: the default makes a labeled copy without provider ids, even while the original is bound and active;
+  // 'continue' without a CodaClauda session holding it is refused, never resumed in place.
   const cwd = row.cwd;
-  assert.throws(() => desktop.session_adopt({ provider: 'codex', providerSessionId: thread, cwd }), e => e.code === 'CONVERSATION_BOUND');
-  assert.deepEqual(desktop.desktop_unbind({ address: 'codex-desktop-chat' }), { unbound: true, bindings: [] });
-  assert.throws(() => desktop.session_adopt({ provider: 'codex', providerSessionId: thread, cwd }), e => e.code === 'CONVERSATION_ACTIVE');
-  const copy = desktop.session_adopt({ provider: 'codex', providerSessionId: thread, cwd, mode: 'fork' });
+  assert.throws(() => desktop.session_adopt({ provider: 'codex', providerSessionId: thread, cwd, mode: 'continue' }),
+    e => e.code === 'OWNERSHIP_UNKNOWN' && /doesn't continue it in place/.test(e.message) && /separate, labeled copy/.test(e.message));
+  const copy = desktop.session_adopt({ provider: 'codex', providerSessionId: thread, cwd });
   assert.deepEqual([copy.copy, copy.session.title, copy.session.providerSessionId, copy.session.threadId, copy.session.forkFrom, copy.session.adoptedFrom.copy], [true, 'Codex conversation (copy)', null, null, thread, true]);
+  // A copy never holds the original, so 'continue' is still refused.
+  assert.throws(() => desktop.session_adopt({ provider: 'codex', providerSessionId: thread, cwd, mode: 'continue' }), e => e.code === 'OWNERSHIP_UNKNOWN');
+  assert.deepEqual(desktop.desktop_unbind({ address: 'codex-desktop-chat' }), { unbound: true, bindings: [] });
 });
 
 test('the preview mock holds, releases and continues turns like usage.rs', () => {

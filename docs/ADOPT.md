@@ -39,8 +39,8 @@ read on the board.
   record, as the On this PC list already reads them;
 - that `cwd` is inside a linked project, compared on canonical paths. The
   binding records the folder and project id;
-- no CodaClauda session writes that thread, whether started, continued or
-  resumed there. A copy made with Fork instead is a different thread.
+- no CodaClauda session writes that thread, whether started or resumed there.
+  A copy made with Continue as a copy is a different thread.
 
 **Delivery** runs on the wake poll (every 10 s) while the app is open and the
 global wake switch is on. Turning that switch off pauses delivery and stops a
@@ -92,33 +92,25 @@ whether `codex queue` reaches a thread that the Codex desktop app holds, and
 what it does when no Codex app server is running. Until that is observed on
 the owner's PC, `queued` means only what Codex reported.
 
-## Continue in CodaClauda / Fork instead
+## Continue as a copy
 
-**Continue** (`session_adopt { provider, providerSessionId, cwd, title? }`)
-starts a CodaClauda session that resumes that exact conversation: Claude with
-`--resume <id>`, Codex with `thread/resume <id>`. It runs at the project's
-current access, or Read when the folder is neither a linked project nor the
-owner's own, with wake on for the new CodaClauda session. Board mail then
-wakes the CodaClauda session, not the other app. The other app shows the new
-turns only after it reopens the conversation.
+**Continue as a copy** (`session_adopt { provider, providerSessionId, cwd,
+title? }`, the default mode, also `mode: "fork"`) starts a new CodaClauda chat
+titled "… (copy)" that copies the conversation so far on its first launch,
+through the existing fork path: Claude `--resume <id> --fork-session`, Codex
+`thread/fork`. It runs at the project's current access, or Read when the
+folder is neither a linked project nor the owner's own, with wake on for the
+new CodaClauda chat. Board mail then wakes the copy, not the other app. The
+original conversation is never changed: it stays as it is in its own app,
+which is not woken. If Claude reports the original session instead of a fork,
+that turn is stopped before it replies. If Codex cannot fork, the chat says so
+and starts a new thread without the earlier context. The copy is never bound
+to or confused with the original.
 
-To keep one writer per conversation, Continue is refused with:
-
-- `CONVERSATION_ACTIVE` when the conversation file changed in the last
-  15 minutes, because it may still be open in another app;
-- `CONVERSATION_BOUND` when the Codex thread has Wake by mail on;
-- `BINDINGS_UNREADABLE` when the bindings file cannot be read, rather than
-  guessing that nothing else writes the thread.
-
-Each refusal offers **Fork instead** (`mode: "fork"`). This creates a new
-CodaClauda chat titled "… (copy)" that copies the conversation on its first
-launch, through the existing fork path: Claude `--resume <id> --fork-session`,
-Codex `thread/fork`. The original conversation is never changed. If Claude
-reports the original session instead of a fork, that turn is stopped before
-it replies. If Codex cannot fork, the chat says so and starts a new thread
-without the earlier context.
-
-The provider's actual session id is recorded. If a Claude resume comes back
-with a different session id, the chat is labeled a copy and the original is
-unchanged. Continuing the same conversation twice returns the existing
-CodaClauda session (`existing: true`) instead of starting a second writer.
+CodaClauda never continues another app's conversation in place. A
+conversation file or a process snapshot alone does not establish that no
+other app still writes it, so `mode: "continue"` only returns the CodaClauda
+session that already holds that conversation (`existing: true`). Otherwise it
+is refused with `OWNERSHIP_UNKNOWN` before the conversation is looked up, and
+nothing is started or changed. Running > On this PC offers only Continue as a
+copy, with one confirmation.
