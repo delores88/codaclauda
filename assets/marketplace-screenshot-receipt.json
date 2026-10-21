@@ -1,29 +1,29 @@
 {
   "schemaVersion": 1,
-  "version": "0.3.3",
-  "capturedAt": "2026-10-17T04:32:21.879Z",
-  "sourceCommit": "aeb3c8959190c8b75680d27ccb9ec94e0929be3d",
-  "installerSha256": "901b946d3e17e29294b8d71364f1117fb6f0287d89e3ecd5f69cee1fbb234daf",
-  "installedGuiSha256": "7640f9c6a0310543a7d0c5fb98e2e80c560877f813e201908c61959437cf9f25",
-  "installedCliSha256": "56dbaa28002af1f17ff788bf36bdfc7a5f4a1c69b12479cb61b1e9df0e309279",
+  "version": "0.5.0",
+  "sourceCommit": "c529dbba1287e73481ec39bb9184f996d5daa685",
+  "installerSha256": "456b88d86c11c9f50afa6d3a2dfd43a5c25a9ca4d942502c2e28e166e1e9ee56",
+  "installedGuiSha256": "e5cd1a5f112317ac1f73be532bfb81b13420cc1b7a7ddb6b5d39703beaf749e3",
+  "installedCliSha256": "361f7a8ccef8ef06e46eaea888c4d8e8f0a54847ea32793df8cc2825703540c4",
   "installedPayloadHashesMatched": true,
   "nativeAppWindowObserved": true,
   "ordinaryInstalledPathCapture": false,
-  "providerSessionsStarted": 0,
-  "separateInPlaceInstallReceiptSha256": "079954364fd0bfd269598b3177d95ba018f6d4c8403ba173085b6916c9bbde37",
   "captureMode": "Isolated copy of the verified installed payload",
-  "view": "Message board showing two sample threads grouped under Demo Notebook, agent filters and message types.",
-  "data": "Fresh synthetic board with Demo owner, Codex - demo and Claude - demo. No private board, transcripts, provider sessions or user profile were copied.",
-  "privacyReview": "Root visually inspected the full native capture. Only synthetic sample participants, project and message content are visible; no private paths, credentials or personal transcripts appear.",
+  "providerSessionsStarted": 0,
+  "separateInPlaceInstallReceiptSha256": "c0e65607d0af3fa9f0b42ecdc040dfc021a8e756da3573d3f0a860111741b5f0",
+  "capturedAt": "2026-10-21T05:04:41.293Z",
+  "view": "Message board with expanded Demo Notebook sample exchange",
+  "data": "Synthetic demonstration messages, Demo owner and demo agent addresses only.",
+  "privacyReview": "Root inspected the native pixels and accessibility: no personal paths, credentials, real conversations or account details visible.",
   "limitations": [
-    "Demonstrates native application rendering with synthetic messages; it does not establish live provider work.",
-    "The preview runs byte-identical installed payloads in an isolated location. In-place installation and actual workflow acceptance are separate receipts.",
-    "The native capture was JPEG. PNG encoding preserves the decoded RGB pixels exactly."
+    "Isolated copy of the verified installed payload, not an in-place capture.",
+    "Synthetic passive messages and activity badges do not demonstrate model execution.",
+    "Separate actual installed native acceptance is recorded independently."
   ],
   "screenshot": {
     "file": "marketplace-screenshot.png",
-    "sha256": "a6ce5d8d1d38ed2f29179db60d60cc49d7e2720df1c6117b1fa979f710a7b8f9",
-    "bytes": 410031,
+    "sha256": "be384b329223222ca3737d21aa4fa42df4e8baf2b27565bf192a3c3e798563ec",
+    "bytes": 543362,
     "width": 1283,
     "height": 881,
     "decodedPixelsUnchanged": true,
@@ -31,7 +31,6 @@
     "retouched": false,
     "syntheticRendering": false,
     "originalCaptureEncoding": "JPEG",
-    "losslessPngEncodingOnly": true,
-    "originalCaptureSha256": "2a0aa546d09890b0cf297e8ed052d0efa56dc091d0bd58648a30ee65b1382a9f"
+    "losslessPngEncodingOnly": true
   }
 }

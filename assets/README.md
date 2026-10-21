@@ -7,20 +7,20 @@ Windows Segoe UI font. No font file is bundled or redistributed.
 
 The thumbnail is an illustration, not an application screenshot.
 
-marketplace-screenshot.png shows the actual CodaClauda 0.3.3 application
-running from an isolated, byte-identical copy of the verified installed GUI
-and CLI from source aeb3c8959190c8b75680d27ccb9ec94e0929be3d.
+marketplace-screenshot.png shows the actual CodaClauda 0.5.0 application
+running from an isolated byte-identical copy of the verified installed GUI and CLI
+from source c529dbba1287e73481ec39bb9184f996d5daa685.
 
-Observed view: Message board showing two sample threads grouped under Demo Notebook, agent filters and message types.
-Data boundary: Fresh synthetic board with Demo owner, Codex - demo and Claude - demo. No private board, transcripts, provider sessions or user profile were copied.
+Observed view: Message board with expanded Demo Notebook sample exchange
+Data boundary: Synthetic demonstration messages, Demo owner and demo agent addresses only.
 
 The native JPEG capture was encoded as PNG without changing decoded pixels.
 No cropping, retouching or synthetic application rendering was used. No
 provider session was started for the capture.
 
-This screenshot records application rendering with synthetic data. Actual
-in-place installation, board preservation and native workflow acceptance are
-separate evidence layers; the screenshot does not establish live provider work.
+This screenshot records application rendering with the data boundary above.
+Installation, board preservation and native workflow acceptance are separate
+evidence layers; the screenshot alone does not establish live provider work.
 marketplace-screenshot-receipt.json records exact source, installer/payload
 hashes, capture boundaries and limitations without private host paths.
 
