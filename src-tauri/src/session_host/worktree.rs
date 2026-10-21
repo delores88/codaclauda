@@ -61,13 +61,21 @@ fn shown(path: &Path) -> String {
     }
 }
 
+// Only Git argv uses the ordinary drive/UNC spelling. Persisted paths and
+// filesystem identity checks retain the canonical board/worktree spelling.
+fn git_path(path: &Path) -> Result<String, Failure> {
+    coord_core::paths::git_argument(path).map_err(|e| ("GIT_PATH_UNSUPPORTED", e.to_string()))
+}
+
 async fn git(dir: &Path, args: &[&str], limit: Duration) -> Result<Output, Failure> {
+    let directory = git_path(dir)?;
     let mut command = Command::new("git");
     command
         .arg("--no-pager")
         .args(["-c", "log.showSignature=false", "-c", "core.fsmonitor="])
+        .args(["-c", "core.longpaths=true"])
         .arg("-C")
-        .arg(dir)
+        .arg(directory)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
@@ -164,7 +172,7 @@ pub(super) async fn create(dir: &Path, id: &str, cwd: &Path) -> Result<Tree, Fai
     let holder = holder.join(short);
     make_dir(&holder)?;
     let root = holder.join(&folder);
-    let root_text = root.to_string_lossy().into_owned();
+    let root_text = git_path(&root)?;
     git_ok(&repo_root, &["worktree", "add", "-b", &branch, &root_text, "HEAD"], GIT_SLOW)
         .await
         .map_err(|(_, m)| ("WORKTREE_FAILED", format!("Git could not create the worktree: {m}")))?;
@@ -188,11 +196,17 @@ pub(super) async fn create(dir: &Path, id: &str, cwd: &Path) -> Result<Tree, Fai
 /// Best effort: undo a worktree whose session was never saved.
 pub(super) async fn remove(tree: &Tree) {
     let repo = PathBuf::from(&tree.repo_root);
-    let _ = git(&repo, &["worktree", "remove", "--force", &tree.root], GIT_SLOW).await;
+    let _ = remove_worktree(&repo, Path::new(&tree.root)).await;
     let _ = git(&repo, &["branch", "-D", &tree.branch], GIT_QUICK).await;
     if let Some(holder) = Path::new(&tree.root).parent() {
         let _ = fs::remove_dir(holder);
     }
+}
+
+async fn remove_worktree(repo: &Path, root: &Path) -> Result<(), Failure> {
+    let root_text = git_path(root)?;
+    git_ok(repo, &["worktree", "remove", "--force", &root_text], GIT_SLOW).await?;
+    Ok(())
 }
 
 fn status_name(code: &str) -> &'static str {
@@ -569,9 +583,8 @@ impl Inner {
         let _reservation = self.reserve_folder_operation(&Self::operation_paths(&record)?)?;
         let (root, branch, repo) = self.validate_worktree(&record).await?;
         require_git_idle(&repo).await?;
-        let root_text = shown(&root);
         // Exactly one removal. Unknown outcomes stay inspectable; no prune/retry loop.
-        git_ok(&repo, &["worktree", "remove", "--force", &root_text], GIT_SLOW).await.map_err(|(_, problem)| (
+        remove_worktree(&repo, &root).await.map_err(|(_, problem)| (
             "WORKTREE_REMOVE_UNCONFIRMED", format!("Git did not confirm removing the worktree: {problem} Inspect it before another action; no retry, prune or branch deletion was attempted.")))?;
         if root.exists() {
             return Err(("WORKTREE_REMOVE_UNCONFIRMED", "Git reported success but the worktree folder remains. No branch deletion was attempted.".into()));
@@ -886,6 +899,79 @@ pub(crate) async fn session_pr_status(app: tauri::AppHandle, id: String) -> Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn git_paths_preserve_unc_identity_and_refuse_verbatim_aliases() {
+        assert_eq!(
+            git_path(Path::new(r"\\?\C:\owner folder\desktop-ui")).unwrap(),
+            "C:/owner folder/desktop-ui"
+        );
+        for unc in [
+            r"\\?\UNC\server\share\owner folder",
+            r"\\server\share\owner folder",
+        ] {
+            assert_eq!(git_path(Path::new(unc)).unwrap(), "//server/share/owner folder");
+        }
+        for unsupported in [
+            r"\\?\C:\owner.\project",
+            r"\\?\C:\NUL\project",
+            r"\\?\Volume{123}\project",
+        ] {
+            assert_eq!(git_path(Path::new(unsupported)).unwrap_err().0, "GIT_PATH_UNSUPPORTED");
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn canonical_windows_board_worktree_create_use_and_remove_preserve_binding() {
+        // Isolated local Git fixture only: no provider, remote, or owner board.
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("source repo");
+        let board = temp.path().join("desktop ui");
+        fs::create_dir_all(repository.join("nested folder")).unwrap();
+        fs::create_dir(&board).unwrap();
+        let repository = repository.canonicalize().unwrap();
+        let board = board.canonicalize().unwrap();
+        let binding = shown(&board);
+        assert!(binding.starts_with(r"\\?\"));
+        fs::write(board.join("binding-proof.txt"), &binding).unwrap();
+        git_ok(&repository, &["init", "--quiet", "-b", "main"], GIT_QUICK).await.unwrap();
+        for (key, value) in [
+            ("user.name", "CodaClauda Unit Test"),
+            ("user.email", "unit@example.invalid"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", ""),
+            ("core.autocrlf", "false"),
+        ] {
+            git_ok(&repository, &["config", "--local", key, value], GIT_QUICK).await.unwrap();
+        }
+        fs::write(repository.join("nested folder/note.txt"), "baseline\n").unwrap();
+        assert!(Inner::commit_all(&repository, "Isolated baseline").await.unwrap());
+
+        let tree = create(&board, "s-12345678-fixture", &repository.join("nested folder"))
+            .await.unwrap();
+        let root = PathBuf::from(&tree.root);
+        assert!(tree.root.starts_with(&binding));
+        assert_eq!(PathBuf::from(&tree.cwd), root.join("nested folder"));
+        assert_eq!(fs::read_to_string(root.join("nested folder/note.txt")).unwrap(), "baseline\n");
+        require_git_idle(&root).await.unwrap();
+        assert!(git_ok(Path::new(&tree.cwd), &["status", "--porcelain"], GIT_QUICK).await.unwrap().is_empty());
+        fs::write(root.join("nested folder/note.txt"), "owner-reviewed edit\n").unwrap();
+        assert!(git_ok(&root, &["diff", "--no-ext-diff", "--no-textconv"], GIT_QUICK)
+            .await.unwrap().contains("+owner-reviewed edit"));
+        assert!(Inner::commit_all(&root, "Isolated worktree edit").await.unwrap());
+        git_ok(&repository, &["merge", "--ff-only", &tree.branch], GIT_SLOW).await.unwrap();
+        assert_eq!(fs::read_to_string(repository.join("nested folder/note.txt")).unwrap(), "owner-reviewed edit\n");
+
+        // The same path-aware removal helper is used by explicit discard.
+        remove(&tree).await;
+        assert!(!root.exists());
+        assert!(!git(&repository, &["show-ref", "--verify", &format!("refs/heads/{}", tree.branch)], GIT_QUICK)
+            .await.unwrap().status.success());
+        assert_eq!(fs::read_to_string(board.join("binding-proof.txt")).unwrap(), binding);
+        assert_eq!(shown(&board.canonicalize().unwrap()), binding);
+    }
 
     #[test]
     fn pending_owner_git_operations_are_refused_without_touching_their_state() {

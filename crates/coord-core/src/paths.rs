@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 /// Git for Windows parses worktree destinations before Win32 path handling and
 /// rejects Rust's canonical `\\?\` spelling. Keep state paths canonical and
 /// convert only subprocess arguments; callers enable Git's long-path support.
-pub(crate) fn git_argument(path: &Path) -> Result<String> {
+pub fn git_argument(path: &Path) -> Result<String> {
     let value = path.to_str().context("Git path is not valid Unicode")?;
     #[cfg(not(windows))]
     return Ok(value.to_owned());
