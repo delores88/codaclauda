@@ -502,8 +502,10 @@ fn a_waiting_parent_cannot_resume_past_a_finite_limit() {
     let error = mcp::call(&store, "parent", "parent-capability", cli, "list_files", &json!({})).unwrap_err().to_string();
     assert!(error.starts_with("SLOT_BUSY"), "{error}");
     // `messages` is a poll and keeps the parent waiting.
-    mcp::call(&store, "parent", "parent-capability", cli, "messages", &json!({"id":"child"})).unwrap();
+    let polled = mcp::call(&store, "parent", "parent-capability", cli, "messages", &json!({"id":"child"}));
+    assert!(polled.as_ref().err().is_none_or(|e| !e.to_string().starts_with("SLOT_BUSY")));
     let state = store.read().unwrap();
+    assert_eq!(state.requests["parent"].waiting_on.as_deref(), Some("child"));
     assert_eq!(state.requests["parent"].mcp_calls_used(), used);
     assert_eq!(scheduler::counts(&state), scheduler::Counts { active: 1, waiting: 1, queued: 0 });
     drop(state);
@@ -517,4 +519,63 @@ fn a_waiting_parent_cannot_resume_past_a_finite_limit() {
     assert_eq!(state.requests["parent"].waiting_on, None);
     assert_eq!(state.requests["parent"].mcp_calls_used(), used + 1);
     assert_eq!(scheduler::counts(&state), scheduler::Counts { active: 1, waiting: 0, queued: 0 });
+}
+
+#[test]
+fn migration_waits_for_a_running_0_4_worker_and_never_relaunches_it() {
+    let (_temp, store, grant) = fixture();
+    let cli = Path::new(CLI);
+    let state_file = store.root.join("state.json");
+    // A 0.4-shaped board: a legacy grant, a claimed running request and a finished one.
+    let legacy_request = |id: &str, state: &str, claim: Option<&str>, answer: Option<&str>| Request {
+        id: id.into(), digest: format!("digest-{id}"), grant_id: "legacy-grant".into(), target: "codex-fixture".into(),
+        kind: "question".into(), prompt: "0.4 fixture".into(), expected_result: "0.4 fixture".into(), origin: "owner".into(),
+        origin_session: None, parent_id: None, root_id: id.into(), hop: 0, state: state.into(), created_at: now(),
+        updated_at: now(), workspace: None, session_id: None, answer: answer.map(String::from),
+        receipt: answer.map(|_| json!({"stop_reason":"completed"})), blocker: None, cancel_requested: false,
+        worker_claim: claim.map(String::from), capability_hash: String::new(), events: vec![], spark_jobs: vec![],
+        next_seq: None, events_total: None, mcp_calls_used: None, spilled_through: None, spilled_bytes: None,
+        waiting_on: None, payloads: Default::default(), context_read_spilled: false, touched: false,
+    };
+    let mut board = serde_json::to_value(store.read().unwrap()).unwrap();
+    board["schema_version"] = json!(1);
+    board["grants"] = json!({"legacy-grant": legacy_grant_json(&grant.project)});
+    board["requests"] = json!({
+        "old": legacy_request("old", "running", Some("claim-old"), None),
+        "done": legacy_request("done", "completed", None, Some("finished under 0.4")),
+    });
+    fs::write(&state_file, serde_json::to_vec_pretty(&board).unwrap()).unwrap();
+    assert_eq!(store.read().unwrap().schema_version, 1);
+    // The 0.4 worker for "old" is alive: it holds its worker lock.
+    let worker = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(store.root.join("worker-old.lock")).unwrap();
+    worker.try_lock_exclusive().unwrap();
+    // 0.4-compatible writes still work, so the old worker can finish.
+    store.transaction(|s| { s.paused = true; Ok(()) }).unwrap();
+    assert_eq!(store.read().unwrap().schema_version, 1);
+    let before = fs::read(&state_file).unwrap();
+    // A write that needs schema 3 is refused and changes nothing.
+    let error = store.transaction(|s| { s.grants.insert(grant.id.clone(), grant.clone()); Ok(()) }).unwrap_err().to_string();
+    assert!(error.starts_with("MIGRATION_BUSY: request old"), "{error}");
+    assert_eq!(fs::read(&state_file).unwrap(), before);
+    assert!(!store.root.join("state.schema1.backup.json").exists());
+    // The worker ends without a receipt; migration reconciles it in the same write.
+    drop(worker);
+    store.transaction(|s| { s.grants.insert(grant.id.clone(), grant.clone()); s.paused = false; Ok(()) }).unwrap();
+    assert_eq!(fs::read(store.root.join("state.schema1.backup.json")).unwrap(), before);
+    let state = store.read().unwrap();
+    assert_eq!(state.schema_version, 3);
+    let old = &state.requests["old"];
+    assert_eq!(old.state, "needs-owner");
+    assert!(old.blocker.as_deref().unwrap().contains("Not relaunched"));
+    assert_eq!(old.worker_claim.as_deref(), Some("claim-old"));
+    let done = &state.requests["done"];
+    assert_eq!((done.state.as_str(), done.answer.as_deref()), ("completed", Some("finished under 0.4")));
+    assert_eq!(done.receipt, Some(json!({"stop_reason":"completed"})));
+    drop(state);
+    // Dispatch never relaunches the original request ID.
+    dispatch(&store, cli).unwrap();
+    let old = &store.read().unwrap().requests["old"];
+    assert!(!old.events.iter().any(|e| e.kind == "dispatch-claimed"));
+    assert_eq!(old.state, "needs-owner");
 }

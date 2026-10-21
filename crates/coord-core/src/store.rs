@@ -2,15 +2,47 @@ use crate::model::State;
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use std::{
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 #[derive(Clone)]
 pub struct Store {
     pub root: PathBuf,
 }
+/// Before the first schema-3 write (C4). A 0.4 worker can save neither its
+/// receipt nor its error on a schema it cannot read, so the board keeps its old
+/// schema while any 0.4 worker may still run: MIGRATION_BUSY leaves it
+/// unchanged. A claim whose worker lock is free (the worker ended, or never
+/// started) is reconciled to needs-owner in the same atomic write, under that
+/// lock, keeping its request ID and never relaunching it.
+fn quiesce_legacy_workers(root: &Path, legacy: &State, state: &mut State) -> Result<Vec<File>> {
+    let mut held = Vec::new();
+    for r in legacy.requests.values().filter(|r| r.worker_claim.is_some() && !r.terminal()) {
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join(format!("worker-{}.lock", r.id)))?;
+        if lock.try_lock_exclusive().is_err() {
+            bail!(
+                "MIGRATION_BUSY: request {} was started by CodaClauda 0.4 and its worker is still running. The board moves to the 0.5 format after it finishes; wait for it or stop it, then try again. Nothing was changed.",
+                r.id
+            );
+        }
+        held.push(lock);
+        if let Some(current) = state.requests.get_mut(&r.id) {
+            if !current.terminal() {
+                current.blocker = Some("A CodaClauda 0.4 worker ended without a final receipt before the board moved to the 0.5 format. Inspect its retained worktree before a new request. Not relaunched.".into());
+                current.transition("needs-owner", serde_json::json!({"reason":"interrupted-worker-at-migration"}));
+            }
+        }
+    }
+    Ok(held)
+}
+
 impl Store {
     /// Create coordination-owned scratch on first compute use, outside projects.
     pub(crate) fn spark_scratch(&self) -> Result<PathBuf> {
@@ -107,7 +139,13 @@ impl Store {
         } else {
             1
         };
+        // Held until the migrating write is persisted (see quiesce_legacy_workers).
+        let mut _legacy_worker_locks = Vec::new();
         if target > state.schema_version {
+            if let (3, Some(original)) = (target, original.as_ref()) {
+                let legacy: State = serde_json::from_slice(original)?;
+                _legacy_worker_locks = quiesce_legacy_workers(&self.root, &legacy, &mut state)?;
+            }
             if let Some(original) = original {
                 // Never overwrite a previous backup. A failed/ambiguous prior
                 // upgrade may leave one; it must match before we can proceed.
