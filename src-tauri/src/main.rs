@@ -472,6 +472,10 @@ fn main() {
             session_host::worktree::session_pr_create,
             session_host::worktree::session_pr_status,
             session_host::external::external_sessions_list,
+            session_host::external::session_adopt,
+            session_host::usage::usage_settings_get,
+            session_host::usage::usage_settings_set,
+            session_host::usage::usage_status,
             session_host::mcp::mcp_servers_get,
             session_host::mcp::mcp_servers_set,
             session_host::notify::notify_settings_get,
@@ -484,7 +488,18 @@ fn main() {
             project_tools::project_instructions_write,
             project_tools::ci_status
         ])
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!())
+        .map(|app| {
+            app.run(|handle, event| {
+                // 0.6 (H1): a clean exit removes the host heartbeat, so a post
+                // made afterwards is told the app is not running.
+                if let tauri::RunEvent::Exit = event
+                    && let Some(binding) = handle.try_state::<board::BoardBinding>()
+                {
+                    session_host::wake::remove_heartbeat(&desktop::ui_dir(&binding));
+                }
+            })
+        });
     if let Err(error) = result {
         let detail: String = error.to_string().chars().take(1600).collect();
         let message = format!(

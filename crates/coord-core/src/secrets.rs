@@ -6,6 +6,13 @@
 //!
 //! Separator rule (every alternative except private-key blocks). The INLINE
 //! alternatives are concatenations of these pieces:
+//!   (?:(?-u:\b)|_)                 before sk-, gh?_ and bearer: an ASCII word
+//!                                  start (zero width) or '_', so a prefix
+//!                                  after an ASCII letter or digit, as in
+//!                                  "task-..." or "desk-...", is not a key
+//!   (?-i:\x{17F})k-                U+017F, which (?i) also accepts for 's' but
+//!                                  is not an ASCII word character, is matched
+//!                                  with no word start at all
 //!   sk-(?:ant-)?[a-z0-9_-]{12,}    letters, digits, '_' and '-'
 //!   gh[pousr]_[a-z0-9_]{15,}       letters, digits and '_'
 //!   bearer\s+[a-z0-9._-]+          letters, whitespace, digits, '.', '_' and '-'
@@ -18,12 +25,16 @@
 //! variants (U+017F, U+212A), `\s` is Unicode White_Space (no ASCII
 //! punctuation), and the only negated class lists all three. So no INLINE match
 //! contains a separator byte, and because the separators are ASCII they never
-//! occur inside a multi-byte character. The pattern has no anchors, word
-//! boundaries or look-around, so whether a span matches depends only on its own
-//! text, and a leftmost-first scan reaches the start of every separator-free
-//! stretch with no match in progress. The INLINE matches of a whole text are
-//! therefore exactly the INLINE matches of each separator-free stretch scanned
-//! alone, and a window is redacted correctly when it is scanned together with
+//! occur inside a multi-byte character. The pattern has no anchors or
+//! look-around. Its only assertion, the ASCII word start, looks at the byte
+//! before a match: one in the same separator-free stretch, or a separator, or
+//! the file start. A separator is not a word byte, and the start of a stretch
+//! scanned alone counts as the same non-word edge. (ASCII, not Unicode, so the
+//! regex DFAs keep running on non-ASCII text.) So whether a span matches
+//! depends only on its own stretch, and a leftmost-first scan reaches the start
+//! of every separator-free stretch with no match in progress. The INLINE
+//! matches of a whole text are therefore exactly the INLINE matches of each
+//! separator-free stretch scanned alone, and a window is redacted correctly when it is scanned together with
 //! the stretches it touches: back to the previous separator and forward to the
 //! next one (or the start/end of the file). If either separator is more than
 //! 1 MiB away the read fails closed instead (READ_UNVERIFIABLE).
@@ -50,7 +61,7 @@ use std::sync::OnceLock;
 const PEM_BLOCK: &str =
     r"-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----.*?-----END (?:[A-Z ]*PRIVATE KEY)-----";
 /// Every other alternative; none can contain a separator (see above).
-const INLINE: &str = r#"sk-(?:ant-)?[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{15,}|bearer\s+[a-z0-9._-]+|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|client[_-]?secret)["']?\s*[:=]\s*["']?[^\s,;"'}]+"#;
+const INLINE: &str = r#"(?:(?-u:\b)|_)(?:sk-(?:ant-)?[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{15,}|bearer\s+[a-z0-9._-]+)|(?-i:\x{17F})k-(?:ant-)?[a-z0-9_-]{12,}|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|client[_-]?secret)["']?\s*[:=]\s*["']?[^\s,;"'}]+"#;
 /// Bytes of a run searched backward from a tail to classify its marker.
 const LOOKBACK: usize = 4096;
 /// Longer than any spelling of "PRIVATE KEY-----" (at most 18 bytes).
@@ -490,6 +501,24 @@ mod tests {
         assert_eq!(blocks(kelvin.as_bytes(), 1), [(0, kelvin.len() as u64)]);
         let odd = format!("{} x {}", marker("BEGIN", "\u{17F}OME "), marker("END", ""));
         assert!(pattern().is_match(&odd) && !blocks(odd.as_bytes(), 2).is_empty());
+    }
+
+    #[test]
+    fn key_prefixes_must_start_a_word() {
+        let tail = "abcdefghijklmnopqrstuvwxyz";
+        for word in ["task-", "desk-", "ghost_", "laughs_", "flagbearer ", "1sk-", "x9ghp_"] {
+            let text = format!("see {word}{tail}, now");
+            assert_eq!(redact(&text), text, "{word}");
+            let mut scan = WriteScan::new(1 << 20);
+            scan.feed(text.as_bytes()).unwrap();
+            assert!(scan.finish().is_ok(), "{word}");
+        }
+        // '_' before a prefix is redacted with it.
+        for (lead, kept) in [("", ""), (" ", " "), ("=", "="), ("\"", "\""), ("(", "("), ("\n", "\n"), ("\u{e9}", "\u{e9}"), ("x_", "x")] {
+            for prefix in ["sk-ant-", "sk-proj-", "sk-", "ghp_", "ghs_", "Bearer "] {
+                assert_eq!(redact(&format!("{lead}{prefix}{tail}")), format!("{kept}[REDACTED]"), "{lead:?} {prefix}");
+            }
+        }
     }
 
     #[test]

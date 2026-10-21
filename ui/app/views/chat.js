@@ -822,13 +822,22 @@ export function mount(root, ctx) {
       hasUsage(u)
         ? h('dl.res-facts',
           h('dt', 'Tokens'), h('dd', `${tokens(u.input)} in · ${tokens(u.output)} out${u.cached ? ` · ${tokens(u.cached)} cached` : ''}`),
-          claude ? null : h('dt', 'Cost'), claude ? null : h('dd', 'Plan usage: no per-turn price'))
+          claude || !s.lastTurnCredits || !Number.isFinite(Number(s.lastTurnCredits.micros)) ? null : h('dt', 'Last turn'),
+          claude || !s.lastTurnCredits || !Number.isFinite(Number(s.lastTurnCredits.micros)) ? null : h('dd', `${(Number(s.lastTurnCredits.micros) / 1e6).toFixed(2)} credits`))
         : h('p.field-hint', 'Shown after the first reply.'),
+      h('dl.res-facts', h('dt', 'Billing'), h('dd', billingText(s))),
       h('div.ctx-meter', { title: u.contextPct != null ? `Context ${Math.round(u.contextPct)}% full` : 'Context fill not reported yet' },
         h('span.ctx-label', 'Context'),
         h(`span.ctx-bar${u.contextPct >= 80 ? '.high' : ''}`, h('span', { style: { '--pct': `${Math.round(u.contextPct ?? 0)}%` } })),
         h('span.ctx-value', u.contextPct != null ? `${Math.round(u.contextPct)}%` : '—')),
       compact);
+  }
+  /** Where this chat's turns are billed (Settings > Usage decides what happens at the plan limit). */
+  function billingText(s) {
+    if (s.billing === 'credits') return 'ChatGPT credits (plan limit reached)';
+    if (s.billing === 'usage-credits') return 'Claude usage credits (plan limit reached)';
+    if (s.billing === 'reset') return 'Plan, after a weekly reset';
+    return 'Your plan';
   }
   async function compactSession(s) {
     state.meterBusy.add(s.id); state.resSig = ''; renderResources();
@@ -1214,7 +1223,7 @@ export function mount(root, ctx) {
     const key = `s:${item.key}`;
     if (item.kind === 'agent' && item.streaming) return { key, sig: JSON.stringify(['stream', item.provider, opts.continued, opts.info.shared]), build: () => buildSessionAgent(item, opts) };
     const sig = JSON.stringify([item.kind, item.text, item.tools, item.targets, item.pending, item.queued, item.deliveryStatus, Boolean(item.turnId), item.attachments, item.from, item.subject, item.body, opts.continued, opts.info.shared, clockTime(item.at)]);
-    const build = { owner: buildSessionOwner, agent: buildSessionAgent, tools: buildTools, error: buildSessionError, wake: buildWake }[item.kind] || buildSessionError;
+    const build = { owner: buildSessionOwner, agent: buildSessionAgent, tools: buildTools, error: buildSessionError, wake: buildWake, notice: buildNotice }[item.kind] || buildSessionError;
     return { key, sig, build: () => build(item, opts) };
   }
 
@@ -1271,6 +1280,15 @@ export function mount(root, ctx) {
       h('span.tool-names', names.slice(0, 4).join(', ') + (names.length > 4 ? '…' : ''))),
     h('ol.tool-lines', item.tools.map(t => h('li', h('code.tool-name', t.name), t.summary ? h('span.tool-summary', String(t.summary).slice(0, 400)) : null))));
     return h('div.tool-row', { dataset: { id: item.key } }, details);
+  }
+
+  /** 0.6 engine note (plan limit, credits, a resumed copy): plain text with an optional https link. */
+  function buildNotice(item, { info }) {
+    const link = item.link ? h('a', { href: item.link, onclick: event => { event.preventDefault(); bridge.desktop.openExternal(item.link).catch(() => copyText(item.link, 'Link copied')); } }, ' Open usage settings') : null;
+    const who = info.shared ? h('strong', `${providerLabel(item.provider)}: `) : null;
+    return h('div.tool-row', { dataset: { id: item.key } }, item.tone === 'warn'
+      ? h('div.msg-callout.warning.session-callout', icon('alert'), h('div', who, String(item.text || ''), link))
+      : h('div.msg-system', icon('bell'), who, String(item.text || ''), link));
   }
 
   function buildSessionError(item, { info }) {

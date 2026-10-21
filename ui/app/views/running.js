@@ -5,6 +5,7 @@
  *                 (asleep = no live process), the board claims it holds and who started it (0.5);
  *   On this PC    Claude Code and Codex sessions found on disk (external_sessions_list), metadata
  *                 only: provider, folder, last change and whether it changed in the last 15 minutes.
+ *                 0.6: "Continue in CodaClauda" (session_adopt) resumes one as a wake-on session.
  * Data comes from sessions.js, schedules.js and features.js; titles and paths render as text only. */
 import { sessions, UNAVAILABLE_TEXT } from '../sessions.js';
 import { schedules, SCHEDULES_UNAVAILABLE_TEXT } from '../schedules.js';
@@ -21,7 +22,7 @@ const EXTERNAL_REFRESH = 60e3;
 export function mount(root, ctx) {
   const { store, ui, navigate } = ctx;
   const { h, icon, toast, pill, portrait, timeAgo, clockTime, fullTime, emptyState } = ui;
-  const state = { visible: false, raf: 0, sig: '', stopping: new Set(), external: { state: 'idle', list: [], error: '', at: 0 }, showAll: false, teamAll: false, ticker: 0 };
+  const state = { visible: false, raf: 0, sig: '', stopping: new Set(), external: { state: 'idle', list: [], error: '', at: 0 }, showAll: false, teamAll: false, ticker: 0, adopting: new Set() };
   ui.registerIcons({
     branch: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M18 10a6 6 0 0 1-6 6H6"/>',
     lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
@@ -91,7 +92,7 @@ export function mount(root, ctx) {
     const sig = JSON.stringify([sessions.available, schedules.available, minute, [...state.stopping],
       work.map(s => [s.id, s.title, s.provider, s.status, sessions.queued(s.id), s.lastActivityAt, s.usage || null]),
       scheds.map(s => [s.id, s.name, s.nextRunAt, s.sessionId, s.sessionId ? sessions.running(s.sessionId) : false, schedules.lastRun(s)?.status]),
-      ext.state, ext.error, shownExt.map(e => [e.provider, e.cwd, e.modifiedAt, e.active]), ext.list.length, state.showAll, hasFeature('external'),
+      ext.state, ext.error, shownExt.map(e => [e.provider, e.cwd, e.modifiedAt, e.active, e.owned]), ext.list.length, state.showAll, hasFeature('external'), hasFeature('adopt'), [...state.adopting],
       state.teamAll, mates.map(({ s, state: st }) => [s.id, s.title, st, s.wake, s.mailboxAddress, s.startedBy?.address, claimsOf(s.mailboxAddress, now)])]);
     if (!force && sig === state.sig) return;
     state.sig = sig;
@@ -197,7 +198,38 @@ export function mount(root, ctx) {
         h('div.run-meta',
           e.cwd ? h('span.mono', { title: shownPath(e.cwd) }, shownPath(e.cwd)) : null,
           e.modifiedAt ? h('span', { title: fullTime(e.modifiedAt) }, `changed ${timeAgo(e.modifiedAt)}`) : null)),
-      h('div.run-actions', e.cwd ? h('button.btn.small.ghost', { type: 'button', onclick: () => ctx.bridge.desktop.openExternal(e.cwd).catch(() => ui.copyText(shownPath(e.cwd), 'Path copied')) }, icon('folder'), 'Folder') : null));
+      h('div.run-actions',
+        canAdopt(e) ? h('button.btn.small', { type: 'button', disabled: state.adopting.has(e.providerSessionId), title: 'Continue this conversation as a CodaClauda session with wake on, so board mail reaches it', onclick: () => adopt(e, project) }, state.adopting.has(e.providerSessionId) ? h('span.spinner') : icon('chat'), 'Continue in CodaClauda') : null,
+        e.cwd ? h('button.btn.small.ghost', { type: 'button', onclick: () => ctx.bridge.desktop.openExternal(e.cwd).catch(() => ui.copyText(shownPath(e.cwd), 'Path copied')) }, icon('folder'), 'Folder') : null));
+  }
+
+  /* 0.6: continue a conversation found on this PC. The provider's own resume appends to the same
+   * conversation; CodaClauda never edits the transcript. The other app does not show the new turns
+   * until it reopens it, so the two must not be used at once. */
+  function canAdopt(e) {
+    return hasFeature('adopt') && !e.owned && Boolean(e.providerSessionId) && Boolean(e.cwd) && (e.provider === 'claude' || e.provider === 'codex');
+  }
+  function adopt(e, project) {
+    const label = providerLabel(e.provider, true);
+    ui.modal({
+      title: 'Continue in CodaClauda?',
+      body: `CodaClauda resumes this ${label} conversation in ${shownPath(e.cwd)} as its own session with wake on, at the project's current access (Read when the folder is not one of your projects). Close it in the other app first and don't use both at once: the other app won't show the new turns until you reopen it there.`,
+      actions: [{ label: 'Cancel' }, { label: 'Continue here', kind: 'primary', run: () => runAdopt(e, project) }],
+    });
+  }
+  async function runAdopt(e, project) {
+    const id = e.providerSessionId;
+    if (state.adopting.has(id)) return;
+    state.adopting.add(id); render(true);
+    try {
+      const data = await callFeature('adopt', { provider: e.provider, providerSessionId: id, cwd: e.cwd, title: `${project?.name || e.projectHint || baseName(e.cwd) || providerLabel(e.provider, true)} (continued)` });
+      const s = data?.session;
+      await sessions.refresh();
+      toast(data?.existing ? 'Already continued in CodaClauda; opening it' : `Continued in CodaClauda at ${s?.access === 'full' ? 'Full' : 'Read'} access`, { kind: 'success', timeout: 3600 });
+      loadExternal(true);
+      if (s?.id) navigate('chat', { thread: threadIdFor(s) });
+    } catch (error) { toast(`Couldn't continue it: ${error?.message || error}`, { kind: 'error', timeout: 8000 }); }
+    finally { state.adopting.delete(id); render(true); }
   }
 
   async function stop(s) {
@@ -218,7 +250,8 @@ export function mount(root, ctx) {
     try {
       const data = await callFeature('external', undefined);
       const list = (Array.isArray(data?.sessions) ? data.sessions : []).filter(e => e && typeof e === 'object')
-        .map(e => ({ provider: String(e.provider || ''), cwd: String(e.cwd || ''), projectHint: String(e.projectHint || ''), modifiedAt: e.modifiedAt, active: e.active === true }));
+        .map(e => ({ provider: String(e.provider || ''), cwd: String(e.cwd || ''), projectHint: String(e.projectHint || ''), modifiedAt: e.modifiedAt, active: e.active === true,
+          owned: e.owned === true, providerSessionId: typeof e.providerSessionId === 'string' ? e.providerSessionId : '' }));
       list.sort((a, b) => Number(b.active) - Number(a.active) || toMs(b.modifiedAt) - toMs(a.modifiedAt));
       Object.assign(ext, { state: 'loaded', list, error: '', at: Date.now() });
     } catch (error) { Object.assign(ext, { state: 'error', error: error?.message || String(error), at: Date.now() }); }

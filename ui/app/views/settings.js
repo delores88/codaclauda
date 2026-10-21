@@ -4,6 +4,8 @@
 import { updatePresentation } from '../../view-model.js';
 import { weatherSettings } from './settings-weather.js';
 import { limitsSettings } from './settings-limits.js';
+import { teamSettings } from './settings-team.js';
+import { usageSettings } from './settings-usage.js';
 import { wake, guardText, WAKE_UNAVAILABLE_TEXT } from '../wake.js';
 import { has as hasFeature, call as callFeature, validNtfyUrl, UNSUPPORTED_TEXT } from '../features.js';
 
@@ -32,6 +34,8 @@ export function mount(root, ctx) {
   const info = (label, value) => h('div.info-row', h('dt', label), h('dd.mono', { title: value || '' }, value || '—'));
   const weatherCard = weatherSettings(ctx);   // persistent: keeps its search box and results
   const limitsCard = limitsSettings(ctx);     // persistent: Agents at once, Board requests at once, grant defaults, wake loop guard
+  const teamCard = teamSettings(ctx);         // persistent: Agents can start teammates in my projects, and its guard
+  const usageCard = usageSettings(ctx);       // persistent (0.6): weekly resets and usage credits past a plan limit
 
   /* ---------- Wake on mail (global switch; each session also has its own, on by default since 0.5) ---------- */
   let wakeSaving = false;
@@ -220,7 +224,7 @@ export function mount(root, ctx) {
   function render() {
     const p = store.prefsInfo || {};
     ui.clear(root, h('div.page.settings-page',
-      h('header.page-head', h('div', h('span.eyebrow', 'CodaClauda'), h('h1', 'Settings'), h('p', 'Preferences for this PC. Agent accounts and billing stay with your own Claude and Codex apps.'))),
+      h('header.page-head', h('div', h('span.eyebrow', 'CodaClauda'), h('h1', 'Settings'), h('p', 'Preferences for this PC. Agents use your own Claude and Codex sign-ins; Usage below decides whether they keep going on credits or a weekly reset at the plan limit.'))),
       h('section.card.settings-card',
         h('h2.panel-title', 'Appearance & alerts'),
         h('div.setting-row', h('div.setting-text', h('strong', 'Theme'), h('span.field-hint', 'Dark or light.')),
@@ -233,6 +237,8 @@ export function mount(root, ctx) {
           h('div.segmented', ['high', 'low'].map(q => h('button', { type: 'button', 'aria-pressed': String(store.prefs.cityQuality === q), onclick: () => { store.setPref('cityQuality', q); render(); } }, q === 'high' ? 'High' : 'Low')))),
       ),
       limitsCard.node,
+      teamCard.node,
+      usageCard.node,
       notifyCard,
       wakeCard,
       weatherCard.node,
@@ -262,7 +268,7 @@ export function mount(root, ctx) {
   }
   render();
   return {
-    show() { visible = true; render(); updateOperation('status'); wake.load(); limitsCard.load(); if (note.state !== 'loaded') loadNotify(); },
+    show() { visible = true; render(); updateOperation('status'); wake.load(); limitsCard.load(); teamCard.load(); usageCard.load(); if (note.state !== 'loaded') loadNotify(); },
     hide() { visible = false; },
   };
 }

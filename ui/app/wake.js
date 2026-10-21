@@ -1,34 +1,40 @@
 /* Wake on mail (0.4.1; 0.5 removed the caps). A session with wake on has its own board address; the engine
- * checks the inboxes of all such sessions every 60 s and sends each new message to its session as a turn.
+ * checks the inboxes of all such sessions every 10 s (0.6) and sends each new message to its session as a turn.
  * New sessions start with wake on (0.5); the global switch (default on) can stop every wake. There is no
- * limit on how many sessions wake or how often, only the owner's loop guard: two CodaClauda sessions that
- * woke each other pairPerHour times in the last hour wait until older wakes age out, and the owner is told.
+ * limit on how many sessions wake or how often, only the owner's loop guard: when two CodaClauda sessions
+ * woke each other pairPerHour times in the last hour the owner is told; in 'pause' mode (0.5) they also wait
+ * until older wakes age out, in 'notify' mode (0.6 default) they keep going.
  *
  * Calls go through bridge.js desktop.* with feature detection:
- *   wakeSettingsGet() → { enabled, loopGuard: { on, pairPerHour } }
+ *   wakeSettingsGet() → { enabled, loopGuard: { on, mode: 'notify'|'pause', pairPerHour } }
  *   wakeSettingsSet({ enabled?, loopGuard? }) → same
  *   sessionSetWake({ id, on }) → { session }  (records gain wake, mailboxAddress, wakes:{ hour, day, total })
  * Events: wake.on('change', fn). */
 import { desktop } from './bridge.js';
 import { sessions } from './sessions.js';
 
-export const WAKE_POLL_SECONDS = 60;
-export const LOOP_GUARD_DEFAULT = Object.freeze({ on: true, pairPerHour: 20 });
+export const WAKE_POLL_SECONDS = 10;
+export const LOOP_GUARD_DEFAULT = Object.freeze({ on: true, mode: 'notify', pairPerHour: 60 });
 export const WAKE_UNAVAILABLE_TEXT = 'Wake on mail needs CodaClauda 0.4.1 desktop';
 
 /** A saved guard, or the default for anything malformed. */
 export function normalizeGuard(value) {
   const g = value && typeof value === 'object' ? value : {};
   const n = Number(g.pairPerHour);
-  return { on: typeof g.on === 'boolean' ? g.on : LOOP_GUARD_DEFAULT.on, pairPerHour: Number.isSafeInteger(n) && n >= 1 ? n : LOOP_GUARD_DEFAULT.pairPerHour };
+  return {
+    on: typeof g.on === 'boolean' ? g.on : LOOP_GUARD_DEFAULT.on,
+    mode: g.mode === 'pause' || g.mode === 'notify' ? g.mode : LOOP_GUARD_DEFAULT.mode,
+    pairPerHour: Number.isSafeInteger(n) && n >= 1 ? n : LOOP_GUARD_DEFAULT.pairPerHour,
+  };
 }
 
 /** The one-line explanation of the guard shown in Settings. */
 export function guardText(guard) {
   const g = normalizeGuard(guard);
-  return g.on
-    ? `Loop guard on: two CodaClauda sessions that woke each other ${g.pairPerHour} times in the last hour pause waking each other until older wakes age out, and you get a notice. Your own messages never count.`
-    : 'Loop guard off: sessions can wake each other without any limit.';
+  if (!g.on) return 'Loop guard off: sessions can wake each other without any limit or notice.';
+  return g.mode === 'pause'
+    ? `Loop guard on, Pause: two CodaClauda sessions that woke each other ${g.pairPerHour} times in the last hour pause waking each other until older wakes age out, and you get a notice. Your own messages never count.`
+    : `Loop guard on, Notify: when two CodaClauda sessions woke each other ${g.pairPerHour} times in the last hour you get one notice; they keep waking each other. Your own messages never count.`;
 }
 
 class Wake extends EventTarget {

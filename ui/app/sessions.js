@@ -103,7 +103,11 @@ class Sessions extends EventTarget {
     if (!e || typeof e.id !== 'string' || typeof e.kind !== 'string') return;
     const s = this.session(e.id);
     if (e.kind === 'usage') {   // token and context meters only: no transcript line, no unread mark
-      if (s && e.usage && typeof e.usage === 'object') { s.usage = { ...(s.usage || {}), ...e.usage }; this.changed(); }
+      if (s && e.usage && typeof e.usage === 'object') s.usage = { ...(s.usage || {}), ...e.usage };
+      // 0.6: where turns are billed when not the plan, and the last turn's credit cost.
+      if (s && 'billing' in e) s.billing = e.billing || null;
+      if (s && 'lastTurnCredits' in e) s.lastTurnCredits = e.lastTurnCredits || null;
+      if (s) this.changed();
       return;
     }
     const queuedStatus = e.kind === 'status' && typeof e.status === 'string' ? QUEUED_STATUS.exec(e.status) : null;

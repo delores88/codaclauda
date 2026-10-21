@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { grantLimits, expiresText } from '../app/views/connect.js';
-import { defaultsPatch, boardLoadText, LIMIT_MIN } from '../app/views/settings-limits.js';
+import { defaultsPatch, boardLoadText, LIMIT_MIN, guardStatusText } from '../app/views/settings-limits.js';
+import { normalizeOwnerDefault, teamAdoptions, teamSummary, OWNER_DEFAULT } from '../app/views/settings-team.js';
 import { BUDGETS, budget, budgetValue, budgetField, budgetText, compareGrants, grantActive, grantState, grantLimitsText, liveGrantUsable, limitValue, wholeNumber, LEGACY_TEXT, MAX_SAFE } from '../app/budgets.js';
 import { teamFor, teamPayload, TEAM_DEFAULTS } from '../app/team.js';
 import { normalizeGuard, guardText, wakeCounts, LOOP_GUARD_DEFAULT } from '../app/wake.js';
@@ -95,13 +96,47 @@ test('team and wake settings have stable shapes and no wake caps', () => {
   const project = { id: 'local:c:/work/app', ids: ['local:c:/work/app', 'gh:ben/app'], name: 'App', path: 'C:\\work\\app' };
   assert.deepEqual(teamFor(null, project), { key: project.id, ...TEAM_DEFAULTS });
   assert.deepEqual(teamFor({ 'gh:ben/app': { agentsCanStart: true, maxAgentStartedLive: 'unlimited' } }, project), { key: 'gh:ben/app', agentsCanStart: true, maxAgentStartedLive: 'unlimited' });
-  assert.equal(teamFor({ [project.id]: { agentsCanStart: true, maxAgentStartedLive: 0 } }, project).maxAgentStartedLive, 8);
+  assert.equal(teamFor({ [project.id]: { agentsCanStart: true, maxAgentStartedLive: 0 } }, project).maxAgentStartedLive, 'unlimited');
+  // 0.6: a project the engine has not listed yet follows the owner's standing default, not "off".
+  assert.deepEqual(teamFor({}, project, { agentsCanStart: false, maxAgentStartedLive: 3 }), { key: project.id, agentsCanStart: false, maxAgentStartedLive: 3 });
+  assert.equal(teamFor(null, project).agentsCanStart, true);
   assert.deepEqual(teamPayload(project, { agentsCanStart: true, maxAgentStartedLive: 3 }), { projectId: project.id, cwd: project.path, name: 'App', ids: project.ids, agentsCanStart: true, maxAgentStartedLive: 3 });
+  // 0.6: the guard notifies by default (60 an hour) and keeps the owner's mode.
+  assert.deepEqual(LOOP_GUARD_DEFAULT, { on: true, mode: 'notify', pairPerHour: 60 });
   assert.deepEqual(normalizeGuard(undefined), LOOP_GUARD_DEFAULT);
-  assert.deepEqual(normalizeGuard({ on: false, pairPerHour: 5 }), { on: false, pairPerHour: 5 });
-  assert.deepEqual(normalizeGuard({ on: 'yes', pairPerHour: 0 }), LOOP_GUARD_DEFAULT);
-  assert.match(guardText({ on: true, pairPerHour: 20 }), /woke each other 20 times in the last hour/);
+  assert.deepEqual(normalizeGuard({ on: false, pairPerHour: 5 }), { on: false, mode: 'notify', pairPerHour: 5 });
+  assert.deepEqual(normalizeGuard({ on: true, mode: 'pause', pairPerHour: 20 }), { on: true, mode: 'pause', pairPerHour: 20 });
+  assert.deepEqual(normalizeGuard({ on: 'yes', mode: 'stop', pairPerHour: 0 }), LOOP_GUARD_DEFAULT);
+  assert.match(guardText({ on: true, mode: 'pause', pairPerHour: 20 }), /woke each other 20 times in the last hour pause waking/);
+  assert.match(guardText({ on: true, pairPerHour: 60 }), /Notify: .* 60 times .* they keep waking each other/);
   assert.match(guardText({ on: false, pairPerHour: 20 }), /without any limit/);
+  assert.equal(guardStatusText({ on: true, mode: 'notify', pairPerHour: 60 }), 'On: notify at 60 per hour.');
+  assert.equal(guardStatusText({ on: true, mode: 'pause', pairPerHour: 9 }), 'On: pause at 9 per hour.');
+  assert.equal(guardStatusText({ on: false }), 'Off: no limit and no notice.');
   // Counters only: no "/6 this hour" or "/30 today" caps.
   assert.equal(wakeCounts({ wakes: { hour: 40, day: 300, total: 900 } }), '40 this hour · 300 today · 900 in all');
+});
+
+test('Settings → Team: the standing switch defaults on and unlimited, and registered folders join Projects once', () => {
+  assert.deepEqual(OWNER_DEFAULT, { agentsCanStart: true, maxAgentStartedLive: 'unlimited' });
+  assert.deepEqual(normalizeOwnerDefault(undefined), OWNER_DEFAULT);
+  assert.deepEqual(normalizeOwnerDefault({ agentsCanStart: false, maxAgentStartedLive: 3 }), { agentsCanStart: false, maxAgentStartedLive: 3 });
+  assert.deepEqual(normalizeOwnerDefault({ agentsCanStart: 'no', maxAgentStartedLive: 0 }), OWNER_DEFAULT);
+  const projects = {
+    'local:c:/work/app': { name: 'App', cwd: 'C:\\work\\app', ids: ['local:c:/work/app'], agentsCanStart: false, maxAgentStartedLive: 'unlimited', followsDefault: false, autoRegistered: false },
+    'local:c:/users/ben/desktop/scratch': { name: 'scratch', cwd: 'C:\\Users\\Ben\\Desktop\\scratch', ids: [], agentsCanStart: true, maxAgentStartedLive: 'unlimited', followsDefault: true, autoRegistered: true, access: 'full' },
+    'local:d:/work/vendor/lib': { name: 'lib', cwd: 'D:\\work\\vendor\\lib', ids: [], agentsCanStart: true, maxAgentStartedLive: 'unlimited', followsDefault: true, autoRegistered: true, access: 'read' },
+  };
+  // Only registered folders Projects does not list yet; each keeps the level it was registered at.
+  assert.deepEqual(teamAdoptions(projects, [{ path: 'C:\\work\\app' }, { path: 'd:/work/vendor/lib/' }]), [
+    { id: 'local:c:/users/ben/desktop/scratch', path: 'C:\\Users\\Ben\\Desktop\\scratch', name: 'scratch', level: 'full' },
+  ]);
+  assert.equal(teamAdoptions(projects, []).find(f => f.name === 'lib').level, 'read');
+  assert.deepEqual(teamAdoptions(null, null), []);
+  assert.equal(teamSummary(projects), 'Own setting in Projects: App (off). Folders agents registered: scratch (Full), lib (Read only).');
+  assert.equal(teamSummary({}), '');
+  // The Projects modal's "use my default" saves useDefault, and the payload keeps the project's ids.
+  const project = { id: 'local:c:/work/app', ids: ['local:c:/work/app'], name: 'App', path: 'C:\\work\\app' };
+  assert.deepEqual(teamPayload(project, { useDefault: true }), { projectId: project.id, cwd: project.path, name: 'App', ids: project.ids, useDefault: true });
+  assert.deepEqual(teamFor(projects, project), { key: project.id, agentsCanStart: false, maxAgentStartedLive: 'unlimited' });
 });

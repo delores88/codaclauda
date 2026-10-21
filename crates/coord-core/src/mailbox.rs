@@ -1,6 +1,7 @@
 //! Passive, self-asserted mailboxes. This sidecar never reads or writes the
-//! coordination state, launches providers, or grants authority to act.
-use crate::store::Store;
+//! coordination state, launches providers, or grants authority to act. A post
+//! reads only the desktop app's heartbeat, to say who will pick it up.
+use crate::{heartbeat, store::Store};
 use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -252,7 +253,7 @@ fn post(args: &Value) -> Result<(String, Post)> {
     ensure!(!subject.chars().any(char::is_control), "Mailbox subject cannot contain control characters");
     let body = text(args, "body", 32768, true)?;
     let reply_to = args.get("reply_to").map(|_| identifier(args, "reply_to")).transpose()?;
-    ensure!((kind == "reply") == reply_to.is_some(), "Replies require reply_to; other message kinds cannot set it");
+    ensure!(kind == "reply" || reply_to.is_none(), "Only replies can set reply_to");
     let resource = args.get("resource").map(|_| resource(args)).transpose()?;
     ensure!(!matches!(kind.as_str(), "claim" | "release") || resource.is_some(), "Claim and release messages require a resource");
     let ttl = if kind == "claim" { Some(number(args, "ttl", 30, 1, 120)?) } else {
@@ -268,8 +269,22 @@ fn save_post(state: &mut Mailbox, id: &str, post: &Post, now: u64) -> Result<Val
         return Ok(serde_json::to_value(&existing.message)?);
     }
     state.address(&post.from)?;
+    // The team inbox exists before the app first runs, so saving never waits for it.
+    if post.to == heartbeat::TEAM_ADDRESS && !state.addresses.contains_key(&post.to) {
+        let label = "CodaClauda team requests".into();
+        state.addresses.insert(post.to.clone(), Address { name: post.to.clone(), label, created_at: now });
+    }
     state.address(&post.to)?;
-    if let Some(parent_id) = &post.reply_to {
+    // A reply without reply_to answers the newest message from its recipient to its sender.
+    let reply_to = match &post.reply_to {
+        None if post.kind == "reply" => Some(
+            state.messages.values().map(|v| &v.message).filter(|m| m.from == post.to && m.to == post.from)
+                .max_by_key(|m| m.sequence).map(|m| m.id.clone())
+                .ok_or_else(|| anyhow::anyhow!("Nothing from {} to {} is retained to reply to; pass --reply-to <message id>", post.to, post.from))?,
+        ),
+        value => value.clone(),
+    };
+    if let Some(parent_id) = &reply_to {
         let parent = &state.messages.get(parent_id).ok_or_else(|| anyhow::anyhow!("Reply message is unavailable or outside retention"))?.message;
         ensure!(parent.to == post.from && parent.from == post.to, "Reply must reverse the original sender and recipient");
     }
@@ -296,7 +311,7 @@ fn save_post(state: &mut Mailbox, id: &str, post: &Post, now: u64) -> Result<Val
     let message = Message {
         id: id.to_owned(), sequence, to: post.to.clone(), from: post.from.clone(), kind: post.kind.clone(),
         subject: post.subject.clone(), body: post.body.clone(), created_at: now, read_at: None,
-        reply_to: post.reply_to.clone(), resource: post.resource.clone(),
+        reply_to, resource: post.resource.clone(),
     };
     let result = serde_json::to_value(&message)?;
     state.messages.insert(id.to_owned(), StoredMessage { message, digest });
@@ -335,7 +350,9 @@ fn api_with_clock(store: &Store, op: &str, args: &Value, clock: &dyn Fn() -> u64
         "post" => {
             let (id, post) = post(args)?;
             let now = clock();
-            transaction(store, now, |state| save_post(state, &id, &post, now))
+            let mut saved = transaction(store, now, |state| save_post(state, &id, &post, now))?;
+            saved["delivery"] = heartbeat::delivery(&store.root, &post.to, now.saturating_mul(1000));
+            Ok(saved)
         }
         "inbox" => {
             fields(args, &["addr", "since", "limit", "unread"], &["addr"])?;
@@ -460,6 +477,28 @@ mod tests {
         let waited = at(&store, "wait-reply", json!({"id":"question","timeout":0}), 104).unwrap();
         assert_eq!(waited["timed_out"], false);
         assert_eq!(waited["reply"]["id"], "answer");
+    }
+    #[test]
+    fn reply_without_reply_to_answers_the_newest_message_or_names_the_flag() {
+        let (_dir, store) = fixture();
+        let reply = |id: &str| json!({"id":id,"to":"owner","from":"codex-claudacoda","kind":"reply","subject":"Re","body":"Done."});
+        let error = at(&store, "post", reply("early"), 100).unwrap_err().to_string();
+        assert!(error.contains("--reply-to"), "{error}");
+        assert!(!store.root.join("mailbox.json").exists(), "a refused reply is not saved");
+        at(&store, "post", message("older"), 101).unwrap();
+        at(&store, "post", message("newer"), 102).unwrap();
+        assert_eq!(at(&store, "post", reply("answer"), 103).unwrap()["reply_to"], "newer");
+        let mut notice = message("notice"); notice["kind"] = json!("notice"); notice["reply_to"] = json!("older");
+        assert!(at(&store, "post", notice, 104).is_err());
+    }
+    #[test]
+    fn team_posts_save_before_the_app_runs_and_say_so() {
+        let (_dir, store) = fixture();
+        let request = json!({"id":"start-1","to":heartbeat::TEAM_ADDRESS,"from":"codex-claudacoda","kind":"question","subject":"Need a reviewer","body":"{\"start\":{}}"});
+        let saved = at(&store, "post", request, 100).unwrap();
+        assert_eq!(saved["delivery"]["state"], "app_not_running");
+        assert_eq!(at(&store, "inbox", json!({"addr":heartbeat::TEAM_ADDRESS}), 101).unwrap()["messages"][0]["id"], "start-1");
+        assert_eq!(at(&store, "post", message("plain"), 102).unwrap()["delivery"]["state"], "passive");
     }
     #[test]
     fn claim_conflicts_expire_and_only_holder_can_release() {

@@ -47,7 +47,7 @@ export function compactEvents(events) {
 }
 
 /** One session's events → { items, openTurn, lastAt }.
- *  items: { key, kind: 'owner'|'agent'|'tools'|'error'|'wake', provider, sessionId, turnId, at, text?, streaming?, tools?, targets?, from?, subject?, body? }.
+ *  items: { key, kind: 'owner'|'agent'|'tools'|'error'|'wake'|'notice', provider, sessionId, turnId, at, text?, streaming?, tools?, targets?, from?, subject?, body? }.
  *  openTurn: the active admitted turnId; accepted queued turns are not running. */
 export function buildTranscript(events, { provider = '', sessionId = '' } = {}) {
   const items = [];
@@ -114,6 +114,10 @@ export function buildTranscript(events, { provider = '', sessionId = '' } = {}) 
     } else if (e.kind === 'error') {
       const item = { ...base, key: `${sessionId}:${turnId}:e${t.err++}`, kind: 'error', text: String(e.error || e.text || 'The session reported an error.') };
       items.push(item); t.last = item;
+    } else if (e.kind === 'notice') {
+      // 0.6 engine notes (usage limits, a resumed copy): plain text, an optional https link.
+      const link = typeof e.link === 'string' && /^https:\/\//.test(e.link) ? e.link : '';
+      items.push({ ...base, key: `${sessionId}:${turnId}:n${t.err++}`, kind: 'notice', text: String(e.text ?? ''), tone: e.tone === 'warn' ? 'warn' : 'info', link });
     } else if (e.kind === 'done') {
       t.done = true;
       if (t.user) { t.user.queued = false; t.user.deliveryStatus = String(e.status || 'completed'); }

@@ -95,10 +95,11 @@ export const desktop = {
     if (value.loopGuard && typeof value.loopGuard === 'object') args.loopGuard = value.loopGuard;
     return invoke('wake_settings_set', args);
   },
-  /** 0.5 team starts (src-tauri/src/session_host/team.rs) →
-   *  { address: 'codaclauda-team', projects: { [projectId]: { name, cwd, ids, agentsCanStart, maxAgentStartedLive, updatedAt } }, defaults } */
+  /** 0.5 team starts (src-tauri/src/session_host/team.rs) → { address: 'codaclauda-team', pollSeconds, ownerDefault (0.6: on, 'unlimited'),
+   *  projects: { [projectId]: { name, cwd, ids, agentsCanStart, maxAgentStartedLive (effective), followsDefault, autoRegistered, access?, updatedAt } } } */
   teamSettingsGet: () => invoke('team_settings_get'),
-  /** { projectId, cwd, name?, ids?, agentsCanStart?, maxAgentStartedLive?: number|'unlimited' } → { projectId, project } */
+  /** { projectId, cwd, name?, ids?, agentsCanStart?, maxAgentStartedLive?: number|'unlimited', useDefault?, remove? } → { projectId, project };
+   *  { ownerDefault: { agentsCanStart?, maxAgentStartedLive? } } → { ownerDefault } (0.6) */
   teamSettingsSet: project => invoke('team_settings_set', { project }),
 
   /* 0.4.1 scheduled tasks (src-tauri/src/session_host/schedule.rs); they run only while the app is open.
@@ -144,6 +145,16 @@ export const desktop = {
   /** Other Claude Code / Codex sessions on this machine, metadata only →
    *  { sessions: [{ provider, cwd, projectHint, modifiedAt, active (modified < 15 min ago), owned (started by CodaClauda) }] } */
   externalSessionsList: () => invoke('external_sessions_list'),
+  /** 0.6: continue that exact conversation as a CodaClauda session (Claude --resume / Codex thread/resume), wake on,
+   *  at the project's current access (Read outside linked or own folders) → { session, existing? } */
+  sessionAdopt: ({ provider, providerSessionId, cwd, title = null }) => invoke('session_adopt', { provider, providerSessionId, cwd, title: title || null }),
+  /** 0.6 usage setting (src-tauri/src/session_host/usage.rs), app-wide, owner only →
+   *  { codex: { useCredits, useResets }, claude: { useCredits }, error|null } (every flag defaults to true) */
+  usageSettingsGet: () => invoke('usage_settings_get'),
+  /** { provider:'codex'|'claude', useCredits?, useResets? (Codex only) } → same shape */
+  usageSettingsSet: ({ provider, useCredits, useResets } = {}) => invoke('usage_settings_set', { provider, useCredits: useCredits ?? null, useResets: useResets ?? null }),
+  /** The latest plan snapshot → { provider, snapshot|null, at|null, limited, resetsAt (unix s)|null, ... } */
+  usageStatus: arg => invoke('usage_status', { provider: arg && typeof arg === 'object' ? arg.provider : arg }),
   /** → { servers: [{ name, command, args, env }], presets: [{ id, label, name, command, args, env, install, notes, source }] }.
    *  Servers reach sessions only at Full access; CodaClauda never installs them (presets are text). */
   mcpServersGet: arg => invoke('mcp_servers_get', { projectId: arg && typeof arg === 'object' ? arg.projectId : arg }),

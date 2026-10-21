@@ -6,13 +6,16 @@
  * Full or Read only), and the toolbar can apply one level to every matching project.
  * 0.5: each project with a folder opens its MCP tools (Full access only) and its CLAUDE.md / AGENTS.md
  * editor (project-tools.js) from the access line or the row menu, and its Teammates switch: whether
- * agents may start teammates there (team.js; off by default, with a guard on how many work at once). */
+ * agents may start teammates there (team.js). 0.6: a project follows Settings → Team (on, Unlimited by
+ * default) unless it has its own setting here; folders an agent's request registered are added to the
+ * list at the level they were registered at, and unlinking one forgets the registration. */
 import { openNewProjectDialog } from '../newproject.js';
 import { LEVELS, ACCESS_NOTE, BROWSER_UNAVAILABLE, levelInfo } from '../access.js';
 import { openInstructions, openMcpTools, MCP_NOTE } from '../project-tools.js';
 import { has as hasFeature } from '../features.js';
-import { team, TEAM_ADDRESS, TEAM_DEFAULTS } from '../team.js';
+import { team, TEAM_ADDRESS } from '../team.js';
 import { limitValue } from '../budgets.js';
+import { teamAdoptions } from './settings-team.js';
 
 const FILTERS = [
   { id: 'all', label: 'All', test: () => true },
@@ -361,7 +364,7 @@ export function mount(root, ctx) {
     const keep = new Set();
     pageRows.forEach((project, index) => {
       keep.add(project.id);
-      const info = { linked: isLinkedLocal(project, linked), manifest: isFromManifest(project, fromManifest), agents: agentsByHome.get(project.id) || [], scanning: Boolean(project.path && scanning.has(normalizePath(project.path))), access: store.projectAccess(project.id), team: team.get(project) };
+      const info = { linked: isLinkedLocal(project, linked), manifest: isFromManifest(project, fromManifest), agents: agentsByHome.get(project.id) || [], scanning: Boolean(project.path && scanning.has(normalizePath(project.path))), access: store.projectAccess(project.id), team: team.get(project), teamDefault: teamFollowsDefault(project) };
       const sig = rowSignature(project, info);
       let entry = rows.get(project.id);
       if (!entry || entry.sig !== sig) {
@@ -450,7 +453,7 @@ export function mount(root, ctx) {
       p.scannedAt || 0, Boolean(p.stats?.git), info.linked, info.manifest, info.scanning,
       info.agents.map(a => [a.id, a.name, a.provider, a.look]),
       info.access.level, info.access.explicit,
-      team.supported(), info.team.agentsCanStart, info.team.maxAgentStartedLive,
+      team.supported(), info.team.agentsCanStart, info.team.maxAgentStartedLive, info.teamDefault,
     ]);
   }
 
@@ -582,38 +585,67 @@ export function mount(root, ctx) {
         hasFeature('mcpGet') ? h('button.btn.small.ghost', { type: 'button', dataset: { fk: 'mcp' }, title: MCP_NOTE, onclick: () => openMcpTools(ctx, currentProject(p.id) || p) }, icon('plug'), 'MCP tools') : null,
         hasFeature('instructionsRead') ? h('button.btn.small.ghost', { type: 'button', dataset: { fk: 'instructions' }, title: 'Edit CLAUDE.md and AGENTS.md at the project root', onclick: () => openInstructions(ctx, currentProject(p.id) || p) }, icon('file'), 'Instructions') : null) : null,
       team.supported() && p.path ? h('button.btn.small.ghost', { type: 'button', dataset: { fk: 'team' }, 'aria-pressed': String(info.team.agentsCanStart),
-        title: info.team.agentsCanStart ? `Agents can start teammates here (at most ${info.team.maxAgentStartedLive} working at once)` : 'Agents cannot start teammates here',
+        title: `${info.team.agentsCanStart ? `Agents can start teammates here (${info.team.maxAgentStartedLive === 'unlimited' ? 'no limit' : `at most ${info.team.maxAgentStartedLive} working at once`})` : 'Agents cannot start teammates here'}${info.teamDefault ? ', following Settings → Team' : ', this project\'s own setting'}`,
         onclick: () => openTeam(currentProject(p.id) || p) }, icon('agents'), info.team.agentsCanStart ? 'Teammates: on' : 'Teammates: off') : null);
   }
 
-  /** Whether agents may start teammates in one project, and how many of them may work at once. */
+  /** Whether agents may start teammates in one project, and how many of them may work at once:
+   *  Settings → Team for every project, unless this project has its own setting. */
   function openTeam(p) {
     const current = team.get(p);
+    const follows = h('input', { type: 'checkbox', checked: teamFollowsDefault(p), 'aria-label': 'Use my setting from Settings → Team', onchange: () => sync() });
     const on = h('input', { type: 'checkbox', checked: current.agentsCanStart, 'aria-label': `Agents can start teammates in ${p.name}` });
-    const unlimited = h('input', { type: 'checkbox', checked: current.maxAgentStartedLive === 'unlimited', 'aria-label': 'No limit on agent-started sessions working at once', onchange: () => { count.disabled = unlimited.checked; } });
-    const count = h('input.input', { type: 'text', inputMode: 'numeric', autocomplete: 'off', style: { width: '90px' }, 'aria-label': 'Agent-started sessions working at once', value: current.maxAgentStartedLive === 'unlimited' ? '' : String(current.maxAgentStartedLive), disabled: current.maxAgentStartedLive === 'unlimited' });
+    const unlimited = h('input', { type: 'checkbox', checked: current.maxAgentStartedLive === 'unlimited', 'aria-label': 'No limit on agent-started sessions working at once', onchange: () => sync() });
+    const count = h('input.input', { type: 'text', inputMode: 'numeric', autocomplete: 'off', style: { width: '90px' }, 'aria-label': 'Agent-started sessions working at once', value: current.maxAgentStartedLive === 'unlimited' ? '' : String(current.maxAgentStartedLive) });
     const error = h('p.inline-error', { role: 'alert', hidden: true });
+    const sync = () => { on.disabled = follows.checked; unlimited.disabled = follows.checked; count.disabled = follows.checked || unlimited.checked; };
+    sync();
     modal({
       title: `Teammates · ${p.name}`,
       body: h('div.pt-body',
+        h('div.setting-row', h('div.setting-text', h('strong', 'Use my setting from Settings → Team'),
+          h('span.field-hint', 'On: this project follows Agents can start teammates in my projects. Off: the two settings below apply to this project only.')),
+          h('label.switch', follows, h('span'))),
         h('div.setting-row', h('div.setting-text', h('strong', 'Agents can start teammates'),
-          h('span.field-hint', `When on, a CodaClauda agent can ask for a new Claude Code or Codex session here by posting to ${TEAM_ADDRESS}. It starts at this project's access level (${levelInfo(store.projectAccess(p.id).level).long}), with wake on and the request as its first message, and the asker gets its board address. Off by default.`)),
+          h('span.field-hint', `When on, a CodaClauda agent can ask for a new Claude Code or Codex session here by posting to ${TEAM_ADDRESS}. It starts at this project's access level (${levelInfo(store.projectAccess(p.id).level).long}), never higher, with wake on and the request as its first message, and the asker gets its board address.`)),
           h('label.switch', on, h('span'))),
         h('div.setting-row', h('div.setting-text', h('strong', 'Agent-started sessions working at once'),
-          h('span.field-hint', `A request past this many is refused with a reason; sessions you start yourself never count. Default ${TEAM_DEFAULTS.maxAgentStartedLive}.`)),
+          h('span.field-hint', 'A request past this many is refused with a reason; sessions you start yourself never count.')),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } }, count, h('label.checkbox-label', unlimited, h('span', 'Unlimited')))),
-        h('p.field-hint', 'This switch is the authority. A board message is information; its sender name is self-asserted and cannot raise access. Every request gets a reply on the board.'),
+        h('p.field-hint', 'Your switch is the authority. A board message is information; its sender name is self-asserted and cannot raise access. Every request gets a reply on the board.'),
         error),
       actions: [{ label: 'Cancel' }, { label: 'Save', kind: 'primary', run: async () => {
         const guard = limitValue(count.value, unlimited.checked, 1);
-        if (guard == null) { error.hidden = false; error.textContent = 'Enter a whole number of sessions (1 or more), or tick Unlimited.'; return false; }
+        if (!follows.checked && guard == null) { error.hidden = false; error.textContent = 'Enter a whole number of sessions (1 or more), or tick Unlimited.'; return false; }
         try {
-          await team.set(p, { agentsCanStart: on.checked, maxAgentStartedLive: guard });
-          toast(on.checked ? `${p.name}: agents can start teammates (${guard === 'unlimited' ? 'no limit' : `at most ${guard} at once`}).` : `${p.name}: agents cannot start teammates.`, { kind: 'success', timeout: 4200 });
+          const saved = await team.set(p, follows.checked ? { useDefault: true } : { agentsCanStart: on.checked, maxAgentStartedLive: guard });
+          const limit = saved.maxAgentStartedLive === 'unlimited' ? 'no limit' : `at most ${saved.maxAgentStartedLive} at once`;
+          toast(`${p.name}: ${saved.agentsCanStart ? `agents can start teammates (${limit})` : 'agents cannot start teammates'}${follows.checked ? ', as in Settings → Team' : ''}.`, { kind: 'success', timeout: 4200 });
           return true;
         } catch (failure) { error.hidden = false; error.textContent = failure?.message || String(failure); return false; }
       } }],
     });
+  }
+
+  /** The project has no Teammates setting of its own (it follows Settings → Team). */
+  function teamFollowsDefault(p) {
+    const saved = team.projects?.[team.get(p).key];
+    return !saved || saved.followsDefault !== false;
+  }
+
+  /** Folders an agent's start request registered join Projects at the level they were registered at. */
+  function adoptTeamFolders() {
+    if (typeof store.updateDesktop !== 'function') return;
+    const fresh = teamAdoptions(team.projects, store.desktop.projects.local);
+    if (!fresh.length) return;
+    store.updateDesktop(d => {
+      d.projectAccess ||= {};
+      for (const f of fresh) {
+        d.projects.local.push({ path: f.path, name: f.name, addedAt: Date.now(), fromTeam: true });
+        if (!d.projectAccess[f.id]) d.projectAccess[f.id] = { level: f.level, playwright: false, updatedAt: Date.now() };
+      }
+    });
+    toast(`Added ${fresh.map(f => `${f.name} (${levelInfo(f.level).long})`).join(', ')}: an agent asked to start a teammate there.`, { timeout: 7000 });
   }
 
   function openAccessMenu(anchor) {
@@ -978,6 +1010,8 @@ export function mount(root, ctx) {
           const localEntries = (d.local || []).filter(item => p.ids.includes(`local:${normalizePath(item.path)}`));
           const repoEntries = (d.github?.repos || []).filter(r => p.ids.includes(`gh:${String(r.full_name || r.name).toLowerCase()}`));
           store.unlinkProject(p);
+          // A folder an agent registered is forgotten too, so it does not come back on its own.
+          if (team.projects?.[team.get(p).key]?.autoRegistered) team.set(p, { remove: true }).catch(error => toast(`Couldn't forget the teammate registration: ${error?.message || error}`, { kind: 'error', timeout: 8000 }));
           const canUndo = typeof store.updateDesktop === 'function' && (localEntries.length || repoEntries.length);
           toast(`Unlinked ${p.name}`, { kind: 'success', timeout: 7000, action: canUndo ? { label: 'Undo', run: () => store.updateDesktop(draft => {
             draft.projects.local.push(...localEntries);
@@ -994,7 +1028,7 @@ export function mount(root, ctx) {
   return {
     show(params = {}) {
       state.visible = true;
-      team.load();
+      Promise.resolve(team.load()).then(adoptTeamFolders);
       if (params.filter && FILTERS.some(f => f.id === params.filter)) setFilter(params.filter);
       if (state.frame) { cancelAnimationFrame(state.frame); state.frame = 0; }
       const target = params.project || params.projectId;

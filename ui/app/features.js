@@ -13,7 +13,10 @@
  *   prCreate           session_pr_create({ id, title, body }) → { url, number }
  *   prStatus           session_pr_status({ id }) → { url|null, state|null, checks:[{ name, status, conclusion }] }
  *   compact            session_compact({ id }) → { ok: true } | error COMPACT_UNSUPPORTED
- *   external           external_sessions_list() → { sessions:[{ provider, cwd, projectHint, modifiedAt, active }] }
+ *   external           external_sessions_list() → { sessions:[{ provider, cwd, projectHint, modifiedAt, active, owned, providerSessionId }] }
+ *   adopt              session_adopt({ provider, providerSessionId, cwd, title? }) → { session, existing? } (0.6)
+ *   usageGet / usageSet  usage_settings_get() / usage_settings_set({ provider, useCredits?, useResets? }) → { codex, claude, error } (0.6)
+ *   usageStatus        usage_status({ provider }) → { snapshot, at, limited, resetsAt } (0.6)
  *   mcpGet / mcpSet    mcp_servers_get({ projectId }) / mcp_servers_set({ projectId, servers }) → { servers }
  *   notifyGet / notifySet  notify_settings_get() / notify_settings_set({ ntfyUrl, onFinish, onError }) → same
  *   notifyTest         notify_test() (optional; the Settings test button needs it)
@@ -34,6 +37,7 @@ export const COMMANDS = {
   instructionsRead: 'project_instructions_read', instructionsWrite: 'project_instructions_write',
   ciStatus: 'ci_status', limitsGet: 'session_limits_get', limitsSet: 'session_limits_set',
   teamGet: 'team_settings_get', teamSet: 'team_settings_set',
+  adopt: 'session_adopt', usageGet: 'usage_settings_get', usageSet: 'usage_settings_set', usageStatus: 'usage_status',
 };
 export const UNSUPPORTED_TEXT = 'Needs CodaClauda 0.5 desktop';
 

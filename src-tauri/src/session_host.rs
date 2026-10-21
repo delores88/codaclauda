@@ -18,6 +18,11 @@
 //! How many agents may work at once is an owner setting (`limits.rs`), new
 //! sessions wake on mail by default, and agents can start teammates in
 //! projects where the owner allows it (`team.rs`).
+//!
+//! 0.6 continues a Claude or Codex conversation found on this PC as a
+//! CodaClauda session (`external.rs`, adopt) and follows the owner's usage
+//! setting when a plan limit is reached: weekly resets, ChatGPT or Claude
+//! usage credits, or a wait for the reset (`usage.rs`).
 
 pub(crate) mod external;
 pub(crate) mod fork;
@@ -26,6 +31,7 @@ pub(crate) mod mcp;
 pub(crate) mod notify;
 pub(crate) mod schedule;
 pub(crate) mod team;
+pub(crate) mod usage;
 pub(crate) mod wake;
 pub(crate) mod worktree;
 
@@ -259,6 +265,17 @@ struct Record {
     /// 0.5: the short CodaClauda note still has to precede the first turn.
     #[serde(default)]
     team_note: bool,
+    /// 0.6: { provider, providerSessionId } of the conversation this session continues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adopted_from: Option<Value>,
+    /// 0.6: "credits" (ChatGPT) or "usage-credits" (Claude) while past the plan limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    billing: Option<String>,
+    /// 0.6 Codex: the thread's credit estimate so far, and the last turn's share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credits_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_turn_credits: Option<Value>,
 }
 
 /// Wake counters shown in the UI: rolling hour and day, and all time.
@@ -882,6 +899,10 @@ struct Inner {
     team: Mutex<team::Book>,
     /// The team inbox address is registered once per run.
     team_registered: AtomicBool,
+    /// 0.6 owner usage setting and the latest plan snapshots (`usage.rs`).
+    usage: Mutex<usage::Book>,
+    /// Turns already given their one usage-limit retry.
+    usage_retries: Mutex<HashSet<String>>,
 }
 
 /// Tauri-managed handle to the session engine.
@@ -915,6 +936,8 @@ impl SessionHost {
             notify: Mutex::new(notify::Settings::default()),
             team: Mutex::new(team::Book::default()),
             team_registered: AtomicBool::new(false),
+            usage: Mutex::new(usage::Book::default()),
+            usage_retries: Mutex::new(HashSet::new()),
         });
         inner.load()?;
         inner.load_wake();
@@ -922,6 +945,7 @@ impl SessionHost {
         inner.load_notify();
         inner.load_limits();
         inner.load_team();
+        inner.load_usage();
         let reaper = inner.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -1626,13 +1650,24 @@ impl Inner {
                     proc.kill();
                     return;
                 }
+                let mut copied = false;
                 let changed = match state.records.iter_mut().find(|r| r.id == id) {
                     Some(r) if r.provider_session_id.as_deref() != Some(session.as_str()) => {
+                        copied = r.adopted_from.as_ref().is_some_and(|a| {
+                            a["providerSessionId"].as_str() == r.provider_session_id.as_deref()
+                        });
                         r.provider_session_id = Some(session);
                         true
                     }
                     _ => false,
                 };
+                if copied {
+                    let turn = state.turns.get(id).map(|t| t.id.clone());
+                    drop(state);
+                    self.publish(event(id, turn.as_deref(), "notice", json!({"tone": "warn",
+                        "text": "Claude continued this conversation as a copy with a new session ID (the original may be open in another app). The original conversation is unchanged."})), true);
+                    state = lock(&self.state);
+                }
                 if changed {
                     if let Err(message) = self.save(&state) {
                         *lock(&proc.failure) = Some(message);
@@ -1824,6 +1859,9 @@ impl Inner {
                         continue;
                     }
                 }
+            }
+            for signal in usage::observe(proc.provider, &value) {
+                self.usage_signal(&id, &proc, signal);
             }
             let outputs = match proc.provider {
                 Provider::Claude => session_parse::parse_claude(&value),
@@ -2241,16 +2279,19 @@ impl Inner {
             )
             .await?;
         session_policy::verify_codex_account(&account)?;
+        // 0.6: the plan snapshot the usage gate decides on (never fatal).
+        self.read_codex_limits(proc).await;
         let mut base = json!({"cwd": record.cwd, "sandbox": sandbox_mode(&record.access), "approvalPolicy": "never"});
         if let Some(model) = &record.model {
             base["model"] = json!(model);
         }
-        let (known, fork) = lock(&self.state)
+        let (known, fork, adopted) = lock(&self.state)
             .records
             .iter()
             .find(|r| r.id == record.id)
-            .map(|r| (r.thread_id.clone(), r.fork_from.clone()))
+            .map(|r| (r.thread_id.clone(), r.fork_from.clone(), r.adopted_from.clone()))
             .unwrap_or_default();
+        let mut fresh = false;
         let result = match known {
             // A fork's first launch copies its source thread (0.5).
             None if fork.is_some() => {
@@ -2293,6 +2334,12 @@ impl Inner {
                     .await
                 {
                     Ok(result) => result,
+                    // An adopted conversation is never silently replaced by a new thread.
+                    Err(problem)
+                        if adopted.as_ref().is_some_and(|a| a["providerSessionId"].as_str() == Some(thread.as_str())) =>
+                    {
+                        return Err(format!("Codex could not continue that conversation ({problem}). Nothing was sent; the conversation is unchanged."));
+                    }
                     Err(problem) => {
                         self.publish(
                             event(
@@ -2311,6 +2358,7 @@ impl Inner {
             }
             None => {
                 base["serviceName"] = json!("codaclauda");
+                fresh = true;
                 self.turn_rpc(&record.id, turn_id, proc, "thread/start", base)
                     .await?
             }
@@ -2333,6 +2381,11 @@ impl Inner {
             return Err("This turn was stopped while Codex was connecting.".into());
         }
         self.with_record(&record.id, |r| {
+            // A new thread starts at zero credits, so its first turn has a cost too.
+            if fresh || r.thread_id.as_deref() != Some(thread.as_str()) {
+                r.credits_micros = fresh.then_some(0);
+                r.last_turn_credits = None;
+            }
             r.thread_id = Some(thread);
             r.provider_session_id = Some(session);
         })?;
@@ -2464,6 +2517,18 @@ impl Inner {
         let model = word(&args["model"])?;
         let effort = word(&args["effort"])?;
         let shared_id = short(&args["sharedId"], 128);
+        // Set only by external.rs (adopt); the owner's session_start command strips it.
+        let adopted_from = args.get("adoptedFrom").filter(|v| v.is_object()).cloned();
+        let adopted_id = match &adopted_from {
+            None => None,
+            Some(a) => Some(
+                a["providerSessionId"]
+                    .as_str()
+                    .filter(|s| external::conversation_id(s))
+                    .ok_or_else(|| invalid("providerSessionId is not a conversation ID."))?
+                    .to_owned(),
+            ),
+        };
         let _lease =
             runtime_lease(&self.board).map_err(|message| ("SESSION_UNAVAILABLE", message))?;
         self.executable(provider)
@@ -2501,6 +2566,10 @@ impl Inner {
             // Set only by team.rs; the owner's session_start command strips it.
             started_by: args.get("startedBy").filter(|v| v.is_object()).cloned(),
             team_note: true,
+            // Claude resumes by session ID, Codex by thread ID (see claude_args / codex_handshake).
+            provider_session_id: adopted_id.clone().filter(|_| provider == Provider::Claude),
+            thread_id: adopted_id.filter(|_| provider == Provider::Codex),
+            adopted_from,
             access: access.into(),
             status: "idle".into(),
             created_at: now,
@@ -2880,12 +2949,26 @@ impl Inner {
         compact: bool,
     ) -> Result<(), String> {
         let provider = Provider::parse(&record.provider).ok_or("Unknown provider.")?;
+        // 0.6 usage setting: Claude decides from its last rate-limit event,
+        // before any process starts; Codex asks its account once started.
+        if provider == Provider::Claude {
+            self.claude_usage_gate(&record.id, turn_id).await?;
+            if !self.turn_active(&record.id, turn_id) {
+                return Ok(());
+            }
+        }
         let proc = match proc {
             Some(proc) => proc,
             None => self.launch(record, provider, turn_id, lease).await?,
         };
         if !self.turn_active(&record.id, turn_id) {
             return Ok(()); // stopped while the agent was starting
+        }
+        if provider == Provider::Codex {
+            self.codex_usage_gate(&record.id, &proc, turn_id).await?;
+            if !self.turn_active(&record.id, turn_id) {
+                return Ok(());
+            }
         }
         if compact {
             // Codex compact-now (0.5); the turn ends on its turn/completed
@@ -3475,9 +3558,11 @@ pub(crate) async fn session_list(app: tauri::AppHandle) -> Value {
 #[tauri::command]
 pub(crate) async fn session_start(app: tauri::AppHandle, mut args: Value) -> Value {
     let inner = host(&app);
-    // Only a team start (team.rs) records who started a session.
+    // Only a team start (team.rs) records who started a session, and only
+    // session_adopt (external.rs) names a conversation to continue.
     if let Some(fields) = args.as_object_mut() {
         fields.remove("startedBy");
+        fields.remove("adoptedFrom");
     }
     reply(inner.start(args).await)
 }

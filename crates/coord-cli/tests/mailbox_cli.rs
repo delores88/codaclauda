@@ -74,6 +74,29 @@ fn process_round_trip_preserves_utf8_idempotence_cursor_ack_and_reply() {
 }
 
 #[test]
+fn post_says_who_picks_it_up_and_a_bare_reply_answers_the_newest_message() {
+    let f = Fixture::new();
+    let (code, saved) = f.post("team-one", "codex-claudacoda", "codaclauda-team", "question", b"{}", &[]);
+    assert_eq!(code, 0);
+    assert_eq!(saved["data"]["delivery"]["state"], "app_not_running");
+    let beat = f.root.join("board/desktop-ui");
+    fs::create_dir_all(&beat).unwrap();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+    let heartbeat = serde_json::json!({"pid": 1, "at": now, "version": "0.6.0", "teamPollSeconds": 5, "wakePollSeconds": 60, "addresses": [], "team": true});
+    fs::write(beat.join("host-heartbeat.json"), heartbeat.to_string()).unwrap();
+    let (_, saved) = f.post("team-two", "codex-claudacoda", "codaclauda-team", "question", b"{}", &[]);
+    assert_eq!(saved["data"]["delivery"], serde_json::json!({"state": "received", "pickup_seconds": 5}));
+    let (_, saved) = f.post("plain-one", "codex-claudacoda", "owner", "question", b"Ready?", &[]);
+    assert_eq!(saved["data"]["delivery"]["state"], "passive");
+    let (code, reply) = f.post("reply-one", "owner", "codex-claudacoda", "reply", b"Yes.", &[]);
+    assert_eq!(code, 0);
+    assert_eq!(reply["data"]["reply_to"], "plain-one");
+    let (code, error) = f.post("reply-two", "owner", "codex-marketplace", "reply", b"Yes.", &[]);
+    assert_eq!(code, 2);
+    assert!(error["error"]["message"].as_str().unwrap().contains("--reply-to"));
+}
+
+#[test]
 fn claims_have_distinct_conflict_exit_and_release_allows_next_holder() {
     let f = Fixture::new();
     for name in ["alpha-agent", "beta-agent"] { assert_eq!(f.run(&["mailbox", "register", name, "--label", name]).0, 0); }

@@ -2,7 +2,8 @@
  *   Agents at once          CodaClauda chat sessions working together (session_limits_get/set; default Unlimited)
  *   Board requests at once  dedicated board requests running together (rpc policy / policy-set → concurrent)
  *   Grant defaults          what a new grant uses for every budget it leaves out (policy.grant_defaults)
- *   Wake loop guard         two sessions waking each other too often pause (wake_settings loopGuard)
+ *   Wake loop guard         two sessions waking each other often: notify you (0.6 default) or pause them
+ *                           (wake_settings loopGuard { on, mode: 'notify'|'pause', pairPerHour }, default on, notify, 60)
  * None is a safety boundary: scope, access and owner-only grants are unchanged. A grant keeps the budgets
  * it was created with; changing a default affects only grants created afterwards. */
 import { has as hasFeature, call as callFeature } from '../features.js';
@@ -10,6 +11,16 @@ import { BUDGETS, UNLIMITED, budgetField, budgetValue, budgetText, limitValue, w
 import { wake, normalizeGuard } from '../wake.js';
 
 export const LIMIT_MIN = { maxLive: 1, concurrent: 1, pairPerHour: 1 };
+export const GUARD_MODES = [
+  { id: 'notify', label: 'Notify', hint: 'Tell me once per pair and hour; they keep waking each other.' },
+  { id: 'pause', label: 'Pause', hint: 'Tell me, and stop them waking each other until older wakes age out.' },
+];
+
+/** "On: notify at 60 per hour." for a saved guard. */
+export function guardStatusText(guard) {
+  if (!guard?.on) return 'Off: no limit and no notice.';
+  return `On: ${guard.mode === 'pause' ? 'pause' : 'notify'} at ${guard.pairPerHour} per hour.`;
+}
 const MEMORY_HINT = 'Each one is a full agent process, so more at once uses more memory.';
 
 const unsupported = error => error?.code === 'UNSUPPORTED' || error?.code === 'MOCK_UNSUPPORTED' || /not found|unknown command|unsupported/i.test(String(error?.message || error || ''));
@@ -195,31 +206,34 @@ export function limitsSettings({ ui, bridge, store }) {
   const guardCount = h('input.input', { type: 'text', inputMode: 'numeric', autocomplete: 'off', 'aria-label': 'Wakes per pair per hour', style: { width: '90px' }, oninput: () => renderGuard() });
   const guardSave = h('button.btn.small.primary', { type: 'button', onclick: () => saveGuard() }, icon('check'), 'Save');
   const guardStatus = h('span.field-hint.ntfy-status', { role: 'status', style: { marginTop: '0' } });
-  const guardNode = h('div.setting-row',
+  let guardMode = 'notify';
+  const modeButtons = GUARD_MODES.map(m => h('button', { type: 'button', title: m.hint, 'aria-pressed': 'false', onclick: () => { guardMode = m.id; renderGuard(); } }, m.label));
+  const guardNode = h('div.setting-row', { style: { display: 'block' } },
     h('div.setting-text', h('strong', 'Wake loop guard'),
-      h('span.field-hint', 'Two CodaClauda sessions that wake each other this many times in an hour pause waking each other until older wakes age out; their messages wait unread and you get a notice in that chat (and on your phone if push is set up). Your own messages never count. Owner concurrency, teammate and access settings still apply when a session wakes.'),
+      h('span.field-hint', 'When two CodaClauda sessions wake each other this many times in an hour. Notify (the default): you get one notice in that chat (and on your phone if push is set up) and they keep going. Pause: they also stop waking each other until older wakes age out; their messages wait unread. Your own messages never count. Owner concurrency, teammate and access settings still apply when a session wakes.'),
       guardStatus),
-    h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: 'none', flexWrap: 'wrap' } },
-      h('label.switch', guardOn, h('span')), guardCount, h('span.muted', 'per hour'), guardSave));
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '10px' } },
+      h('label.switch', guardOn, h('span')), h('div.segmented', { role: 'group', 'aria-label': 'When the guard is reached' }, ...modeButtons), guardCount, h('span.muted', 'per hour'), guardSave));
   let guardSaved = null;
   function renderGuard() {
     const loaded = Boolean(guardSaved) && wake.supported();
     guardNode.hidden = !wake.supported();
     const count = wholeNumber(guardCount.value, LIMIT_MIN.pairPerHour);
-    const dirty = loaded && (guardOn.checked !== guardSaved.on || count !== guardSaved.pairPerHour);
+    const dirty = loaded && (guardOn.checked !== guardSaved.on || guardMode !== guardSaved.mode || count !== guardSaved.pairPerHour);
     guardOn.disabled = !loaded || guard.busy;
     guardCount.disabled = !loaded || guard.busy || !guardOn.checked;
+    GUARD_MODES.forEach((m, i) => { modeButtons[i].disabled = !loaded || guard.busy || !guardOn.checked; modeButtons[i].setAttribute('aria-pressed', String(guardMode === m.id)); });
     guardSave.disabled = !loaded || guard.busy || !dirty || count == null;
     guardStatus.classList.toggle('bad', loaded && count == null);
     guardStatus.textContent = !loaded ? (wake.error ? `Couldn't read the setting: ${wake.error}` : 'Reading…')
       : count == null ? 'Enter a whole number of wakes per hour (1 or more).'
-        : guard.busy ? 'Saving…' : dirty ? 'Not saved yet.' : guardSaved.on ? `On, ${guardSaved.pairPerHour} per hour.` : 'Off.';
+        : guard.busy ? 'Saving…' : dirty ? 'Not saved yet.' : guardStatusText(guardSaved);
   }
   function syncGuard() {
     if (guard.busy || !wake.loopGuard) { renderGuard(); return; }
     const fresh = normalizeGuard(wake.loopGuard);
-    if (!guardSaved || guardSaved.on !== fresh.on || guardSaved.pairPerHour !== fresh.pairPerHour) {
-      guardSaved = fresh; guardOn.checked = fresh.on; guardCount.value = String(fresh.pairPerHour);
+    if (!guardSaved || guardSaved.on !== fresh.on || guardSaved.mode !== fresh.mode || guardSaved.pairPerHour !== fresh.pairPerHour) {
+      guardSaved = fresh; guardOn.checked = fresh.on; guardMode = fresh.mode; guardCount.value = String(fresh.pairPerHour);
     }
     renderGuard();
   }
@@ -228,9 +242,9 @@ export function limitsSettings({ ui, bridge, store }) {
     if (count == null || guard.busy) return;
     guard.busy = true; renderGuard();
     try {
-      const saved = await wake.setLoopGuard({ on: guardOn.checked, pairPerHour: count });
+      const saved = await wake.setLoopGuard({ on: guardOn.checked, mode: guardMode, pairPerHour: count });
       guardSaved = null; guard.busy = false; syncGuard();
-      toast(saved.on ? `Wake loop guard: ${saved.pairPerHour} per hour` : 'Wake loop guard off', { kind: 'success', timeout: 3000 });
+      toast(saved.on ? `Wake loop guard: ${saved.mode === 'pause' ? 'pause' : 'notify'} at ${saved.pairPerHour} per hour` : 'Wake loop guard off', { kind: 'success', timeout: 3000 });
     } catch (error) {
       toast(`Couldn't save the wake loop guard: ${error?.message || error}`, { kind: 'error', timeout: 8000 });
     } finally { guard.busy = false; renderGuard(); }
@@ -242,7 +256,7 @@ export function limitsSettings({ ui, bridge, store }) {
     ...rows.map(row => row.node),
     defaultsNode,
     guardNode,
-    h('p.field-hint', 'Each grant can still set its own budgets in Agent setup → Grant & send. Who may start teammates is a per-project switch in Projects.'));
+    h('p.field-hint', 'Each grant can still set its own budgets in Agent setup → Grant & send. Who may start teammates: Team below, and per project in Projects.'));
 
   rows.forEach(render); renderDefaults(); renderGuard();
   // The board's active / waiting / queued counts arrive with each status poll.

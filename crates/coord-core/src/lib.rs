@@ -3,6 +3,7 @@ pub mod budget;
 pub mod files_io;
 #[cfg(test)]
 mod files_tests;
+pub mod heartbeat;
 #[cfg(test)]
 mod limits_tests;
 pub mod mailbox;

@@ -29,6 +29,7 @@ enum Action {
         command: MailboxAction,
     },
     /// Save a passive message. Its contents do not grant task authority.
+    /// The result's "delivery" says whether a running CodaClauda app will pick it up.
     Post {
         #[arg(long)]
         to: String,
@@ -40,6 +41,7 @@ enum Action {
         subject: String,
         #[arg(long)]
         body_file: PathBuf,
+        /// Message being answered. A reply without it answers the newest message from --to to --from.
         #[arg(long)]
         reply_to: Option<String>,
         #[arg(long)]

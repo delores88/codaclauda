@@ -29,6 +29,13 @@ or test passed. Inspect the returned request state and receipt. A timed-out
 `wait` returns `ok:true` with `data.timed_out:true`; it does not cancel the request.
 Requests accept at most 1 MiB of JSON stdin; the prompt limit is 32,000 bytes.
 
+Mailbox `post` (0.6) adds `data.delivery`: `received` with `pickup_seconds`
+when the running app polls the recipient, `app_not_running` with a `fix` when
+the recipient is `codaclauda-team` or one of the app's sessions and the app is
+not running, otherwise `passive`. The message is saved in every case. A
+`--kind reply` without `--reply-to` answers the newest message from `--to` to
+`--from`, or is refused naming `--reply-to`. See MAILBOX.md.
+
 ## Existing conversations (0.2 candidate)
 
 This path exchanges messages with explicitly registered conversations. It never
@@ -515,7 +522,9 @@ separator within 1 MiB); read from a different offset or ask the owner.`
 Private-key blocks are found by streaming the file for their BEGIN/END markers,
 and any part of a block inside the window is redacted, including a block with
 no END marker (to the end of the file). Redaction may remove slightly more than
-`redact` on the whole text; it never removes less.
+`redact` on the whole text; it never removes less. Key prefixes (`sk-`, `gh?_`,
+`Bearer`) count only at the start of a word or after `_`, so `task-...` and
+`desk-...` are ordinary text.
 
 `write_file` (delegations only) takes `path`, `content` (at most 8 MiB) and
 optional `expect_version`: `"sha256:<hex>"` from `read_file`, or `"absent"` for

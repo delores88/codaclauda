@@ -11,12 +11,20 @@ use std::{fs, sync::OnceLock, time::Duration};
 const NOTIFY_FILE: &str = "notify.json";
 const URL_LIMIT: usize = 512;
 
-#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct Settings {
     ntfy_url: Option<String>,
     on_finish: bool,
     on_error: bool,
+}
+
+/// 0.6: both pushes start on, so pasting a topic URL is the only step.
+/// Nothing is posted until the owner saves a URL; a saved file keeps its switches.
+impl Default for Settings {
+    fn default() -> Self {
+        Self { ntfy_url: None, on_finish: true, on_error: true }
+    }
 }
 
 /// An https topic URL without embedded credentials.
@@ -180,5 +188,6 @@ mod tests {
         let saved = json!({"ntfyUrl": null, "onFinish": true, "onError": false});
         let settings: Settings = serde_json::from_value(saved.clone()).unwrap();
         assert_eq!(json!(settings), saved);
+        assert_eq!(json!(Settings::default()), json!({"ntfyUrl": null, "onFinish": true, "onError": true}), "no URL, so nothing posts");
     }
 }

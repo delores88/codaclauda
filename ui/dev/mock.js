@@ -435,8 +435,9 @@ const sessionHandlers = {
     const store = sessions();
     const next = loopGuard();
     if (guard !== undefined) {
-      if (!guard || typeof guard !== 'object') throw coded('INVALID_ARGUMENTS', 'loopGuard must be an object with on and pairPerHour.');
+      if (!guard || typeof guard !== 'object') throw coded('INVALID_ARGUMENTS', 'loopGuard must be an object with on, mode and pairPerHour.');
       if (guard.on !== undefined) { if (typeof guard.on !== 'boolean') throw coded('INVALID_ARGUMENTS', 'loopGuard.on must be true or false.'); next.on = guard.on; }
+      if (guard.mode !== undefined) { if (!['notify', 'pause'].includes(guard.mode)) throw coded('INVALID_ARGUMENTS', 'loopGuard.mode must be "notify" or "pause".'); next.mode = guard.mode; }
       if (guard.pairPerHour !== undefined) { if (!Number.isSafeInteger(guard.pairPerHour) || guard.pairPerHour < 1) throw coded('INVALID_ARGUMENTS', 'pairPerHour must be a whole number from 1 to 9007199254740991.'); next.pairPerHour = guard.pairPerHour; }
     }
     if (enabled !== undefined) store.wakeEnabled = Boolean(enabled);
@@ -444,33 +445,73 @@ const sessionHandlers = {
     saveSessions();
     return { enabled: store.wakeEnabled !== false, loopGuard: { ...next } };
   },
-  /* 0.5 team starts: per-project switch (off by default) and guard (8 by default). */
-  team_settings_get: () => ({ address: 'codaclauda-team', projects: structuredClone(teamBook().projects), defaults: { agentsCanStart: false, maxAgentStartedLive: 8 } }),
+  /* 0.6 team starts: the owner's standing switch (on, Unlimited by default) covers every linked project
+   * without its own entry; an entry may override it. Like team.rs, get lists every linked project with its
+   * effective setting, followsDefault and autoRegistered. */
+  team_settings_get: () => {
+    const book = teamBook();
+    return { address: 'codaclauda-team', pollSeconds: 5, ownerDefault: { ...book.ownerDefault }, defaults: { ...book.ownerDefault }, projects: teamTargets(book) };
+  },
   team_settings_set: ({ project = {} }) => {
+    const book = teamBook();
+    if (project.ownerDefault !== undefined) {
+      const next = { ...book.ownerDefault }, input = project.ownerDefault;
+      if (!input || typeof input !== 'object') throw coded('INVALID_ARGUMENTS', 'ownerDefault must be an object with agentsCanStart and maxAgentStartedLive.');
+      if (input.agentsCanStart !== undefined) { if (typeof input.agentsCanStart !== 'boolean') throw coded('INVALID_ARGUMENTS', 'agentsCanStart must be true or false.'); next.agentsCanStart = input.agentsCanStart; }
+      if (input.maxAgentStartedLive !== undefined) next.maxAgentStartedLive = budget('maxAgentStartedLive', input.maxAgentStartedLive, 1);
+      book.ownerDefault = next;
+      writeJson(TEAM_KEY, book);
+      return { ownerDefault: { ...next } };
+    }
     const id = String(project.projectId || '').trim();
     if (!id) throw coded('INVALID_ARGUMENTS', 'projectId must name the project.');
-    const book = teamBook(), entry = { name: '', cwd: '', ids: [], agentsCanStart: false, maxAgentStartedLive: 8, ...book.projects[id] };
+    const entry = { name: '', cwd: '', ids: [], ...book.projects[id] };
     if (project.cwd) entry.cwd = String(project.cwd);
     if (project.name) entry.name = String(project.name);
     if (Array.isArray(project.ids)) entry.ids = project.ids.map(String).slice(0, 32);
+    if (project.useDefault === true) { delete entry.agentsCanStart; delete entry.maxAgentStartedLive; }
     if (project.agentsCanStart !== undefined) { if (typeof project.agentsCanStart !== 'boolean') throw coded('INVALID_ARGUMENTS', 'agentsCanStart must be true or false.'); entry.agentsCanStart = project.agentsCanStart; }
     if (project.maxAgentStartedLive !== undefined) entry.maxAgentStartedLive = budget('maxAgentStartedLive', project.maxAgentStartedLive, 1);
-    if (entry.agentsCanStart && !entry.cwd) throw coded('PROJECT_MISSING', 'The project needs a local folder.');
+    if (entry.agentsCanStart === true && !entry.cwd) throw coded('PROJECT_MISSING', 'The project needs a local folder.');
     entry.updatedAt = Date.now();
-    book.projects[id] = entry;
+    const follows = entry.agentsCanStart === undefined && entry.maxAgentStartedLive === undefined && !entry.autoAccess;
+    if (project.remove === true || follows) delete book.projects[id]; else book.projects[id] = entry;
     writeJson(TEAM_KEY, book);
-    return { projectId: id, project: structuredClone(entry) };
+    const view = teamTargets(book)[id] || teamView(book, entry);
+    return { projectId: id, project: project.remove === true ? { ...view, removed: true } : view };
   },
 };
-const loopGuard = () => ({ on: true, pairPerHour: 20, ...(sessions().loopGuard || {}) });
+const loopGuard = () => ({ on: true, mode: 'notify', pairPerHour: 60, ...(sessions().loopGuard || {}) });
 const TEAM_KEY = 'mock.team';
-const teamBook = () => { const book = readJson(TEAM_KEY, null) || {}; book.projects ||= {}; return book; };
-/** Preview: an agent's codaclauda-team request starting a teammate (codaMock.teamStart()). */
+const teamBook = () => { const book = readJson(TEAM_KEY, null) || {}; book.projects ||= {}; book.ownerDefault = { agentsCanStart: true, maxAgentStartedLive: 'unlimited', ...(book.ownerDefault || {}) }; return book; };
+const mockPath = path => String(path || '').replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase();
+const teamView = (book, p) => ({
+  name: p.name, cwd: p.cwd, ids: p.ids || [], agentsCanStart: p.agentsCanStart ?? book.ownerDefault.agentsCanStart,
+  maxAgentStartedLive: p.maxAgentStartedLive ?? book.ownerDefault.maxAgentStartedLive,
+  followsDefault: p.agentsCanStart === undefined && p.maxAgentStartedLive === undefined, autoRegistered: Boolean(p.autoAccess), ...(p.autoAccess ? { access: p.autoAccess } : {}),
+});
+/** Entries first, then the preview's linked folders (mock desktop state) that no entry covers. */
+function teamTargets(book) {
+  const out = Object.fromEntries(Object.entries(book.projects).map(([id, p]) => [id, teamView(book, p)]));
+  const local = readJson('mock.desktop', null)?.projects?.local || [];
+  for (const item of local) {
+    const id = `local:${mockPath(item.path)}`;
+    if (Object.entries(out).some(([key, p]) => key === id || p.ids.includes(id) || mockPath(p.cwd) === mockPath(item.path))) continue;
+    out[id] = teamView(book, { name: item.name || item.path.split(/[\\/]/).pop(), cwd: item.path, ids: [id] });
+  }
+  return out;
+}
+/** Preview: an agent's codaclauda-team request starting a teammate (codaMock.teamStart()). A folder path on
+ *  the preview Desktop registers like team.rs does (Read unless it is under C:\Users\Ben). */
 function mockTeamStart(projectId) {
   const book = teamBook();
-  const [id, entry] = Object.entries(book.projects).find(([key, p]) => p.agentsCanStart && (!projectId || key === projectId)) || [];
-  if (!id) return 'Turn on Agents can start teammates for a project first (Projects → Teammates).';
-  const { session } = sessionHandlers.session_start({ args: { provider: 'codex', projectId: id, cwd: entry.cwd, access: 'read', title: 'Reviewer (started by an agent)', startedBy: { address: 'claude-codaclauda', messageId: `mock-team-${hex(3)}`, at: Date.now() } } });
+  if (projectId && /^[A-Za-z]:\\/.test(projectId) && !teamTargets(book)[`local:${mockPath(projectId)}`]) {
+    book.projects[`local:${mockPath(projectId)}`] = { name: projectId.split('\\').pop(), cwd: projectId, ids: [`local:${mockPath(projectId)}`], autoAccess: /^c:\\users\\ben\\/i.test(projectId) ? 'full' : 'read', updatedAt: Date.now() };
+    writeJson(TEAM_KEY, book);
+  }
+  const [id, entry] = Object.entries(teamTargets(book)).find(([key, p]) => p.agentsCanStart && (!projectId || key === projectId || key === `local:${mockPath(projectId)}`)) || [];
+  if (!id) return 'Agents cannot start teammates there: turn on Settings → Team, or the project in Projects → Teammates.';
+  const { session } = sessionHandlers.session_start({ args: { provider: 'codex', projectId: id, cwd: entry.cwd, access: entry.access || 'read', title: 'Reviewer (started by an agent)', startedBy: { address: 'claude-codaclauda', messageId: `mock-team-${hex(3)}`, at: Date.now() } } });
   submit(session.id, 'claude-codaclauda asked CodaClauda to start you. Review the diff.', [], { kind: 'team', from: 'claude-codaclauda' });
   return session.mailboxAddress;
 }
@@ -611,6 +652,14 @@ const MCP_PRESETS = [
   { id: 'playwright', label: 'Playwright MCP (browser automation)', name: 'playwright', command: 'cmd', args: ['/c', 'playwright-mcp'], env: {}, install: 'npm i -g @playwright/mcp', notes: 'Preview copy of the engine preset: install it yourself first; the npm bin is playwright-mcp, run through cmd /c on Windows.', source: 'https://registry.npmjs.org/@playwright/mcp/latest' },
   { id: 'windows-mcp', label: 'Windows-MCP (desktop control, CursorTouch)', name: 'windows-mcp', command: 'windows-mcp', args: ['serve'], env: {}, install: 'uv tool install windows-mcp', notes: 'Preview copy of the engine preset: install it yourself first with uv tool install windows-mcp; CodaClauda never runs uvx or downloads it.', source: 'https://github.com/CursorTouch/Windows-MCP#readme' },
 ];
+const FAKE_EXTERNAL_IDS = ['3f1c2a9e-7b4d-4e21-9a0c-5d8e6f1b2c3a', 'a7e9d1c4-2b6f-4a83-8c15-9e0d3b7f4a62', '0199c3b2-5e7a-7d41-b8f0-2c6a9e4d1f73', '0199b8e1-4c2d-7a95-a3e6-8f1d0c5b7e24', 'c2d4e6f8-1a3b-4c5d-8e7f-9a0b1c2d3e4f'];
+const USAGE_KEY = 'mock.usage';
+/* Like usage.rs: every flag is on unless saved exactly false. */
+const usageSettings = () => {
+  const saved = readJson(USAGE_KEY, {}) || {};
+  const on = value => value !== false;
+  return { codex: { useCredits: on(saved.codex?.useCredits), useResets: on(saved.codex?.useResets) }, claude: { useCredits: on(saved.claude?.useCredits) }, error: null };
+};
 const busy = id => sessionTurns.has(id) || Boolean(sessionQueues.get(id)?.length);
 const needsWorktree = session => { if (!session.worktreePath) throw coded('NO_WORKTREE', 'This chat does not have its own worktree.'); };
 const MOCK_PATCH = 'diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # Project\n-Old line\n+New line from the agent\n+Another added line\n \n diff --git a/src/new.js b/src/new.js\nnew file mode 100644\n--- /dev/null\n+++ b/src/new.js\n@@ -0,0 +1,2 @@\n+export const hello = () => \'preview\';\n+// mock data\n';
@@ -692,9 +741,46 @@ const v05Handlers = {
     const fake = [
       ['claude', 'C:\\Users\\Ben\\Desktop\\CodaClauda', 3], ['claude', 'D:\\PhaseForge-claude', 40], ['codex', 'C:\\Users\\Ben\\Desktop\\CodaClauda', 9],
       ['codex', 'C:\\Users\\Ben\\Desktop\\DGXBridge', 300], ['claude', 'C:\\Users\\Ben\\Desktop\\TuningSpork', 2900],
-    ].map(([provider, cwd, minutesAgo]) => ({ provider, cwd, projectHint: cwd.split('\\').pop(), modifiedAt: at - minutesAgo * 60e3, active: minutesAgo < 15, owned: false }));
-    const mine = sessions().sessions.filter(s => s.providerSessionId).map(s => ({ provider: s.provider, cwd: s.cwd, projectHint: s.cwd.split(/[\\/]/).pop(), modifiedAt: s.lastActivityAt, active: at - s.lastActivityAt < 15 * 60e3, owned: owned.has(s.providerSessionId) }));
+    ].map(([provider, cwd, minutesAgo], i) => ({ provider, cwd, projectHint: cwd.split('\\').pop(), modifiedAt: at - minutesAgo * 60e3, active: minutesAgo < 15, owned: owned.has(FAKE_EXTERNAL_IDS[i]), providerSessionId: FAKE_EXTERNAL_IDS[i] }));
+    const mine = sessions().sessions.filter(s => s.providerSessionId && !FAKE_EXTERNAL_IDS.includes(s.providerSessionId)).map(s => ({ provider: s.provider, cwd: s.cwd, projectHint: s.cwd.split(/[\\/]/).pop(), modifiedAt: s.lastActivityAt, active: at - s.lastActivityAt < 15 * 60e3, owned: owned.has(s.providerSessionId), providerSessionId: s.providerSessionId }));
     return { sessions: [...fake, ...mine].sort((a, b) => b.modifiedAt - a.modifiedAt) };
+  },
+  /* 0.6 (H6): resume that exact provider conversation as a CodaClauda session, wake on, at the project's
+   * current access (Read when the folder is not a linked project). */
+  session_adopt: input => {
+    const a = input?.args && typeof input.args === 'object' ? input.args : input || {};
+    if (!['claude', 'codex'].includes(a.provider)) throw coded('INVALID_ARGUMENTS', 'provider must be claude or codex.');
+    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(String(a.providerSessionId || ''))) throw coded('INVALID_ARGUMENTS', 'providerSessionId must name the provider conversation.');
+    if (!/^[A-Za-z]:\\/.test(String(a.cwd || ''))) throw coded('PROJECT_MISSING', `${a.cwd || 'That folder'} is not an existing project folder.`);
+    const existing = sessions().sessions.find(s => s.provider === a.provider && (s.providerSessionId === a.providerSessionId || s.threadId === a.providerSessionId));
+    if (existing) return { session: listed(existing), existing: true };   // like external.rs: never a second copy
+    const linked = (readJson('mock.desktop', null)?.projects?.local || []).find(p => mockPath(p.path) === mockPath(a.cwd));
+    const level = linked ? readJson('mock.desktop', null)?.projectAccess?.[`local:${mockPath(a.cwd)}`]?.level || 'full' : 'read';
+    const { session } = sessionHandlers.session_start({ args: { provider: a.provider, projectId: linked ? `local:${mockPath(a.cwd)}` : a.cwd, cwd: a.cwd, access: level, title: a.title || `Adopted ${agentName(a.provider)} chat` } });
+    const record = findSession(session.id);
+    Object.assign(record, { providerSessionId: a.providerSessionId, threadId: a.provider === 'codex' ? a.providerSessionId : null, adoptedFrom: { provider: a.provider, providerSessionId: a.providerSessionId } });
+    saveSessions();
+    return { session: listed(record) };
+  },
+  /* 0.6 usage setting (usage.rs): app-wide, all on by default; the preview never contacts a provider. */
+  usage_settings_get: () => usageSettings(),
+  usage_settings_set: input => {
+    const a = input?.args && typeof input.args === 'object' ? input.args : input || {};
+    if (!['claude', 'codex'].includes(a.provider)) throw coded('INVALID_ARGUMENTS', 'provider must be claude or codex.');
+    if (a.provider === 'claude' && a.useResets != null) throw coded('INVALID_ARGUMENTS', 'Claude has no weekly-reset credits.');
+    if ([a.useCredits, a.useResets].some(v => v != null && typeof v !== 'boolean')) throw coded('INVALID_ARGUMENTS', 'Each switch must be true or false.');
+    const settings = usageSettings();
+    if (a.useCredits != null) settings[a.provider].useCredits = a.useCredits;
+    if (a.provider === 'codex' && a.useResets != null) settings.codex.useResets = a.useResets;
+    writeJson(USAGE_KEY, { codex: settings.codex, claude: settings.claude });
+    return settings;
+  },
+  usage_status: input => {
+    const provider = (input?.args && typeof input.args === 'object' ? input.args : input || {}).provider;
+    if (provider === 'claude') return { provider, snapshot: null, at: null, limited: false, overage: false, resets: 'unsupported' };
+    if (provider !== 'codex') throw coded('INVALID_ARGUMENTS', 'provider must be claude or codex.');
+    const at = Date.now(), soon = Math.round(at / 1000) + 3 * 3600;
+    return { provider, at, limited: false, resetsAt: null, snapshot: { ordinaryUsageAllowed: true, rateLimits: { planType: 'pro', primary: { usedPercent: 41, windowDurationMins: 300, resetsAt: soon }, secondary: { usedPercent: 76, windowDurationMins: 10080, resetsAt: soon + 3 * 86400 }, credits: { hasCredits: true, unlimited: false, balance: '11.86' }, spendControlReached: false, rateLimitReachedType: null }, rateLimitResetCredits: { availableCount: 1 } } };
   },
   mcp_servers_get: ({ projectId }) => ({ servers: readJson(MCP_KEY, {})[projectId] || [], presets: structuredClone(MCP_PRESETS) }),
   mcp_servers_set: ({ projectId, servers = [] }) => {
@@ -719,7 +805,7 @@ const v05Handlers = {
     writeJson(LIMITS_KEY, value);
     return { maxLive: value, queueMax: QUEUE_MAX };
   },
-  notify_settings_get: () => readJson(NOTIFY_KEY, { ntfyUrl: null, onFinish: false, onError: false }),
+  notify_settings_get: () => readJson(NOTIFY_KEY, { ntfyUrl: null, onFinish: true, onError: true }),   // 0.6: on until a URL is the only step
   notify_settings_set: ({ ntfyUrl = null, onFinish = false, onError = false }) => {
     const url = String(ntfyUrl || '').trim();
     if (url) {
