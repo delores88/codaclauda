@@ -152,9 +152,8 @@ export const desktop = {
   externalSessionsList: () => invoke('external_sessions_list'),
   /** 0.6: continue a conversation found on this PC as a separate, labeled copy (Claude --resume --fork-session /
    *  Codex thread/fork), wake on, at the project's current access (Read outside linked or own folders) → { session, copy: true }.
-   *  The original is never changed and its app is not woken. mode 'continue' only returns a conversation CodaClauda already
-   *  holds as a session ({ session, existing: true }); otherwise it is refused with OWNERSHIP_UNKNOWN, because CodaClauda
-   *  can't establish that no other app still writes it. */
+   *  The original is never changed and its app is not woken. mode 'continue' is always refused with OWNERSHIP_UNKNOWN,
+   *  because CodaClauda can't establish who owns another app's conversation (an id match is not provenance). */
   sessionAdopt: ({ provider, providerSessionId, cwd, title = null, mode = null }) => invoke('session_adopt', { provider, providerSessionId, cwd, title: title || null, mode: mode || null }),
   /** 0.6 Wake by mail for an existing Codex desktop chat (src-tauri/src/session_host/desktop_queue.rs). New board mail for a
    *  bound address runs Codex's own `codex queue --thread <id> --message <notice>` once per batch: counts and sender names only,

@@ -14,9 +14,8 @@
  *   prStatus           session_pr_status({ id }) → { url|null, state|null, checks:[{ name, status, conclusion }] }
  *   compact            session_compact({ id }) → { ok: true } | error COMPACT_UNSUPPORTED
  *   external           external_sessions_list() → { sessions:[{ provider, cwd, projectHint, modifiedAt, active, owned, providerSessionId }] }
- *   adopt              session_adopt({ provider, providerSessionId, cwd, title?, mode?: 'fork'|'continue' }) → { session, existing?, copy? } (0.6);
- *                      the default (or 'fork') makes a separate, labeled copy; 'continue' returns the CodaClauda session that
- *                      already holds the conversation, else error OWNERSHIP_UNKNOWN (never continued in place)
+ *   adopt              session_adopt({ provider, providerSessionId, cwd, title?, mode?: 'fork'|'continue' }) → { session, copy: true } (0.6);
+ *                      the default (or 'fork') makes a separate, labeled copy; 'continue' is always error OWNERSHIP_UNKNOWN
  *   desktopBindings    desktop_bindings_get() → { bindings:[{ address, provider, threadId, cwd, projectId, boundAt, cursor, last }], wakeEnabled, pollSeconds } (0.6)
  *   desktopBind        desktop_bind({ address, threadId }) → { binding, bindings } (0.6, owner only)
  *   desktopUnbind      desktop_unbind({ address }) → { unbound, bindings } (0.6)

@@ -15,8 +15,18 @@ supported command, "Queue a message for an existing session"
 codex-cli 0.163):
 
 ```text
-codex queue --thread <thread uuid> --message "<notice>"
+codex queue --remote unix:// --thread <thread uuid> --message "<notice>"
 ```
+
+`--remote unix://` targets the local Codex app-server endpoint explicitly.
+Without it, codex-cli 0.163 falls back to a temporary embedded app server when
+no local daemon answers ("local daemon connection failed; starting embedded
+app server"), which would not be your desktop chat. With it, an unavailable
+endpoint makes the delivery fail and be reported as unreachable; it is never
+rerouted. Whether the Codex desktop app keeps that local endpoint running is
+not yet established on this PC, so the first delivery receipt is the evidence.
+The receipt states only what Codex reported: `queued` means the command was
+accepted, not that the chat ran a turn or read its mail.
 
 The notice is information only. It gives the number of new messages, the
 address and the senders' board names, for example:
@@ -109,8 +119,7 @@ to or confused with the original.
 
 CodaClauda never continues another app's conversation in place. A
 conversation file or a process snapshot alone does not establish that no
-other app still writes it, so `mode: "continue"` only returns the CodaClauda
-session that already holds that conversation (`existing: true`). Otherwise it
-is refused with `OWNERSHIP_UNKNOWN` before the conversation is looked up, and
-nothing is started or changed. Running > On this PC offers only Continue as a
+other app still writes it, and an id or project match is not ownership
+provenance, so `mode: "continue"` is always refused with `OWNERSHIP_UNKNOWN`
+before the conversation is looked up, and nothing is started or changed. Running > On this PC offers only Continue as a
 copy, with one confirmation.

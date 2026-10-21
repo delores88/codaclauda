@@ -17,9 +17,8 @@
 //! place. Continue (the default mode, or "fork") makes a separate, labeled copy
 //! on its first launch by the existing fork path (Claude `--resume <id>
 //! --fork-session`, Codex `thread/fork`); the original is never changed. Mode
-//! "continue" only returns the CodaClauda session that already holds the
-//! conversation and otherwise refuses with OWNERSHIP_UNKNOWN. Neither wakes or
-//! updates the other app's window.
+//! "continue" is always refused with OWNERSHIP_UNKNOWN: an id or project match
+//! is not ownership provenance. Nothing wakes or updates the other app's window.
 
 use super::{Failure, Inner, Provider, Record, host, lock, now_ms, random_hex, reply};
 use serde_json::{Value, json};
@@ -397,7 +396,7 @@ fn fork_mode(mode: Option<&str>) -> Result<bool, Failure> {
 /// conversation file or process snapshot alone does not establish.
 fn ownership_unknown(provider: Provider) -> Failure {
     ("OWNERSHIP_UNKNOWN", format!(
-        "CodaClauda can't confirm that no other app still writes this {} conversation, so it doesn't continue it in place. Continue makes a separate, labeled copy instead; the original stays as it is in its own app.",
+        "CodaClauda can't establish who owns this {} conversation, so it never continues it in place. Continue makes a separate, labeled copy instead; the original stays as it is in its own app.",
         provider.label()
     ))
 }
@@ -415,20 +414,9 @@ impl Inner {
         if cwd.is_empty() || cwd.len() > 4096 || !Path::new(cwd).is_absolute() || !Path::new(cwd).is_dir() {
             return Err(("PROJECT_MISSING", format!("{cwd} is not an existing folder on this PC.")));
         }
-        // Continuing it twice would interleave two CodaClauda chats in one conversation.
-        let existing = lock(&self.state)
-            .records
-            .iter()
-            .find(|r| {
-                r.provider == provider.name()
-                    && (r.provider_session_id.as_deref() == Some(session) || r.thread_id.as_deref() == Some(session))
-            })
-            .cloned();
-        if let Some(record) = existing.filter(|_| !copy) {
-            return Ok(json!({"session": record, "existing": true}));
-        }
-        // Nothing here shows which app still writes the conversation, so it is
-        // never continued in place; the default copy is offered instead.
+        // Nothing here proves which app writes the conversation (an id or
+        // project match is not provenance, Codex 847), so it is never continued
+        // or reused in place; the default copy is the only supported action.
         if !copy {
             return Err(ownership_unknown(provider));
         }
@@ -503,8 +491,8 @@ impl Inner {
 
 /// { provider, providerSessionId, cwd, title?, mode? } → { session, existing?, copy? }:
 /// start a separate, labeled CodaClauda copy of an existing Claude Code or
-/// Codex conversation (the default, or mode "fork"). Mode "continue" returns
-/// the CodaClauda session that already holds it, else OWNERSHIP_UNKNOWN.
+/// Codex conversation (the default, or mode "fork"). Mode "continue" is
+/// always refused with OWNERSHIP_UNKNOWN.
 #[tauri::command]
 pub(crate) async fn session_adopt(
     app: tauri::AppHandle,
@@ -575,7 +563,7 @@ mod tests {
         // Without a CodaClauda session holding it, continuing in place is refused and names the copy.
         let refusal = ownership_unknown(Provider::Codex);
         assert_eq!(refusal.0, "OWNERSHIP_UNKNOWN");
-        assert!(refusal.1.contains("this Codex conversation") && refusal.1.contains("doesn't continue it in place"));
+        assert!(refusal.1.contains("this Codex conversation") && refusal.1.contains("never continues it in place"));
         assert!(refusal.1.contains("separate, labeled copy") && refusal.1.contains("the original stays as it is"));
         assert!(ownership_unknown(Provider::Claude).1.contains("this Claude Code conversation"));
 

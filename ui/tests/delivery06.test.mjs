@@ -71,7 +71,7 @@ test('the preview mock has every changed command, with the engine shapes', () =>
   // 'continue' without a CodaClauda session holding it is refused, never resumed in place.
   const cwd = row.cwd;
   assert.throws(() => desktop.session_adopt({ provider: 'codex', providerSessionId: thread, cwd, mode: 'continue' }),
-    e => e.code === 'OWNERSHIP_UNKNOWN' && /doesn't continue it in place/.test(e.message) && /separate, labeled copy/.test(e.message));
+    e => e.code === 'OWNERSHIP_UNKNOWN' && /never continues it in place/.test(e.message) && /separate, labeled copy/.test(e.message));
   const copy = desktop.session_adopt({ provider: 'codex', providerSessionId: thread, cwd });
   assert.deepEqual([copy.copy, copy.session.title, copy.session.providerSessionId, copy.session.threadId, copy.session.forkFrom, copy.session.adoptedFrom.copy], [true, 'Codex conversation (copy)', null, null, thread, true]);
   // A copy never holds the original, so 'continue' is still refused.

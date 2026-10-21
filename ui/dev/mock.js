@@ -891,16 +891,14 @@ const v05Handlers = {
   /* 0.6 (H6): Continue as a copy, like external.rs. The default (or mode 'fork') starts a separate copy as a
    * CodaClauda session, wake on, at the project's current access (Read when the folder is not a linked project):
    * no provider ids, forkFrom = the original, adoptedFrom.copy; the original is never touched. Mode 'continue'
-   * returns the CodaClauda session that already holds the conversation, else OWNERSHIP_UNKNOWN. */
+   * is always refused with OWNERSHIP_UNKNOWN (an id match is not ownership provenance). */
   session_adopt: input => {
     const a = input?.args && typeof input.args === 'object' ? input.args : input || {};
     if (!['claude', 'codex'].includes(a.provider)) throw coded('INVALID_ARGUMENTS', 'provider must be claude or codex.');
     if (!/^[A-Za-z0-9._:-]{1,128}$/.test(String(a.providerSessionId || ''))) throw coded('INVALID_ARGUMENTS', 'That is not a Claude Code or Codex conversation id.');
     if (a.mode != null && !['', 'continue', 'fork'].includes(String(a.mode).trim())) throw coded('INVALID_ARGUMENTS', 'mode must be continue or fork.');
     const fork = String(a.mode || '').trim() !== 'continue';
-    const existing = sessions().sessions.find(s => s.provider === a.provider && (s.providerSessionId === a.providerSessionId || s.threadId === a.providerSessionId));
-    if (existing && !fork) return { session: listed(existing), existing: true };   // never a second writer
-    if (!fork) throw coded('OWNERSHIP_UNKNOWN', `CodaClauda can't confirm that no other app still writes this ${agentName(a.provider)} conversation, so it doesn't continue it in place. Continue makes a separate, labeled copy instead; the original stays as it is in its own app.`);
+    if (!fork) throw coded('OWNERSHIP_UNKNOWN', `CodaClauda can't establish who owns this ${agentName(a.provider)} conversation, so it never continues it in place. Continue makes a separate, labeled copy instead; the original stays as it is in its own app.`);
     const row = v05Handlers.external_sessions_list().sessions.find(e => e.provider === a.provider && e.providerSessionId === a.providerSessionId);
     if (!row) throw coded('SESSION_NOT_FOUND', `That ${agentName(a.provider)} conversation is no longer on this PC.`);
     if (!/^[A-Za-z]:\\/.test(String(a.cwd || ''))) throw coded('PROJECT_MISSING', `${a.cwd || 'That folder'} is not an existing project folder.`);
