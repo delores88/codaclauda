@@ -28,13 +28,33 @@ process is selected by name or recycled PID. The adapter does not stop another
 provider process, session or build. Hosts without this Windows containment fail
 closed in version 1.
 
-The supervisor enforces 1–2592000 seconds (30 days) and 1–10000 turns per launch,
-taken from the owner's authorization, plus a 16 GiB combined-output runaway guard
-and 128 MiB per unfinished JSON line. Provider probes have independent ten-second timeouts
-and a 1 MiB output cap. They make no model requests. A heartbeat is emitted while
-the model runs. A clean process exit without an actual session ID and provider
-terminal event is a failure, not an answer receipt. Unknown launch outcomes must
-be reconciled by the durable worker; this module never automatically retries.
+The run time and turn limit come from the owner's authorization. The run time
+is the smaller of the grant's `timeout_seconds` and its remaining lifetime;
+`"unlimited"` on both means no deadline. The deadline is computed with checked
+arithmetic before launch, so an unrepresentable one is refused with
+`timeout_seconds is too large to schedule; choose a smaller value or
+"unlimited"` rather than treated as unlimited.
+
+Current (policy_version 1) grants have no total-output cap. Provider stdout is
+split into newline-terminated records as it arrives; a record up to 64 MiB is
+parsed normally. A single record larger than that frame is streamed, with
+bounded memory, to `<run_dir>/oversized-<n>.jsonl` in the request's private run
+directory, and the run is stopped with `stop_reason`
+`provider_record_too_large` and the blocker `Provider sent a single record
+larger than 64 MiB; it was saved to <path> and the run was stopped so no result
+is lost. Inspect it, then retry.` A record is never skipped while a run reports
+success. That file is raw provider output kept owner-local with the board.
+
+Grants created before 0.5 keep their 0.4.0 supervisor limits: at most 3600
+seconds and 12 turns, a 1 MiB unfinished stream line
+(`provider_line_limit_exceeded`) and 8 MiB of combined output
+(`output_limit_exceeded`), each of which stops the run.
+
+Provider probes have independent ten-second timeouts and a 1 MiB output cap.
+They make no model requests. A heartbeat is emitted while the model runs. A
+clean process exit without an actual session ID and provider terminal event is
+a failure, not an answer receipt. Unknown launch outcomes must be reconciled by
+the durable worker; this module never automatically retries.
 
 Only metadata is emitted for provider/tool events; full tool arguments and
 provider transcripts are not copied into public receipts. Known credential
@@ -51,7 +71,7 @@ The adapter uses:
 --tools "" --allowedTools mcp__codaclauda__*
 --permission-mode dontAsk --permission-prompts none
 --disable-slash-commands --no-chrome
---output-format stream-json --verbose --max-turns <limit>
+--output-format stream-json --verbose [--max-turns <limit>]
 --session-id <new-uuid>
 ```
 
@@ -76,8 +96,9 @@ from child environments without inspecting their values.
 The UUID passed at launch is only a proposal until a real provider event reports
 the session ID. Result events supply success/error, token/model usage, turn count
 and optional `total_cost_usd`. That dollar value is a provider estimate, not an
-invoice. Version 1 enforces the provider turn limit and supervisor deadline; it
-does not advertise a hard dollar or token limit.
+invoice. A finite owner turn limit is passed as `--max-turns`; an unlimited one
+omits the flag, so Claude applies no turn cap. The supervisor deadline applies
+separately. No hard dollar or token limit is advertised.
 
 Reference: [Claude CLI](https://code.claude.com/docs/en/cli-reference),
 [programmatic runs](https://code.claude.com/docs/en/headless),
@@ -97,7 +118,9 @@ tools. `approval_policy="never"` remains in force globally. The invocation sets
 `mcp_servers.codaclauda.default_tools_approval_mode="prompt"`, sets
 `enabled_tools` to `get_context`, `list_files`, `read_file`, `write_file`, `ask`,
 `review`, `delegate`, `wait`, `messages`, `cancel`, `spark_status`, `spark_run`,
-`spark_wait`, `spark_logs`, and `spark_cancel`, then sets each listed tool's
+`spark_wait`, `spark_logs`, and `spark_cancel`, plus `write_begin`,
+`write_chunk`, `write_commit` and `write_abort` for grants created by 0.5 or
+later (a 0.4 grant keeps exactly the earlier list), then sets each listed tool's
 `mcp_servers.codaclauda.tools.<tool>.approval_mode="approve"`. This allows only
 those owned tools to reach the server without another provider prompt. The
 server still validates the capability, grant scope, allowed paths, request kind,
@@ -147,9 +170,11 @@ failure, not permission to widen access.
 `thread.started.thread_id` supplies actual session identity. Agent-message items
 supply the answer; MCP items supply tool-call evidence; `turn.completed.usage`
 supplies observed token usage. The CLI does not provide this adapter with a
-reliable dollar cost or hard per-request turn/token ceiling. Those fields are
-unavailable. Owner grant limits still bound peer requests, hops, concurrency and
-wall time in the CodaClauda core.
+reliable dollar cost or hard per-request turn/token ceiling: `codex exec --help`
+of codex-cli 0.163.0-alpha.10.2 lists no turn-limit option, so `max_turns` is
+not enforced for Codex runs. Those fields are unavailable. Owner grant limits
+still bound peer requests, hops, tool calls, concurrency and wall time in the
+CodaClauda core.
 
 Reference: [noninteractive mode](https://learn.chatgpt.com/docs/non-interactive-mode),
 [configuration](https://learn.chatgpt.com/docs/config-file/config-reference),

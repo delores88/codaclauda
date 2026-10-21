@@ -244,11 +244,11 @@ fn presets() -> Value {
             "id": "windows-mcp",
             "label": "Windows-MCP (desktop control, CursorTouch)",
             "name": "windows-mcp",
-            "command": "uvx",
-            "args": ["windows-mcp", "serve"],
+            "command": "windows-mcp",
+            "args": ["serve"],
             "env": {},
-            "install": "pip install uv  (the README also requires Python 3.14+)",
-            "notes": "CursorTouch's Windows-MCP (MIT, third party) moves the mouse, types and reads the screen with your rights while it runs. Its README starts it with uvx windows-mcp serve. uvx fetches the windows-mcp package from PyPI on first use, so run that command once yourself in a terminal before adding it here. CodaClauda does not install or update it.",
+            "install": "uv tool install windows-mcp",
+            "notes": "CursorTouch's Windows-MCP (MIT, third party) moves the mouse, types and reads the screen with your rights while it runs. Install it yourself first in a terminal with uv tool install windows-mcp (its README also needs Python 3.14+ and uv); that adds the windows-mcp command this preset runs as windows-mcp serve. Add the preset only after you installed it. CodaClauda never runs uvx, downloads, installs or updates it.",
             "source": "https://github.com/CursorTouch/Windows-MCP#readme"
         }
     ])

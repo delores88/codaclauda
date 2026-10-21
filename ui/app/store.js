@@ -12,6 +12,8 @@ import { agentAvatar, normalizeAvatar, hash } from './avatar/spec.js';
 import { toMs } from './ui.js';
 import { sparkLink, sparkFresh, jobRunning, jobEndSec } from './spark-link.js';
 import { accessFor, normalizeLevel } from './access.js';
+import { expiryMs, liveGrantUsable } from './budgets.js';
+import { TEAM_ADDRESS } from './team.js';
 
 const OWNER = 'owner';
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'needs-owner']);
@@ -19,8 +21,6 @@ const RUNNING = new Set(['delivered', 'acknowledged', 'running']);
 const ACTIVE_WINDOW = 20 * 60e3;   // agent counts as "working" this long after its last activity
 const AWAKE_WINDOW = 3 * 3600e3;   // and "awake" this long; otherwise "powered down"
 const PROJECT_SIGNAL_WINDOW = 2 * 3600e3;
-/** Live-chat grant: generous owner defaults (1000 replies, 4 h per reply, 7 days, 200 turns). */
-const LIVE_GRANT = { max_requests: 1000, timeout_seconds: 14400, expires_seconds: 604800, max_turns: 200 };
 const LOCAL_KEY = 'codaclauda.desktop-state';
 
 export const LANGUAGE_COLORS = {
@@ -99,7 +99,7 @@ class Store extends EventTarget {
   async refreshBoard() {
     try {
       const data = await rpc('status');
-      this.board = { endpoints: data.endpoints || [], grants: data.grants || [], requests: data.requests || [], paused: !!data.paused, state_dir: data.state_dir || '', spark: data.spark || null };
+      this.board = { endpoints: data.endpoints || [], grants: data.grants || [], requests: data.requests || [], paused: !!data.paused, state_dir: data.state_dir || '', spark: data.spark || null, limits: data.limits || null };
       this.setSync(true);
     } catch (error) { this.setSync(false, error); }
   }
@@ -385,7 +385,8 @@ class Store extends EventTarget {
     const agents = [];
     const agentPrefs = this.desktop.agents || {};
     for (const address of this.addresses) {
-      if (address.name === OWNER) continue;
+      // The desktop's team inbox (codaclauda-team) is a service address, not an agent.
+      if (address.name === OWNER || address.name === TEAM_ADDRESS) continue;
       const id = address.name, provider = providerOf(id);
       const sent = messages.filter(m => m.from === id);
       const involved = messages.filter(m => m.from === id || m.to === id);
@@ -631,12 +632,11 @@ class Store extends EventTarget {
   async ensureGrant(thread) {
     const endpoint = this.board.endpoints.find(e => e.id === thread.endpointId);
     if (!endpoint) throw new Error('This agent connection is no longer on the board. Reconnect it in Agent setup → Dedicated connections.');
-    // Prefer the board's copy: a revoke moves expires_at to now and sets revoked_at.
-    const live = this.board.grants.find(g => g.id === thread.grantId);
-    const expiresAt = live ? (live.revoked_at ? 0 : toMs(live.expires_at)) : thread.grantExpiresAt;
-    if (thread.grantId && expiresAt - Date.now() > 120e3 && thread.grantUsed < LIVE_GRANT.max_requests - 1) return thread.grantId;
-    const grant = await rpc('grant', { project: endpoint.workspace, allowed_paths: ['.'], targets: [endpoint.id], kinds: ['question'], expected_result: 'Reply to the owner in the CodaClauda live chat.', ...LIVE_GRANT, max_delegations: 0, max_hops: 0, compute: [] });
-    this.updateDesktop(d => { Object.assign(d.chats.threads[thread.id], { grantId: grant.id, grantExpiresAt: toMs(grant.expires_at), grantUsed: 0 }); });
+    if (liveGrantUsable(thread, this.board.grants.find(g => g.id === thread.grantId))) return thread.grantId;
+    // Question-only, so no delegations or hops; every budget is left out to use the owner's defaults.
+    const grant = await rpc('grant', { project: endpoint.workspace, allowed_paths: ['.'], targets: [endpoint.id], kinds: ['question'], expected_result: 'Reply to the owner in the CodaClauda live chat.', max_delegations: 0, max_hops: 0, compute: [] });
+    const expires = expiryMs(grant.expires_at);
+    this.updateDesktop(d => { Object.assign(d.chats.threads[thread.id], { grantId: grant.id, grantExpiresAt: expires === Infinity ? 'never' : expires, grantUsed: 0 }); });
     return grant.id;
   }
   /** attachments: [{ name, path, text? }] (text inlined when small). */

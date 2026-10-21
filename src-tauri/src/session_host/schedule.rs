@@ -123,7 +123,7 @@ fn recover_run(run: &mut Value, outcome: Option<&Value>, now: u64) {
     run["endedAt"] = json!(now);
 }
 
-fn read_json(path: &Path, limit: u64) -> Result<Option<Value>, String> {
+pub(super) fn read_json(path: &Path, limit: u64) -> Result<Option<Value>, String> {
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),

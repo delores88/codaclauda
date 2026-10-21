@@ -1,6 +1,8 @@
 /* Running (0.5): background work at a glance.
  *   Working now   every CodaClauda session with a running or queued turn, with Stop and Open;
  *   Scheduled     the enabled schedules by next run, with Stop while a run's session is working;
+ *   Team          every open CodaClauda session: its board address, wake on/off, working / awake / asleep
+ *                 (asleep = no live process), the board claims it holds and who started it (0.5);
  *   On this PC    Claude Code and Codex sessions found on disk (external_sessions_list), metadata
  *                 only: provider, folder, last change and whether it changed in the last 15 minutes.
  * Data comes from sessions.js, schedules.js and features.js; titles and paths render as text only. */
@@ -19,12 +21,18 @@ const EXTERNAL_REFRESH = 60e3;
 export function mount(root, ctx) {
   const { store, ui, navigate } = ctx;
   const { h, icon, toast, pill, portrait, timeAgo, clockTime, fullTime, emptyState } = ui;
-  const state = { visible: false, raf: 0, sig: '', stopping: new Set(), external: { state: 'idle', list: [], error: '', at: 0 }, showAll: false, ticker: 0 };
-  ui.registerIcons({ branch: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M18 10a6 6 0 0 1-6 6H6"/>' });
+  const state = { visible: false, raf: 0, sig: '', stopping: new Set(), external: { state: 'idle', list: [], error: '', at: 0 }, showAll: false, teamAll: false, ticker: 0 };
+  ui.registerIcons({
+    branch: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M18 10a6 6 0 0 1-6 6H6"/>',
+    lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  });
 
   const workHost = h('div.run-list');
   const schedHost = h('div.run-list');
   const extHost = h('div.run-list');
+  const teamHost = h('div.run-list');
+  const teamCount = h('span.run-count');
+  const teamToggle = h('button.btn.small.ghost', { type: 'button', onclick: () => { state.teamAll = !state.teamAll; render(true); } });
   const workCount = h('span.run-count');
   const schedCount = h('span.run-count');
   const extCount = h('span.run-count');
@@ -39,6 +47,9 @@ export function mount(root, ctx) {
       h('p', 'Everything working in the background: sessions with a turn in progress or waiting, scheduled runs, and other agent sessions on this PC.'))),
     h('section.run-section', h('header.run-head', h('h2', icon('bolt'), 'Working now'), workCount), workHost),
     h('section.run-section', h('header.run-head', h('h2', icon('clock'), 'Scheduled'), schedCount, h('span.run-spacer'), h('button.btn.small.ghost', { type: 'button', onclick: () => navigate('schedules') }, 'Open Schedules')), schedHost),
+    h('section.run-section', h('header.run-head', h('h2', icon('agents'), 'Team'), teamCount, h('span.run-spacer'), teamToggle),
+      h('p.field-hint', 'Every open CodaClauda session and its board address. Teammates wake each other by posting to these addresses and claim shared resources on the board; a message is information, never approval. Asleep means no process is running; mail to it wakes it.'),
+      teamHost),
     extSection));
 
   sessions.on('change', schedule);
@@ -58,8 +69,21 @@ export function mount(root, ctx) {
       .sort((a, b) => toMs(b.lastActivityAt) - toMs(a.lastActivityAt));
   }
 
+  /** 'working' (a turn running or waiting), 'awake' (an owned process, idle) or 'asleep' (no process). */
+  const teamState = s => (sessions.running(s.id) || sessions.queued(s.id) > 0 ? 'working' : s.live === true ? 'awake' : 'asleep');
+  const STATE_RANK = { working: 0, awake: 1, asleep: 2 };
+  const TEAM_PAGE = 12;
+  function teammates() {
+    return sessions.list.filter(s => s.status !== 'stopped')
+      .map(s => ({ s, state: teamState(s) }))
+      .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || toMs(b.s.lastActivityAt) - toMs(a.s.lastActivityAt));
+  }
+  const claimsOf = (address, now) => (address ? store.claims.filter(c => c.holder === address && ui.toMs(c.expires_at) > now).map(c => c.resource) : []);
+
   function render(force = false) {
     const work = working();
+    const mates = teammates();
+    const now = Date.now();
     const scheds = (schedules.list || []).filter(s => s.enabled !== false).sort((a, b) => (toMs(a.nextRunAt) || Infinity) - (toMs(b.nextRunAt) || Infinity));
     const ext = state.external;
     const shownExt = state.showAll ? ext.list : ext.list.filter(e => e.active);
@@ -67,7 +91,8 @@ export function mount(root, ctx) {
     const sig = JSON.stringify([sessions.available, schedules.available, minute, [...state.stopping],
       work.map(s => [s.id, s.title, s.provider, s.status, sessions.queued(s.id), s.lastActivityAt, s.usage || null]),
       scheds.map(s => [s.id, s.name, s.nextRunAt, s.sessionId, s.sessionId ? sessions.running(s.sessionId) : false, schedules.lastRun(s)?.status]),
-      ext.state, ext.error, shownExt.map(e => [e.provider, e.cwd, e.modifiedAt, e.active]), ext.list.length, state.showAll, hasFeature('external')]);
+      ext.state, ext.error, shownExt.map(e => [e.provider, e.cwd, e.modifiedAt, e.active]), ext.list.length, state.showAll, hasFeature('external'),
+      state.teamAll, mates.map(({ s, state: st }) => [s.id, s.title, st, s.wake, s.mailboxAddress, s.startedBy?.address, claimsOf(s.mailboxAddress, now)])]);
     if (!force && sig === state.sig) return;
     state.sig = sig;
 
@@ -82,6 +107,13 @@ export function mount(root, ctx) {
       ? [h('p.run-empty', icon('clock'), `${SCHEDULES_UNAVAILABLE_TEXT}.`)]
       : schedules.available === null ? [h('p.run-empty', h('span.spinner'), 'Loading schedules…')]
         : scheds.length ? scheds.map(schedRow) : [h('p.run-empty', icon('clock'), 'No schedules are on. Create one in Schedules.')]));
+
+    teamCount.textContent = mates.length ? `${mates.filter(m => m.state === 'working').length} working · ${mates.length} open` : '';
+    teamToggle.hidden = mates.length <= TEAM_PAGE;
+    teamToggle.textContent = state.teamAll ? 'Show fewer' : `Show all ${mates.length}`;
+    teamHost.replaceChildren(...(sessions.available === false ? [h('p.run-empty', icon('agents'), `${UNAVAILABLE_TEXT}.`)]
+      : mates.length ? mates.slice(0, state.teamAll ? 200 : TEAM_PAGE).map(m => teamRow(m, now))
+        : [h('p.run-empty', icon('agents'), 'No open sessions. Start one in Chat; agents can start teammates in projects where you turned it on.')]));
 
     extSection.hidden = !hasFeature('external');
     const active = ext.list.filter(e => e.active).length;
@@ -113,6 +145,23 @@ export function mount(root, ctx) {
       h('div.run-actions',
         h('button.btn.small', { type: 'button', onclick: () => navigate('chat', { thread: threadIdFor(s) }) }, icon('chat'), 'Open'),
         h('button.btn.small.danger', { type: 'button', disabled: stopping || !running, title: running ? 'Interrupt the current turn; the session stays resumable' : 'Waiting turns start after the current one', onclick: () => stop(s) }, stopping ? h('span.spinner') : icon('stop'), 'Stop')));
+  }
+
+  function teamRow({ s, state: st }, now) {
+    const claims = claimsOf(s.mailboxAddress, now);
+    const by = s.startedBy && typeof s.startedBy.address === 'string' ? s.startedBy.address : '';
+    const label = { working: 'Working', awake: 'Awake', asleep: 'Asleep' }[st];
+    return h('article.card.run-row',
+      portrait(look(s.provider), { size: 30, provider: s.provider, status: st === 'working' ? 'active' : st === 'awake' ? 'idle' : 'offline' }),
+      h('div.run-text',
+        h('div.run-title', h('strong', { title: s.title || '' }, s.title || `${providerLabel(s.provider, true)} session`), pill(providerLabel(s.provider), s.provider), pill(label, st === 'working' ? 'success' : 'neutral')),
+        h('div.run-meta',
+          s.mailboxAddress ? h('code', { title: 'Board address' }, s.mailboxAddress) : h('span.muted', 'No board address'),
+          h('span', icon('bell'), s.wake === true ? 'Wake on' : 'Wake off'),
+          h('span', icon('projects'), projectName(s) || 'No project'),
+          claims.length ? h('span', { title: claims.join(', ') }, icon('lock'), `holds ${claims.slice(0, 3).join(', ')}${claims.length > 3 ? ` +${claims.length - 3}` : ''}`) : null,
+          by ? h('span', { title: 'Started through codaclauda-team; the sender name is self-asserted' }, `started by ${by}`) : null)),
+      h('div.run-actions', h('button.btn.small', { type: 'button', onclick: () => navigate('chat', { thread: threadIdFor(s) }) }, icon('chat'), 'Open')));
   }
 
   function schedRow(s) {
@@ -183,7 +232,7 @@ export function mount(root, ctx) {
       render(true);
       loadExternal();
       clearInterval(state.ticker);
-      state.ticker = setInterval(() => { if (state.visible) { render(); loadExternal(); } }, 15e3);
+      state.ticker = setInterval(() => { if (state.visible) { sessions.refresh(); render(); loadExternal(); } }, 15e3);
     },
     hide() { state.visible = false; clearInterval(state.ticker); state.ticker = 0; },
   };

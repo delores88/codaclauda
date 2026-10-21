@@ -44,7 +44,7 @@ function register(name, label) {
 /* Preview only: a copied join prompt "is pasted" into a pretend chat that registers ~5 s later,
  * so Agent setup's "Waiting… → Joined ✓" can be seen. Also callable as codaMock.join(address, label). */
 function simulateJoins() {
-  globalThis.codaMock = { join: register, sparkOffline: on => { sparkRemoteDown = on === 'throw' ? 'throw' : Boolean(on); }, addCollaborator, weather: code => { weatherForced = code || null; }, weatherFail: on => { weatherFails = Boolean(on); } };
+  globalThis.codaMock = { join: register, teamStart: projectId => mockTeamStart(projectId), sparkOffline: on => { sparkRemoteDown = on === 'throw' ? 'throw' : Boolean(on); }, addCollaborator, weather: code => { weatherForced = code || null; }, weatherFail: on => { weatherFails = Boolean(on); } };
   const clip = globalThis.navigator?.clipboard;
   if (!clip?.writeText || clip.writeText.mockJoins) return;
   const write = clip.writeText.bind(clip);
@@ -77,11 +77,37 @@ function updateOp({ op }) {
 const requests = [
   { id: 'req-1', kind: 'question', origin: 'owner', target: 'codex-claudacoda', state: 'completed', prompt: 'Read README and list both endpoint labels.', expected_result: 'Labels and IDs.', created_at: ago(400), updated_at: ago(398), answer: 'Claude Code - CodaClauda and Codex - CodaClauda.' },
   { id: 'req-2', kind: 'review', origin: 'owner', target: 'claude-claudacoda', state: 'needs-owner', prompt: 'Review the installer manifest.', expected_result: 'Findings', created_at: ago(90), updated_at: ago(88), blocker: 'Grant expired before review completed.' },
-  { id: 'req-3', kind: 'question', origin: 'owner', target: 'codex-claudacoda', state: 'queued', prompt: 'List the files the installer bundles.', expected_result: 'A file list.', created_at: ago(6), updated_at: ago(6) },
+  { id: 'req-3', kind: 'question', origin: 'owner', target: 'codex-claudacoda', state: 'queued', prompt: 'List the files the installer bundles.', expected_result: 'A file list.', created_at: ago(6), updated_at: ago(6), queued_reason: 'endpoint codex-claudacoda busy with request req-live' },
 ];
-const grants = [{ id: 'grant-demo', project: endpoints[1].workspace, targets: ['codex-claudacoda'], kinds: ['question', 'review'], allowed_paths: ['README.md', 'ui/'], expected_result: 'Preview grant', expires_at: now() + 3600 }];
+// grant-demo is a 0.4 grant (no policy_version): its effective limits include the implicit 0.4 ones.
+const grants = [{ id: 'grant-demo', project: endpoints[1].workspace, targets: ['codex-claudacoda'], kinds: ['question', 'review'], allowed_paths: ['README.md', 'ui/'], expected_result: 'Preview grant', expires_at: now() + 3600, revoked_at: null,
+  max_requests: 16, max_delegations: 0, max_hops: 1, timeout_seconds: 600,
+  effective: { max_requests: 16, max_delegations: 0, max_hops: 1, timeout_seconds: 600, max_turns: 12, max_mcp_calls: 128, max_compute_jobs: 2, expires_seconds: 3600 } }];
 const liveRequests = new Map();
-let boardPaused = false, sparkExecutable = 'C:\\mock\\sparkdev.exe', boardConcurrent = 4;
+let boardPaused = false, sparkExecutable = 'C:\\mock\\sparkdev.exe';
+/* Owner policy (C2): defaults when the board has no policy.json. */
+const MAX_SAFE = Number.MAX_SAFE_INTEGER;
+const BUDGET_MIN = { timeout_seconds: 10, expires_seconds: 30, max_requests: 1, max_delegations: 0, max_hops: 0, max_turns: 1, max_mcp_calls: 1, max_compute_jobs: 0 };
+const policy = { concurrent: 'unlimited', grant_defaults: { timeout_seconds: 86400, expires_seconds: 604800, max_requests: 'unlimited', max_delegations: 'unlimited', max_hops: 'unlimited', max_turns: 'unlimited', max_mcp_calls: 'unlimited', max_compute_jobs: 'unlimited' } };
+/** Like coord-core: a whole number from the minimum, "unlimited" (expires_seconds also "never"); null/omitted only where inherit is allowed. */
+function budget(field, value, min) {
+  if (value === 'unlimited' || (field === 'expires_seconds' && value === 'never')) return 'unlimited';
+  if (Number.isSafeInteger(value) && value >= min && value <= MAX_SAFE) return value;
+  throw coded('INVALID_ARGUMENTS', `${field} must be a whole number from ${min} to ${MAX_SAFE}, or "unlimited"`);
+}
+function grantFrom(args) {
+  const resolved = {};
+  for (const [field, min] of Object.entries(BUDGET_MIN)) resolved[field] = args[field] == null ? policy.grant_defaults[field] : budget(field, args[field], min);
+  const at = now();
+  const g = { ...args, ...resolved, id: `grant-${grants.length + 1}`, policy_version: 1, revoked_at: null,
+    expires_at: resolved.expires_seconds === 'unlimited' ? 'never' : at + resolved.expires_seconds, effective: { ...resolved } };
+  grants.push(g);
+  return g;
+}
+function boardLoad() {
+  const all = [...requests, ...liveRequests.values()];
+  return { concurrent: policy.concurrent, active: all.filter(r => ['delivered', 'acknowledged', 'running'].includes(r.state)).length, waiting: 0, queued: all.filter(r => r.state === 'queued').length };
+}
 
 const repos = [
   ['codaclauda', 'Owner-scoped Claude Code and Codex coordination', 'Rust', 2400, 160, 0.2],
@@ -135,7 +161,7 @@ const sparkStatus = () => sparkRemoteDown === 'throw' ? (() => { throw new Error
   laptop_jobs: [sparkJob('j5', 'laptop', 'claude', 'rust', 6, 3), sparkJob('j6', 'laptop', 'codex', 'node', 2, 200, 180)],
 });
 const handlers = {
-  status: () => ({ endpoints, grants, requests: [...requests, ...liveRequests.values()], paused: boardPaused, state_dir: 'C:\\mock\\board', spark: { executable: sparkExecutable }, limits: { concurrent: boardConcurrent } }),
+  status: () => ({ endpoints, grants, requests: [...requests, ...liveRequests.values()], paused: boardPaused, state_dir: 'C:\\mock\\board', spark: { executable: sparkExecutable }, limits: boardLoad() }),
   spark: () => sparkStatus(),
   'mailbox-directory': () => ({ addresses, identity: 'self-asserted-label' }),
   'mailbox-register': ({ name, label }) => register(name, label),
@@ -155,19 +181,27 @@ const handlers = {
   },
   'mailbox-post': payload => { const m = { ...msg(payload.from, payload.to, payload.kind, payload.subject, payload.body, 0), ...payload, id: payload.id }; messages.push(m); if (payload.to !== 'owner') mockReply(payload.to, payload.subject); return m; },
   'mailbox-ack': ({ id }) => { const m = messages.find(x => x.id === id); if (m) m.read_at = now(); return { read_at: now() }; },
-  grant: args => { const g = { max_turns: 200, ...args, id: `grant-${grants.length + 1}`, expires_at: now() + (Number(args.expires_seconds) || 604800), revoked_at: null }; grants.push(g); return g; },
-  'grant-revoke': ({ id }) => { // like coord-core: idempotent, ends the grant now
+  grant: args => grantFrom(args),
+  'grant-revoke': ({ id }) => { // like coord-core: idempotent, ends the grant now (old readers see expiry too)
     const g = grants.find(x => x.id === id);
     if (!g) throw new Error('Owner grant not found');
-    g.revoked_at ??= now(); g.expires_at = Math.min(g.expires_at, now());
+    g.revoked_at ??= now(); g.expires_at = g.expires_at === 'never' ? now() : Math.min(g.expires_at, now());
     return g;
   },
-  limits: () => ({ concurrent: boardConcurrent }),
-  'limits-set': ({ concurrent }) => {
-    if (!Number.isInteger(concurrent) || concurrent < 1 || concurrent > 64) throw new Error('concurrent must be from 1 to 64.');
-    boardConcurrent = concurrent;
-    return { concurrent };
+  policy: () => structuredClone(policy),
+  'policy-set': ({ concurrent, grant_defaults: defaults } = {}) => {
+    const next = structuredClone(policy);
+    if (concurrent !== undefined) next.concurrent = budget('concurrent', concurrent, 1);
+    for (const [field, value] of Object.entries(defaults || {})) {
+      if (!(field in BUDGET_MIN)) throw coded('INVALID_ARGUMENTS', `Unknown grant default ${field}`);
+      next.grant_defaults[field] = budget(field, value, BUDGET_MIN[field]);
+    }
+    Object.assign(policy, next);
+    return structuredClone(policy);
   },
+  // Round 1 aliases of policy.concurrent.
+  limits: () => ({ concurrent: policy.concurrent }),
+  'limits-set': ({ concurrent }) => { policy.concurrent = budget('concurrent', concurrent, 1); return { concurrent: policy.concurrent }; },
   submit: ({ id, target, prompt }) => { const r = { id, target, kind: 'question', origin: 'owner', state: 'running', prompt, created_at: now(), updated_at: now() }; liveRequests.set(id, r); setTimeout(() => Object.assign(r, { state: 'completed', answer, updated_at: now(), session_id: 'mock-session' }), 4500); return r; },
   request: ({ id }) => liveRequests.get(id) || requests.find(r => r.id === id),
   cancel: ({ id, all }) => { // like coord-core: unfinished requests (or the whole root tree) become cancelled
@@ -320,15 +354,18 @@ function submit(id, text, attachments = [], origin = null) {
   return { accepted: true, turnId: item.turnId, queued: 0 };
 }
 
-/* Fake wake: every 30 s each wake-enabled session (at most 6 an hour, like the engine) gets a board message. */
+/* Fake wake: wake-enabled sessions get a fake board message now and then. The engine has no wake caps
+ * (0.5), only the owner's loop guard; the 10-minute spacing here is preview pacing so fake mail does not
+ * flood the page, not an engine limit. */
 const wakeTimes = new Map(); // id → [ms]
+const PREVIEW_WAKE_SPACING = 10 * 60e3;
 function mockWakeTick() {
   const store = sessionStore;
   if (!store?.wakeEnabled) return;
   const at = Date.now();
-  for (const session of store.sessions.filter(s => s.wake && s.mailboxAddress)) {
+  for (const session of store.sessions.filter(s => s.wake && s.mailboxAddress && s.status !== 'stopped')) {
     const times = (wakeTimes.get(session.id) || []).filter(t => at - t < 3600e3);
-    if (times.length >= 6) continue;
+    if (times.length && at - times.at(-1) < PREVIEW_WAKE_SPACING) continue;
     const from = ['owner', 'codex-claudacoda', 'claude-phaseforge'][times.length % 3];
     const subject = `Preview board message #${(session.wakes?.total || 0) + 1}`;
     const messageId = `mock-wake-${hex(4)}`;
@@ -337,7 +374,7 @@ function mockWakeTick() {
       const sent = submit(session.id, text, [], { kind: 'wake', from, subject, messageId, messageKind: 'question' });
       times.push(at);
       wakeTimes.set(session.id, times);
-      session.wakes = { hour: times.length, day: Math.min(30, (session.wakes?.day || 0) + 1), total: (session.wakes?.total || 0) + 1 };
+      session.wakes = { hour: times.length, day: (session.wakes?.day || 0) + 1, total: (session.wakes?.total || 0) + 1 };
       saveSessions();
       sessionEmit({ id: session.id, turnId: sent.turnId, kind: 'wake', from, subject, messageId, messageKind: 'question', wakes: session.wakes });
     } catch { /* queue full: try again next time */ }
@@ -345,8 +382,10 @@ function mockWakeTick() {
 }
 
 const slug = cwd => String(cwd || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '') || 'project';
+/** Like the engine's list: live = an owned process (here: a turn now, or activity in the last 10 minutes). */
+const listed = s => ({ ...s, queued: sessionQueues.get(s.id)?.length || 0, live: sessionTurns.has(s.id) || (s.status !== 'stopped' && Boolean(s.providerSessionId) && Date.now() - s.lastActivityAt < 10 * 60e3) });
 const sessionHandlers = {
-  session_list: () => ({ sessions: sessions().sessions }),
+  session_list: () => ({ sessions: sessions().sessions.map(listed) }),
   session_start: ({ args = {} }) => {
     if (!['claude', 'codex'].includes(args.provider)) throw new Error('provider must be claude or codex.');
     if (!args.cwd) throw new Error('cwd must be the project folder.');
@@ -354,7 +393,10 @@ const sessionHandlers = {
     // Preview: any folder named like a project counts as a git repository.
     const repoName = String(args.cwd).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'project';
     const worktreePath = args.worktree ? `C:\\mock\\board\\desktop-ui\\worktrees\\${short}\\${repoName}` : null;
-    const session = { id, provider: args.provider, projectId: args.projectId || args.cwd, cwd: worktreePath || args.cwd, title: args.title || `${agentName(args.provider)} chat`, access: args.access === 'full' ? 'full' : 'read', threadId: null, providerSessionId: null, status: 'idle', createdAt: at, lastActivityAt: at, shared: Boolean(args.sharedId), sharedId: args.sharedId || null, playwright: false, wake: false, mailboxAddress: null, wakes: { hour: 0, day: 0, total: 0 }, worktreePath, branch: worktreePath ? `codaclauda/${short}` : null, usage: emptyUsage(), ...(worktreePath ? { repoRoot: args.cwd, baseBranch: 'main' } : {}) };
+    // 0.5: wake on by default with its own board address; startedBy only for a team start.
+    const address = `${args.provider}-${slug(worktreePath || args.cwd)}-${hex(2)}`;
+    register(address, `CodaClauda ${agentName(args.provider)} session: ${args.title || 'chat'}`.slice(0, 110));
+    const session = { id, provider: args.provider, projectId: args.projectId || args.cwd, cwd: worktreePath || args.cwd, title: args.title || `${agentName(args.provider)} chat`, access: args.access === 'full' ? 'full' : 'read', threadId: null, providerSessionId: null, status: 'idle', createdAt: at, lastActivityAt: at, shared: Boolean(args.sharedId), sharedId: args.sharedId || null, playwright: false, wake: true, mailboxAddress: address, wakes: { hour: 0, day: 0, total: 0 }, worktreePath, branch: worktreePath ? `codaclauda/${short}` : null, usage: emptyUsage(), teamNote: true, ...(args.startedBy ? { startedBy: args.startedBy } : {}), ...(worktreePath ? { repoRoot: args.cwd, baseBranch: 'main' } : {}) };
     sessions().sessions.push(session);
     saveSessions();
     return { session };
@@ -380,18 +422,58 @@ const sessionHandlers = {
     return { closed: true };
   },
   session_history: ({ id, limit = 500 }) => { findSession(id); return { events: (sessions().logs[id] || []).slice(-limit) }; },
-  session_set_wake: ({ id, on }) => {
+  session_set_wake: ({ id, on }) => {   // no cap on how many sessions wake (0.5)
     const session = findSession(id);
-    if (on && sessions().sessions.filter(s => s.wake && s.id !== id).length >= 5) throw new Error('At most 5 sessions can wake on mail. Turn it off in another session first.');
-    if (on && !session.mailboxAddress) session.mailboxAddress = `${session.provider}-${slug(session.cwd)}-${hex(2)}`;
+    if (on && !session.mailboxAddress) { session.mailboxAddress = `${session.provider}-${slug(session.cwd)}-${hex(2)}`; register(session.mailboxAddress, session.title); }
     session.wake = Boolean(on);
     saveSessions();
     sessionEmit({ id, kind: 'status', status: session.status });
-    return { session };
+    return { session: listed(session) };
   },
-  wake_settings_get: () => ({ enabled: sessions().wakeEnabled !== false }),
-  wake_settings_set: ({ enabled }) => { sessions().wakeEnabled = Boolean(enabled); saveSessions(); return { enabled: Boolean(enabled) }; },
+  wake_settings_get: () => ({ enabled: sessions().wakeEnabled !== false, loopGuard: loopGuard() }),
+  wake_settings_set: ({ enabled, loopGuard: guard } = {}) => {
+    const store = sessions();
+    const next = loopGuard();
+    if (guard !== undefined) {
+      if (!guard || typeof guard !== 'object') throw coded('INVALID_ARGUMENTS', 'loopGuard must be an object with on and pairPerHour.');
+      if (guard.on !== undefined) { if (typeof guard.on !== 'boolean') throw coded('INVALID_ARGUMENTS', 'loopGuard.on must be true or false.'); next.on = guard.on; }
+      if (guard.pairPerHour !== undefined) { if (!Number.isSafeInteger(guard.pairPerHour) || guard.pairPerHour < 1) throw coded('INVALID_ARGUMENTS', 'pairPerHour must be a whole number from 1 to 9007199254740991.'); next.pairPerHour = guard.pairPerHour; }
+    }
+    if (enabled !== undefined) store.wakeEnabled = Boolean(enabled);
+    store.loopGuard = next;
+    saveSessions();
+    return { enabled: store.wakeEnabled !== false, loopGuard: { ...next } };
+  },
+  /* 0.5 team starts: per-project switch (off by default) and guard (8 by default). */
+  team_settings_get: () => ({ address: 'codaclauda-team', projects: structuredClone(teamBook().projects), defaults: { agentsCanStart: false, maxAgentStartedLive: 8 } }),
+  team_settings_set: ({ project = {} }) => {
+    const id = String(project.projectId || '').trim();
+    if (!id) throw coded('INVALID_ARGUMENTS', 'projectId must name the project.');
+    const book = teamBook(), entry = { name: '', cwd: '', ids: [], agentsCanStart: false, maxAgentStartedLive: 8, ...book.projects[id] };
+    if (project.cwd) entry.cwd = String(project.cwd);
+    if (project.name) entry.name = String(project.name);
+    if (Array.isArray(project.ids)) entry.ids = project.ids.map(String).slice(0, 32);
+    if (project.agentsCanStart !== undefined) { if (typeof project.agentsCanStart !== 'boolean') throw coded('INVALID_ARGUMENTS', 'agentsCanStart must be true or false.'); entry.agentsCanStart = project.agentsCanStart; }
+    if (project.maxAgentStartedLive !== undefined) entry.maxAgentStartedLive = budget('maxAgentStartedLive', project.maxAgentStartedLive, 1);
+    if (entry.agentsCanStart && !entry.cwd) throw coded('PROJECT_MISSING', 'The project needs a local folder.');
+    entry.updatedAt = Date.now();
+    book.projects[id] = entry;
+    writeJson(TEAM_KEY, book);
+    return { projectId: id, project: structuredClone(entry) };
+  },
 };
+const loopGuard = () => ({ on: true, pairPerHour: 20, ...(sessions().loopGuard || {}) });
+const TEAM_KEY = 'mock.team';
+const teamBook = () => { const book = readJson(TEAM_KEY, null) || {}; book.projects ||= {}; return book; };
+/** Preview: an agent's codaclauda-team request starting a teammate (codaMock.teamStart()). */
+function mockTeamStart(projectId) {
+  const book = teamBook();
+  const [id, entry] = Object.entries(book.projects).find(([key, p]) => p.agentsCanStart && (!projectId || key === projectId)) || [];
+  if (!id) return 'Turn on Agents can start teammates for a project first (Projects → Teammates).';
+  const { session } = sessionHandlers.session_start({ args: { provider: 'codex', projectId: id, cwd: entry.cwd, access: 'read', title: 'Reviewer (started by an agent)', startedBy: { address: 'claude-codaclauda', messageId: `mock-team-${hex(3)}`, at: Date.now() } } });
+  submit(session.id, 'claude-codaclauda asked CodaClauda to start you. Review the diff.', [], { kind: 'team', from: 'claude-codaclauda' });
+  return session.mailboxAddress;
+}
 
 /* Mock schedules (localStorage mock.schedules). Due checks run every 10 s; a run reuses one dedicated session. */
 let scheduleStore = null;
@@ -527,7 +609,7 @@ const readJson = (key, fallback) => { try { return JSON.parse(localStorage.getIt
 const writeJson = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* preview only */ } };
 const MCP_PRESETS = [
   { id: 'playwright', label: 'Playwright MCP (browser automation)', name: 'playwright', command: 'cmd', args: ['/c', 'playwright-mcp'], env: {}, install: 'npm i -g @playwright/mcp', notes: 'Preview copy of the engine preset: install it yourself first; the npm bin is playwright-mcp, run through cmd /c on Windows.', source: 'https://registry.npmjs.org/@playwright/mcp/latest' },
-  { id: 'windows-mcp', label: 'Windows-MCP (desktop control, CursorTouch)', name: 'windows-mcp', command: 'uvx', args: ['windows-mcp', 'serve'], env: {}, install: 'pip install uv  (the README also requires Python 3.14+)', notes: 'Preview copy of the engine preset: its README starts it with uvx windows-mcp serve; run that once yourself first.', source: 'https://github.com/CursorTouch/Windows-MCP#readme' },
+  { id: 'windows-mcp', label: 'Windows-MCP (desktop control, CursorTouch)', name: 'windows-mcp', command: 'windows-mcp', args: ['serve'], env: {}, install: 'uv tool install windows-mcp', notes: 'Preview copy of the engine preset: install it yourself first with uv tool install windows-mcp; CodaClauda never runs uvx or downloads it.', source: 'https://github.com/CursorTouch/Windows-MCP#readme' },
 ];
 const busy = id => sessionTurns.has(id) || Boolean(sessionQueues.get(id)?.length);
 const needsWorktree = session => { if (!session.worktreePath) throw coded('NO_WORKTREE', 'This chat does not have its own worktree.'); };
@@ -537,9 +619,13 @@ const v05Handlers = {
     const source = findSession(id);
     const from = source.provider === 'codex' ? source.threadId : source.providerSessionId;
     if (!from && !source.forkFrom) throw coded('NOTHING_TO_FORK', 'Send a message in this chat before forking it.');
-    const at = Date.now(), newId = `s_${hex(8)}`;
-    const session = { ...structuredClone(source), id: newId, title: `Fork of ${source.title}`.slice(0, 200), threadId: null, providerSessionId: null, status: 'idle', createdAt: at, lastActivityAt: at, shared: false, sharedId: null, wake: false, mailboxAddress: null, wakes: { hour: 0, day: 0, total: 0 }, worktreePath: null, branch: null, usage: { ...emptyUsage(), contextPct: source.usage?.contextPct ?? null }, forkFrom: from || source.forkFrom, forkedFrom: source.id };
-    delete session.prUrl; delete session.prNumber; delete session.repoRoot; delete session.baseBranch;
+    const at = Date.now(), newId = `s_${hex(8)}`, title = `Fork of ${source.title}`.slice(0, 200);
+    // Like fork.rs: a fork is a new session, so wake is on with its own board address.
+    const address = `${source.provider}-${slug(source.cwd)}-${hex(2)}`;
+    register(address, `CodaClauda ${agentName(source.provider)} session: ${title}`.slice(0, 110));
+    const session = { ...structuredClone(source), id: newId, title, threadId: null, providerSessionId: null, status: 'idle', createdAt: at, lastActivityAt: at, shared: false, sharedId: null, wake: true, mailboxAddress: address, wakes: { hour: 0, day: 0, total: 0 }, worktreePath: null, branch: null, usage: { ...emptyUsage(), contextPct: source.usage?.contextPct ?? null }, forkFrom: from || source.forkFrom, forkedFrom: source.id };
+    delete session.prUrl; delete session.prNumber; delete session.repoRoot; delete session.baseBranch; delete session.startedBy;
+    session.teamNote = true;
     sessions().sessions.push(session);
     sessions().logs[newId] = (sessions().logs[id] || []).map(ev => ({ ...ev, id: newId }));
     saveSessions();
@@ -627,11 +713,11 @@ const v05Handlers = {
     writeJson(MCP_KEY, book);
     return { servers: clean };
   },
-  session_limits_get: () => ({ maxLive: readJson(LIMITS_KEY, 6), queueMax: QUEUE_MAX }),
+  session_limits_get: () => ({ maxLive: readJson(LIMITS_KEY, 'unlimited'), queueMax: QUEUE_MAX }),
   session_limits_set: ({ maxLive }) => {
-    if (!Number.isInteger(maxLive) || maxLive < 1 || maxLive > 32) throw coded('INVALID_ARGUMENTS', 'Agents at once must be a whole number from 1 to 32.');
-    writeJson(LIMITS_KEY, maxLive);
-    return { maxLive, queueMax: QUEUE_MAX };
+    const value = budget('Agents at once', maxLive, 1);
+    writeJson(LIMITS_KEY, value);
+    return { maxLive: value, queueMax: QUEUE_MAX };
   },
   notify_settings_get: () => readJson(NOTIFY_KEY, { ntfyUrl: null, onFinish: false, onError: false }),
   notify_settings_set: ({ ntfyUrl = null, onFinish = false, onError = false }) => {

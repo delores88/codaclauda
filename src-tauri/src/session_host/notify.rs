@@ -117,24 +117,36 @@ impl Inner {
         };
         let agent = Provider::parse(&provider).map_or("An agent", Provider::label);
         let body = format!("{agent} {what}: {}", clip(&title, 80));
-        tauri::async_runtime::spawn(async move {
-            let Some(client) = client() else {
-                return;
-            };
-            let sent = client
-                .post(&url)
-                .header("Title", "CodaClauda")
-                .header("Tags", tag)
-                .body(body)
-                .send()
-                .await;
-            match sent {
-                Ok(response) if response.status().is_success() => {}
-                Ok(response) => eprintln!("CodaClauda: ntfy answered {}", response.status()),
-                Err(e) => eprintln!("CodaClauda: ntfy push failed: {}", e.without_url()),
-            }
-        });
+        push(url, tag, body);
     }
+
+    /// An owner notice (the wake loop guard) to the ntfy topic, when one is
+    /// configured. The caller passes a short line with no message text.
+    pub(super) fn notify_owner(&self, line: &str) {
+        if let Some(url) = lock(&self.notify).ntfy_url.clone() {
+            push(url, "warning", clip(line, 160));
+        }
+    }
+}
+
+fn push(url: String, tag: &'static str, body: String) {
+    tauri::async_runtime::spawn(async move {
+        let Some(client) = client() else {
+            return;
+        };
+        let sent = client
+            .post(&url)
+            .header("Title", "CodaClauda")
+            .header("Tags", tag)
+            .body(body)
+            .send()
+            .await;
+        match sent {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => eprintln!("CodaClauda: ntfy answered {}", response.status()),
+            Err(e) => eprintln!("CodaClauda: ntfy push failed: {}", e.without_url()),
+        }
+    });
 }
 
 // ----------------------------------------------------------------- commands

@@ -4,7 +4,7 @@
 import { updatePresentation } from '../../view-model.js';
 import { weatherSettings } from './settings-weather.js';
 import { limitsSettings } from './settings-limits.js';
-import { wake, WAKE_CAPS_TEXT, WAKE_UNAVAILABLE_TEXT } from '../wake.js';
+import { wake, guardText, WAKE_UNAVAILABLE_TEXT } from '../wake.js';
 import { has as hasFeature, call as callFeature, validNtfyUrl, UNSUPPORTED_TEXT } from '../features.js';
 
 const UPDATE_LABELS = { check: 'Check for updates', status: 'Read updater status', authorize: 'Approve in browser', poll: 'Check approval', download: 'Download update', install: 'Install update' };
@@ -31,24 +31,26 @@ export function mount(root, ctx) {
   };
   const info = (label, value) => h('div.info-row', h('dt', label), h('dd.mono', { title: value || '' }, value || '—'));
   const weatherCard = weatherSettings(ctx);   // persistent: keeps its search box and results
-  const limitsCard = limitsSettings(ctx);     // persistent: Agents at once, Board requests at once
+  const limitsCard = limitsSettings(ctx);     // persistent: Agents at once, Board requests at once, grant defaults, wake loop guard
 
-  /* ---------- Wake on mail (global switch; each session also has its own, off by default) ---------- */
+  /* ---------- Wake on mail (global switch; each session also has its own, on by default since 0.5) ---------- */
   let wakeSaving = false;
   const wakeInput = h('input', { type: 'checkbox', 'aria-label': 'Wake on mail', onchange: event => setWake(event.currentTarget.checked) });
   const wakeHint = h('span.field-hint');
+  const wakeGuard = h('p.field-hint');
   const wakeCard = h('section.card.settings-card.wake-card',
     h('h2.panel-title', 'Wake on mail'),
     h('div.setting-row', h('div.setting-text', h('strong', 'Wake sessions on board messages'), wakeHint), h('label.switch', wakeInput, h('span'))),
-    h('p.field-hint', WAKE_CAPS_TEXT));
+    wakeGuard);
   function renderWake() {
     const supported = wake.supported();
     wakeInput.disabled = !supported || wakeSaving || wake.enabled === null;
     wakeInput.checked = wake.enabled === true;
     wakeHint.textContent = !supported ? `${WAKE_UNAVAILABLE_TEXT}.`
       : wake.enabled === null ? (wake.error ? `Couldn't read the setting: ${wake.error}` : 'Reading…')
-        : wake.enabled ? "On: a session you turned it on for (in the chat's resources panel) gets a turn for each new board message to its address. Each session starts with it off."
+        : wake.enabled ? "On: a session with wake on (each new session starts with it on; switch it in the chat's resources panel) gets a turn for each new board message to its address. There is no limit on how many sessions wake."
           : 'Off: no new wake turns start. An already running turn continues until you press Stop. Mail waits on the board.';
+    wakeGuard.textContent = wake.loopGuard ? `${guardText(wake.loopGuard)} Change it in Limits below.` : '';
   }
   async function setWake(enabled) {
     wakeSaving = true; renderWake();

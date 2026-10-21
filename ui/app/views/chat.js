@@ -23,7 +23,7 @@ import { agentAvatar } from '../avatar/spec.js';
 import { sessions, UNAVAILABLE_TEXT, QUEUE_LIMIT } from '../sessions.js';
 import { mergeShared, routeMessage, sharedContext, resumeCommand, providerLabel, searchTranscript, otherProvider, toMs as eventMs } from '../session-model.js';
 import { LEVELS, ACCESS_NOTE, BROWSER_UNAVAILABLE, levelInfo } from '../access.js';
-import { wake, wakeCounts, WAKE_LIMITS, WAKE_UNAVAILABLE_TEXT } from '../wake.js';
+import { wake, wakeCounts, WAKE_POLL_SECONDS, WAKE_UNAVAILABLE_TEXT } from '../wake.js';
 import { has as hasFeature, call as callFeature, normalizeUsage, tokens, money, patchLines, repoOf } from '../features.js';
 import { openInstructions, openMcpTools, MCP_NOTE } from '../project-tools.js';
 
@@ -1015,7 +1015,7 @@ export function mount(root, ctx) {
     const project = info.project;
     const access = project ? store.projectAccess(project.id) : null;
     const sig = JSON.stringify([info.id, project?.id, project?.name, project?.path, project?.url, access?.level, info.access,
-      wake.enabled, wake.sessionSupported(), wake.count(), [...state.wakeBusy], state.extraVersion, [...state.meterBusy],
+      wake.enabled, wake.sessionSupported(), [...state.wakeBusy], state.extraVersion, [...state.meterBusy],
       info.sessions.map(s => [s.id, s.provider, s.status, s.access, s.providerSessionId, s.threadId, s.cwd, sessions.running(s.id), s.wake, s.mailboxAddress, s.wakes, s.usage || null, s.worktreePath || '', s.branch || ''])]);
     if (sig === state.resSig) return;
     state.resSig = sig;
@@ -1068,20 +1068,19 @@ export function mount(root, ctx) {
     if (!wake.sessionSupported()) return h('div.res-wake', h('div.res-row', h('span.res-wake-label', icon('bell'), 'Wake on mail'), h('span.muted.res-wake-off', 'Not in this build')), h('p.field-hint', `${WAKE_UNAVAILABLE_TEXT}.`));
     const on = s.wake === true;
     const busy = state.wakeBusy.has(s.id);
-    const full = !on && wake.count(s.id) >= WAKE_LIMITS.sessions;
     const input = h('input', {
-      type: 'checkbox', checked: on, disabled: busy || full, 'aria-label': `Wake ${name} on mail`,
+      type: 'checkbox', checked: on, disabled: busy, 'aria-label': `Wake ${name} on mail`,
       onchange: event => toggleWake(s, event.currentTarget.checked, event.currentTarget),
     });
-    const sw = h('label.switch', { title: full ? `At most ${WAKE_LIMITS.sessions} sessions can wake on mail` : on ? 'Board messages to this session start a turn' : 'Off: board messages are not delivered to this session' }, input, h('span'));
+    const sw = h('label.switch', { title: on ? 'Board messages to this session start a turn' : 'Off: board messages are not delivered to this session' }, input, h('span'));
     return h('div.res-wake',
       h('div.res-row', h('span.res-wake-label', icon('bell'), 'Wake on mail'), sw),
       on || s.mailboxAddress ? h('dl.res-facts',
         h('dt', 'Address'), h('dd', s.mailboxAddress ? h('code.res-id', { title: s.mailboxAddress }, s.mailboxAddress) : h('span.muted', 'Assigned when it turns on')),
         h('dt', 'Wakes'), h('dd', wakeCounts(s))) : null,
       h('p.field-hint', on
-        ? `Board messages to this address start a turn here with this session's existing access (checked every ${WAKE_LIMITS.pollSeconds} s). Sender names are self-asserted; a message is information, not approval.`
-        : full ? `${WAKE_LIMITS.sessions} sessions already wake on mail; turn one off first.` : 'Off: give this session its own board address and let new messages to it start a turn.'),
+        ? `Board messages to this address start a turn here with this session's existing access (checked every ${WAKE_POLL_SECONDS} s). Sender names are self-asserted; a message is information, not approval.`
+        : 'Off: give this session its own board address and let new messages to it start a turn.'),
       on && wake.enabled === false ? h('p.res-pending', 'Wake on mail is off for every session in Settings. Already running turns need Stop.', ' ', h('button.link-btn', { type: 'button', onclick: () => navigate('settings') }, 'Open Settings')) : null,
       on && wake.error ? h('p.res-pending', `Wake is unavailable: ${wake.error}`) : null);
   }

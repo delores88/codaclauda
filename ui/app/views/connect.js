@@ -6,11 +6,12 @@
  * patches it in place, so polling never steals focus from the form. Board text (labels,
  * paths, addresses) only ever lands in text nodes or form values. */
 import { setupPrompt, psLiteral } from '../../view-model.js';
+import { BUDGETS, budgetValue, budgetText, budgetSummary, grantLimitsText, grantActive, grantState, compareGrants, expiryMs, isUnlimited } from '../budgets.js';
 
 const APPS = [{ id: 'claude', label: 'Claude Code' }, { id: 'codex', label: 'Codex' }];
 const NAMES = { claude: 'Claude Code', codex: 'Codex' };
 const PAGE = 6;
-const RESERVED = new Set(['owner']);
+const RESERVED = new Set(['owner', 'codaclauda-team']);   // codaclauda-team: the desktop's team inbox (docs/TEAM.md)
 const JOIN_POLL = 4000, JOIN_WINDOW = 30 * 60e3;
 const slug = text => String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 const cleanAddress = text => String(text || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-{2,}/g, '-').slice(0, 60);
@@ -48,21 +49,24 @@ export function joinPrompt({ cli, stateDir, address, label }) {
   ].join('\n');
 }
 
-/** Grant & send limit fields → the grant's limits (hours and days become seconds). Throws on an out-of-range value. */
+/** Grant & send budget fields → the grant's budgets. values[key] is the text (hours for timeout_seconds,
+ *  days for expires_seconds) and values[`${key}_unlimited`] its Unlimited/Never box. An empty field is left
+ *  out so the board applies the owner's default. Throws an Error naming the field otherwise. */
 export function grantLimits(values) {
-  const read = (key, label, min, max, whole) => {
-    const text = String(values?.[key] ?? '').trim(), n = Number(text);
-    if (!text || !Number.isFinite(n) || (whole && !Number.isInteger(n)) || n < min || n > max) throw new Error(`${label} must be ${whole ? 'a whole number ' : ''}from ${min} to ${max}.`);
-    return n;
-  };
-  return {
-    max_requests: read('max_requests', 'Maximum requests', 1, 100000, true),
-    max_delegations: read('max_delegations', 'Maximum delegations', 0, 10000, true),
-    max_hops: read('max_hops', 'Maximum hops', 0, 16, true),
-    timeout_seconds: Math.max(10, Math.round(read('run_hours', 'Hours per run', 0.1, 720) * 3600)),
-    max_turns: read('max_turns', 'Maximum turns per run', 1, 10000, true),
-    expires_seconds: Math.max(30, Math.round(read('expiry_days', 'Days until it expires', 0.1, 365) * 86400)),
-  };
+  const out = {};
+  for (const spec of BUDGETS) {
+    const value = budgetValue(spec, values?.[spec.key], values?.[`${spec.key}_unlimited`] === true);
+    if (value !== undefined) out[spec.key] = value;
+  }
+  return out;
+}
+
+/** "never expires", "expires 14:05" or "expired 14:05" for a grant. */
+export function expiresText(grant, clockTime, now = Date.now()) {
+  if (isUnlimited(grant?.expires_at)) return 'never expires';
+  const at = expiryMs(grant?.expires_at);
+  if (!Number.isFinite(at)) return 'expiry unknown';
+  return `${at > now ? 'expires' : 'expired'} ${clockTime(at)}`;
 }
 
 export function mount(root, ctx) {
@@ -153,7 +157,7 @@ export function mount(root, ctx) {
   function addressProblem(address) {
     if (!address) return 'Enter a mailbox address for this chat.';
     if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(address)) return 'Use lowercase letters and digits separated by single hyphens.';
-    if (RESERVED.has(address)) return '"owner" is your own address. Choose another one for the chat.';
+    if (RESERVED.has(address)) return address === 'owner' ? '"owner" is your own address. Choose another one for the chat.' : `${address} is CodaClauda's team inbox. Choose another address for the chat.`;
     if (names().has(address)) {
       const existing = store.addresses.find(a => a.name === address);
       return `${address} is already on the board${existing?.label && existing.label !== address ? ` (${existing.label})` : ''}. Choose a new address for a new chat.`;
@@ -234,7 +238,7 @@ export function mount(root, ctx) {
   }
 
   function renderRoster() {
-    const list = store.addresses.filter(a => a.name !== 'owner').map(a => {
+    const list = store.addresses.filter(a => !RESERVED.has(a.name)).map(a => {
       const agent = store.agent(a.name);
       return { ...a, agent, seen: agent?.lastSeenAt || 0 };
     }).sort((a, b) => b.seen - a.seen || a.name.localeCompare(b.name));
@@ -291,6 +295,7 @@ export function mount(root, ctx) {
   const taskTarget = h('select.select', { 'aria-label': 'Target connection', onchange: onTaskSelect });
   const taskGrant = h('select.select', { 'aria-label': 'Existing owner grant', style: { flex: '1', minWidth: '0' }, onchange: onTaskSelect });
   const taskRevoke = h('button.btn', { type: 'button', disabled: true, title: 'Revoke the selected grant now', onclick: () => revokeGrant(taskGrant.value) }, icon('close'), 'Revoke');
+  const taskGrantInfo = h('span.field-hint', { hidden: true });
   /** Owner-only: stops the grant's queued and running requests now; nothing new can use it. */
   function revokeGrant(id) {
     const grant = store.board.grants.find(g => g.id === id);
@@ -325,10 +330,13 @@ export function mount(root, ctx) {
     const inProject = endpoints.filter(e => sameWorkspace(e.workspace, project));
     selectOptions(taskTarget, inProject.map(e => ({ value: e.id, label: `${labelFor(e.id)} · ${e.id}` })), inProject.length ? null : 'No connected target');
     const target = endpoints.find(e => e.id === taskTarget.value);
-    const grants = store.board.grants.filter(g => target && sameWorkspace(g.project, project) && g.targets?.includes(target.id) && !g.revoked_at && toMs(g.expires_at) > Date.now());
-    selectOptions(taskGrant, grants.map(g => ({ value: g.id, label: `${g.id} · ${(g.kinds || []).join(', ')} · expires ${clockTime(g.expires_at)}` })), 'No grant selected · ask for authorization');
+    // Never-expiring grants are active; revoked and expired ones cannot be selected.
+    const grants = store.board.grants.filter(g => target && sameWorkspace(g.project, project) && g.targets?.includes(target.id) && grantActive(g));
+    selectOptions(taskGrant, grants.map(g => ({ value: g.id, label: `${g.id} · ${(g.kinds || []).join(', ')} · ${expiresText(g, clockTime)}` })), 'No grant selected · ask for authorization');
     const grant = grants.find(g => g.id === taskGrant.value);
     taskRevoke.disabled = !grant;
+    taskGrantInfo.hidden = !grant;
+    taskGrantInfo.textContent = grant ? `Enforced limits: ${grantLimitsText(grant) || 'not reported by this board'}` : '';
     const { cli, stateDir, matches } = paths();
     taskCli.textContent = cli || 'Installed CLI unavailable';
     taskBoard.textContent = stateDir || 'Actual board directory unavailable';
@@ -344,7 +352,7 @@ export function mount(root, ctx) {
       h('div.cx-form',
         h('label.field', h('span', 'Project'), taskProject),
         h('label.field', h('span', 'Target connection'), taskTarget),
-        h('label.field.cx-wide', h('span', 'Existing owner grant ', h('span.muted', '(optional)')), h('span.cx-path-picker', taskGrant, taskRevoke))),
+        h('label.field.cx-wide', h('span', 'Existing owner grant ', h('span.muted', '(optional)')), h('span.cx-path-picker', taskGrant, taskRevoke), taskGrantInfo)),
       h('p.field-hint', 'Paths come from this running installation. Copying a prompt does not connect an agent or authorize a request.'),
       h('dl.cx-runtime', h('dt', 'Installed CLI'), h('dd', taskCli), h('dt', 'Actual board'), h('dd', taskBoard)),
       taskText,
@@ -357,7 +365,6 @@ export function mount(root, ctx) {
   const KINDS = [{ id: 'question', label: 'Question', hint: 'Ask for an answer' }, { id: 'review', label: 'Review', hint: 'Get another perspective' }, { id: 'delegate', label: 'Delegate', hint: 'Create a scoped diff' }];
   let pendingSubmission = null, gsInFlight = false;   // in flight: a grant/submit call is still running
   const gs = { kind: 'question' };
-  const num = (name, min, max, value, step) => h('input.input', { type: 'number', name, min, max, value, step, required: true });
   const gsTarget = h('select.select', { required: true, onchange: () => { gsProject.value = store.board.endpoints.find(e => e.id === gsTarget.value)?.workspace || ''; renderPeers(true); } });
   const gsProject = h('input.input.mono', { type: 'text', required: true, spellcheck: 'false', autocomplete: 'off', onchange: () => renderPeers() });
   const gsBrowse = h('button.btn', { type: 'button', onclick: async () => {
@@ -375,12 +382,31 @@ export function mount(root, ctx) {
   const gsPaths = h('textarea.textarea.mono', { rows: 3, required: true, spellcheck: 'false', placeholder: 'README.md\nsrc/components/' });
   const gsExpected = h('textarea.textarea', { rows: 3, required: true, placeholder: 'For example: a concise explanation with file references and any remaining uncertainty.' });
   const gsScope = h('p.field-hint');
-  const gsLimits = { max_requests: num('max_requests', 1, 100000, 100), max_delegations: num('max_delegations', 0, 10000, 20), max_hops: num('max_hops', 0, 16, 2), run_hours: num('run_hours', 0.1, 720, 8, 'any'), max_turns: num('max_turns', 1, 10000, 200), expiry_days: num('expiry_days', 0.1, 365, 7, 'any') };
+  /* Budgets: empty = the owner's default (shown as the placeholder), a value, or Unlimited / Never. */
+  const policy = { defaults: null, state: 'idle' };
+  const gsLimits = BUDGETS.map(spec => {
+    const input = h('input.input', { type: 'text', inputMode: spec.scale ? 'decimal' : 'numeric', name: spec.key, autocomplete: 'off', spellcheck: 'false', 'aria-label': spec.label, placeholder: 'Owner default' });
+    const box = h('input', { type: 'checkbox', 'aria-label': `${spec.label}: ${spec.never ? 'never' : 'unlimited'}`, onchange: () => { input.disabled = box.checked; renderLimitsSummary(); } });
+    const node = h('div.field', h('span', spec.label), input, h('label.checkbox-label', box, h('span', spec.never ? 'Never' : 'Unlimited')));
+    return { spec, input, box, node };
+  });
+  const limitValues = () => Object.fromEntries(gsLimits.flatMap(({ spec, input, box }) => [[spec.key, input.value], [`${spec.key}_unlimited`, box.checked]]));
   const gsLimitsSummary = h('span.muted');
-  const renderLimitsSummary = () => {
-    const v = key => gsLimits[key].value || '?';
-    gsLimitsSummary.textContent = `${v('max_requests')} requests · ${v('max_delegations')} delegations · ${v('max_hops')} hops · ${v('run_hours')} h/run · ${v('max_turns')} turns · ${v('expiry_days')} days`;
-  };
+  function renderLimitsSummary() {
+    for (const { spec, input } of gsLimits) input.placeholder = policy.defaults ? `Default: ${budgetText(spec, policy.defaults[spec.key])}` : 'Owner default';
+    try {
+      const chosen = grantLimits(limitValues());
+      gsLimitsSummary.textContent = Object.keys(chosen).length ? `${budgetSummary(chosen)} · the rest use your defaults` : 'Your defaults from Settings → Limits';
+    } catch (error) { gsLimitsSummary.textContent = error.message; }
+  }
+  /** Owner defaults for the placeholders (policy.grant_defaults); a board without policy shows none. */
+  async function loadPolicy() {
+    if (policy.state === 'loading') return;
+    policy.state = 'loading';
+    try { policy.defaults = (await bridge.rpc('policy'))?.grant_defaults || null; policy.state = 'loaded'; }
+    catch { policy.state = 'error'; }
+    renderLimitsSummary();
+  }
   renderLimitsSummary();
   const gsCompute = h('textarea.textarea.mono', { rows: 3, spellcheck: 'false', value: '[]' });
   const gsComputeOk = h('input', { type: 'checkbox' });
@@ -416,7 +442,7 @@ export function mount(root, ctx) {
     gsInFlight = true; gsError.hidden = true; gsSend.disabled = true;
     try {
       if (!gsConsent.checked) throw new Error('Authorize the scope and limits before sending.');
-      const values = { kind: gs.kind, target: gsTarget.value, project: gsProject.value, prompt: gsPrompt.value, expected_result: gsExpected.value, allowed_paths: gsPaths.value, compute: gsCompute.value, peers: gsPeers.map(s => s.value), ...Object.fromEntries(Object.entries(gsLimits).map(([k, input]) => [k, input.value])) };
+      const values = { kind: gs.kind, target: gsTarget.value, project: gsProject.value, prompt: gsPrompt.value, expected_result: gsExpected.value, allowed_paths: gsPaths.value, compute: gsCompute.value, peers: gsPeers.map(s => s.value), ...limitValues() };
       const paths = [...new Set(values.allowed_paths.split(/\r?\n/).map(path => path.trim()).filter(Boolean))];
       if (!paths.length) throw new Error('Enter at least one allowed relative path.');
       let compute;
@@ -459,11 +485,8 @@ export function mount(root, ctx) {
     h('label.field', h('span', 'Expected result'), gsExpected),
     h('div.cx-wide', icon('shield'), ' ', gsScope),
     h('details.cx-sub.cx-wide', h('summary', 'Scope & limits ', gsLimitsSummary),
-      h('div.cx-form',
-        h('label.field', h('span', 'Maximum requests'), gsLimits.max_requests), h('label.field', h('span', 'Maximum delegations'), gsLimits.max_delegations),
-        h('label.field', h('span', 'Maximum hops'), gsLimits.max_hops), h('label.field', h('span', 'Hours per run'), gsLimits.run_hours),
-        h('label.field', h('span', 'Maximum turns per run'), gsLimits.max_turns), h('label.field', h('span', 'Days until it expires'), gsLimits.expiry_days)),
-      h('p.field-hint', 'Hours per run is how long one agent run may take before it is stopped (0.1 to 720 hours); turns per run caps its agent turns. Revoke a grant any time under Dedicated task prompt → Existing owner grant.'),
+      h('div.cx-form', ...gsLimits.map(item => item.node)),
+      h('p.field-hint', 'Leave a field empty to use your default (Settings → Limits), enter a value, or tick Unlimited. Hours per run is how long one agent run may take; turns count per run and tool calls per request. The grant keeps the values it was created with; revoke it any time under Authorizations.'),
       h('p.field-hint', 'Peer requests may target only the primary agent and the optional peers selected above in this workspace. Question and review grants permit read-only requests; delegation grants also permit scoped writes in an isolated Git worktree. Nothing auto-merges.')),
     h('details.cx-sub.cx-wide', h('summary', 'External compute authorization ', h('span.muted', 'Optional · no jobs by default')),
       h('label.field', h('span', 'Exact command permissions (JSON array)'), gsCompute),
@@ -472,9 +495,43 @@ export function mount(root, ctx) {
     h('label.checkbox-label.cx-wide', gsConsent, h('span', 'I authorize this scope and these limits for this request and its peer handoffs.')),
     h('div.cx-wide', gsError),
     h('div.cx-copy-row.cx-wide', gsSend, h('span.field-hint', 'Creates a new immutable owner grant.')));
-  const grantCard = h('details.card.cx-advanced',
+  const grantCard = h('details.card.cx-advanced', { ontoggle: event => { if (event.currentTarget.open) loadPolicy(); } },
     h('summary', icon('shield'), h('span.cx-summary-text', h('strong', 'Grant & send'), h('small', 'Advanced · authorize a scoped question, review or delegation (isolated worktree) for a connected agent, with optional peers and compute.'))),
     h('div.cx-advanced-body', gsForm));
+
+  /* =====================================================================
+   * b3. Authorizations: every owner grant with the limits it enforces, its state and Revoke.
+   * ===================================================================== */
+  const authPage = { n: 1 };
+  const authList = h('div.cx-connections');
+  const stateLabel = { active: ['Active', 'success'], revoked: ['Revoked', 'danger'], expired: ['Expired', 'neutral'] };
+  function renderAuths() {
+    const now = Date.now();
+    const all = [...store.board.grants].sort((a, b) => compareGrants(a, b, now));
+    const pages = Math.max(1, Math.ceil(all.length / PAGE));
+    authPage.n = Math.min(pages, Math.max(1, authPage.n));
+    const signature = JSON.stringify([all.map(g => [g.id, g.revoked_at, g.expires_at, g.effective, g.policy_version]), authPage.n, Math.floor(now / 60e3)]);
+    if (authList.dataset.signature === signature) return;
+    authList.dataset.signature = signature;
+    if (!all.length) { clear(authList, h('p.muted', 'No grants yet. Grant & send creates one; a live chat creates its own.')); return; }
+    const items = all.slice((authPage.n - 1) * PAGE, authPage.n * PAGE);
+    clear(authList, h('ul.cx-endpoints', { 'aria-label': 'Owner grants' }, items.map(g => {
+      const state = grantState(g, now), [label, kind] = stateLabel[state];
+      return h('li.cx-endpoint',
+        h('div.cx-endpoint-name', h('strong', g.id), pill(label, kind),
+          state === 'active' ? h('button.btn.small.ghost', { type: 'button', onclick: () => revokeGrant(g.id) }, icon('close'), 'Revoke') : null),
+        h('div.cx-endpoint-meta.muted', `${(g.kinds || []).join(', ') || 'no kinds'} · ${g.revoked_at ? `revoked ${clockTime(g.revoked_at)}` : expiresText(g, clockTime, now)}`),
+        h('div.cx-endpoint-path', { title: g.project || '' }, icon('folder'), h('span', g.project || '')),
+        h('div.cx-endpoint-meta', grantLimitsText(g) || 'Limits not reported by this board'));
+    })),
+    all.length > PAGE ? h('nav.cx-pager', { 'aria-label': 'Grant pages' },
+      h('button.btn.small.ghost', { type: 'button', disabled: authPage.n === 1, onclick: () => { authPage.n--; renderAuths(); } }, 'Previous'),
+      h('span.muted', `${(authPage.n - 1) * PAGE + 1}–${Math.min(authPage.n * PAGE, all.length)} of ${all.length}`),
+      h('button.btn.small.ghost', { type: 'button', disabled: authPage.n === pages, onclick: () => { authPage.n++; renderAuths(); } }, 'Next')) : null);
+  }
+  const authCard = h('details.card.cx-advanced',
+    h('summary', icon('shield'), h('span.cx-summary-text', h('strong', 'Authorizations'), h('small', 'Advanced · every owner grant on the board, the limits it enforces, and Revoke.'))),
+    h('div.cx-advanced-body', h('p.field-hint', 'A revoked grant stops its queued and running requests at once and is never usable again. Grants from before 0.5 keep their 0.4 limits.'), authList));
 
   /* =====================================================================
    * c. Dedicated connections (0.2 connections list + "Connect an agent")
@@ -696,7 +753,7 @@ export function mount(root, ctx) {
       h('p', 'Put your Claude Code and Codex desktop chats on one board so they can message each other, claim shared resources and ask you for approval.'))),
     inviteCard, rosterCard,
     h('h2.cx-group-title', 'Advanced'),
-    taskCard, grantCard, connCard, controlsCard));
+    taskCard, grantCard, authCard, connCard, controlsCard));
 
   function refresh() {
     const projects = [...store.projects].sort((a, b) => a.name.localeCompare(b.name));
@@ -705,7 +762,7 @@ export function mount(root, ctx) {
     if (!form.copied) suggestAddress();
     suggestLabel();
     checkJoins();
-    refreshInvite(); renderRoster(); renderTaskPrompt(); renderGrantSend(); renderConnections(); renderControls();
+    refreshInvite(); renderRoster(); renderTaskPrompt(); renderGrantSend(); renderAuths(); renderConnections(); renderControls();
   }
 
   suggest();
@@ -714,7 +771,7 @@ export function mount(root, ctx) {
   store.on('sync', () => { if (state.visible && !store.board.state_dir) refreshInvite(); });
 
   return {
-    show() { state.visible = true; refresh(); },
+    show() { state.visible = true; refresh(); if (grantCard.open) loadPolicy(); },
     hide() { state.visible = false; },
   };
 }

@@ -313,6 +313,12 @@ mod boundary_tests {
             Action::Api {
                 op: "limits-set".into(),
             },
+            Action::Api {
+                op: "policy-set".into(),
+            },
+            Action::Api {
+                op: "policy".into(),
+            },
             Action::Worker {
                 id: "x".into(),
                 claim: "y".into(),

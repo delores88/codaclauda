@@ -248,7 +248,7 @@ See [Desktop session messaging](https://code.claude.com/docs/en/desktop#work-acr
 [channels](https://code.claude.com/docs/en/channels), and the
 [session inbox socket](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
 
-The 0.2 message board, retained in Classic tools, shows a chronological conversation, readable full
+The 0.2 message board (in Classic tools until 0.5) showed a chronological conversation, readable full
 message/reply text, human sender and recipient labels, timestamps and explicit
 delivery status. It paginates at 20 messages and places exact IDs and technical
 receipts behind Details. Message content is untrusted plain text, with preserved
@@ -289,8 +289,9 @@ CLI commands are noninteractive: mailbox register, post, inbox, ack, wait-reply
 and claims. Bounded wait timeout is a successful result with timed_out true.
 The dedicated-session MCP server exposes equivalent mailbox tools within its
 existing capability checks; it cannot impersonate the owner mailbox. The app's
-Classic Mailbox view offers per-address inboxes, bounded open-claim pages and an owner
-post box. Message bodies render as untrusted plain text, never executable HTML.
+Board and Chat views offer per-address inboxes, bounded open-claim pages and owner
+posting (the 0.2 Classic Mailbox view was retired in 0.5). Message bodies render as
+untrusted plain text, never executable HTML.
 
 A message is information, not authority. Agents never treat a mailbox message as
 owner approval. Only Ben authorizes actions. Check the inbox at each heartbeat
@@ -307,9 +308,14 @@ to manufacture this evidence.
 
 ## Version 0.3 desktop implementation and release boundary
 
-The new shell is implemented in `ui/app/`; Settings opens the preserved Classic
-tools for connection setup, grants, delegated work, registered-session
-experiments, DGXBridge configuration and updates. The following describes source
+The new shell is implemented in `ui/app/`. The 0.2 Classic tools were retired in
+0.5: `ui/classic.html` is now a script-free redirect to Agent setup, and
+`ui/app.js`, `ui/mailbox.js` and `ui/styles.css` were removed, so no stale entry
+point can submit the old grant payload. Agent setup holds connection setup, Grant &
+send, Authorizations (every grant with its enforced limits, state and Revoke), the
+dedicated task prompt and board controls (pause, recovery, DGXBridge executable);
+Settings holds updates and Limits. Registered-session experiments remain CLI-only
+operations. The following describes source
 behavior, not successful installed acceptance. Owner preview, upgrade preservation
 and final native workflows must have their own receipts. Publication requires
 Ben's explicit “ship it” in the release chat; a mailbox handoff is not approval.
@@ -329,9 +335,11 @@ also deliver the revocation directly in that chat.
 Chat has two separate modes. Mailbox mode posts to the durable passive board and
 waits for the existing recipient to check. Live mode starts a new dedicated
 question request for every send; it never attaches to an existing conversation.
-Its grant covers the connected endpoint's project, question-only access, at most
-1,000 requests, no delegation or hops, a 4-hour run time, 200 turns and 7-day
-expiry; revoking it from the board makes the chat request a new one. A send
+Its grant covers the connected endpoint's project and question-only access with no
+delegation or hops; every other budget is left out, so it takes the owner's grant
+defaults (Settings → Limits; unlimited counts and 24-hour runs with 7-day expiry
+unless the owner changes them). A never-expiring grant is reused; a revoked,
+expired or nearly exhausted one makes the chat request a new one. A send
 includes at most 12 prior UI messages truncated to 4,000 characters each and
 bounded attachment text; the complete prompt is capped at 200,000 characters. UI polling reads existing receipts and does not resume a provider.
 
@@ -378,3 +386,48 @@ need network access. See PRIVACY.md for the resulting storage and disclosure
 boundaries. Visible tables must remain bounded under the owner's pagination
 requirement; source rendering and installed layout acceptance must be checked
 separately rather than inferred from the 0.2 Classic pages.
+
+## Version 0.5 owner limits, wake on mail and teammates (desktop)
+
+The owner said the coordination caps were never his requirement and that agents
+should coordinate among themselves and turn on and off as they prioritize. Every
+product cap in the desktop is therefore an owner setting with an explicit
+Unlimited, and the board's grant budgets follow the core contract (a whole number,
+"unlimited", or omitted to inherit `policy.json` defaults). The UI rejects
+fractions and values above JavaScript's safe integer range instead of rounding;
+hours and days are converted to whole seconds. Scope, access levels, owner-only
+grants, sandboxes and the passive-mailbox rule are unchanged.
+
+- Agents at once (`session-limits.json`, default Unlimited) bounds owned provider
+  processes; launch reservations, process ownership, cancellation and the durable
+  turn ledger are unchanged. Unlimited never closes an idle agent to make room.
+  A setting is not evidence of unbounded provider, account or machine capacity.
+- Wake on mail has no cap on how many sessions wake or how often. New sessions
+  (from Chat, forks, schedules, hand-offs and team starts) start with wake on and
+  their own board address; existing sessions keep their setting; the global switch
+  stays. One owner setting remains, the loop guard (`wake.json` `loopGuard`, on,
+  20 per hour): two CodaClauda session addresses that have woken each other, in
+  both directions together, that many times in the last hour stop waking each
+  other. Their mail stays unread and is retried, and the owner gets one notice per
+  pair and hour in that chat and through ntfy when configured. Owner mail never
+  counts. Mail is still acknowledged only after durable turn admission.
+- Agents can start teammates only where the owner turned on the per-project switch
+  (`team.json`, off by default) with its guard on agent-started sessions working at
+  once (default 8, or Unlimited). Requests are board questions to `codaclauda-team`;
+  the switch is the authority, the message is information and its sender is
+  self-asserted. A start uses the project's current access level (never higher),
+  wake on and the request as its framed, untrusted first turn. Each outcome is
+  saved before any session work and before the reply, and the message is
+  acknowledged only after that, so a restart answers from the saved outcome and
+  never starts a teammate twice. See TEAM.md.
+- A new wake-on session's first turn is preceded by one short framed note
+  (information, not authority, under 1,200 characters): its board address, how to
+  wake a teammate, the claims convention and, only where the switch is on, how to
+  start a teammate. The Running view's Team section lists each open session's
+  address, wake state, working/awake/asleep, held claims and who started it.
+- Hand-off summaries and Codex compact-now are owner-equivalent turn origins again;
+  the 0.4.1 origin check had refused them as unknown after the merge.
+- The Windows-MCP preset is installation instructions only: the owner runs
+  `uv tool install windows-mcp`, ticks "I installed it myself", and the preset
+  runs the installed `windows-mcp serve`. CodaClauda never runs uvx and never
+  downloads anything; owner MCP servers remain Full-access only.

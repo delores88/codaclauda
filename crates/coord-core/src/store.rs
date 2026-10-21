@@ -93,25 +93,29 @@ impl Store {
         } else {
             State::default()
         };
-        if !matches!(state.schema_version, 1 | 2) {
-            bail!("unsupported state schema; upgrade CodaClauda")
-        }
-        if state.schema_version == 1
-            && (!state.registrations.is_empty()
-                || !state.conversations.is_empty()
-                || !state.session_messages.is_empty())
-        {
-            bail!("Registered-session data requires schema 2; preserve the inconsistent board")
-        }
+        check_schema(&state)?;
         let result = operation(&mut state)?;
-        if session && state.schema_version == 1 {
+        // Bound each changed request's retained history before persisting it (C6).
+        crate::spool::spill_events(&self.root, &mut state)?;
+        // Upgrade only when a successful mutation persists data the old schema
+        // cannot hold: registered sessions (2) or 0.5-only data (3), which 0.4
+        // clients refuse. Backup bytes are the exact previous file.
+        let target = if state.has_current_data() {
+            3
+        } else if session {
+            2
+        } else {
+            1
+        };
+        if target > state.schema_version {
             if let Some(original) = original {
                 // Never overwrite a previous backup. A failed/ambiguous prior
                 // upgrade may leave one; it must match before we can proceed.
-                let backup = self.root.join("state.schema1.backup.json");
+                let old = state.schema_version;
+                let backup = self.root.join(format!("state.schema{old}.backup.json"));
                 if backup.exists() {
                     if fs::read(&backup)? != original {
-                        bail!("Schema 1 backup differs; preserve both files before migrating")
+                        bail!("Schema {old} backup differs; preserve both files before migrating")
                     }
                 } else {
                     let mut saved = tempfile::NamedTempFile::new_in(&self.root)?;
@@ -123,7 +127,7 @@ impl Store {
                     fs::File::open(&self.root)?.sync_all()?;
                 }
             }
-            state.schema_version = 2;
+            state.schema_version = target;
         }
         let bytes = serde_json::to_vec_pretty(&state)?;
         let mut temporary = tempfile::NamedTempFile::new_in(&self.root)?;
@@ -148,18 +152,26 @@ impl Store {
         } else {
             State::default()
         };
-        if !matches!(state.schema_version, 1 | 2) {
-            bail!("unsupported state schema; upgrade CodaClauda")
-        }
-        if state.schema_version == 1
-            && (!state.registrations.is_empty()
-                || !state.conversations.is_empty()
-                || !state.session_messages.is_empty())
-        {
-            bail!("Registered-session data requires schema 2; preserve the inconsistent board")
-        }
+        check_schema(&state)?;
         Ok(state)
     }
+}
+
+fn check_schema(state: &State) -> Result<()> {
+    if !matches!(state.schema_version, 1..=3) {
+        bail!("unsupported state schema; upgrade CodaClauda")
+    }
+    if state.schema_version == 1
+        && (!state.registrations.is_empty()
+            || !state.conversations.is_empty()
+            || !state.session_messages.is_empty())
+    {
+        bail!("Registered-session data requires schema 2; preserve the inconsistent board")
+    }
+    if state.schema_version < 3 && state.has_current_data() {
+        bail!("CodaClauda 0.5 data requires schema 3; preserve the inconsistent board")
+    }
+    Ok(())
 }
 
 pub fn default_root() -> Result<PathBuf> {

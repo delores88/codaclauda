@@ -39,13 +39,16 @@ fn fixture() -> (tempfile::TempDir, Store, String) {
         targets: vec!["codex".into(), "claude".into()],
         kinds: vec!["question".into(), "delegate".into(), "review".into()],
         expected_result: "Bounded unit fixture".into(),
-        max_requests: 8,
-        max_delegations: 2,
-        max_hops: 1,
-        timeout_seconds: 20,
-        expires_at: now() + 600,
+        max_requests: Finite(8),
+        max_delegations: Finite(2),
+        max_hops: Finite(1),
+        timeout_seconds: Finite(20),
+        expires_at: Finite(now() + 600),
         compute: vec![],
-        max_turns: 200,
+        max_turns: Finite(200),
+        max_mcp_calls: Unlimited,
+        max_compute_jobs: Unlimited,
+        policy_version: POLICY_VERSION,
         revoked_at: None,
     };
     store
@@ -128,7 +131,7 @@ fn expired_scope_cannot_start() {
     let (_dir, store, _) = fixture();
     store
         .transaction(|s| {
-            s.grants.get_mut("grant").unwrap().expires_at = now() - 1;
+            s.grants.get_mut("grant").unwrap().expires_at = Finite(now() - 1);
             Ok(())
         })
         .unwrap();

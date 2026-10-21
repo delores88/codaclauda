@@ -108,7 +108,7 @@ impl Inner {
             .map_err(|e| format!("Could not save the forked chat: {e}"))
     }
 
-    fn fork(&self, id: &str) -> Result<Value, Failure> {
+    async fn fork(&self, id: &str) -> Result<Value, Failure> {
         if let Some(message) = lock(&self.storage_failure).clone() {
             return Err(("STORAGE_FAILED", message));
         }
@@ -122,6 +122,9 @@ impl Inner {
             "NOTHING_TO_FORK",
             "Send a message in this chat before forking it.".to_owned(),
         ))?;
+        let title = clip(&format!("Fork of {}", source.title), 200);
+        // A fork is a new session: wake on with its own board address, as in start().
+        let (wake, mailbox_address) = self.default_wake(&source.provider, &source.cwd, &title).await;
         let now = now_ms();
         let record = Record {
             id: format!("s_{}", random_hex(8)),
@@ -129,7 +132,10 @@ impl Inner {
             project_id: source.project_id.clone(),
             // Claude finds a session to resume by its folder, so a fork stays put.
             cwd: source.cwd.clone(),
-            title: clip(&format!("Fork of {}", source.title), 200),
+            title,
+            wake,
+            mailbox_address,
+            team_note: true,
             access: source.access.clone(),
             status: "idle".into(),
             created_at: now,
@@ -208,7 +214,8 @@ impl Inner {
 
 #[tauri::command]
 pub(crate) async fn session_fork(app: tauri::AppHandle, id: String) -> Value {
-    reply(host(&app).fork(&id))
+    let inner = host(&app);
+    reply(inner.fork(&id).await)
 }
 
 #[tauri::command]

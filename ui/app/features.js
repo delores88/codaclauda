@@ -17,7 +17,8 @@
  *   mcpGet / mcpSet    mcp_servers_get({ projectId }) / mcp_servers_set({ projectId, servers }) → { servers }
  *   notifyGet / notifySet  notify_settings_get() / notify_settings_set({ ntfyUrl, onFinish, onError }) → same
  *   notifyTest         notify_test() (optional; the Settings test button needs it)
- *   limitsGet / limitsSet  session_limits_get() / session_limits_set({ maxLive }) → { maxLive, queueMax }
+ *   limitsGet / limitsSet  session_limits_get() / session_limits_set({ maxLive: n|'unlimited' }) → { maxLive, queueMax }
+ *   teamGet / teamSet  team_settings_get() → { address, projects, defaults } / team_settings_set({ project }) → { projectId, project }
  *   instructionsRead   project_instructions_read({ projectId, cwd, file }) → { text, exists }
  *   instructionsWrite  project_instructions_write({ projectId, cwd, file, text }) → { ok: true }
  *   ciStatus           ci_status({ projectId, repo }) → { runs:[{ name, status, conclusion, branch, url, at }] }
@@ -32,6 +33,7 @@ export const COMMANDS = {
   notifyGet: 'notify_settings_get', notifySet: 'notify_settings_set', notifyTest: 'notify_test',
   instructionsRead: 'project_instructions_read', instructionsWrite: 'project_instructions_write',
   ciStatus: 'ci_status', limitsGet: 'session_limits_get', limitsSet: 'session_limits_set',
+  teamGet: 'team_settings_get', teamSet: 'team_settings_set',
 };
 export const UNSUPPORTED_TEXT = 'Needs CodaClauda 0.5 desktop';
 

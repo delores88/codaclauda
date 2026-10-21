@@ -80,13 +80,26 @@ export const desktop = {
    *  A 'user' event for a wake or scheduled turn carries origin { kind: 'wake'|'schedule', ... }; owner turns have none. */
   onSessionEvent: cb => listenTo('session://event', cb),
 
-  /* 0.4.1 wake on mail (src-tauri/src/session_host/wake.rs). Records gain wake, mailboxAddress|null, wakes { hour, day, total }. */
+  /* 0.4.1 wake on mail (src-tauri/src/session_host/wake.rs). Records gain wake, mailboxAddress|null, wakes { hour, day, total }.
+   * 0.5: new sessions start with wake on; no session or rate caps, only the owner's loop guard. Records also gain
+   * live (an owned process is running or starting) and startedBy { address, messageId, at } for team starts. */
   /** Turns wake on mail on or off for one session (on: registers its board address) → { session } */
   sessionSetWake: ({ id, on }) => invoke('session_set_wake', { id, on: Boolean(on) }),
-  /** Global kill switch → { enabled } */
+  /** Global switch and loop guard → { enabled, loopGuard: { on, pairPerHour } } */
   wakeSettingsGet: () => invoke('wake_settings_get'),
-  /** Accepts { enabled } or a boolean → { enabled } */
-  wakeSettingsSet: arg => invoke('wake_settings_set', { enabled: Boolean(arg && typeof arg === 'object' ? arg.enabled : arg) }),
+  /** Accepts a boolean, { enabled } and/or { loopGuard: { on?, pairPerHour? } }; omitted fields stay → same shape */
+  wakeSettingsSet: arg => {
+    const value = arg && typeof arg === 'object' ? arg : { enabled: arg };
+    const args = {};
+    if (value.enabled !== undefined) args.enabled = Boolean(value.enabled);
+    if (value.loopGuard && typeof value.loopGuard === 'object') args.loopGuard = value.loopGuard;
+    return invoke('wake_settings_set', args);
+  },
+  /** 0.5 team starts (src-tauri/src/session_host/team.rs) →
+   *  { address: 'codaclauda-team', projects: { [projectId]: { name, cwd, ids, agentsCanStart, maxAgentStartedLive, updatedAt } }, defaults } */
+  teamSettingsGet: () => invoke('team_settings_get'),
+  /** { projectId, cwd, name?, ids?, agentsCanStart?, maxAgentStartedLive?: number|'unlimited' } → { projectId, project } */
+  teamSettingsSet: project => invoke('team_settings_set', { project }),
 
   /* 0.4.1 scheduled tasks (src-tauri/src/session_host/schedule.rs); they run only while the app is open.
    * Schedule: { id, name, projectId, cwd, provider, prompt, cadence, enabled, catchUp, lastRunAt, nextRunAt, sessionId, access? }
@@ -142,8 +155,8 @@ export const desktop = {
   notifySettingsSet: ({ ntfyUrl = null, onFinish = false, onError = false } = {}) => invoke('notify_settings_set', { ntfyUrl: ntfyUrl || null, onFinish: Boolean(onFinish), onError: Boolean(onError) }),
   /** Owner setting: CodaClauda sessions working at once (Settings → Limits) → { maxLive, queueMax } */
   sessionLimitsGet: () => invoke('session_limits_get'),
-  /** maxLive is a whole number 1-32 (default 6) → { maxLive, queueMax } */
-  sessionLimitsSet: ({ maxLive } = {}) => invoke('session_limits_set', { maxLive: Number(maxLive) }),
+  /** maxLive is a whole number ≥ 1 or 'unlimited' (the default) → { maxLive, queueMax } */
+  sessionLimitsSet: ({ maxLive } = {}) => invoke('session_limits_set', { maxLive: maxLive === 'unlimited' ? 'unlimited' : Number(maxLive) }),
   /** file: 'CLAUDE.md' | 'AGENTS.md' at the project root (≤ 200 KB) → { text, exists } */
   projectInstructionsRead: ({ projectId = null, cwd, file }) => invoke('project_instructions_read', { projectId, cwd, file }),
   /** → { ok: true } */

@@ -225,7 +225,7 @@ pub fn guard_board(board: &Path) -> Result<AdmissionGuard> {
     }
     let state: State = serde_json::from_slice(&bytes)
         .map_err(|_| "The coordination board is invalid. Preserve it; update was stopped.")?;
-    if !matches!(state.schema_version, 1 | 2) {
+    if !matches!(state.schema_version, 1..=3) {
         return Err("This coordination board needs a compatible updater.".into());
     }
     if state.requests.values().any(|request| !request.terminal()) {
@@ -242,7 +242,7 @@ pub fn guard_board(board: &Path) -> Result<AdmissionGuard> {
                 conversation.revoked_at.is_none() && conversation.expires_at > coord_core::now()
             })
     }) {
-        return Err("There are messages awaiting delivery or acknowledgment. Finish the exchange, or revoke its conversation in Agent setup before installing. Its history will be preserved.".into());
+        return Err("There are messages awaiting delivery or acknowledgment. Finish the exchange, or revoke its conversation with the CLI (api session-revoke with its conversation_id; see docs/CLI.md) before installing. Its history will be preserved.".into());
     }
     Ok(AdmissionGuard {
         _runtime: runtime,
@@ -385,6 +385,31 @@ mod tests {
                 state
             );
         }
+        // A board 0.5 migrated to schema 3: a policy_version 1 grant with
+        // unlimited budgets and a finished request carrying 0.5 counters.
+        let mut state = fixture("completed");
+        state["schema_version"] = json!(3);
+        state["grants"] = json!({"grant": {
+            "id":"grant", "project":"fixture", "allowed_paths":[], "targets":["agent"],
+            "kinds":["question"], "expected_result":"fixture", "max_requests":"unlimited",
+            "max_delegations":0, "max_hops":0, "timeout_seconds":86400, "expires_at":"never",
+            "max_turns":"unlimited", "max_mcp_calls":"unlimited", "max_compute_jobs":"unlimited",
+            "policy_version":1
+        }});
+        state["requests"]["request"]["next_seq"] = json!(3);
+        state["requests"]["request"]["mcp_calls_used"] = json!(2);
+        let path = temp.path().join("state.json");
+        let before = serde_json::to_vec(&state).unwrap();
+        fs::write(&path, &before).unwrap();
+        assert!(guard_board(temp.path()).is_ok());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        // A schema 3 v1 grant missing a resolved budget still fails closed.
+        state["grants"]["grant"]
+            .as_object_mut()
+            .unwrap()
+            .remove("max_turns");
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(guard_board(temp.path()).is_err());
     }
 
     #[cfg(windows)]

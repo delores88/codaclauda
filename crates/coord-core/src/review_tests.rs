@@ -105,13 +105,16 @@ fn fixture() -> (tempfile::TempDir, Store, Grant) {
         targets: vec!["codex-fixture".into(), "claude-fixture".into()],
         kinds: vec!["question".into(), "review".into(), "delegate".into()],
         expected_result: "Unit test fixture only".into(),
-        max_requests: 16,
-        max_delegations: 4,
-        max_hops: 3,
-        timeout_seconds: 60,
-        expires_at: now() + 300,
+        max_requests: Finite(16),
+        max_delegations: Finite(4),
+        max_hops: Finite(3),
+        timeout_seconds: Finite(60),
+        expires_at: Finite(now() + 300),
         compute: vec![],
-        max_turns: 200,
+        max_turns: Finite(200),
+        max_mcp_calls: Unlimited,
+        max_compute_jobs: Unlimited,
+        policy_version: POLICY_VERSION,
         revoked_at: None,
     };
     store
@@ -696,29 +699,28 @@ fn question_grant(store: &Store, project: &str, extra: Value) -> Result<Value> {
 }
 
 #[test]
-fn grant_defaults_suit_long_work_and_upper_bounds_are_accepted() {
+fn new_grants_inherit_owner_defaults_and_keep_them_when_policy_changes() {
     let (_temp, store, grant) = fixture();
+    let cli = Path::new("must-never-be-launched.exe");
     let made = question_grant(&store, &grant.project, json!({})).unwrap();
-    assert_eq!(made["max_requests"], 100);
-    assert_eq!(made["max_delegations"], 20);
-    assert_eq!(made["max_hops"], 2);
-    assert_eq!(made["timeout_seconds"], 28_800);
-    assert_eq!(made["max_turns"], 200);
+    assert_eq!(made["policy_version"], 1);
+    assert_eq!(made["timeout_seconds"], 86_400);
+    for field in ["max_requests", "max_delegations", "max_hops", "max_turns", "max_mcp_calls", "max_compute_jobs"] {
+        assert_eq!(made[field], "unlimited", "{field}");
+        assert_eq!(made["effective"][field], "unlimited", "{field}");
+    }
     assert!(made["expires_at"].as_u64().unwrap() >= now() + 604_800 - 5);
-    let top = json!({"max_requests":100_000,"max_delegations":10_000,"max_hops":16,
-        "timeout_seconds":2_592_000,"expires_seconds":31_536_000,"max_turns":10_000});
-    assert_eq!(
-        question_grant(&store, &grant.project, top).unwrap()["max_turns"],
-        10_000
-    );
-    let error = question_grant(&store, &grant.project, json!({"max_turns":10_001})).unwrap_err();
-    assert!(error.to_string().contains("max_turns"));
-    // Grants saved before max_turns existed read with the default.
-    let mut saved = serde_json::to_value(&grant).unwrap();
-    saved.as_object_mut().unwrap().remove("max_turns");
-    saved.as_object_mut().unwrap().remove("revoked_at");
-    let legacy: Grant = serde_json::from_value(saved).unwrap();
-    assert_eq!((legacy.max_turns, legacy.revoked_at), (200, None));
+    assert!(made["revoked_at"].is_null());
+    let never = question_grant(&store, &grant.project, json!({"expires_seconds":"never","max_turns":0}));
+    assert!(never.unwrap_err().to_string().contains("max_turns must be a whole number from 1"));
+    let never = question_grant(&store, &grant.project, json!({"expires_seconds":"never","max_delegations":0})).unwrap();
+    assert_eq!((&never["expires_at"], &never["max_delegations"]), (&json!("never"), &json!(0)));
+    owner_api(&store, "policy-set", &json!({"grant_defaults":{"max_turns":40,"timeout_seconds":"unlimited"}}), cli).unwrap();
+    let after = question_grant(&store, &grant.project, json!({})).unwrap();
+    assert_eq!((&after["max_turns"], &after["timeout_seconds"]), (&json!(40), &json!("unlimited")));
+    let id = made["id"].as_str().unwrap();
+    let kept = &store.read().unwrap().grants[id];
+    assert_eq!((kept.max_turns, kept.timeout_seconds), (Unlimited, Finite(86_400)));
 }
 
 #[test]
@@ -777,7 +779,7 @@ fn owner_concurrency_setting_gates_dispatch() {
     let cli = Path::new("must-never-be-launched.exe");
     assert_eq!(
         owner_api(&store, "limits", &json!({}), cli).unwrap()["concurrent"],
-        4
+        "unlimited"
     );
     owner_api(&store, "limits-set", &json!({"concurrent":2}), cli).unwrap();
     for id in ["active-one", "active-two"] {
@@ -798,8 +800,11 @@ fn owner_concurrency_setting_gates_dispatch() {
     submit(&store, &waiting, None).unwrap();
     dispatch(&store, cli).unwrap();
     assert_eq!(store.read().unwrap().requests["waiting"].state, "queued");
-    let raised = owner_api(&store, "limits-set", &json!({"concurrent":3}), cli).unwrap();
-    assert_eq!(raised["concurrent"], 3);
+    let status = owner_api(&store, "status", &json!({}), cli).unwrap();
+    let queued = status["requests"].as_array().unwrap().iter().find(|r| r["id"] == "waiting").unwrap();
+    assert_eq!(queued["queued_reason"], "waiting for a free slot (active 2 of 2)");
+    let raised = owner_api(&store, "limits-set", &json!({"concurrent":"unlimited"}), cli).unwrap();
+    assert_eq!(raised["concurrent"], "unlimited");
     // The fixture CLI cannot launch, so the claimed request records that and stops.
     let state = store.read().unwrap();
     assert!(
@@ -809,8 +814,13 @@ fn owner_concurrency_setting_gates_dispatch() {
             .any(|e| e.kind == "dispatch-claimed")
     );
     let status = owner_api(&store, "status", &json!({}), cli).unwrap();
-    assert_eq!(status["limits"]["concurrent"], 3);
-    assert!(owner_api(&store, "limits-set", &json!({"concurrent":65}), cli).is_err());
+    assert_eq!(status["limits"]["concurrent"], "unlimited");
+    assert_eq!((&status["limits"]["active"], &status["limits"]["queued"]), (&json!(2), &json!(0)));
+    for bad in [json!(0), json!(1.5), json!("lots"), json!(null), json!(9_007_199_254_740_992u64)] {
+        let error = owner_api(&store, "limits-set", &json!({"concurrent":bad}), cli).unwrap_err();
+        assert!(error.to_string().contains("concurrent must be a whole number from 1"), "{error}");
+    }
+    assert_eq!(owner_api(&store, "policy", &json!({}), cli).unwrap()["concurrent"], "unlimited");
 }
 
 fn running_reader(store: &Store, grant: &Grant, capability: &str) -> String {

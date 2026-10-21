@@ -10,7 +10,9 @@ import { has, call, PROJECT_FILES, INSTRUCTIONS_LIMIT, utf8Length, parseServers,
 export const MCP_NOTE = 'Full access only: sessions started at Full access in this project get these tools; Read only sessions never do. CodaClauda never downloads or installs them; you install each one yourself.';
 
 /* Checked 2026-10-20: @playwright/mcp 0.0.83 on the npm registry (Apache-2.0) has bin { "playwright-mcp": "cli.js" };
- * the CursorTouch/Windows-MCP README (MIT) runs `uvx windows-mcp serve` and needs Python 3.14+ and uv. */
+ * the CursorTouch/Windows-MCP README (MIT) needs Python 3.14+ and uv and documents `uvx windows-mcp serve`, which
+ * downloads the package on first use. This preset never uses uvx: the owner installs it with `uv tool install
+ * windows-mcp` (its windows-mcp command) and ticks "I installed it myself" before Add is enabled. */
 export const MCP_PRESETS = [
   {
     id: 'playwright', name: 'playwright', title: 'Playwright MCP', by: 'Microsoft · Apache-2.0',
@@ -20,9 +22,10 @@ export const MCP_PRESETS = [
   },
   {
     id: 'windows', name: 'windows-mcp', title: 'Windows-MCP', by: 'CursorTouch · MIT · third-party',
-    command: 'uvx', args: ['windows-mcp', 'serve'],
-    install: ['pip install uv'],
-    text: 'Windows desktop control (UI Automation, screenshots, mouse and keyboard), per its README: needs Python 3.14+ and uv, and runs as "uvx windows-mcp serve". uv fetches windows-mcp from PyPI the first time it runs. Its README warns it has full system access and can do irreversible things; it takes over the mouse and keyboard while it works, and on-screen text is untrusted.',
+    command: 'windows-mcp', args: ['serve'],
+    install: ['uv tool install windows-mcp'],
+    confirm: 'I installed it myself',
+    text: 'Windows desktop control (UI Automation, screenshots, mouse and keyboard). Install it yourself first in a terminal with the command below (its README also needs Python 3.14+ and uv); that adds a windows-mcp command, which this preset runs as "windows-mcp serve". If it is not on your PATH, put its full path in Command ("uv tool dir --bin" shows the folder). CodaClauda never runs uvx and never downloads or installs it. Its README warns it has full system access and can do irreversible things; it takes over the mouse and keyboard while it works, and on-screen text is untrusted.',
   },
 ];
 
@@ -113,6 +116,7 @@ export function openMcpTools({ ui, store }, project, { onSaved } = {}) {
   const { h, icon, iconButton, modal, toast, copyText } = ui;
   if (!project) return;
   let rows = [], loaded = false, saving = false, dialog = null;
+  const installed = new Set();   // presets the owner confirmed they installed themselves (this dialog only)
   if (!has('mcpGet') || !has('mcpSet')) {
     modal({ title: 'MCP tools', body: h('div.pt-body', h('p', `${UNSUPPORTED_TEXT}.`), h('p.field-hint', 'This build cannot attach your own MCP servers to sessions.'), h('p.mcp-note', icon('shield'), h('span', MCP_NOTE)), presetList()) });
     return;
@@ -126,8 +130,9 @@ export function openMcpTools({ ui, store }, project, { onSaved } = {}) {
   function presetList() {
     return h('div.mcp-presets', MCP_PRESETS.map(p => h('section.mcp-preset',
       h('header', h('strong', p.title), h('span.muted', p.by),
-        loaded ? h('button.btn.small', { type: 'button', disabled: rows.some(r => r.name === p.name), onclick: () => addRow({ name: p.name, command: p.command, args: p.args.join('\n'), env: '' }) }, icon('plus'), 'Add') : null),
+        loaded ? h('button.btn.small', { type: 'button', disabled: rows.some(r => r.name === p.name) || (p.confirm && !installed.has(p.id)), title: p.confirm && !installed.has(p.id) ? `Install it yourself first, then tick "${p.confirm}"` : '', onclick: () => addRow({ name: p.name, command: p.command, args: p.args.join('\n'), env: '' }) }, icon('plus'), 'Add') : null),
       h('p.field-hint', p.text),
+      p.confirm && loaded ? h('label.checkbox-label', h('input', { type: 'checkbox', checked: installed.has(p.id), onchange: event => { if (event.currentTarget.checked) installed.add(p.id); else installed.delete(p.id); render(); } }), h('span', `${p.confirm} with ${p.install.join(' / ')}`)) : null,
       h('div.mcp-install', icon('terminal'), h('span', 'You run:'),
         ...p.install.map(cmd => h('code', cmd)),
         ...p.install.map(cmd => iconButton('copy', `Copy ${cmd}`, () => copyText(cmd, 'Command copied')))),

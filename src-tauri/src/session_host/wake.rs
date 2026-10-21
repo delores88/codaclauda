@@ -1,19 +1,24 @@
-//! Wake on mail (0.4.1). Opt-in per session; a global switch (on by default)
-//! can stop every wake at once. A session with wake on owns a board address
-//! (`<provider>-<project>-<4 hex>`) registered through coord-core's mailbox
-//! API in process. One background task polls the inbox of every wake-enabled
-//! session each minute; each new unread message becomes one turn through the
-//! normal send path (queued when the session is busy) and is then
-//! acknowledged. Mail is framed as information, never as owner approval.
+//! Wake on mail (0.4.1; 0.5 removed the fixed caps). On by default for new
+//! sessions (0.5), with a per-session switch and a global switch (on by
+//! default) that can stop every wake at once. A session with wake on owns a
+//! board address (`<provider>-<project>-<4 hex>`) registered through
+//! coord-core's mailbox API in process. One background task polls the inbox
+//! of every wake-enabled session each minute; each new unread message becomes
+//! one turn through the normal send path (queued when the session is busy)
+//! and is acknowledged only after that durable admission. Mail is framed as
+//! information, never as owner approval. The same poller serves the team
+//! inbox (`team.rs`).
 //!
-//! Caps: 5 wake-enabled sessions; 6 wakes per session per hour and 30 per
-//! day; and, as a loop guard, 3 wakes per hour for each pair of CodaClauda
-//! session addresses. 'owner' is exempt from the pair cap only. A capped
-//! message stays unread and is tried again on a later poll.
+//! There is no cap on how many sessions wake or how often. One owner setting
+//! remains, the loop guard (`wake.json` `loopGuard`, on with 20 by default):
+//! two CodaClauda session addresses that have woken each other (both
+//! directions together) `pairPerHour` times in the last hour stop waking each
+//! other; the message stays unread and is retried on a later poll, and the
+//! owner gets a notice once per pair and hour. 'owner' never forms a pair.
 
 use super::{
-    Failure, Inner, Queued, Record, Wakes, ensure_dirs, event, host, lock, now_ms, random_hex,
-    reply, require_browser_disabled, write_atomic,
+    Failure, Inner, Queued, Record, Wakes, ensure_dirs, event, host, limits::JS_SAFE_MAX, lock,
+    now_ms, random_hex, reply, require_browser_disabled, write_atomic,
 };
 use coord_core::{mailbox, store::Store};
 use serde::{Deserialize, Serialize};
@@ -29,27 +34,71 @@ use tauri::Manager;
 
 const WAKE_FILE: &str = "wake.json";
 const POLL_EVERY: Duration = Duration::from_secs(60);
-const MAX_WAKE_SESSIONS: usize = 5;
-const PER_HOUR: usize = 6;
-const PER_DAY: usize = 30;
-const PER_PAIR_HOUR: usize = 3;
 const INBOX_PAGE: u64 = 20;
 const HOUR_MS: u64 = 60 * 60 * 1000;
 const DAY_MS: u64 = 24 * HOUR_MS;
+const DEFAULT_PAIR_PER_HOUR: u64 = 20;
 
-/// Persisted wake switch and the recent wake times behind the caps.
+/// Owner setting: stop two CodaClauda sessions from waking each other in a loop.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LoopGuard {
+    on: bool,
+    pair_per_hour: u64,
+}
+
+impl Default for LoopGuard {
+    fn default() -> Self {
+        Self {
+            on: true,
+            pair_per_hour: DEFAULT_PAIR_PER_HOUR,
+        }
+    }
+}
+
+/// Owner input {on?, pairPerHour?} applied over the current guard.
+fn parse_guard(current: LoopGuard, value: &Value) -> Result<LoopGuard, Failure> {
+    let invalid = |m: &str| ("INVALID_ARGUMENTS", m.to_owned());
+    if !value.is_object() {
+        return Err(invalid("loopGuard must be an object with on and pairPerHour."));
+    }
+    let mut guard = current;
+    if let Some(on) = value.get("on") {
+        guard.on = on
+            .as_bool()
+            .ok_or_else(|| invalid("loopGuard.on must be true or false."))?;
+    }
+    if let Some(n) = value.get("pairPerHour") {
+        guard.pair_per_hour = n
+            .as_u64()
+            .filter(|n| (1..=JS_SAFE_MAX).contains(n))
+            .ok_or_else(|| {
+                invalid("pairPerHour must be a whole number from 1 to 9007199254740991.")
+            })?;
+    }
+    Ok(guard)
+}
+
+/// Persisted wake switch, loop guard, and the recent wake times behind the
+/// guard and the counters shown in Chat.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Book {
     enabled: bool,
-    /// Session id → wake times (epoch ms, last 24 h).
+    /// Session id → wake times (epoch ms, last 24 h); display counters only.
     times: BTreeMap<String, Vec<u64>>,
-    /// "<sender address>><session id>" → wake times (epoch ms, last hour).
+    /// Unordered session-address pair (`pair_key`) → wakes in either
+    /// direction (epoch ms, last hour). 0.4.1 directional keys age out.
     pairs: BTreeMap<String, Vec<u64>>,
-    /// Durable cap reservation for each stable wake identity. Host admission
-    /// and later dequeue share it, so ack retries never consume another slot.
+    /// Durable reservation for each stable wake identity. Host admission
+    /// and later dequeue share it, so ack retries never count twice.
     #[serde(default)]
     reservations: BTreeMap<String, u64>,
+    #[serde(default)]
+    loop_guard: LoopGuard,
+    /// Pair → when the owner was last told the guard held it (once an hour).
+    #[serde(default)]
+    guard_notices: BTreeMap<String, u64>,
     #[serde(skip)]
     failure: Option<String>,
 }
@@ -61,9 +110,17 @@ impl Default for Book {
             times: BTreeMap::new(),
             pairs: BTreeMap::new(),
             reservations: BTreeMap::new(),
+            loop_guard: LoopGuard::default(),
+            guard_notices: BTreeMap::new(),
             failure: None,
         }
     }
+}
+
+/// Both directions between two session addresses share one key.
+fn pair_key(a: &str, b: &str) -> String {
+    let (first, second) = if a <= b { (a, b) } else { (b, a) };
+    format!("pair:{first}|{second}")
 }
 
 impl Book {
@@ -78,6 +135,21 @@ impl Book {
         self.pairs.retain(|_, times| !times.is_empty());
         self.reservations
             .retain(|_, at| now.saturating_sub(*at) < DAY_MS);
+        self.guard_notices
+            .retain(|_, at| now.saturating_sub(*at) < HOUR_MS);
+    }
+
+    /// True once per pair and hour: the owner hears about a held pair once.
+    fn notice_due(&mut self, pair: &str, now: u64) -> bool {
+        if self
+            .guard_notices
+            .get(pair)
+            .is_some_and(|at| now.saturating_sub(*at) < HOUR_MS)
+        {
+            return false;
+        }
+        self.guard_notices.insert(pair.to_owned(), now);
+        true
     }
 
     fn check(&self) -> Result<(), Failure> {
@@ -102,17 +174,17 @@ impl Book {
         if self.reservations.contains_key(key) {
             return Ok(false);
         }
-        let times = self.times.get(id).map_or(&[][..], Vec::as_slice);
-        let pair_times = pair.map(|p| self.pairs.get(p).map_or(&[][..], Vec::as_slice));
-        if let Some(limit) = capped(times, pair_times, now) {
-            return Err((
-                if limit == "pair" {
-                    "WAKE_PAIR_LIMIT"
-                } else {
-                    "WAKE_LIMIT"
-                },
-                format!("The wake {limit} limit has been reached; mail stays unread."),
-            ));
+        if let Some(pair) = pair {
+            let recent = self.pairs.get(pair).map_or(&[][..], Vec::as_slice);
+            if guard_holds(self.loop_guard, recent, now) {
+                return Err((
+                    "WAKE_LOOP_GUARD",
+                    format!(
+                        "These two sessions have woken each other {} times in the last hour (Settings → Limits → Wake loop guard). The message stays unread and is retried later.",
+                        self.loop_guard.pair_per_hour
+                    ),
+                ));
+            }
         }
         self.times.entry(id.to_owned()).or_default().push(now);
         if let Some(pair) = pair {
@@ -174,24 +246,14 @@ fn validate_binding(
     Ok(())
 }
 
-/// Whether one more wake fits the caps. `None` means it does.
-fn capped(session: &[u64], pair: Option<&[u64]>, now: u64) -> Option<&'static str> {
-    let within = |times: &[u64], span: u64| {
-        times
+/// The loop guard: a pair at its hourly count waits for older wakes to age out.
+fn guard_holds(guard: LoopGuard, pair: &[u64], now: u64) -> bool {
+    guard.on
+        && pair
             .iter()
-            .filter(|t| now.saturating_sub(**t) < span)
-            .count()
-    };
-    if within(session, HOUR_MS) >= PER_HOUR {
-        return Some("hour");
-    }
-    if within(session, DAY_MS) >= PER_DAY {
-        return Some("day");
-    }
-    if pair.is_some_and(|times| within(times, HOUR_MS) >= PER_PAIR_HOUR) {
-        return Some("pair");
-    }
-    None
+            .filter(|t| now.saturating_sub(**t) < HOUR_MS)
+            .count() as u64
+            >= guard.pair_per_hour
 }
 
 fn counts(times: &[u64], total: u64, now: u64) -> Wakes {
@@ -278,7 +340,7 @@ impl Inner {
     }
 
     /// The bound board, checked again so a moved board is never recreated.
-    fn board_store(&self) -> Result<Store, Failure> {
+    pub(super) fn board_store(&self) -> Result<Store, Failure> {
         if let Some(board) = self.app.try_state::<crate::board::BoardBinding>() {
             board
                 .validate()
@@ -380,19 +442,6 @@ impl Inner {
             require_browser_disabled(record.playwright)
                 .map_err(|message| ("BROWSER_UNAVAILABLE", message))?;
         }
-        let too_many = || {
-            (
-                "WAKE_LIMIT",
-                format!(
-                    "At most {MAX_WAKE_SESSIONS} sessions can wake on mail. Turn it off in another session first."
-                ),
-            )
-        };
-        let enabled_elsewhere =
-            |records: &[super::Record]| records.iter().filter(|r| r.wake && r.id != id).count();
-        if on && enabled_elsewhere(&lock(&self.state).records) >= MAX_WAKE_SESSIONS {
-            return Err(too_many());
-        }
         let address = match (on, record.mailbox_address.clone()) {
             (true, None) => Some(
                 self.register_address(&record.provider, &record.cwd, &record.title)
@@ -413,9 +462,6 @@ impl Inner {
             }
         }
         let mut state = lock(&self.state);
-        if on && enabled_elsewhere(&state.records) >= MAX_WAKE_SESSIONS {
-            return Err(too_many());
-        }
         let Some(record) = state.records.iter_mut().find(|r| r.id == id) else {
             return Err(("SESSION_NOT_FOUND", "That chat no longer exists.".into()));
         };
@@ -437,7 +483,7 @@ impl Inner {
         Ok(json!({"session": session}))
     }
 
-    fn wake_enabled(&self) -> bool {
+    pub(super) fn wake_enabled(&self) -> bool {
         let book = lock(&self.wake);
         book.enabled && book.failure.is_none()
     }
@@ -445,22 +491,89 @@ impl Inner {
     fn wake_settings(&self) -> Result<Value, Failure> {
         let book = lock(&self.wake);
         book.check()?;
-        Ok(json!({"enabled": book.enabled}))
+        Ok(json!({"enabled": book.enabled, "loopGuard": book.loop_guard}))
     }
 
-    fn set_wake_enabled(&self, enabled: bool) -> Result<Value, Failure> {
+    fn set_wake_settings(
+        &self,
+        enabled: Option<bool>,
+        loop_guard: Option<&Value>,
+    ) -> Result<Value, Failure> {
         let _lifecycle = lock(&self.lifecycle);
         let mut book = lock(&self.wake);
         book.check()?;
         let mut updated = book.clone();
-        updated.enabled = enabled;
+        if let Some(enabled) = enabled {
+            updated.enabled = enabled;
+        }
+        if let Some(value) = loop_guard {
+            updated.loop_guard = parse_guard(updated.loop_guard, value)?;
+        }
         if let Err(failure) = self.save_wake(&updated) {
             book.enabled = false;
             book.failure = Some(failure.1.clone());
             return Err(failure);
         }
         *book = updated;
-        Ok(json!({"enabled": enabled}))
+        Ok(json!({"enabled": book.enabled, "loopGuard": book.loop_guard}))
+    }
+
+    /// 0.5: a new session starts with wake on and its own board address. Any
+    /// mailbox or wake-storage problem leaves it off (the owner can retry).
+    pub(super) async fn default_wake(
+        &self,
+        provider: &str,
+        cwd: &str,
+        title: &str,
+    ) -> (bool, Option<String>) {
+        if lock(&self.wake).check().is_err() {
+            return (false, None);
+        }
+        let address = match self.register_address(provider, cwd, title).await {
+            Ok(address) => address,
+            Err((_, message)) => {
+                eprintln!("CodaClauda started a session with wake off: {message}");
+                return (false, None);
+            }
+        };
+        let _lifecycle = lock(&self.lifecycle);
+        let mut book = lock(&self.wake);
+        // As in set_wake: the book exists before the first opt-in is saved.
+        if let Err(failure) = self.save_wake(&book) {
+            book.enabled = false;
+            book.failure = Some(failure.1);
+            return (false, Some(address));
+        }
+        (true, Some(address))
+    }
+
+    /// The loop guard held a pair: one session event (saved in that chat)
+    /// and one phone push per pair and hour, never the message text.
+    fn loop_guard_notice(&self, id: &str, pair: &str, from: &str, address: &str) {
+        let now = now_ms();
+        let due = {
+            let mut book = lock(&self.wake);
+            let mut updated = book.clone();
+            let due = updated.notice_due(pair, now);
+            if due && self.save_wake(&updated).is_ok() {
+                *book = updated;
+            }
+            due
+        };
+        if !due {
+            return;
+        }
+        let per_hour = lock(&self.wake).loop_guard.pair_per_hour;
+        let text = format!(
+            "Wake loop guard: {from} and {address} woke each other {per_hour} times in the last hour, so their messages to each other wait unread until older wakes age out. Change it in Settings → Limits → Wake loop guard."
+        );
+        self.publish(
+            event(id, None, "error", json!({"error": text, "notice": "wake-loop-guard"})),
+            true,
+        );
+        self.notify_owner(&format!(
+            "Wake loop guard paused {from} and {address} waking each other."
+        ));
     }
 
     /// Called by the host with lifecycle and state held, both at durable
@@ -546,6 +659,8 @@ impl Inner {
     async fn wake_tick(self: &Arc<Self>) {
         let now = now_ms();
         self.decay_wakes(now);
+        // Team requests are owner-switched per project, not by the wake switch.
+        self.team_tick().await;
         if !self.wake_enabled() {
             return;
         }
@@ -609,8 +724,8 @@ impl Inner {
                 if !self.wake_enabled() {
                     break;
                 }
-                let pair =
-                    (from != "owner" && sessions.contains(from)).then(|| format!("{from}>{id}"));
+                let pair = (from != "owner" && sessions.contains(from))
+                    .then(|| pair_key(from, &address));
                 let now = now_ms();
                 let subject = message["subject"].as_str().unwrap_or("");
                 let kind = message["kind"].as_str().unwrap_or("");
@@ -640,7 +755,18 @@ impl Inner {
                             true,
                         );
                     }
-                    Err(("WAKE_PAIR_LIMIT", _)) => continue,
+                    Err(("WAKE_LOOP_GUARD", _)) => {
+                        if let Some(pair) = &pair {
+                            self.loop_guard_notice(&id, pair, from, &address);
+                        }
+                        continue;
+                    }
+                    // This stable wake identity was durably admitted before
+                    // (by 0.4.1, whose origin differed); it never replays.
+                    Err(("TURN_ID_CONFLICT", _)) => {
+                        acks.push((address.clone(), message_id.to_owned()));
+                        continue;
+                    }
                     // Queue full or session gone: leave the mail unread for a later poll.
                     Err(_) => break,
                 }
@@ -675,9 +801,14 @@ pub(crate) async fn wake_settings_get(app: tauri::AppHandle) -> Value {
     reply(host(&app).wake_settings())
 }
 
+/// Either field may be left out: { enabled?, loopGuard?: { on?, pairPerHour? } }.
 #[tauri::command]
-pub(crate) async fn wake_settings_set(app: tauri::AppHandle, enabled: bool) -> Value {
-    reply(host(&app).set_wake_enabled(enabled))
+pub(crate) async fn wake_settings_set(
+    app: tauri::AppHandle,
+    enabled: Option<bool>,
+    loop_guard: Option<Value>,
+) -> Value {
+    reply(host(&app).set_wake_settings(enabled, loop_guard.as_ref()))
 }
 
 #[cfg(test)]
@@ -721,15 +852,17 @@ mod tests {
     }
 
     #[test]
-    fn disabled_setting_and_reserved_caps_survive_reload_without_recount() {
+    fn disabled_setting_reservations_and_loop_guard_survive_reload_without_recount() {
         let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let path = dir.path().join(WAKE_FILE);
         let now = 10 * DAY_MS;
         let mut book = Book::default();
+        book.loop_guard = parse_guard(book.loop_guard, &json!({"pairPerHour": 3})).unwrap();
         let key = wake_key("s", "codex-fixture-0001", "m1");
         assert!(book.reserve("s", &key, Some("peer>s"), now).unwrap());
         persist_book(&path, &book).unwrap();
         let mut restored = read_book(&path, true).unwrap();
+        assert_eq!(restored.loop_guard, LoopGuard { on: true, pair_per_hour: 3 });
         assert!(
             !restored
                 .reserve("s", &key, Some("peer>s"), now + 1)
@@ -749,7 +882,7 @@ mod tests {
                 .reserve("s", "m4", Some("peer>s"), now)
                 .unwrap_err()
                 .0,
-            "WAKE_PAIR_LIMIT"
+            "WAKE_LOOP_GUARD"
         );
         restored.enabled = false;
         persist_book(&path, &restored).unwrap();
@@ -782,16 +915,57 @@ mod tests {
     }
 
     #[test]
-    fn caps_and_addresses() {
+    fn no_session_or_rate_caps_only_the_owner_pair_guard_counting_both_directions() {
+        let now = 10 * DAY_MS;
+        let mut book = Book::default();
+        // No per-session hourly/daily cap and no cap on how many sessions wake.
+        for n in 0..500u64 {
+            assert!(book.reserve("s", &format!("owner-{n}"), None, now + n).unwrap());
+        }
+        for n in 0..100 {
+            assert!(book.reserve(&format!("s{n}"), &format!("k{n}"), None, now).unwrap());
+        }
+        assert_eq!(book.times["s"].len(), 500);
+        assert_eq!(counts(&book.times["s"], 500, now + 500).hour, 500);
+        // The pair guard (default on, 20 an hour) counts A→B and B→A together.
+        let (a, b) = ("claude-alpha-0001", "codex-beta-0002");
+        let pair = pair_key(a, b);
+        assert_eq!(pair, pair_key(b, a));
+        for n in 0..10 {
+            assert!(book.reserve("sb", &format!("ab{n}"), Some(&pair), now).unwrap());
+            assert!(book.reserve("sa", &format!("ba{n}"), Some(&pair), now).unwrap());
+        }
+        assert_eq!(
+            book.reserve("sa", "ba-more", Some(&pair), now).unwrap_err().0,
+            "WAKE_LOOP_GUARD"
+        );
+        // Unrelated pairs and owner mail are unaffected; the pair resumes as wakes age out.
+        assert!(book.reserve("sa", "other", Some(&pair_key(a, "codex-gamma-0003")), now).unwrap());
+        assert!(book.reserve("sa", "from-owner", None, now).unwrap());
+        assert!(book.reserve("sa", "later", Some(&pair), now + HOUR_MS).unwrap());
+        // Off means no guard at all; the owner hears about a held pair once an hour.
+        book.loop_guard = parse_guard(book.loop_guard, &json!({"on": false})).unwrap();
+        for n in 0..50 {
+            assert!(book.reserve("sb", &format!("off{n}"), Some(&pair), now + HOUR_MS).unwrap());
+        }
+        assert!(book.notice_due(&pair, now) && !book.notice_due(&pair, now + 1));
+        assert!(book.notice_due(&pair, now + HOUR_MS));
+        // Owner input is validated; omitted fields keep their value.
+        let current = LoopGuard::default();
+        assert_eq!(parse_guard(current, &json!({})).unwrap(), current);
+        assert_eq!(parse_guard(current, &json!({"pairPerHour": JS_SAFE_MAX})).unwrap().pair_per_hour, JS_SAFE_MAX);
+        for bad in [json!({"pairPerHour": 0}), json!({"pairPerHour": 1.5}), json!({"pairPerHour": "20"}), json!({"on": "yes"}), json!(20)] {
+            assert_eq!(parse_guard(current, &bad).unwrap_err().0, "INVALID_ARGUMENTS", "{bad}");
+        }
+        // A 0.4.1 wake.json (no loopGuard) reads with the default guard.
+        let legacy: Book = serde_json::from_value(json!({"enabled": true, "times": {}, "pairs": {"peer>s": [now]}})).unwrap();
+        assert_eq!(legacy.loop_guard, LoopGuard { on: true, pair_per_hour: 20 });
+    }
+
+    #[test]
+    fn counters_and_addresses() {
         let now = 10 * DAY_MS;
         let recent: Vec<u64> = (0..6).map(|i| now - i * 1000).collect();
-        assert_eq!(capped(&recent, None, now), Some("hour"));
-        assert_eq!(capped(&recent[..5], None, now), None);
-        let spread: Vec<u64> = (1..=30)
-            .map(|i| now - i * (HOUR_MS / 2) - HOUR_MS)
-            .collect();
-        assert_eq!(capped(&spread, None, now), Some("day"));
-        assert_eq!(capped(&[], Some(&recent[..3]), now), Some("pair"));
         assert_eq!(
             counts(&recent, 9, now),
             Wakes {

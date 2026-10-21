@@ -78,8 +78,10 @@ Browser control is not available in 0.4.1.
 
 A send to a busy owned session waits in its queue, up to ten waiting messages.
 Queued work is not automatically replayed after an interrupted app run.
-**Wake on mail** is an optional per-session setting, with a global switch in
-Settings. When enabled, the open app can send incoming mailbox content to that
+**Wake on mail** is on by default for each new owned session, which gets its own
+board address; turn it off per session in the chat, or for all sessions with the
+global switch in Settings. The only limit is the owner's wake loop guard in
+Settings → Limits. While on, the open app can send incoming mailbox content to that
 owned provider session. Sender labels are not verified identities, and incoming
 messages do not grant new permissions. Turn wake off when you do not want it to
 consume provider usage. Existing desktop-chat mailboxes remain passive.

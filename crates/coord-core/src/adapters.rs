@@ -1,4 +1,6 @@
 //! Version 1 adapters. Only owned, newly created provider processes are controlled.
+use crate::budget::{self, Budget, Finite, Unlimited};
+use crate::model::{LEGACY_LINE_BYTES, LEGACY_MAX_TIMEOUT, LEGACY_OUTPUT_BYTES, RECORD_FRAME_BYTES};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -14,14 +16,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-// Runaway guard only; the owner's run time limit is the real bound on a run.
-const OUTPUT_LIMIT: u64 = 16 << 30;
-// One provider stream line can echo a whole read_file chunk or write_file body,
-// JSON-escaped more than once, so this must stay well above those tool limits.
-const LINE_LIMIT: usize = 128 * 1024 * 1024;
 const PROBE_LIMIT: usize = 1024 * 1024;
-pub const MAX_RUN_SECONDS: u64 = 2_592_000;
-pub const MAX_TURNS: u32 = 10_000;
+// The prompt travels over stdin; it is bounded by request validation upstream.
+const PROMPT_LIMIT: usize = 128 * 1024 * 1024;
 // Only these request-bound server tools receive noninteractive provider approval.
 // Each call still passes the MCP server's immutable owner-grant checks.
 const OWNED_MCP_TOOLS: &[&str] = &[
@@ -41,6 +38,9 @@ const OWNED_MCP_TOOLS: &[&str] = &[
     "spark_logs",
     "spark_cancel",
 ];
+// Staged writes exist only for grants created by 0.5 or later (C9); a 0.4
+// grant keeps exactly the list above.
+const STAGED_WRITE_TOOLS: &[&str] = &["write_begin", "write_chunk", "write_commit", "write_abort"];
 
 pub struct LaunchSpec {
     pub agent: String,
@@ -51,8 +51,12 @@ pub struct LaunchSpec {
     pub state_dir: PathBuf,
     pub request_id: String,
     pub capability: String,
-    pub timeout_seconds: u64,
-    pub max_turns: u32,
+    /// Run time in seconds; Unlimited means no deadline.
+    pub timeout: Budget,
+    /// Unlimited omits Claude's --max-turns. Codex exec has no turn flag.
+    pub max_turns: Budget,
+    /// 0.4 grants keep 1 MiB lines, 8 MiB total output and at most 3600 s.
+    pub legacy_limits: bool,
     pub work_dir: PathBuf,
 }
 
@@ -65,6 +69,124 @@ pub struct Outcome {
     pub estimated_cost_usd: Option<f64>,
     pub exit_code: Option<i32>,
     pub stop_reason: Option<String>,
+    /// Owner-readable explanation and evidence for an adapter stop.
+    #[serde(default)]
+    pub stop_message: Option<String>,
+}
+
+/// What one chunk of provider stdout completed.
+#[derive(Debug, PartialEq)]
+enum Feed {
+    Record(Vec<u8>),
+    /// A record larger than the frame, saved whole to this file.
+    Oversized(PathBuf, u64),
+    /// Legacy only: a line passed 1 MiB; the run stops as in 0.4.
+    LineLimit,
+}
+
+/// Splits provider stdout into newline-terminated records with bounded memory.
+/// Current grants stream a record larger than `frame` to
+/// <run_dir>/oversized-<n>.jsonl instead of buffering or skipping it.
+struct Records {
+    pending: Vec<u8>,
+    frame: usize,
+    spill_dir: Option<PathBuf>,
+    oversized: Option<(File, PathBuf, u64)>,
+    count: usize,
+    line_limit_reported: bool,
+}
+
+impl Records {
+    fn new(frame: usize, spill_dir: Option<PathBuf>) -> Self {
+        Self {
+            pending: Vec::new(),
+            frame,
+            spill_dir,
+            oversized: None,
+            count: 0,
+            line_limit_reported: false,
+        }
+    }
+
+    fn start_oversized(&mut self, dir: &Path, first: &[u8]) -> Result<()> {
+        self.count += 1;
+        let path = dir.join(format!("oversized-{}.jsonl", self.count));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| format!("create {}", path.display()))?;
+        file.write_all(&self.pending)?;
+        file.write_all(first)?;
+        let bytes = (self.pending.len() + first.len()) as u64;
+        self.pending.clear();
+        self.oversized = Some((file, path, bytes));
+        Ok(())
+    }
+
+    fn finish_oversized(&mut self) -> Result<Feed> {
+        let (file, path, bytes) = self.oversized.take().expect("oversized record in progress");
+        file.sync_all()?;
+        Ok(Feed::Oversized(path, bytes))
+    }
+
+    fn push(&mut self, mut data: &[u8]) -> Result<Vec<Feed>> {
+        let mut out = Vec::new();
+        while !data.is_empty() {
+            let newline = data.iter().position(|b| *b == b'\n');
+            let (chunk, rest) = data.split_at(newline.map_or(data.len(), |i| i + 1));
+            data = rest;
+            let over = self.pending.len() + chunk.len() > self.frame;
+            if let Some((file, _, bytes)) = &mut self.oversized {
+                file.write_all(chunk)?;
+                *bytes += chunk.len() as u64;
+            } else if let Some(dir) = self.spill_dir.clone().filter(|_| over) {
+                self.start_oversized(&dir, chunk)?;
+            } else {
+                self.pending.extend_from_slice(chunk);
+            }
+            if newline.is_some() {
+                out.push(if self.oversized.is_some() {
+                    self.finish_oversized()?
+                } else {
+                    Feed::Record(std::mem::take(&mut self.pending))
+                });
+            } else if self.pending.len() > self.frame && !self.line_limit_reported {
+                // Legacy only (current grants never buffer past the frame):
+                // an unfinished line over 1 MiB stopped the run in 0.4.
+                self.line_limit_reported = true;
+                out.push(Feed::LineLimit);
+            }
+        }
+        Ok(out)
+    }
+
+    /// End of stream: an unterminated final record.
+    fn finish(&mut self) -> Result<Option<Feed>> {
+        if self.oversized.is_some() {
+            return self.finish_oversized().map(Some);
+        }
+        if self.pending.is_empty() || self.pending.len() > self.frame {
+            return Ok(None);
+        }
+        Ok(Some(Feed::Record(std::mem::take(&mut self.pending))))
+    }
+}
+
+fn mebibytes(bytes: usize) -> String {
+    if bytes % (1 << 20) == 0 {
+        format!("{} MiB", bytes >> 20)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+pub fn oversized_message(path: &Path, frame: usize) -> String {
+    format!(
+        "Provider sent a single record larger than {}; it was saved to {} and the run was stopped so no result is lost. Inspect it, then retry.",
+        mebibytes(frame),
+        path.display()
+    )
 }
 
 /// Start an owner worker without inheriting the caller's capture pipes or a
@@ -395,7 +517,7 @@ fn launch_args(spec: &LaunchSpec) -> Result<Vec<OsString>> {
             &config,
             &serde_json::to_vec_pretty(&json!({"mcpServers":{"codaclauda":server}}))?,
         )?;
-        Ok(vec![
+        let mut result: Vec<OsString> = vec![
             "--print".into(),
             "--restricted".into(),
             "--strict-mcp-config".into(),
@@ -414,11 +536,13 @@ fn launch_args(spec: &LaunchSpec) -> Result<Vec<OsString>> {
             "--output-format".into(),
             "stream-json".into(),
             "--verbose".into(),
-            "--max-turns".into(),
-            spec.max_turns.to_string().into(),
-            "--session-id".into(),
-            uuid::Uuid::new_v4().to_string().into(),
-        ])
+        ];
+        // An unlimited owner choice omits the flag; Claude then has no turn cap.
+        if let Finite(turns) = spec.max_turns {
+            result.extend(["--max-turns".into(), turns.to_string().into()]);
+        }
+        result.extend(["--session-id".into(), uuid::Uuid::new_v4().to_string().into()]);
+        Ok(result)
     } else {
         let mut result: Vec<OsString> = vec![
             "--no-daemon".into(),
@@ -433,6 +557,8 @@ fn launch_args(spec: &LaunchSpec) -> Result<Vec<OsString>> {
             "-C".into(),
             spec.workspace.as_os_str().to_owned(),
         ];
+        let staged: &[&str] = if spec.legacy_limits { &[] } else { STAGED_WRITE_TOOLS };
+        let owned_tools: Vec<&str> = OWNED_MCP_TOOLS.iter().chain(staged).copied().collect();
         let mut config = vec![
             "forced_login_method=\"chatgpt\"".to_owned(),
             "approval_policy=\"never\"".to_owned(),
@@ -466,13 +592,13 @@ fn launch_args(spec: &LaunchSpec) -> Result<Vec<OsString>> {
             "mcp_servers.codaclauda.default_tools_approval_mode=\"prompt\"".to_owned(),
             format!(
                 "mcp_servers.codaclauda.enabled_tools={}",
-                serde_json::to_string(OWNED_MCP_TOOLS)?
+                serde_json::to_string(&owned_tools)?
             ),
         ];
         // The owner grant already authorizes this bounded server surface. Keep
         // global approval_policy=never and approve only the named server tools;
         // provider prompts must not block peer handoffs before our scope checks.
-        for tool in OWNED_MCP_TOOLS {
+        for tool in &owned_tools {
             config.push(format!(
                 "mcp_servers.codaclauda.tools.{tool}.approval_mode=\"approve\""
             ));
@@ -702,12 +828,25 @@ pub fn run(
     valid_agent(&spec.agent)?;
     native_executable(&spec.executable)?;
     native_executable(&spec.mcp_executable)?;
-    if !(1..=MAX_RUN_SECONDS).contains(&spec.timeout_seconds)
-        || !(1..=MAX_TURNS).contains(&spec.max_turns)
-    {
-        bail!("adapter requires timeout 1..{MAX_RUN_SECONDS} seconds and max_turns 1..{MAX_TURNS}");
+    if spec.timeout == Finite(0) || spec.max_turns == Finite(0) {
+        bail!("adapter requires a run time and turn limit of at least 1, or unlimited");
     }
-    if spec.prompt.len() > LINE_LIMIT
+    if spec.legacy_limits
+        && !(matches!(spec.timeout, Finite(1..=LEGACY_MAX_TIMEOUT)) && spec.max_turns.finite().is_some_and(|t| t <= 100))
+    {
+        bail!("0.4 authorization requires timeout 1..3600 seconds and max_turns 1..100");
+    }
+    // Checked before launch: an unrepresentable deadline is a named error, never "no deadline".
+    let run_time = match spec.timeout {
+        Finite(seconds) => Some(Duration::from_secs(seconds)),
+        Unlimited => None,
+    };
+    if let Some(run_time) = run_time {
+        Instant::now()
+            .checked_add(run_time)
+            .ok_or_else(|| budget::too_large("timeout_seconds"))?;
+    }
+    if spec.prompt.len() > PROMPT_LIMIT
         || spec.capability.is_empty()
         || !spec.workspace.is_absolute()
         || !spec.state_dir.is_absolute()
@@ -746,21 +885,37 @@ pub fn run(
     });
     let receiver = readers(&mut child)?;
     let start = Instant::now();
+    let deadline = match run_time {
+        Some(run_time) => Some(
+            start
+                .checked_add(run_time)
+                .ok_or_else(|| budget::too_large("timeout_seconds"))?,
+        ),
+        None => None,
+    };
     let mut heartbeat = Instant::now();
     let mut parsed = Parsed::default();
-    let mut pending = Vec::new();
+    // Legacy runs keep 0.4's 1 MiB line and 8 MiB output caps. Current runs have
+    // no total-output cap and save an oversized record instead of buffering it.
+    let mut records = if spec.legacy_limits {
+        Records::new(LEGACY_LINE_BYTES as usize, None)
+    } else {
+        Records::new(RECORD_FRAME_BYTES as usize, Some(spec.work_dir.clone()))
+    };
+    let output_limit = spec.legacy_limits.then_some(LEGACY_OUTPUT_BYTES);
     let mut stderr = Vec::new();
     let mut bytes = 0u64;
     let mut streams = 0;
     let mut code = None;
     let mut stop_reason = None;
+    let mut stop_message = None;
     let mut exited = None;
     loop {
         if stop_reason.is_none() && is_cancelled() {
             stop_reason = Some("cancelled".to_owned());
             child.terminate()?;
         }
-        if stop_reason.is_none() && start.elapsed() >= Duration::from_secs(spec.timeout_seconds) {
+        if stop_reason.is_none() && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             stop_reason = Some("deadline_exceeded".to_owned());
             child.terminate()?;
         }
@@ -773,7 +928,7 @@ pub fn run(
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(PipeEvent::Data(is_error, data)) => {
                 bytes = bytes.saturating_add(data.len() as u64);
-                if bytes > OUTPUT_LIMIT {
+                if output_limit.is_some_and(|limit| bytes > limit) {
                     if stop_reason.is_none() {
                         stop_reason = Some("output_limit_exceeded".to_owned());
                         child.terminate()?;
@@ -785,24 +940,32 @@ pub fn run(
                         stderr.extend_from_slice(&data[..data.len().min(16384 - stderr.len())]);
                     }
                 } else {
-                    pending.extend_from_slice(&data);
-                    // `pending` never holds a newline between chunks, so only a chunk
-                    // with one can finish a line; this keeps huge lines linear.
-                    if data.contains(&b'\n') {
-                        while let Some(newline) = pending.iter().position(|x| *x == b'\n') {
-                            let line: Vec<u8> = pending.drain(..=newline).collect();
-                            if let Ok(value) = serde_json::from_slice::<Value>(&line) {
-                                parsed.event(
-                                    &spec.agent,
-                                    scrub_value(&value, &spec.capability),
-                                    &mut on_event,
-                                )?;
+                    for feed in records.push(&data)? {
+                        match feed {
+                            Feed::Record(line) => {
+                                if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+                                    parsed.event(
+                                        &spec.agent,
+                                        scrub_value(&value, &spec.capability),
+                                        &mut on_event,
+                                    )?;
+                                }
+                            }
+                            // Never skip a record and report success: stop with its evidence.
+                            Feed::Oversized(path, _) => {
+                                if stop_reason.is_none() {
+                                    stop_reason = Some("provider_record_too_large".to_owned());
+                                    stop_message = Some(oversized_message(&path, records.frame));
+                                    child.terminate()?;
+                                }
+                            }
+                            Feed::LineLimit => {
+                                if stop_reason.is_none() {
+                                    stop_reason = Some("provider_line_limit_exceeded".to_owned());
+                                    child.terminate()?;
+                                }
                             }
                         }
-                    }
-                    if pending.len() > LINE_LIMIT && stop_reason.is_none() {
-                        stop_reason = Some("provider_line_limit_exceeded".to_owned());
-                        child.terminate()?;
                     }
                 }
             }
@@ -834,14 +997,21 @@ pub fn run(
             break;
         }
     }
-    if !pending.is_empty() && pending.len() <= LINE_LIMIT {
-        if let Ok(value) = serde_json::from_slice::<Value>(&pending) {
-            parsed.event(
-                &spec.agent,
-                scrub_value(&value, &spec.capability),
-                &mut on_event,
-            )?;
+    match records.finish()? {
+        Some(Feed::Record(line)) => {
+            if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+                parsed.event(
+                    &spec.agent,
+                    scrub_value(&value, &spec.capability),
+                    &mut on_event,
+                )?;
+            }
         }
+        Some(Feed::Oversized(path, _)) if stop_reason.is_none() => {
+            stop_reason = Some("provider_record_too_large".to_owned());
+            stop_message = Some(oversized_message(&path, records.frame));
+        }
+        _ => {}
     }
     if writer.is_finished() {
         if let Ok(Err(error)) = writer.join() {
@@ -870,6 +1040,7 @@ pub fn run(
         estimated_cost_usd: parsed.cost,
         exit_code: code,
         stop_reason,
+        stop_message,
     })
 }
 
@@ -882,6 +1053,7 @@ fn stopped(reason: &str) -> Outcome {
         estimated_cost_usd: None,
         exit_code: None,
         stop_reason: Some(reason.to_owned()),
+        stop_message: None,
     }
 }
 
@@ -1607,6 +1779,101 @@ mod tests {
         }
         let mut parsed = Parsed::default();
         assert!(parsed.event("codex", json!({"type":"item.started","item":{"type":"mcp_tool_call","server":"codaclauda","tool":"get_context"}}), &mut |_| Ok(())).is_ok());
+    }
+    #[test]
+    fn oversized_record_is_saved_whole_and_stops_the_run_with_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut records = Records::new(16, Some(dir.path().to_path_buf()));
+        let big = format!("{{\"text\":\"{}\"}}
+", "x".repeat(40));
+        let stream = format!("{{\"a\":1}}
+{big}{{\"b\":2}}
+{{\"tail\":");
+        let mut feeds = vec![];
+        for chunk in stream.as_bytes().chunks(5) {
+            feeds.extend(records.push(chunk).unwrap());
+        }
+        let saved = dir.path().join("oversized-1.jsonl");
+        assert_eq!(
+            feeds,
+            [
+                Feed::Record(b"{\"a\":1}
+".to_vec()),
+                Feed::Oversized(saved.clone(), big.len() as u64),
+                Feed::Record(b"{\"b\":2}
+".to_vec()),
+            ]
+        );
+        assert_eq!(fs::read_to_string(&saved).unwrap(), big);
+        // An unterminated oversized record at end of stream is saved too.
+        records.push("y".repeat(40).as_bytes()).unwrap();
+        let last = dir.path().join("oversized-2.jsonl");
+        assert_eq!(records.finish().unwrap(), Some(Feed::Oversized(last.clone(), 48)));
+        assert_eq!(fs::read_to_string(last).unwrap(), format!("{{\"tail\":{}", "y".repeat(40)));
+        assert_eq!(
+            oversized_message(&saved, RECORD_FRAME_BYTES as usize),
+            format!("Provider sent a single record larger than 64 MiB; it was saved to {} and the run was stopped so no result is lost. Inspect it, then retry.", saved.display())
+        );
+        // 0.4 grants keep their line limit: reported once, nothing saved.
+        let mut legacy = Records::new(16, None);
+        assert_eq!(legacy.push(&[b'z'; 40]).unwrap(), [Feed::LineLimit]);
+        assert!(legacy.push(&[b'z'; 40]).unwrap().is_empty());
+        assert_eq!(legacy.finish().unwrap(), None);
+    }
+
+    #[test]
+    fn unlimited_turns_omit_the_claude_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = |max_turns, name: &str| {
+            let work_dir = dir.path().join(name);
+            fs::create_dir(&work_dir).unwrap();
+            LaunchSpec {
+                agent: "claude".into(),
+                executable: dir.path().join("claude.exe"),
+                workspace: dir.path().to_path_buf(),
+                prompt: String::new(),
+                mcp_executable: dir.path().join("cli.exe"),
+                state_dir: dir.path().to_path_buf(),
+                request_id: "r".into(),
+                capability: "c".into(),
+                timeout: Unlimited,
+                max_turns,
+                legacy_limits: false,
+                work_dir,
+            }
+        };
+        let flagged = launch_args(&spec(Finite(7), "finite")).unwrap();
+        let position = flagged.iter().position(|a| a == "--max-turns").unwrap();
+        assert_eq!(flagged[position + 1], "7");
+        assert!(!launch_args(&spec(Unlimited, "unlimited")).unwrap().iter().any(|a| a == "--max-turns"));
+    }
+    #[test]
+    fn codex_exposes_staged_writes_only_to_current_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let enabled = |legacy_limits| {
+            let spec = LaunchSpec {
+                agent: "codex".into(),
+                executable: dir.path().join("codex.exe"),
+                workspace: dir.path().to_path_buf(),
+                prompt: String::new(),
+                mcp_executable: dir.path().join("cli.exe"),
+                state_dir: dir.path().to_path_buf(),
+                request_id: "r".into(),
+                capability: "c".into(),
+                timeout: Unlimited,
+                max_turns: Unlimited,
+                legacy_limits,
+                work_dir: dir.path().to_path_buf(),
+            };
+            let args = launch_args(&spec).unwrap();
+            let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+            let list = args.iter().find(|a| a.starts_with("mcp_servers.codaclauda.enabled_tools=")).unwrap().clone();
+            (list, args.iter().any(|a| a == "mcp_servers.codaclauda.tools.write_commit.approval_mode=\"approve\""))
+        };
+        assert!(enabled(false).1);
+        assert!(enabled(false).0.contains("\"write_begin\",\"write_chunk\",\"write_commit\",\"write_abort\""));
+        let (legacy, approved) = enabled(true);
+        assert!(legacy.contains("\"write_file\"") && !legacy.contains("write_begin") && !approved);
     }
     #[test]
     fn scrubs_credentials_but_preserves_usage_tokens() {

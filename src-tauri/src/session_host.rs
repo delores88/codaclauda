@@ -15,7 +15,9 @@
 //! Codex compact-now, read-only detection of other Claude/Codex sessions
 //! (`external.rs`), the owner's own MCP servers at Full access (`mcp.rs`) and
 //! opt-in phone push (`notify.rs`). All of them reuse the lifecycle below.
-//! How many agents may work at once is an owner setting (`limits.rs`).
+//! How many agents may work at once is an owner setting (`limits.rs`), new
+//! sessions wake on mail by default, and agents can start teammates in
+//! projects where the owner allows it (`team.rs`).
 
 pub(crate) mod external;
 pub(crate) mod fork;
@@ -23,6 +25,7 @@ pub(crate) mod limits;
 pub(crate) mod mcp;
 pub(crate) mod notify;
 pub(crate) mod schedule;
+pub(crate) mod team;
 pub(crate) mod wake;
 pub(crate) mod worktree;
 
@@ -249,6 +252,13 @@ struct Record {
     forked_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handoff_from: Option<String>,
+    /// 0.5 team starts: { address, messageId, at } of the (self-asserted)
+    /// agent whose board request started this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    started_by: Option<Value>,
+    /// 0.5: the short CodaClauda note still has to precede the first turn.
+    #[serde(default)]
+    team_note: bool,
 }
 
 /// Wake counters shown in the UI: rolling hour and day, and all time.
@@ -452,6 +462,13 @@ impl Queued {
     }
 }
 
+/// Turns that need no automation revalidation: the owner's own, Codex
+/// compact-now, a hand-off's summary (0.5), and a team start's first turn,
+/// authorized by the project switch when its session was created.
+fn owner_equivalent_origin(origin: &Value) -> bool {
+    origin.is_null() || matches!(origin["kind"].as_str(), Some("compact" | "handoff" | "team"))
+}
+
 fn hex_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -584,7 +601,7 @@ struct State {
     queues: HashMap<String, VecDeque<Queued>>,
     ledger: BTreeMap<String, DurableTurn>,
     /// Owner setting (Settings → Limits → Agents at once), see `limits.rs`.
-    max_live: usize,
+    max_live: limits::Limit,
 }
 
 impl Default for State {
@@ -596,7 +613,7 @@ impl Default for State {
             launching: HashMap::new(),
             queues: HashMap::new(),
             ledger: BTreeMap::new(),
-            max_live: limits::DEFAULT_MAX_LIVE,
+            max_live: limits::Limit::Unlimited,
         }
     }
 }
@@ -685,8 +702,9 @@ impl State {
         if self.live.contains_key(id) || self.launching.contains_key(id) {
             return Err("This agent already has a process or launch in progress.".into());
         }
+        // Unlimited (the default) never closes an idle agent to make room.
         let working = self.live.len() + self.launching.len();
-        let victim = if working >= self.max_live {
+        let victim = if !self.max_live.allows(working) {
             let oldest = self.live.iter()
                 .filter(|(id, _)| !self.turns.contains_key(*id))
                 .min_by_key(|(_, live)| live.last_used)
@@ -758,6 +776,9 @@ struct Inner {
     schedules: Mutex<Vec<schedule::Schedule>>,
     run_lock: Mutex<()>,
     notify: Mutex<notify::Settings>,
+    team: Mutex<team::Book>,
+    /// The team inbox address is registered once per run.
+    team_registered: AtomicBool,
 }
 
 /// Tauri-managed handle to the session engine.
@@ -789,12 +810,15 @@ impl SessionHost {
             schedules: Mutex::new(Vec::new()),
             run_lock: Mutex::new(()),
             notify: Mutex::new(notify::Settings::default()),
+            team: Mutex::new(team::Book::default()),
+            team_registered: AtomicBool::new(false),
         });
         inner.load()?;
         inner.load_wake();
         inner.load_schedules();
         inner.load_notify();
         inner.load_limits();
+        inner.load_team();
         let reaper = inner.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -1169,7 +1193,7 @@ impl Inner {
     /// Caller holds lifecycle and state; automation validators may lock only
     /// their own configuration books, never reacquire these locks.
     fn validate_origin(&self, record: &Record, origin: &Value) -> Result<(), Failure> {
-        if origin.is_null() {
+        if owner_equivalent_origin(origin) {
             return Ok(());
         }
         match origin["kind"].as_str() {
@@ -2235,6 +2259,10 @@ impl Inner {
                 let mut value =
                     serde_json::to_value(record).expect("A record contains only JSON values");
                 value["queued"] = json!(state.queues.get(&record.id).map_or(0, VecDeque::len));
+                // Team view: awake = an owned process (or one starting), asleep = none.
+                value["live"] = json!(
+                    state.live.contains_key(&record.id) || state.launching.contains_key(&record.id)
+                );
                 value
             })
             .collect();
@@ -2308,12 +2336,21 @@ impl Inner {
         } else {
             None
         };
+        let session_cwd = tree.as_ref().map_or_else(|| cwd.to_owned(), |t| t.cwd.clone());
+        let title =
+            short(&args["title"], 200).unwrap_or_else(|| format!("{} chat", provider.label()));
+        // 0.5: wake on by default, with its own board address.
+        let (wake, mailbox_address) = self.default_wake(provider.name(), &session_cwd, &title).await;
         let record = Record {
             provider: provider.name().into(),
             project_id: short(&args["projectId"], 512).unwrap_or_else(|| cwd.to_owned()),
-            cwd: tree.as_ref().map_or_else(|| cwd.to_owned(), |t| t.cwd.clone()),
-            title: short(&args["title"], 200)
-                .unwrap_or_else(|| format!("{} chat", provider.label())),
+            cwd: session_cwd,
+            title,
+            wake,
+            mailbox_address,
+            // Set only by team.rs; the owner's session_start command strips it.
+            started_by: args.get("startedBy").filter(|v| v.is_object()).cloned(),
+            team_note: true,
             access: access.into(),
             status: "idle".into(),
             created_at: now,
@@ -2706,6 +2743,11 @@ impl Inner {
             return Ok(());
         }
         let prompt = with_attachments(text, attachments);
+        let note = self.first_turn_note(&record.id);
+        let prompt = match &note {
+            Some(note) => format!("{note}\n\n{prompt}"),
+            None => prompt,
+        };
         match provider {
             Provider::Claude => {
                 let _lifecycle = lock(&self.lifecycle);
@@ -2716,7 +2758,9 @@ impl Inner {
                 proc.write(
                     json!({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": prompt}]}, "parent_tool_use_id": null})
                         .to_string(),
-                )
+                )?;
+                self.note_delivered(&record.id);
+                Ok(())
             }
             Provider::Codex => {
                 let thread = lock(&self.state)
@@ -2739,6 +2783,7 @@ impl Inner {
                 let result = self
                     .turn_rpc(&record.id, turn_id, &proc, "turn/start", params)
                     .await?;
+                self.note_delivered(&record.id);
                 let provider_turn = result["turn"]["id"]
                     .as_str()
                     .filter(|id| !id.is_empty())
@@ -3261,8 +3306,12 @@ pub(crate) async fn session_list(app: tauri::AppHandle) -> Value {
 }
 
 #[tauri::command]
-pub(crate) async fn session_start(app: tauri::AppHandle, args: Value) -> Value {
+pub(crate) async fn session_start(app: tauri::AppHandle, mut args: Value) -> Value {
     let inner = host(&app);
+    // Only a team start (team.rs) records who started a session.
+    if let Some(fields) = args.as_object_mut() {
+        fields.remove("startedBy");
+    }
     reply(inner.start(args).await)
 }
 
@@ -3351,6 +3400,28 @@ mod tests {
             status: "idle".into(),
             ..Record::default()
         }
+    }
+
+    #[test]
+    fn compact_handoff_and_team_turns_are_admitted_but_unknown_origins_are_not() {
+        // 0.5 hand-off and compact-now were refused as "Unknown turn origin"
+        // after the 0.4.1 merge; automation origins still revalidate.
+        for kind in ["compact", "handoff", "team"] {
+            assert!(owner_equivalent_origin(&json!({"kind": kind})), "{kind}");
+        }
+        assert!(owner_equivalent_origin(&Value::Null));
+        for kind in ["wake", "schedule", "mystery"] {
+            assert!(!owner_equivalent_origin(&json!({"kind": kind})), "{kind}");
+        }
+        // Team fields round-trip, and legacy records never get the first-turn note.
+        let legacy: Record = serde_json::from_value(json!({"id": "s_0123456789abcdef", "provider": "codex", "projectId": "p", "cwd": "C:\\p", "title": "t", "access": "read", "threadId": null, "providerSessionId": null, "status": "idle", "createdAt": 1, "lastActivityAt": 1, "shared": false, "sharedId": null})).unwrap();
+        assert!(!legacy.team_note && legacy.started_by.is_none() && !legacy.wake);
+        let mut started = legacy.clone();
+        started.started_by = Some(json!({"address": "claude-p-0001", "messageId": "m1", "at": 2}));
+        started.team_note = true;
+        let back: Record = serde_json::from_value(serde_json::to_value(&started).unwrap()).unwrap();
+        assert_eq!(back.started_by, started.started_by);
+        assert!(back.team_note);
     }
 
     #[test]
@@ -3671,7 +3742,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let lease = runtime_lease(dir.path()).unwrap();
         let mut state = State::default();
-        state.max_live = 5; // the owner's setting, not a built-in cap
+        state.max_live = limits::Limit::Finite(5); // the owner's setting, not a built-in cap
         for n in 0..8 {
             state
                 .turns

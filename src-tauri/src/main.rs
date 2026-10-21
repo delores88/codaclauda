@@ -36,6 +36,8 @@ const OPERATIONS: &[&str] = &[
     "rename-agent",
     "grant",
     "grant-revoke",
+    "policy",
+    "policy-set",
     "limits",
     "limits-set",
     "submit",
@@ -87,7 +89,7 @@ async fn update(
     }
 }
 
-fn cli_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn cli_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let packaged = app
         .path()
         .resource_dir()
@@ -476,6 +478,8 @@ fn main() {
             session_host::notify::notify_settings_set,
             session_host::limits::session_limits_get,
             session_host::limits::session_limits_set,
+            session_host::team::team_settings_get,
+            session_host::team::team_settings_set,
             project_tools::project_instructions_read,
             project_tools::project_instructions_write,
             project_tools::ci_status

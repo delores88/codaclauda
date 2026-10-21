@@ -1,8 +1,17 @@
 pub mod adapters;
+pub mod budget;
+pub mod files_io;
+#[cfg(test)]
+mod files_tests;
+#[cfg(test)]
+mod limits_tests;
 pub mod mailbox;
 pub mod mcp;
 pub mod model;
 pub mod paths;
+pub mod policy;
+pub mod scheduler;
+pub mod secrets;
 pub mod session;
 pub mod session_mcp;
 pub mod session_transport;
@@ -10,11 +19,13 @@ pub mod live_codex;
 #[cfg(test)]
 mod review_tests;
 pub mod spark;
+pub mod spool;
 pub mod store;
 #[cfg(test)]
 mod tests;
 
 use anyhow::{Context, Result, bail, ensure};
+use budget::{Budget, Finite, Unlimited};
 use fs2::FileExt;
 use model::*;
 use serde_json::{Value, json};
@@ -120,32 +131,7 @@ fn add_worktree(project: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn secret_pattern() -> &'static regex::Regex {
-    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    PATTERN.get_or_init(||regex::Regex::new(r#"(?is)(?:-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----.*?-----END (?:[A-Z ]*PRIVATE KEY)-----|sk-(?:ant-)?[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{15,}|bearer\s+[a-z0-9._-]+|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|client[_-]?secret)["']?\s*[:=]\s*["']?[^\s,;"'}]+)"#).unwrap())
-}
-pub fn redact(text: &str) -> String {
-    secret_pattern().replace_all(text, "[REDACTED]").into_owned()
-}
-/// Redact `text` as it reads between its neighbours, so a credential split
-/// across separately returned file windows is removed from every window.
-pub fn redact_in_context(before: &str, text: &str, after: &str) -> String {
-    let joined = format!("{before}{text}{after}");
-    let (mut at, end) = (before.len(), before.len() + text.len());
-    let mut out = String::with_capacity(text.len());
-    for m in secret_pattern().find_iter(&joined) {
-        if m.start() >= end {
-            break;
-        }
-        if m.end() > at {
-            out.push_str(&joined[at..m.start().max(at)]);
-            out.push_str("[REDACTED]");
-            at = m.end().min(end);
-        }
-    }
-    out.push_str(&joined[at..end]);
-    redact(&out)
-}
+pub use secrets::redact;
 fn sanitized(v: &Value) -> Value {
     match v {
         Value::String(s) => json!(redact(s)),
@@ -205,6 +191,19 @@ fn public_request(r: &Request) -> Value {
     let mut v = serde_json::to_value(r).unwrap();
     v.as_object_mut().unwrap().remove("capability_hash");
     v.as_object_mut().unwrap().remove("worker_claim");
+    v["next_seq"] = json!(r.next_seq());
+    v["events_total"] = json!(r.events_total());
+    v["mcp_calls_used"] = json!(r.mcp_calls_used());
+    v["waiting_on"] = json!(r.waiting_on);
+    v
+}
+
+/// A request as the owner sees it on the board, with why it is still queued.
+fn board_request(s: &State, counts: scheduler::Counts, concurrent: Budget, r: &Request) -> Value {
+    let mut v = public_request(r);
+    if let Some(reason) = scheduler::queued_reason(s, counts, r, concurrent) {
+        v["queued_reason"] = json!(reason);
+    }
     v
 }
 
@@ -318,25 +317,27 @@ pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value
             })
         }
         "status" => {
+            let policy = policy::read(&store.root)?;
             let s = store.read()?;
-            let mut requests: Vec<_> = s.requests.values().map(public_request).collect();
+            let counts = scheduler::counts(&s);
+            let mut requests: Vec<_> = s
+                .requests
+                .values()
+                .map(|r| board_request(&s, counts, policy.concurrent, r))
+                .collect();
             requests.sort_by_key(|r| std::cmp::Reverse(r["created_at"].as_u64().unwrap_or(0)));
             Ok(
-                json!({"schema_version":s.schema_version,"endpoints":s.endpoints.values().map(public_endpoint).collect::<Vec<_>>(),"grants":s.grants.values().collect::<Vec<_>>(),"requests":requests,"spark":{"executable":s.spark,"acceptance":"pending until actual shared job receipt"},"paused":s.paused,"state_dir":store.root,"limits":{"concurrent":s.limits.concurrent,"codex_cost":"unavailable","hard_token_cap":"unavailable"}}),
+                json!({"schema_version":s.schema_version,"endpoints":s.endpoints.values().map(public_endpoint).collect::<Vec<_>>(),"grants":s.grants.values().map(Grant::public).collect::<Vec<_>>(),"requests":requests,"spark":{"executable":s.spark,"acceptance":"pending until actual shared job receipt"},"paused":s.paused,"state_dir":store.root,"policy":policy,"limits":{"concurrent":policy.concurrent,"active":counts.active,"waiting":counts.waiting,"queued":counts.queued,"codex_cost":"unavailable","hard_token_cap":"unavailable"}}),
             )
         }
         "grant" => create_grant(store, a),
         "grant-revoke" => revoke_grant(store, field(a, "id")?),
-        "limits" => Ok(json!({"concurrent":store.read()?.limits.concurrent})),
-        "limits-set" => {
-            let concurrent = bound(a, "concurrent", 0, 1, 64)? as u32;
-            store.transaction(|s| {
-                s.limits.concurrent = concurrent;
-                Ok(())
-            })?;
+        "policy" | "limits" => policy::api(&store.root, op, a),
+        "policy-set" | "limits-set" => {
+            let result = policy::api(&store.root, op, a)?;
             // A higher limit can start queued work now; a lower one only gates new launches.
             dispatch(store, cli)?;
-            Ok(json!({"concurrent":concurrent}))
+            Ok(result)
         }
         "submit" => {
             let r = submit(store, a, None)?;
@@ -344,12 +345,10 @@ pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value
             Ok(public_request(&r))
         }
         "request" => {
+            let concurrent = policy::read(&store.root)?.concurrent;
             let s = store.read()?;
-            Ok(public_request(
-                s.requests
-                    .get(field(a, "id")?)
-                    .context("Request not found")?,
-            ))
+            let r = s.requests.get(field(a, "id")?).context("Request not found")?;
+            Ok(board_request(&s, scheduler::counts(&s), concurrent, r))
         }
         "messages" => messages(store, a),
         "attach-test" => {
@@ -450,11 +449,9 @@ fn create_grant(store: &Store, a: &Value) -> Result<Value> {
             "Delegation requires the repository root as project; select that root and scope relative paths explicitly"
         );
     }
+    // No product cap on endpoints for current grants; each must be connected.
     let targets = strings(a, "targets")?;
-    ensure!(
-        !targets.is_empty() && targets.len() <= 4,
-        "Select up to four endpoints"
-    );
+    ensure!(!targets.is_empty(), "Select at least one endpoint");
     let compute: Vec<ComputePermission> =
         serde_json::from_value(a.get("compute").cloned().unwrap_or(json!([])))?;
     ensure!(
@@ -477,7 +474,24 @@ fn create_grant(store: &Store, a: &Value) -> Result<Value> {
             "Invalid compute placement or runtime"
         );
     }
-    // Owner-chosen bounds. The ranges only reject nonsense; defaults suit multi-hour work.
+    // Owner choices: a whole number or "unlimited"; omitted inherits the owner
+    // policy default. The resolved values are stored, so a later policy change
+    // never alters this grant.
+    let defaults = policy::read(&store.root)?.grant_defaults;
+    let mut resolved = std::collections::BTreeMap::new();
+    for (name, min) in policy::GRANT_FIELDS {
+        let value = budget::parse(a, name, min)?.unwrap_or(defaults.get(name));
+        resolved.insert(name, value);
+    }
+    let expires_at = match resolved["expires_seconds"] {
+        Finite(seconds) => Finite(
+            now()
+                .checked_add(seconds)
+                .filter(|at| *at <= budget::JS_SAFE_MAX)
+                .ok_or_else(|| budget::too_large("expires_seconds"))?,
+        ),
+        Unlimited => Unlimited,
+    };
     let g = Grant {
         id: id(),
         project: project.to_string_lossy().into(),
@@ -485,13 +499,16 @@ fn create_grant(store: &Store, a: &Value) -> Result<Value> {
         targets,
         kinds,
         expected_result: field(a, "expected_result")?.into(),
-        max_requests: bound(a, "max_requests", 100, 1, 100_000)? as usize,
-        max_delegations: bound(a, "max_delegations", 20, 0, 10_000)? as usize,
-        max_hops: bound(a, "max_hops", 2, 0, 16)? as u32,
-        timeout_seconds: bound(a, "timeout_seconds", 28_800, 10, adapters::MAX_RUN_SECONDS)?,
-        expires_at: now().saturating_add(bound(a, "expires_seconds", 604_800, 30, 31_536_000)?),
+        max_requests: resolved["max_requests"],
+        max_delegations: resolved["max_delegations"],
+        max_hops: resolved["max_hops"],
+        timeout_seconds: resolved["timeout_seconds"],
+        expires_at,
         compute,
-        max_turns: bound(a, "max_turns", DEFAULT_MAX_TURNS.into(), 1, adapters::MAX_TURNS.into())? as u32,
+        max_turns: resolved["max_turns"],
+        max_mcp_calls: resolved["max_mcp_calls"],
+        max_compute_jobs: resolved["max_compute_jobs"],
+        policy_version: POLICY_VERSION,
         revoked_at: None,
     };
     store.transaction(|s| {
@@ -508,20 +525,19 @@ fn create_grant(store: &Store, a: &Value) -> Result<Value> {
         s.grants.insert(g.id.clone(), g.clone());
         Ok(())
     })?;
-    Ok(json!(g))
+    Ok(g.public())
 }
 
-const EXPIRED: &str = "OWNER_LIMIT: authorization expired or revoked; create a new authorization";
-
-/// Owner revocation. Moving the deadline to now lets every existing expiry
-/// check stop the grant's queued, running and peer work; like an owner cancel
-/// it also stops the grant's owned Spark jobs. Repeating is harmless.
+/// Owner revocation. Every check reads the current persisted grant, and the
+/// deadline also moves to now so older readers see an expired grant. Like an
+/// owner cancel it stops the grant's work and owned Spark jobs. Repeating is
+/// harmless; a revoked grant is never un-revoked.
 fn revoke_grant(store: &Store, grant_id: &str) -> Result<Value> {
     let (g, stopped) = store.transaction(|s| {
         let g = s.grants.get_mut(grant_id).context("Owner grant not found")?;
         let at = *g.revoked_at.get_or_insert(now());
-        g.expires_at = g.expires_at.min(at);
-        let g = g.clone();
+        g.expires_at = g.expires_at.min(Finite(at));
+        let g = g.public();
         let mut stopped = vec![];
         for r in s
             .requests
@@ -538,7 +554,7 @@ fn revoke_grant(store: &Store, grant_id: &str) -> Result<Value> {
             }
             stopped.push(r.id.clone());
         }
-        Ok((json!(g), stopped))
+        Ok((g, stopped))
     })?;
     for id in stopped {
         cancel_owned_spark(store, &id)?;
@@ -568,18 +584,29 @@ pub fn submit(store: &Store, a: &Value, parent: Option<&str>) -> Result<Request>
         let expected=a["expected_result"].as_str().unwrap_or(&g.expected_result).to_owned();
         let digest=hash(&json!({"target":target,"kind":kind,"prompt":prompt,"grant":grant_id,"parent":parent,"expected":expected}).to_string());
         if let Some(existing)=s.requests.get(&request_id){ensure!(existing.digest==digest,"ID_CONFLICT: request ID already has different content");return Ok(existing.clone())}
-        ensure!(g.expires_at>now(),"{EXPIRED}");
+        // History, payload and staging paths are named by request ID, and Windows
+        // file names ignore case, so IDs that differ only in case would share them.
+        if let Some(other)=s.requests.keys().find(|other|other.eq_ignore_ascii_case(&request_id)){bail!("ID_CONFLICT: request ID {request_id} differs only in letter case from existing request {other}; choose a different ID")}
+        g.ensure_active(now())?;
         ensure!(g.targets.contains(&target)&&g.kinds.contains(&kind),"OWNER_SCOPE: target or request type was not authorized");
-        ensure!(s.requests.values().filter(|r|r.grant_id==grant_id).count()<g.max_requests,"OWNER_LIMIT: request budget reached (max_requests {} on this authorization). Create a new authorization with a higher Maximum requests.",g.max_requests);
-        let hop=p.as_ref().map(|p|p.hop+1).unwrap_or(0);ensure!(hop<=g.max_hops,"OWNER_LIMIT: hop limit reached (max_hops {} on this authorization); stop and report unresolved work. Create a new authorization with a higher Maximum hops.",g.max_hops);
+        ensure!(g.max_requests.allows(s.requests.values().filter(|r|r.grant_id==grant_id).count() as u64),"OWNER_LIMIT: request budget reached (max_requests {} on this authorization). Create a new authorization with a higher Maximum requests.",g.max_requests);
+        let hop=match p.as_ref(){Some(p)=>p.hop.checked_add(1).ok_or_else(||budget::too_large("max_hops"))?,None=>0};
+        ensure!(g.max_hops.permits(hop.into()),"OWNER_LIMIT: hop limit reached (max_hops {} on this authorization); stop and report unresolved work. Create a new authorization with a higher Maximum hops.",g.max_hops);
         if kind=="delegate"{
-            ensure!(s.requests.values().filter(|r|r.grant_id==grant_id&&r.kind=="delegate").count()<g.max_delegations,"OWNER_LIMIT: delegation budget reached (max_delegations {} on this authorization). Create a new authorization with a higher Maximum delegations.",g.max_delegations);
+            ensure!(g.max_delegations.allows(s.requests.values().filter(|r|r.grant_id==grant_id&&r.kind=="delegate").count() as u64),"OWNER_LIMIT: delegation budget reached (max_delegations {} on this authorization). Create a new authorization with a higher Maximum delegations.",g.max_delegations);
             for other in s.requests.values().filter(|r|r.kind=="delegate"&&!r.terminal()){
                 let og=&s.grants[&other.grant_id];
                 ensure!(og.project!=g.project||!og.allowed_paths.iter().any(|x|g.allowed_paths.iter().any(|y|paths::overlaps(x,y))),"CLAIM_CONFLICT: overlapping delegated edit already owns this source path");
             }
         }
-        let mut r=Request{id:request_id.clone(),digest,grant_id:grant_id.into(),target,kind,prompt,expected_result:expected,origin,origin_session:p.as_ref().and_then(|p|p.session_id.clone()),parent_id:parent.map(String::from),root_id:p.as_ref().map(|p|p.root_id.clone()).unwrap_or(request_id),hop,state:"queued".into(),created_at:now(),updated_at:now(),workspace:None,session_id:None,answer:None,receipt:None,blocker:None,cancel_requested:false,worker_claim:None,capability_hash:String::new(),events:vec![],spark_jobs:vec![]};
+        // A child that its parent could never receive (the wait-for chain from
+        // its target endpoint leads back to the parent) is refused before creation.
+        if let Some(parent) = parent {
+            if let Some(path) = scheduler::submit_cycle(s, parent, &request_id, &target) {
+                bail!(scheduler::cycle_message(&path));
+            }
+        }
+        let mut r=Request{id:request_id.clone(),digest,grant_id:grant_id.into(),target,kind,prompt,expected_result:expected,origin,origin_session:p.as_ref().and_then(|p|p.session_id.clone()),parent_id:parent.map(String::from),root_id:p.as_ref().map(|p|p.root_id.clone()).unwrap_or(request_id),hop,state:"queued".into(),created_at:now(),updated_at:now(),workspace:None,session_id:None,answer:None,receipt:None,blocker:None,cancel_requested:false,worker_claim:None,capability_hash:String::new(),events:vec![],spark_jobs:vec![],next_seq:Some(0),events_total:Some(0),mcp_calls_used:Some(0),spilled_through:None,spilled_bytes:None,waiting_on:None,payloads:Default::default(),context_read_spilled:false,touched:false};
         r.event("queued",json!({"owner_grant":g.id,"hop":hop}));s.requests.insert(r.id.clone(),r.clone());Ok(r)
     })
 }
@@ -590,26 +617,109 @@ fn messages(store: &Store, a: &Value) -> Result<Value> {
         .requests
         .get(field(a, "id")?)
         .context("Request not found")?;
-    let after = bound(a, "after", 0, 0, u64::MAX)? as usize;
+    let after = bound(a, "after", 0, 0, u64::MAX)?;
+    let (events, next) = spool::page(&store.root, r, after, 100)?;
     Ok(
-        json!({"events":r.events.iter().filter(|e|e.seq>=after).take(100).collect::<Vec<_>>(),"next_offset":after.min(r.events.len())+r.events.len().saturating_sub(after).min(100),"state":r.state,"answer":r.answer,"receipt":r.receipt}),
+        json!({"events":events,"next_offset":next,"events_total":r.events_total(),"state":r.state,"answer":r.answer,"receipt":r.receipt,"payloads":r.payloads}),
     )
 }
-pub fn wait(store: &Store, request: &str, seconds: u64) -> Result<Value> {
+
+fn wait_result(r: &Request) -> Value {
+    // Long runs log thousands of events; `messages` pages them instead.
+    let mut request = public_request(r);
+    request.as_object_mut().unwrap().remove("events");
+    json!({"timed_out":!r.terminal(),"request":request})
+}
+
+fn wait_deadline(seconds: u64) -> Result<std::time::Instant> {
     ensure!(seconds <= 60, "Wait timeout may not exceed 60 seconds");
-    let end = std::time::Instant::now() + Duration::from_secs(seconds);
+    std::time::Instant::now()
+        .checked_add(Duration::from_secs(seconds))
+        .ok_or_else(|| budget::too_large("timeout"))
+}
+
+pub fn wait(store: &Store, request: &str, seconds: u64) -> Result<Value> {
+    let end = wait_deadline(seconds)?;
     loop {
         let s = store.read()?;
         let r = s.requests.get(request).context("Request not found")?;
         if r.terminal() || std::time::Instant::now() >= end {
-            // Long runs log thousands of events; `messages` pages them instead.
-            let mut request = public_request(r);
-            request.as_object_mut().unwrap().remove("events");
-            request["events_total"] = json!(r.events.len());
-            return Ok(json!({"timed_out":!r.terminal(),"request":request}));
+            return Ok(wait_result(r));
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+/// The waiter's capability, liveness and current persisted grant.
+fn waiter_authorized(s: &State, waiter: &str, capability: &str) -> Result<()> {
+    let w = s.requests.get(waiter).context("Request scope unavailable")?;
+    ensure!(
+        !capability.is_empty() && hash(capability) == w.capability_hash,
+        "MCP capability invalid"
+    );
+    ensure!(!w.terminal() && !w.cancel_requested, "Request is no longer active");
+    s.grants
+        .get(&w.grant_id)
+        .context("Owner grant not found")?
+        .ensure_active(now())
+}
+
+/// MCP wait by a running request (C7). Waiting on a live descendant frees the
+/// waiter's slot for the scheduler; a wait that would close a cycle in the
+/// wait-for graph is refused at once. Any return clears the mark.
+pub fn wait_for(
+    store: &Store,
+    waiter: &str,
+    capability: &str,
+    other: &str,
+    seconds: u64,
+) -> Result<Value> {
+    let end = wait_deadline(seconds)?;
+    let marked = store.transaction(|s| {
+        waiter_authorized(s, waiter, capability)?;
+        let target = s.requests.get(other).context("Request not found")?;
+        ensure!(
+            target.grant_id == s.requests[waiter].grant_id,
+            "Request is outside the owner grant"
+        );
+        if target.terminal() {
+            return Ok(false);
+        }
+        if let Some(path) = scheduler::wait_cycle(s, waiter, other) {
+            bail!(scheduler::cycle_message(&path));
+        }
+        if !scheduler::is_descendant(s, other, waiter) {
+            return Ok(false);
+        }
+        s.requests.get_mut(waiter).unwrap().waiting_on = Some(other.into());
+        Ok(true)
+    })?;
+    let result = loop {
+        let s = store.read()?;
+        if let Err(error) = waiter_authorized(&s, waiter, capability) {
+            break Err(error);
+        }
+        let r = s.requests.get(other).context("Request not found")?;
+        if r.terminal() || std::time::Instant::now() >= end {
+            break Ok(wait_result(r));
+        }
+        drop(s);
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    // A wait that times out while the awaited request still runs keeps the
+    // waiter counted as waiting, so resuming cannot exceed a finite limit (C7).
+    if marked {
+        store.transaction(|s| {
+            let live = s.requests.get(other).is_some_and(|r| !r.terminal());
+            if let Some(w) = s.requests.get_mut(waiter) {
+                if w.waiting_on.as_deref() == Some(other) && (result.is_err() || !live) {
+                    w.waiting_on = None;
+                }
+            }
+            Ok(())
+        })?;
+    }
+    result
 }
 fn cancel(store: &Store, request: &str, all: bool) -> Result<Value> {
     let result = store.transaction(|s| {
@@ -725,40 +835,17 @@ fn cancel_owned_spark_with(
 
 pub fn dispatch(store: &Store, cli: &Path) -> Result<()> {
     loop {
+        let concurrent = policy::read(&store.root)?.concurrent;
         let claim = id();
         let capability = format!("{}{}", id(), id());
         let picked = store.transaction(|s| {
             if s.paused {
                 return Ok(None);
             }
-            let active = s
-                .requests
-                .values()
-                .filter(|r| r.worker_claim.is_some() && !r.terminal())
-                .count();
-            if active >= s.limits.concurrent as usize {
-                return Ok(None);
-            }
-            let busy: Vec<_> = s
-                .requests
-                .values()
-                .filter(|r| r.worker_claim.is_some() && !r.terminal())
-                .map(|r| r.target.clone())
-                .collect();
-            let candidate = s
-                .requests
-                .values()
-                .filter(|r| {
-                    r.state == "queued"
-                        && !r.cancel_requested
-                        && r.worker_claim.is_none()
-                        && !busy.contains(&r.target)
-                })
-                .min_by_key(|r| r.created_at)
-                .map(|r| r.id.clone());
-            if let Some(rid) = candidate {
+            if let Some(rid) = scheduler::pick(s, concurrent) {
+                let active = s.grants[&s.requests[&rid].grant_id].is_active(now());
                 let r = s.requests.get_mut(&rid).unwrap();
-                if s.grants[&r.grant_id].expires_at <= now() {
+                if !active {
                     r.blocker = Some(EXPIRED.into());
                     r.transition("needs-owner", json!({"reason":"deadline"}));
                     return Ok(Some((rid, false)));
@@ -792,24 +879,25 @@ pub fn dispatch(store: &Store, cli: &Path) -> Result<()> {
                 r.transition("needs-owner", json!({"reason":"worker-launch"}));
                 Ok(())
             })?;
+            let _ = files_io::remove_staging(&store.root, &rid);
         }
     }
     Ok(())
 }
 
 /// Owner-facing reason for a run stopped by one of the authorization's limits.
-fn limit_message(stop: Option<&str>, g: &Grant, run_seconds: u64, expired: bool) -> Option<String> {
+fn limit_message(stop: Option<&str>, limits: &Effective, run: Budget, expired: bool) -> Option<String> {
     match stop? {
-        "deadline_exceeded" if run_seconds >= g.timeout_seconds => Some(format!(
+        "deadline_exceeded" if run == limits.timeout_seconds => Some(format!(
             "Run time limit reached (timeout_seconds {}). Create a new authorization with a longer run time.",
-            g.timeout_seconds
+            limits.timeout_seconds
         )),
         // The run was clipped to the authorization deadline, or revocation stopped it.
         "deadline_exceeded" => Some(EXPIRED.into()),
         "cancelled" if expired => Some(EXPIRED.into()),
         "max_turns_reached" => Some(format!(
             "Turn limit reached (max_turns {}). Create a new authorization with a higher Maximum turns.",
-            g.max_turns
+            limits.max_turns
         )),
         _ => None,
     }
@@ -839,6 +927,8 @@ fn recover(store: &Store) -> Result<()> {
     {
         cancel_owned_spark(store, &r.id)?;
     }
+    // Staged uploads of finished or unknown requests (C9).
+    files_io::sweep_staging(&store.root, &store.read()?)?;
     Ok(())
 }
 
@@ -916,6 +1006,10 @@ pub fn worker(
             r.hop,
             r.prompt
         );
+        let limits = g.effective();
+        // A run never outlives its authorization: min(run time, remaining lifetime).
+        let run_time = limits.timeout_seconds.min(g.remaining(now()));
+        ensure!(run_time != Finite(0), EXPIRED);
         let spec = adapters::LaunchSpec {
             agent: endpoint.agent.clone(),
             executable: endpoint.executable.into(),
@@ -925,11 +1019,11 @@ pub fn worker(
             state_dir: store.root.clone(),
             request_id: r.id.clone(),
             capability: capability.into(),
-            timeout_seconds: g.timeout_seconds.min(g.expires_at.saturating_sub(now())),
-            max_turns: g.max_turns,
+            timeout: run_time,
+            max_turns: limits.max_turns,
+            legacy_limits: limits.legacy,
             work_dir: run_dir,
         };
-        ensure!(spec.timeout_seconds > 0, EXPIRED);
         let outcome = adapters::run(
             &spec,
             |event| {
@@ -947,11 +1041,12 @@ pub fn worker(
                 Ok(())
             },
             || {
+                // Every heartbeat re-reads the persisted request and grant.
                 store
                     .read()
                     .map(|s| {
                         s.requests[request_id].cancel_requested
-                            || s.grants[&r.grant_id].expires_at <= now()
+                            || !s.grants[&r.grant_id].is_active(now())
                     })
                     .unwrap_or(true)
             },
@@ -974,10 +1069,20 @@ pub fn worker(
         } else {
             None
         };
-        store.transaction(|s|{let expired=s.grants.get(&g.id).is_none_or(|x|x.expires_at<=now());let r=s.requests.get_mut(request_id).unwrap();r.answer=Some(redact(&outcome.answer));if outcome.session_id.is_some(){r.session_id=outcome.session_id.clone();}
-            let scoped_context_read=r.events.iter().any(|event|event.kind=="context-read");
-            let limit=if r.cancel_requested{None}else{limit_message(outcome.stop_reason.as_deref(),&g,spec.timeout_seconds,expired)};
-            r.receipt=Some(json!({"adapter":"new-session-v1","agent":endpoint.agent,"version":endpoint.version,"session_id":r.session_id,"exit_code":outcome.exit_code,"usage":outcome.usage,"estimated_cost_usd":outcome.estimated_cost_usd,"observed_cost_usd":null,"verification":"agent-result; tests require separate receipts","scoped_context_read":scoped_context_read,"changed_files":changed,"diff":diff.as_deref().map(redact),"worktree":workspace,"merged":false,"tests_run":[],"stop_reason":outcome.stop_reason,"stop_message":limit}));
+        // Large texts go beside the board before state references them (C6).
+        let mut payloads = vec![];
+        let mut keep = |name: &str, text: String| -> Result<String> {
+            let (inline, payload) = spool::inline_or_file(&store.root, request_id, name, text)?;
+            payloads.extend(payload.map(|p| (name.to_owned(), p)));
+            Ok(inline)
+        };
+        let answer = keep("answer", redact(&outcome.answer))?;
+        let changed = changed.map(|text| keep("changed_files", text)).transpose()?;
+        let diff = diff.map(|text| keep("diff", redact(&text))).transpose()?;
+        store.transaction(|s|{let expired=s.grants.get(&g.id).is_none_or(|x|!x.is_active(now()));let r=s.requests.get_mut(request_id).unwrap();r.answer=Some(answer.clone());r.payloads.extend(payloads.clone());if outcome.session_id.is_some(){r.session_id=outcome.session_id.clone();}
+            let scoped_context_read=r.has_context_read();
+            let limit=if r.cancel_requested{None}else{limit_message(outcome.stop_reason.as_deref(),&limits,spec.timeout,expired).or_else(||outcome.stop_message.clone())};
+            r.receipt=Some(json!({"adapter":"new-session-v1","agent":endpoint.agent,"version":endpoint.version,"session_id":r.session_id,"exit_code":outcome.exit_code,"usage":outcome.usage,"estimated_cost_usd":outcome.estimated_cost_usd,"observed_cost_usd":null,"verification":"agent-result; tests require separate receipts","scoped_context_read":scoped_context_read,"changed_files":changed,"diff":diff,"worktree":workspace,"merged":false,"tests_run":[],"stop_reason":outcome.stop_reason,"stop_message":limit}));
             let missing_context=outcome.success&&!scoped_context_read;
             let state=if r.cancel_requested{"cancelled"}else if missing_context{"needs-owner"}else if outcome.success&&r.session_id.is_some(){"completed"}else if limit.is_some()||outcome.stop_reason.as_deref().is_some_and(|x|x.contains("timeout")||x.contains("deadline")||x.contains("limit")){"needs-owner"}else{"failed"};
             if state!="completed"{r.blocker=Some(if missing_context&&!r.cancel_requested{"Provider returned without accessing scoped CodaClauda tools".into()}else{limit.clone().or_else(||outcome.stop_reason.clone()).unwrap_or("Agent did not complete with a verified session receipt".into())});}r.transition(state,json!({"receipt_available":true}));Ok(())})?;
@@ -996,6 +1101,8 @@ pub fn worker(
             Ok(())
         })?;
     }
+    // The request is terminal; its staged uploads go too (recover() sweeps any left).
+    let _ = files_io::remove_staging(&store.root, request_id);
     drop(lock);
     dispatch(store, cli)?;
     Ok(())

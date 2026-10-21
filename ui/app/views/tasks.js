@@ -592,7 +592,7 @@ export function mount(root, ctx) {
     const task = state.drawer ? store.tasks.find(t => t.id === state.drawer) : null;
     const override = task ? overrideOf(task.id) : {};
     const project = task ? proj(task.projectId) : null;
-    const sig = JSON.stringify([state.drawer, task && [task.title, task.detail, statusOf(task), task.state, task.updatedAt, task.projectId, task.expiresAt, task.source?.blocker, task.source?.answer, task.source?.cancel_requested, (task.replies || []).map(r => `${r.id}:${r.read_at ? 1 : 0}`)], override, project && [project.name, project.color], looks, store.visibleProjects('board').map(p => p.id)]);
+    const sig = JSON.stringify([state.drawer, task && [task.title, task.detail, statusOf(task), task.state, task.updatedAt, task.projectId, task.expiresAt, task.source?.blocker, task.source?.queued_reason, task.source?.answer, task.source?.cancel_requested, (task.replies || []).map(r => `${r.id}:${r.read_at ? 1 : 0}`)], override, project && [project.name, project.color], looks, store.visibleProjects('board').map(p => p.id)]);
     if (!force && drawer.dataset.sig === sig) return;
     drawer.dataset.sig = sig;
     const scroller = drawerHost.querySelector('.tk-drawer-scroll');
@@ -662,6 +662,7 @@ export function mount(root, ctx) {
           fact('Updated', timeEl(task.updatedAt))),
         status === 'waiting' ? h('div.tk-callout.info', icon('clock'), h('p', 'The agent has not opened this yet. It sees it at its next inbox check (schedules vary and sending does not wake it), so this is normal for a while.')) : null,
         task.type === 'request' && source.blocker ? h('div.tk-callout', icon('alert'), h('div', h('strong', 'Blocked'), h('p', typeof source.blocker === 'string' ? source.blocker : JSON.stringify(source.blocker)))) : null,
+        task.type === 'request' && source.state === 'queued' && typeof source.queued_reason === 'string' && source.queued_reason ? h('div.tk-callout', icon('clock'), h('div', h('strong', 'Waiting'), h('p', source.queued_reason))) : null,
         task.type === 'request' && source.prompt ? section('Prompt', renderMarkdown(source.prompt, { compact: true })) : null,
         section(task.type === 'request' ? 'Expected result' : task.type === 'claim' ? 'Purpose' : 'Details', detail ? renderMarkdown(detail) : h('p.muted', 'No details.')),
         task.type === 'request' && source.answer ? section('Answer', renderMarkdown(source.answer)) : null,

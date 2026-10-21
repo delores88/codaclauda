@@ -43,11 +43,31 @@ chosen project. Prompts, included attachment text or paths, tool results and
 provider conversation context can reach that provider. A later owner send
 continues the saved provider conversation, including after idle shutdown or
 restarting the app. The app does not attach to unrelated desktop conversations.
-The owner can opt an owned session into **Wake on mail**. While the app is open,
-its watcher can send message subjects, bodies and sender labels to that provider,
-then acknowledge messages retained for delivery. The global wake switch and
-per-session opt-in control future admission; sender labels never grant authority.
-Wake checks and daily/hourly limits do not establish a sender's identity.
+**Wake on mail** is on by default for every owned session created in 0.5 or
+later (from Chat, a fork, a schedule, a hand-off or a team start); each gets its
+own board address. Sessions from before 0.5 keep their setting. While the app is
+open, its watcher can send message subjects, bodies and sender labels to that
+provider, consuming provider usage, then acknowledge messages retained for
+delivery. The per-session switch and the global switch in Settings control future
+admission; sender labels never grant authority. There is no cap on how many
+sessions wake or how often. The only limit is the owner's loop guard (Settings →
+Limits, on by default, 20 per hour): two CodaClauda sessions that have woken each
+other that often in the last hour stop waking each other, their mail stays unread,
+and the owner gets one notice per pair and hour in that chat and, when ntfy is
+configured, a phone push naming the two addresses (never the message text). Wake
+checks and the loop guard do not establish a sender's identity.
+
+**Teammate starts** are off for every project until the owner turns on
+Projects → Teammates for it. Agents ask by posting to the board address
+`codaclauda-team`; the app reads that inbox while it is open. When the project's
+switch is on and its guard allows, the app starts a new owned session at the
+project's current access level (never higher) with wake on. The requested title
+and prompt, written by an agent whose sender name is self-asserted, are sent to
+the provider as that session's framed, untrusted first turn and can consume
+usage. The app replies to the sender on the board with the new session's ID,
+address, provider and project, or with a named refusal. A new wake-on session's
+first turn is also preceded by a short framed note giving its board address, the
+CLI and board paths, and how to wake teammates and post claims.
 
 Schedules store a prompt, project, provider, timing and optional catch-up setting.
 Enabled schedules can consume provider plan usage without another click while
@@ -117,6 +137,11 @@ MCP-call metadata, usage observations, diffs, test/job receipts, private request
 configuration and isolated Git worktrees. CodaClauda retains this data until the
 owner removes it. Grant expiry stops authorized work; it does not delete history.
 There is no automatic retention period or purge for this legacy request history.
+Since 0.5, older request events move to `requests/<id>.events.jsonl` and answers
+or diffs over 256 KiB to `requests/<id>/` beside the board, with the same
+retention. Staged file writes live under `staging/` until they commit, abort or
+the request ends. A provider record over 64 MiB is saved raw (not redacted) as
+`oversized-<n>.jsonl` in that run's private directory.
 The separate passive mailbox retains messages and read receipts for 30 days,
 pruning expired messages during subsequent mailbox operations. Address entries
 remain registered; claims expire after their chosen 1–120 minute lifetime.
@@ -150,8 +175,13 @@ automatically replayed on restart.
 
 The owned-session registry also retains accepted queue entries and their
 outcomes. Wake and schedule configuration, deduplication records and run receipts
-are stored under the same private desktop state. These can contain message IDs,
-mailbox addresses, prompts and project paths. They are separate from the passive
+are stored under the same private desktop state. `desktop-ui/wake.json` holds the
+wake switch, loop-guard setting and recent wake counts per session pair;
+`desktop-ui/team.json` holds each project's teammate switch, guard, path and ids,
+and the saved outcome and exact reply of every handled team request for 31 days;
+`desktop-ui/session-limits.json` holds Agents at once. The board's `policy.json`
+holds the owner's grant defaults and Board requests at once. These can contain
+message IDs, mailbox addresses, prompts and project paths. They are separate from the passive
 mailbox's 30-day pruning and must be included in any private board backup.
 
 Owned-session prompts, replies and tool summaries are not generally redacted
@@ -298,7 +328,7 @@ checked with those services; a locally reported cost estimate is not an invoice.
 
 The Windows GUI requires Microsoft Edge WebView2 to be installed separately;
 its 3D City and avatar preview use WebGL graphics support. The bundled UI
-libraries do not download model weights. The updater in Classic tools contacts
+libraries do not download model weights. The updater in Settings contacts
 `deloresai.com` to discover accepted stable CodaClauda
 releases. Checking sends the app identifier and the normal network information
 needed for HTTPS; it sends no coordination prompts, project files or provider
