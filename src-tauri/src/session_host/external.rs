@@ -20,7 +20,7 @@
 //! "continue" is always refused with OWNERSHIP_UNKNOWN: an id or project match
 //! is not ownership provenance. Nothing wakes or updates the other app's window.
 
-use super::{Failure, Inner, Provider, Record, host, lock, now_ms, random_hex, reply};
+use super::{Failure, Inner, Provider, Record, canonical_folder, host, lock, now_ms, random_hex, reply};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -330,14 +330,20 @@ pub(super) fn norm(path: &str) -> String {
     p.trim_end_matches('/').to_lowercase()
 }
 
-fn within(path: &str, root: &str) -> bool {
-    !root.is_empty() && (path == root || path.strip_prefix(root).is_some_and(|rest| rest.starts_with('/')))
-}
-
 /// `gh:owner/name` from a GitHub remote URL, as the UI derives project ids.
 fn github_id(remote: &str) -> Option<String> {
-    let (_, rest) = remote.split_once("github.com")?;
-    let rest = rest.trim_start_matches([':', '/']).trim_end_matches('/');
+    let lower = remote.trim().to_ascii_lowercase();
+    let path = if let Some(rest) = lower.strip_prefix("git@github.com:") {
+        rest.to_owned()
+    } else {
+        let url = url::Url::parse(&lower).ok()?;
+        if !matches!(url.scheme(), "https" | "http" | "ssh" | "git")
+            || url.host_str() != Some("github.com") || url.query().is_some() || url.fragment().is_some() {
+            return None;
+        }
+        url.path().strip_prefix('/')?.to_owned()
+    };
+    let rest = path.trim_end_matches('/');
     let rest = rest.strip_suffix(".git").unwrap_or(rest);
     let (owner, name) = rest.split_once('/')?;
     (!owner.is_empty() && !name.is_empty() && !name.contains('/')).then(|| format!("gh:{}/{}", owner.to_lowercase(), name.to_lowercase()))
@@ -348,37 +354,61 @@ fn github_id(remote: &str) -> Option<String> {
 /// level, else Full as for every linked folder); an unlinked folder under the
 /// user profile is the owner's own (Full); anything else, or settings that
 /// cannot be read, is Read. Never above the project's current level.
-fn adopt_access(ui: &Result<Option<Value>, String>, cwd: &str, profile: Option<&str>) -> (Option<String>, &'static str) {
+fn adopt_access(ui: &Result<Option<Value>, String>, cwd: &str, profile: Option<&str>) -> Result<(Option<String>, &'static str), Failure> {
+    let folder = canonical_folder(Path::new(cwd))?;
     let Ok(ui) = ui else {
-        return (None, "read");
+        return Ok((None, "read"));
     };
-    let folder = norm(cwd);
-    let linked = ui
+    if ui.as_ref().is_some_and(|state| !state.is_object()
+        || state.get("projectAccess").is_some_and(|access| !access.is_object())
+        || state.get("projects").is_some_and(|projects| !projects.is_object()
+            || projects.get("local").is_some_and(|local| !local.is_array()))) {
+        return Err(("ADOPT_PROJECT_UNVERIFIED", "Saved project or access settings are invalid; review them in Projects before copying a conversation.".into()));
+    }
+    let mut linked = Vec::new();
+    for item in ui
         .as_ref()
         .and_then(|state| state["projects"]["local"].as_array())
         .into_iter()
         .flatten()
-        .filter_map(|item| Some((norm(item["path"].as_str()?), item)))
-        .filter(|(path, _)| within(&folder, path))
-        .max_by_key(|(path, _)| path.len());
-    if let Some((path, item)) = linked {
-        let id = format!("local:{path}");
+    {
+        let path = item["path"].as_str().ok_or_else(|| (
+            "ADOPT_PROJECT_UNVERIFIED", "A linked project has no valid folder; its access cannot be checked.".to_owned()
+        ))?;
+        let root = canonical_folder(Path::new(path)).map_err(|_| (
+            "ADOPT_PROJECT_UNVERIFIED", format!("The linked project {path} cannot be resolved; restore or unlink it before copying a conversation.")
+        ))?;
+        if folder.starts_with(&root) {
+            linked.push((root.components().count(), path, item));
+        }
+    }
+    let deepest = linked.iter().map(|(depth, _, _)| *depth).max();
+    linked.retain(|(depth, _, _)| Some(*depth) == deepest);
+    // Two lexical links can resolve to the same folder but carry different
+    // owner settings. Do not choose one by list order or fall back to Full.
+    if linked.len() > 1 {
+        return Err(("ADOPT_PROJECT_AMBIGUOUS", "More than one linked project resolves to this folder. Keep one unambiguous project link before copying the conversation.".into()));
+    }
+    if let Some((_, path, item)) = linked.first() {
+        let id = format!("local:{}", norm(path));
         let ids = [Some(id.clone()), item["stats"]["git"]["remote"].as_str().and_then(github_id)];
         let saved = ui.as_ref().map(|state| &state["projectAccess"]);
         let level = ids
             .iter()
             .flatten()
-            .find_map(|key| saved.and_then(|map| map.get(key)).filter(|r| r.is_object()))
+            .find_map(|key| saved.and_then(|map| map.get(key)))
             .map(|record| record["level"].as_str());
         let access = match level {
             None => "full",
             Some(Some("full")) => "full",
             Some(_) => "read",
         };
-        return (Some(id), access);
+        return Ok((Some(id), access));
     }
-    let own = profile.map(norm).is_some_and(|home| within(&folder, &home));
-    (None, if own { "full" } else { "read" })
+    let own = profile
+        .and_then(|home| canonical_folder(Path::new(home)).ok())
+        .is_some_and(|home| folder.starts_with(home));
+    Ok((None, if own { "full" } else { "read" }))
 }
 
 /// The default (no mode, "" or "fork") makes a separate copy; "continue" asks
@@ -433,12 +463,15 @@ impl Inner {
         }
         let ui = super::schedule::read_json(&self.dir.join("ui-state.json"), 8 * 1024 * 1024);
         let profile = env_dir("USERPROFILE").map(|p| p.to_string_lossy().into_owned());
-        let (project_id, access) = adopt_access(&ui, cwd, profile.as_deref());
+        // Keep the verified physical route, not an alias that can be retargeted
+        // between creating this copy and its first provider launch.
+        let cwd = canonical_folder(Path::new(cwd))?.to_string_lossy().into_owned();
+        let (project_id, access) = adopt_access(&ui, &cwd, profile.as_deref())?;
         let title = title
             .map(|t| t.trim().chars().filter(|c| !c.is_control()).take(200).collect::<String>())
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| format!("{} conversation (copy)", provider.label()));
-        self.adopt_copy(provider, session, cwd, project_id, access, title).await
+        self.adopt_copy(provider, session, &cwd, project_id, access, title).await
     }
 
     /// Continue as a copy: a new CodaClauda session whose first launch copies the
@@ -513,21 +546,54 @@ mod tests {
 
     #[test]
     fn adopt_uses_the_projects_current_access_and_finds_conversations_by_name_only() {
+        let paths = tempfile::tempdir().unwrap();
+        let home = paths.path().join("owner");
+        let work = home.join("work");
+        let locked = work.join("locked");
+        let elsewhere = home.join("elsewhere");
+        let shared = paths.path().join("shared");
+        for folder in [work.join("app"), locked.clone(), elsewhere.clone(), shared.clone()] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let path = |p: &Path| p.to_string_lossy().into_owned();
         let ui = Ok(Some(json!({
             "projects": {"local": [
-                {"path": "C:\\Users\\Ben\\Work"},
-                {"path": "C:\\Users\\Ben\\Work\\Locked", "stats": {"git": {"remote": "https://github.com/someone/locked.git"}}},
+                {"path": work},
+                {"path": locked, "stats": {"git": {"remote": "https://github.com/someone/locked.git"}}},
             ]},
             "projectAccess": {"gh:someone/locked": {"level": "read"}},
         })));
-        let home = Some("C:\\Users\\Ben");
-        assert_eq!(adopt_access(&ui, "C:\\Users\\Ben\\Work\\app", home), (Some("local:c:/users/ben/work".into()), "full"));
+        let profile = path(&home);
+        let home = Some(profile.as_str());
+        assert_eq!(adopt_access(&ui, &path(&work.join("app")), home).unwrap(), (Some(format!("local:{}", norm(&path(&work)))), "full"));
         // The deepest linked project wins, found by its GitHub id too.
-        assert_eq!(adopt_access(&ui, "c:/users/ben/work/locked/", home).1, "read");
-        assert_eq!(adopt_access(&ui, "C:\\Users\\Ben\\Elsewhere", home), (None, "full"));
-        assert_eq!(adopt_access(&ui, "D:\\Shared\\x", home), (None, "read"));
-        assert_eq!(adopt_access(&Err("unreadable".into()), "C:\\Users\\Ben\\Work", home), (None, "read"));
-        assert_eq!(adopt_access(&Ok(None), "C:\\Users\\Benjamin", home).1, "read");
+        assert_eq!(adopt_access(&ui, &path(&locked), home).unwrap().1, "read");
+        assert_eq!(adopt_access(&ui, &path(&elsewhere), home).unwrap(), (None, "full"));
+        assert_eq!(adopt_access(&ui, &path(&shared), home).unwrap(), (None, "read"));
+        assert_eq!(adopt_access(&Err("unreadable".into()), &path(&work), home).unwrap(), (None, "read"));
+        assert_eq!(adopt_access(&Ok(None), &path(&shared), home).unwrap().1, "read");
+        // A lexical alias outside the linked path still resolves to Read. No
+        // symlink privilege is needed to reproduce the old string-match bug.
+        let alias = elsewhere.join("..").join("work").join("locked");
+        assert_eq!(adopt_access(&ui, &path(&alias), home).unwrap().1, "read");
+        let mut ambiguous = ui.clone().unwrap().unwrap();
+        ambiguous["projects"]["local"].as_array_mut().unwrap().push(json!({"path": alias}));
+        assert_eq!(adopt_access(&Ok(Some(ambiguous)), &path(&locked), home).unwrap_err().0, "ADOPT_PROJECT_AMBIGUOUS");
+        let mut unavailable = ui.clone().unwrap().unwrap();
+        unavailable["projects"]["local"].as_array_mut().unwrap().push(json!({"path": paths.path().join("missing")}));
+        assert_eq!(adopt_access(&Ok(Some(unavailable)), &path(&locked), home).unwrap_err().0, "ADOPT_PROJECT_UNVERIFIED");
+        let mut malformed = ui.clone().unwrap().unwrap();
+        malformed["projectAccess"][format!("local:{}", norm(&path(&work)))] = json!("invalid");
+        assert_eq!(adopt_access(&Ok(Some(malformed)), &path(&work), home).unwrap().1, "read");
+        for invalid in [json!(null), json!([]), json!("invalid")] {
+            let mut malformed = ui.clone().unwrap().unwrap();
+            malformed["projectAccess"] = invalid;
+            assert_eq!(adopt_access(&Ok(Some(malformed)), &path(&work), home).unwrap_err().0, "ADOPT_PROJECT_UNVERIFIED");
+        }
+        assert_eq!(github_id("git@github.com:Ben/Project.git"), Some("gh:ben/project".into()));
+        for remote in ["https://notgithub.com/ben/project.git", "https://github.com@evil.test/ben/project.git", "https://evil.test/github.com/ben/project.git"] {
+            assert_eq!(github_id(remote), None);
+        }
         assert!(conversation_id("0199a8f2-1c2d-7e3f-8a9b-0c1d2e3f4a5b"));
         assert!(!conversation_id("--resume") && !conversation_id("../0199a8f2-1c2d-7e3f-8a9b-0c1d2e3f4a"));
         // Rollouts are matched by file name; contents are never opened.

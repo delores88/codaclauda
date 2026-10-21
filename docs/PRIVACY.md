@@ -1,7 +1,7 @@
 # CodaClauda privacy and local data
 
 CodaClauda is a DeloresAI desktop utility for owner-authorized coordination between
-Claude Code and Codex. This document describes the 0.5.0 source,
+Claude Code and Codex. This document describes the 0.6.0 source,
 including the preserved scoped-request and mailbox tools. Source review does not
 establish native acceptance, publication or Marketplace admission; those require
 separate release evidence.
@@ -51,14 +51,17 @@ provider, consuming provider usage, then acknowledge messages retained for
 delivery. The per-session switch and the global switch in Settings control future
 admission; sender labels never grant authority. There is no cap on how many
 sessions wake or how often apart from owner concurrency settings and the loop guard (Settings →
-Limits, on by default, 20 per hour): two CodaClauda sessions that have woken each
-other that often in the last hour stop waking each other, their mail stays unread,
-and the owner gets one notice per pair and hour in that chat and, when ntfy is
-configured, a phone push naming the two addresses (never the message text). Wake
+Limits). A new guard defaults to Notify at 60 per pair per hour; it sends one
+notice per pair and hour without pausing. Every saved pre-0.6 guard retains its
+on/off choice, count and Pause behavior. Pause mode stops further wakes until
+older counts age out; the owner can also pause a pair explicitly. When ntfy is
+configured, its notice names the two addresses, never the message text. Wake
 checks and the loop guard do not establish a sender's identity.
 
-**Teammate starts** are off for every project until the owner turns on
-Projects → Teammates for it. Agents ask by posting to the board address
+**Teammate starts** inherit Settings → Team for linked projects without a saved
+override. The new owner default is On with Unlimited concurrency; existing
+project Off, Read and finite guards are retained. The owner can change the
+global default or set a project's override. Agents ask by posting to the address
 `codaclauda-team`; the app reads that inbox while it is open. When the project's
 switch is on and its guard allows, the app starts a new owned session at the
 project's current access level (never higher) with wake on. The requested title
@@ -73,6 +76,35 @@ The project guard applies again when an agent-started session wakes or starts
 another turn. Disabling teammates prevents further turns from those sessions;
 an already running turn still needs Stop. Lowering project access prevents a
 Full teammate from starting another turn at its previous level.
+
+The 0.6 host lease records the bound board and installation, recent heartbeat
+time and consumer status. A CLI post reports a saved receipt separately from
+available, unavailable or unknown host state. A closed app cannot consume team
+requests. A queued request can be cancelled and must not run after a terminal
+refusal or cancellation. These receipts do not authenticate the sender.
+
+**Continue as a copy** reads local conversation metadata to identify a source
+and asks the installed provider to fork it on first launch. The separate copy
+can send inherited conversation context to the same provider; the original is
+not continued in place. Optional Codex desktop notification bindings store an
+exact thread ID, board address, linked folder, cursor and delivery receipts.
+Each notice contains message counts and sender names, not message bodies.
+The provider may execute work after accepting a notice. Command acceptance
+alone does not prove execution or that the recipient read the mailbox.
+
+**Settings → Usage** applies to all CodaClauda-owned sessions, not other clients
+or provider account settings. Credits and supported earned resets default on
+for new settings; saved Off values are retained and unreadable policy fails
+closed. Codex limit reads may report allowance, windows, credit balance, spend
+control and earned reset availability. Reset redemption uses a durable attempt
+key and a hashed account identifier to reconcile uncertain outcomes without
+consuming another reset. A natural window reset does not redeem a credit.
+Unknown provider fields remain unknown. Off is admission control, not a hard
+billing cap: a turn crossing a limit or starting with unreported state may
+still use credits. Claude extra usage depends on the provider's account
+settings; no account switching, API profile or credential copying is performed.
+Only definitively unstarted held work may retry automatically once. Partial
+or unknown execution retains its original receipt for owner review.
 
 Schedules store a prompt, project, provider, timing and optional catch-up setting.
 Enabled schedules can consume provider plan usage without another click while
@@ -206,6 +238,15 @@ and the saved outcome and exact reply of every handled team request for 31 days;
 holds the owner's grant defaults and Board requests at once. These can contain
 message IDs, mailbox addresses, prompts and project paths. They are separate from the passive
 mailbox's 30-day pruning and must be included in any private board backup.
+
+The desktop also retains `desktop-bindings.json` notification bindings/cursors
+and bounded output receipts, `usage.json` owner policy, and held-turn state in
+the session ledger. `usage-resets.json` and its lock in the app data folder
+serialize redemption attempts across CodaClauda processes. These records can
+contain account hashes, attempt IDs, provider outcomes and timing; they are
+private local state, not public release evidence. The transient
+`desktop-ui/host-heartbeat.json` is removed on a clean exit. Mailbox retention
+does not purge these separate records.
 
 Owned-session prompts, replies and tool summaries are not generally redacted
 or screened by the mailbox credential scan before sending, display or local

@@ -431,3 +431,56 @@ grants, sandboxes and the passive-mailbox rule are unchanged.
   `uv tool install windows-mcp`, ticks "I installed it myself", and the preset
   runs the installed `windows-mcp serve`. CodaClauda never runs uvx and never
   downloads anything; owner MCP servers remain Full-access only.
+
+## Version 0.6 delivery, owner defaults and usage
+
+This section describes source behavior and its review requirements, not installed
+acceptance. The 0.5.0 release is complete; its artifacts and receipts are retained.
+The 0.6 handoff is `58712b2ef87878282bce9b2cc24079ec42667fad` plus independently
+reviewed release corrections. See RELEASE-0.6.0.md for separate release gates.
+
+Team settings inherit an owner default only where a currently linked project
+has no saved override. The new default is enabled with Unlimited concurrency.
+Saved Off, Read, finite guard and revocation decisions survive migration.
+Registration of child folders requires canonical containment under a current
+linked root without link traversal. Orphan settings remain preferences and do
+not remain authorization roots after unlinking. Project linkage, access and
+teammate policy are checked again before dispatch. Passive posts never launch
+providers. Team requests have distinct queued, admitted and terminal outcomes;
+cancellation is considered across the unread inbox before starting requests.
+
+A board/installation-bound host lease reports availability separately from the
+durable post receipt. A closed or unreadable consumer does not imply delivery.
+Team polls every five seconds and owned-session wakes every ten seconds while
+the app is open. New loop guards notify at 60 wakes per pair per hour. Every
+saved legacy guard retains its Pause behavior, on/off choice and count; only
+absent settings receive the new default. An explicit pair pause also prevents
+dispatch of a previously queued wake.
+
+External conversations can only be continued as labeled copies through the
+provider's fork operation, with distinct provider identity. In-place Continue
+refuses with OWNERSHIP_UNKNOWN. Copy access resolves canonical project paths
+and preserves saved Read settings. An owner may separately bind one mailbox
+address to a Codex thread in an unambiguous, currently Full-access linked
+project. Binding and dispatch refuse Read or unverifiable access because the
+queue command cannot enforce the external thread's sandbox. Delivery uses structured argv
+for `codex queue --remote unix://`; unavailable endpoints refuse rather than
+falling back to an embedded server. A saved sending cursor prevents duplicate
+delivery after an ambiguous result. Binding, command acceptance, provider
+execution and recipient acknowledgment are distinct. Runtime delivery remains
+unverified until separately observed; Claude desktop push is unsupported.
+
+Usage policy is global only across CodaClauda-owned sessions. New credit and
+supported earned-reset flags default on; malformed persisted policy fails
+closed and explicit Off is preserved. Reset decisions require fresh provider
+data bound to the actual account/process, a serialized durable episode and a
+key persisted before consumption. Unknown outcomes retain that key across
+window rollover. Current cancellation and owner policy are checked at the
+side-effect boundary. Missing fields are unknown; credit estimates are not
+billing proof. Off controls admission and cannot guarantee a hard spending cap.
+Natural reset timing and earned-credit redemption remain separate concepts.
+Held work must be definitively unstarted, retain its original turn identity,
+recheck access and revocation, and retry at most once at a validated reset.
+Partial or unknown execution never silently replays. No API profile, provider
+account switching, credential copying or live spending probe is required to
+test the deterministic policy and concurrency branches.

@@ -43,7 +43,7 @@ use std::{
     fs::File,
     future::Future,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tauri::Manager;
@@ -54,7 +54,7 @@ const FILE_LIMIT: u64 = 64 * 1024;
 const SOFT_WAIT: Duration = Duration::from_secs(20);
 /// Wait a little past the reported reset before the one retry.
 const RESET_MARGIN_MS: u64 = 30_000;
-/// A snapshot this fresh is not read again before a send.
+/// A successful admission read may be used only briefly at dispatch.
 const FRESH_MS: u64 = 5_000;
 const RESETS_FILE: &str = "usage-resets.json";
 const RESETS_LOCK: &str = "usage-resets.lock";
@@ -94,10 +94,14 @@ pub(super) fn parse_settings(value: &Value) -> Result<Settings, String> {
     if !value.is_object() {
         return Err("Usage settings are not an object.".into());
     }
-    let flag = |provider: &str, key: &str| match &value[provider][key] {
-        Value::Null => Ok(true),
-        Value::Bool(on) => Ok(*on),
-        _ => Err(format!("{provider}.{key} must be true or false.")),
+    let flag = |provider: &str, key: &str| {
+        let Some(section) = value.get(provider) else { return Ok(true) };
+        let fields = section.as_object().ok_or_else(|| format!("{provider} usage settings must be an object."))?;
+        match fields.get(key) {
+            None => Ok(true),
+            Some(Value::Bool(on)) => Ok(*on),
+            _ => Err(format!("{provider}.{key} must be true or false.")),
+        }
     };
     Ok(Settings {
         codex_credits: flag("codex", "useCredits")?,
@@ -523,6 +527,114 @@ pub(super) fn account_hash(read: &Value) -> Option<String> {
         .map(|id| hex_digest(format!("codaclauda.codex-account/1\n{id}").as_bytes()))
 }
 
+/// A successful response from this process, never recovered from the UI cache.
+#[derive(Clone)]
+pub(super) struct CodexRead {
+    snapshot: Value,
+    account: Option<String>,
+    revision: u64,
+    at: u64,
+}
+
+#[derive(Default)]
+pub(super) struct ProcUsage {
+    revision: u64,
+    last: Option<CodexRead>,
+    /// A restriction only: never used as fresh credit/reset authorization.
+    known_limited: Option<Value>,
+    admission: Option<(String, u64, Option<CodexRead>)>,
+}
+
+impl ProcUsage {
+    fn invalidate(&mut self, account_changed: bool) {
+        self.revision = self.revision.wrapping_add(1);
+        self.admission = None;
+        if account_changed {
+            self.last = None;
+            self.known_limited = None;
+        }
+    }
+
+    fn note_limits(&mut self, update: &Value) {
+        self.invalidate(false);
+        // A notification is not a fresh authorization, but a reported limit
+        // must still prevent a failed read from becoming unknown-state admission.
+        if let Some(fields) = update.as_object() {
+            let mut snapshot = self.last.as_ref().map_or_else(|| json!({"rateLimits": {}}), |r| r.snapshot.clone());
+            for (key, value) in fields.iter().filter(|(_, v)| !v.is_null()) {
+                snapshot["rateLimits"][key] = value.clone();
+            }
+            if codex_state(&snapshot) == PlanState::Limited {
+                self.known_limited = Some(snapshot);
+            }
+        }
+    }
+
+    fn accept_read(&mut self, snapshot: Value, revision: u64, at: u64) -> Result<CodexRead, String> {
+        if revision != self.revision {
+            return Err("Codex account or limits changed during the usage read.".into());
+        }
+        if !snapshot["rateLimits"].is_object() {
+            return Err("Codex returned an invalid usage response.".into());
+        }
+        let account = account_hash(&snapshot);
+        // A newer successful read also invalidates decisions based on an older
+        // response, even when both responses identify the same account.
+        let previous_account = self.last.as_ref().and_then(|last| last.account.clone())
+            .or_else(|| self.known_limited.as_ref().and_then(account_hash));
+        let account_changed = previous_account.is_some() && account.is_some() && previous_account != account;
+        self.invalidate(account_changed);
+        let read = CodexRead { account, snapshot, revision: self.revision, at };
+        match codex_state(&read.snapshot) {
+            PlanState::Limited => self.known_limited = Some(read.snapshot.clone()),
+            PlanState::Allowed => self.known_limited = None,
+            PlanState::Unknown => {} // Missing fields are not evidence of recovery.
+        }
+        self.last = Some(read.clone());
+        Ok(read)
+    }
+
+    fn check_read(&self, read: &CodexRead, now: u64) -> Result<(), String> {
+        if read.revision != self.revision || now.saturating_sub(read.at) > FRESH_MS {
+            return Err("Codex account or limits changed, or the usage read expired; nothing was sent.".into());
+        }
+        Ok(())
+    }
+
+    fn check_reset(&self, read: &CodexRead, settings: Settings, now: u64) -> Result<(), String> {
+        self.check_read(read, now)?;
+        if !settings.codex_resets {
+            return Err("Earned resets were turned off before redemption.".into());
+        }
+        if read.account.is_none() || codex_state(&read.snapshot) != PlanState::Limited {
+            return Err("No fresh account-bound limit authorizes redemption.".into());
+        }
+        Ok(())
+    }
+
+    fn check_admission(&self, turn_id: &str, settings: Settings, now: u64) -> Result<(), String> {
+        let Some((turn, revision, read)) = &self.admission else {
+            return Err("Codex usage changed before dispatch; nothing was sent.".into());
+        };
+        if turn != turn_id || *revision != self.revision {
+            return Err("The Codex usage admission is no longer current; nothing was sent.".into());
+        }
+        if let Some(read) = read {
+            self.check_read(read, now)?;
+            if codex_state(&read.snapshot) == PlanState::Limited {
+                codex_credit_check(&read.snapshot, settings)?;
+            } else if codex_state(&read.snapshot) == PlanState::Unknown && self.known_limited.is_some() {
+                return Err("Codex did not confirm recovery from its known limit; nothing was sent.".into());
+            }
+        } else if self.known_limited.is_some() {
+            return Err("Codex now has a known limit; the unknown-state admission cannot send this turn.".into());
+        }
+        // A failed/unreported first read remains the documented unknown-state
+        // admission, never authority to redeem a reset or a hard spending cap.
+        Ok(())
+    }
+}
+
 // ------------------------------------------------------- reset episodes
 
 /// One stretch at the plan limit for one account, shared by every session and
@@ -542,15 +654,24 @@ pub(super) struct ResetEpisode {
     outcome: Option<String>,
     #[serde(default)]
     settled_at: Option<u64>,
-    /// A fresh read showed this account allowed again.
+    /// A fresh read showed this account allowed again after a known outcome.
     #[serde(default)]
     closed_at: Option<u64>,
 }
 
 impl ResetEpisode {
+    fn reconciled(&self) -> bool {
+        matches!(self.outcome.as_deref(), Some("reset" | "alreadyRedeemed" | "nothingToReset" | "noCredit"))
+    }
+
     /// Still the same limit stretch: not closed, its window has not reset on
     /// its own, and the limited windows have not rolled over since it began.
     fn open(&self, now_secs: u64, fresh_until: Option<u64>) -> bool {
+        // Neither time, an Allowed snapshot nor an unrecognized response can
+        // reconcile a possible external side effect. Keep its original key.
+        if !self.reconciled() {
+            return true;
+        }
         if self.closed_at.is_some() {
             return false;
         }
@@ -596,13 +717,18 @@ impl ResetBook {
         }
         let fresh_until = codex_retry_at(snapshot, now_secs);
         if let Some(episode) = self.accounts.get(account).filter(|e| e.open(now_secs, fresh_until)) {
+            if !episode.reconciled() {
+                return if use_resets {
+                    Step::Consume(episode.key.clone())
+                } else {
+                    Step::Skip("earned resets are off in Settings > Usage".into())
+                };
+            }
             return match episode.outcome.as_deref() {
-                None if use_resets => Step::Consume(episode.key.clone()),
-                None => Step::Skip("earned resets are off in Settings > Usage".into()),
                 Some("reset" | "alreadyRedeemed") => Step::Skip("an earned reset was already redeemed for this limit".into()),
                 Some("nothingToReset") => Step::Skip("Codex reported nothing to reset for this limit".into()),
                 Some("noCredit") => Step::Skip("no earned reset credit is available".into()),
-                Some(_) => Step::Skip("the earlier reset attempt had an unrecognized outcome".into()),
+                _ => unreachable!("only recognized outcomes are reconciled"),
             };
         }
         if !use_resets {
@@ -628,16 +754,16 @@ impl ResetBook {
             "reset" | "alreadyRedeemed" | "nothingToReset" | "noCredit" => o.to_owned(),
             _ => "unrecognized".to_owned(),
         });
-        if episode.outcome.is_some() {
-            episode.settled_at = Some(now);
-        }
+        episode.settled_at = episode.reconciled().then_some(now);
     }
 
     pub(super) fn close_if_recovered(&mut self, account: &str, snapshot: &Value, now: u64) -> bool {
         if codex_state(snapshot) != PlanState::Allowed {
             return false;
         }
-        match self.accounts.get_mut(account).filter(|e| e.closed_at.is_none()) {
+        // An Allowed snapshot may come from a natural window reset. It does
+        // not resolve whether a consume with a lost reply used a credit.
+        match self.accounts.get_mut(account).filter(|e| e.closed_at.is_none() && e.reconciled()) {
             Some(episode) => {
                 episode.closed_at = Some(now);
                 true
@@ -938,6 +1064,13 @@ fn read_settings(path: &std::path::Path) -> Result<Settings, String> {
 
 async fn soft_rpc(proc: &Arc<Proc>, method: &str, params: Value) -> Result<Value, String> {
     let (call, receiver) = begin_rpc(proc, method, params)?;
+    soft_reply(proc, method, call, receiver).await
+}
+
+async fn soft_reply(
+    proc: &Arc<Proc>, method: &str, call: u64,
+    receiver: tokio::sync::oneshot::Receiver<Result<Value, String>>,
+) -> Result<Value, String> {
     match tokio::time::timeout(SOFT_WAIT, receiver).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err(format!("Codex stopped before answering {method}.")),
@@ -974,6 +1107,7 @@ impl Inner {
     }
 
     fn usage_settings_set(self: &Arc<Self>, provider: &str, credits: Option<bool>, resets: Option<bool>) -> Result<Value, Failure> {
+        let lifecycle = lock(&self.lifecycle);
         let mut book = lock(&self.usage);
         let before = book.effective();
         let mut next = before;
@@ -994,6 +1128,7 @@ impl Inner {
         book.settings = next;
         book.failure = None;
         drop(book);
+        drop(lifecycle);
         // A setting the owner turned on may release turns held for it.
         let enabled = (next.codex_credits && !before.codex_credits)
             || (next.codex_resets && !before.codex_resets)
@@ -1069,72 +1204,92 @@ impl Inner {
         self.publish(event(id, None, "usage", data), false);
     }
 
-    pub(super) async fn read_codex_limits(&self, proc: &Arc<Proc>) {
-        if let Ok(read) = soft_rpc(proc, "account/rateLimits/read", json!({"excludeResetCreditDetails": true})).await {
-            lock(&self.usage).set_codex(read);
-        }
+    pub(super) async fn read_codex_limits(&self, proc: &Arc<Proc>) -> Result<CodexRead, String> {
+        let revision = lock(&proc.usage_policy).revision;
+        let response = soft_rpc(proc, "account/rateLimits/read", json!({"excludeResetCreditDetails": true})).await?;
+        let _lifecycle = lock(&self.lifecycle);
+        let read = lock(&proc.usage_policy).accept_read(response, revision, now_ms())?;
+        // The shared Book is only for display. Decisions use this returned response.
+        lock(&self.usage).set_codex(read.snapshot.clone());
+        Ok(read)
     }
 
     fn resets(&self) -> Option<Resets> {
         self.app.path().app_data_dir().ok().map(Resets::new)
     }
 
-    async fn redeem_reset(&self, proc: &Arc<Proc>, use_resets: bool) -> Redeem {
+    async fn redeem_reset(&self, id: &str, proc: &Arc<Proc>, turn_id: &str) -> (Redeem, Option<CodexRead>) {
         let Some(resets) = self.resets() else {
-            return Redeem::Skipped("CodaClauda's app data folder is unavailable, so no reset is redeemed".into());
+            return (Redeem::Skipped("CodaClauda's app data folder is unavailable, so no reset is redeemed".into()), None);
         };
         let inner: &Inner = self;
-        redeem_with(
+        // This cell belongs only to this redemption, and contains the exact
+        // response from its most recent read, not another session's UI cache.
+        let latest: Mutex<Option<CodexRead>> = Mutex::new(None);
+        let outcome = redeem_with(
             &resets,
-            use_resets,
+            true,
             || {
                 let proc = proc.clone();
+                let latest = &latest;
                 async move {
-                    inner.read_codex_limits(&proc).await;
-                    let fresh = {
-                        let book = lock(&inner.usage);
-                        book.codex.clone().map(|s| (s, book.codex_account.clone()))
-                    };
+                    let read = inner.read_codex_limits(&proc).await.ok();
+                    let fresh = read.as_ref().map(|r| (r.snapshot.clone(), r.account.clone()));
+                    *lock(latest) = read;
                     fresh
                 }
             },
             |key| {
                 let proc = proc.clone();
+                let read = lock(&latest).clone();
                 async move {
-                    soft_rpc(&proc, "account/rateLimitResetCredit/consume", json!({"idempotencyKey": key})).await
+                    let read = read.ok_or("No successful usage read precedes this redemption.")?;
+                    let (call, receiver) = {
+                        let _lifecycle = lock(&inner.lifecycle);
+                        inner.check_dispatch(id, turn_id, &proc)?;
+                        let settings = lock(&inner.usage).effective();
+                        lock(&proc.usage_policy).check_reset(&read, settings, now_ms())?;
+                        begin_rpc(&proc, "account/rateLimitResetCredit/consume", json!({"idempotencyKey": key}))?
+                    };
+                    soft_reply(&proc, "account/rateLimitResetCredit/consume", call, receiver).await
                 }
             },
         )
-        .await
+        .await;
+        let read = lock(&latest).clone();
+        (outcome, read)
     }
 
     /// Before a Codex turn is sent (nothing has reached the provider yet).
     pub(super) async fn codex_usage_gate(self: &Arc<Self>, id: &str, proc: &Arc<Proc>, turn_id: &str) -> Gate {
-        let stale = {
-            let book = lock(&self.usage);
-            book.codex.as_ref().is_none_or(|s| codex_state(s) != PlanState::Allowed)
-                && book.codex_at.is_none_or(|at| now_ms().saturating_sub(at) > FRESH_MS)
-        };
-        if stale {
-            self.read_codex_limits(proc).await; // never decide on a stale or missing "limited"
-        }
+        // Always ask this process, including after a previously Allowed state.
+        let mut read = self.read_codex_limits(proc).await.ok();
         if !self.turn_active(id, turn_id) {
             return Gate::Stopped;
         }
-        let (snapshot, settings) = {
-            let book = lock(&self.usage);
-            (book.codex.clone(), book.effective())
-        };
-        let state = snapshot.as_ref().map_or(PlanState::Unknown, codex_state);
+        // Failure is not recovery from a known limit, nor permission to use
+        // stale credits. A genuinely unreported state keeps the documented
+        // unknown-state admission behavior.
+        let state = read.as_ref().map_or(PlanState::Unknown, |r| codex_state(&r.snapshot));
+        if state == PlanState::Unknown {
+            let known_limit = lock(&proc.usage_policy).known_limited.clone();
+            if let Some(snapshot) = known_limit {
+                return Self::codex_hold(&snapshot, "Codex did not confirm recovery from its known limit; no reset or credit admission was authorized".into());
+            }
+        }
         if state != PlanState::Limited {
             // Unknown is sent on the plan (the provider decides) but never shown as known.
             self.set_billing(id, (state == PlanState::Unknown).then_some("unknown"));
-            return Gate::Send;
+            return self.codex_admitted(proc, turn_id, read);
         }
+        let original = read.as_ref().expect("limited requires a read").snapshot.clone();
         let mut redeemed = None;
         let mut reset_why = None;
-        if settings.codex_resets {
-            match self.redeem_reset(proc, true).await {
+        let use_resets = lock(&self.usage).effective().codex_resets;
+        if use_resets {
+            let (outcome, fresh) = self.redeem_reset(id, proc, turn_id).await;
+            read = fresh;
+            match outcome {
                 Redeem::NotNeeded => {}
                 Redeem::Redeemed { outcome } => redeemed = Some(outcome),
                 Redeem::Skipped(why) => reset_why = Some(why),
@@ -1143,7 +1298,10 @@ impl Inner {
                 return Gate::Stopped;
             }
         }
-        let snapshot = lock(&self.usage).codex.clone().unwrap_or(Value::Null);
+        let Some(fresh) = read.as_ref() else {
+            return Self::codex_hold(&original, "Codex could not refresh its limit after the reset check; no credit admission was authorized".into());
+        };
+        let snapshot = &fresh.snapshot;
         if let Some(outcome) = &redeemed {
             let left = snapshot["rateLimitResetCredits"]["availableCount"].as_i64();
             let text = match (outcome.as_str(), left) {
@@ -1153,11 +1311,18 @@ impl Inner {
             };
             self.usage_notice(id, Some(turn_id), &text, "info", json!({"billing": "reset"}));
         }
-        if codex_state(&snapshot) != PlanState::Limited {
-            self.set_billing(id, redeemed.as_ref().map(|_| "reset"));
-            return Gate::Send;
+        if codex_state(snapshot) != PlanState::Limited {
+            if codex_state(snapshot) == PlanState::Unknown {
+                if let Some(known) = lock(&proc.usage_policy).known_limited.clone() {
+                    return Self::codex_hold(&known, "Codex did not confirm recovery after the reset check; no credit admission was authorized".into());
+                }
+            }
+            let billing = if codex_state(snapshot) == PlanState::Unknown { Some("unknown") } else { redeemed.as_ref().map(|_| "reset") };
+            self.set_billing(id, billing);
+            return self.codex_admitted(proc, turn_id, read);
         }
-        match codex_credit_check(&snapshot, settings) {
+        let settings = lock(&self.usage).effective();
+        match codex_credit_check(snapshot, settings) {
             Ok(balance) => {
                 let first = !std::mem::replace(&mut lock(&self.usage).codex_noticed, true);
                 if first {
@@ -1168,21 +1333,47 @@ impl Inner {
                     self.usage_notice(id, Some(turn_id), &text, "info", json!({"billing": "credits"}));
                 }
                 self.set_billing(id, Some("credits"));
-                Gate::Send
+                self.codex_admitted(proc, turn_id, read)
             }
             Err(credit_why) => {
                 let reason = match reset_why {
                     Some(why) => format!("{why}, and {credit_why}"),
                     None => credit_why,
                 };
-                Gate::Hold(Hold {
-                    provider: "codex".into(),
-                    reason,
-                    retry_at: codex_retry_at(&snapshot, now_ms() / 1000),
-                    at: now_ms(),
-                    ..Hold::default()
-                })
+                Self::codex_hold(snapshot, reason)
             }
+        }
+    }
+
+    fn codex_hold(snapshot: &Value, reason: String) -> Gate {
+        Gate::Hold(Hold {
+            provider: "codex".into(), reason,
+            retry_at: codex_retry_at(snapshot, now_ms() / 1000), at: now_ms(),
+            ..Hold::default()
+        })
+    }
+
+    fn codex_admitted(&self, proc: &Arc<Proc>, turn_id: &str, read: Option<CodexRead>) -> Gate {
+        let mut policy = lock(&proc.usage_policy);
+        let revision = read.as_ref().map_or(policy.revision, |r| r.revision);
+        policy.admission = Some((turn_id.to_owned(), revision, read));
+        Gate::Send
+    }
+
+    /// Called under lifecycle immediately before writing model input. Settings,
+    /// Stop, revocation and provider account/limit notifications use that gate too.
+    pub(super) fn check_usage_dispatch(&self, id: &str, turn_id: &str, proc: &Arc<Proc>) -> Result<(), String> {
+        if proc.provider == Provider::Codex {
+            let settings = lock(&self.usage).effective();
+            return lock(&proc.usage_policy).check_admission(turn_id, settings, now_ms());
+        }
+        let owner_try = lock(&self.state).ledger.get(turn_id)
+            .and_then(|t| t.hold.as_ref()).is_some_and(|h| h.owner_try);
+        let book = lock(&self.usage);
+        match claude_plan(book.claude.as_ref(), book.effective(), now_ms() / 1000) {
+            ClaudePlan::Hold { bypass: true, .. } if owner_try => Ok(()),
+            ClaudePlan::Hold { reason, .. } => Err(format!("Claude usage changed before dispatch for {id}: {reason}. Nothing was sent.")),
+            _ => Ok(()),
         }
     }
 
@@ -1406,18 +1597,28 @@ impl Inner {
     pub(super) fn usage_signal(self: &Arc<Self>, id: &str, proc: &Arc<Proc>, signal: Signal) {
         let current = || lock(&self.state).live.get(id).is_some_and(|l| l.proc.generation == proc.generation);
         match signal {
-            Signal::CodexRateLimits(update) => lock(&self.usage).merge_codex(&update),
-            Signal::CodexAccountChanged => lock(&self.usage).forget_codex(),
+            Signal::CodexRateLimits(update) => {
+                let _lifecycle = lock(&self.lifecycle);
+                if !current() { return; }
+                lock(&proc.usage_policy).note_limits(&update);
+                lock(&self.usage).merge_codex(&update);
+            }
+            Signal::CodexAccountChanged => {
+                let _lifecycle = lock(&self.lifecycle);
+                if !current() { return; }
+                lock(&proc.usage_policy).invalidate(true);
+                lock(&self.usage).forget_codex();
+            }
             Signal::ClaudeRateLimit(info) => {
+                let lifecycle = lock(&self.lifecycle);
+                if !current() { return; }
                 let overage = claude_overage(&info) && claude_current(Some(&info), now_ms() / 1000).is_some();
                 let first = {
                     let mut book = lock(&self.usage);
                     book.set_claude(&info);
                     overage && !std::mem::replace(&mut book.claude_noticed, true)
                 };
-                if !current() {
-                    return;
-                }
+                drop(lifecycle);
                 self.set_billing(id, overage.then_some("usage-credits"));
                 if first {
                     let turn = self.current_turn(id).map(|t| t.0);
@@ -1474,8 +1675,7 @@ impl Inner {
             let now = now_ms() / 1000;
             let resets_at = match provider {
                 Provider::Codex => {
-                    inner.read_codex_limits(&proc).await;
-                    lock(&inner.usage).codex.as_ref().and_then(|s| codex_retry_at(s, now))
+                    inner.read_codex_limits(&proc).await.ok().and_then(|r| codex_retry_at(&r.snapshot, now))
                 }
                 Provider::Claude => claude_retry_at(lock(&inner.usage).claude.as_ref(), now),
             };
@@ -1571,6 +1771,136 @@ mod tests {
         assert_eq!(back, off);
         let failed = Book { failure: Some("unreadable".into()), ..Book::default() };
         assert_eq!(failed.effective(), Settings::OFF, "an unreadable file never spends");
+    }
+
+    #[test]
+    fn usage_saved_null_or_malformed_sections_fail_closed() {
+        for value in [
+            json!({"codex": false}), json!({"codex": []}), json!({"codex": null}),
+            json!({"claude": "off"}), json!({"claude": null}),
+            json!({"codex": {"useCredits": null, "useResets": false}}),
+            json!({"codex": {"useResets": null}}),
+            json!({"claude": {"useCredits": null}}),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(USAGE_FILE);
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(read_settings(&path).is_err(), "{value}");
+            assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap(), value);
+        }
+        assert_eq!(parse_settings(&json!({})).unwrap(), Settings::default(), "genuinely absent first-run flags retain the documented defaults");
+    }
+
+    #[test]
+    fn usage_admission_is_fresh_per_process_and_invalidated_by_new_reads() {
+        let mut a = ProcUsage::default();
+        let mut b = ProcUsage::default();
+        let allowed = a.accept_read(allowed_read(), 0, 100).unwrap();
+        a.admission = Some(("a".into(), allowed.revision, Some(allowed.clone())));
+        let mut other = limited_read();
+        other["accountId"] = json!("acct-owner-b");
+        let limited_b = b.accept_read(other, 0, 100).unwrap();
+        assert_ne!(allowed.account, limited_b.account);
+        assert!(a.check_admission("a", Settings::OFF, 101).is_ok(), "another process cannot replace this process's response");
+        assert!(a.check_admission("a", Settings::OFF, 100 + FRESH_MS + 1).is_err(), "Allowed expires too");
+        let limited_a = a.accept_read(limited_read(), a.revision, 102).unwrap();
+        assert!(a.check_read(&allowed, 103).is_err(), "a newer response invalidates the earlier decision");
+        a.admission = Some(("a".into(), limited_a.revision, Some(limited_a.clone())));
+        assert!(a.check_admission("a", Settings::default(), 103).is_ok());
+        assert!(a.check_admission("a", Settings::OFF, 103).is_err(), "OFF before input is written wins");
+        assert!(a.accept_read(json!({"rateLimits": null}), a.revision, 104).is_err(), "malformed reads cannot return a cached success");
+        a.invalidate(true);
+        assert!(a.last.is_none() && a.admission.is_none());
+        assert!(a.check_reset(&limited_a, Settings::default(), 105).is_err(), "old-account eligibility cannot redeem");
+        let known = a.accept_read(allowed_read(), a.revision, 106).unwrap();
+        a.note_limits(&json!({"rateLimitReachedType": "rate_limit_reached"}));
+        assert!(a.known_limited.is_some());
+        assert!(a.check_read(&known, 107).is_err(), "notifications restrict admission but cannot authorize spending");
+    }
+
+    #[test]
+    fn usage_reset_rechecks_policy_and_account_after_waiting() {
+        let mut policy = ProcUsage::default();
+        let read = policy.accept_read(limited_read(), 0, 100).unwrap();
+        assert!(policy.check_reset(&read, Settings::default(), 101).is_ok());
+        assert!(policy.check_reset(&read, Settings::OFF, 101).is_err(), "turning resets off while waiting must prevent the consume call");
+        policy.invalidate(false);
+        assert!(policy.check_reset(&read, Settings::default(), 102).is_err(), "changed windows need a new successful read");
+        let revision = policy.revision;
+        policy.invalidate(true);
+        assert!(policy.accept_read(limited_read(), revision, 103).is_err(), "sign-in changing during a read cannot be ignored");
+    }
+
+    #[test]
+    fn usage_unknown_success_does_not_clear_a_known_limit() {
+        let mut policy = ProcUsage::default();
+        policy.accept_read(limited_read(), 0, 100).unwrap();
+        for unknown in [json!({"rateLimits": {}}), json!({"accountId": "acct-owner-a", "rateLimits": {}})] {
+            let read = policy.accept_read(unknown, policy.revision, 101).unwrap();
+            assert_eq!(codex_state(&read.snapshot), PlanState::Unknown);
+            assert!(policy.known_limited.is_some(), "a partial successful read does not prove recovery");
+            policy.admission = Some(("turn".into(), read.revision, Some(read.clone())));
+            assert!(policy.check_admission("turn", Settings::OFF, 102).is_err());
+            assert!(policy.check_admission("turn", Settings::default(), 102).is_err(), "unknown credits cannot release the known hold either");
+            assert!(policy.check_reset(&read, Settings::default(), 102).is_err());
+        }
+        let recovered = policy.accept_read(allowed_read(), policy.revision, 103).unwrap();
+        assert!(policy.known_limited.is_none());
+        policy.admission = Some(("turn".into(), recovered.revision, Some(recovered)));
+        assert!(policy.check_admission("turn", Settings::OFF, 104).is_ok());
+
+        policy.accept_read(limited_read(), policy.revision, 105).unwrap();
+        policy.accept_read(json!({"rateLimits": {}}), policy.revision, 106).unwrap();
+        let other = policy.accept_read(json!({"accountId": "acct-owner-b", "rateLimits": {}}), policy.revision, 107).unwrap();
+        assert!(policy.known_limited.is_none(), "a verified different account does not inherit the old account's limit");
+        policy.admission = Some(("other".into(), other.revision, Some(other)));
+        assert!(policy.check_admission("other", Settings::OFF, 108).is_ok(), "genuinely unknown admission remains documented");
+    }
+
+    #[test]
+    fn usage_pending_reset_key_survives_window_rollover_and_expiry() {
+        let mut book = ResetBook::empty();
+        let read = limited_read();
+        let Step::Consume(first) = book.begin("owner", &read, true, NOW * 1000) else { panic!("expected admission") };
+        let mut rolled = read.clone();
+        rolled["rateLimits"]["secondary"]["resetsAt"] = json!(NOW + WEEK);
+        assert_eq!(book.begin("owner", &rolled, true, NOW * 1000), Step::Consume(first.clone()));
+        assert_eq!(book.begin("owner", &rolled, true, (NOW + WEEK * 2) * 1000), Step::Consume(first.clone()));
+        assert!(matches!(book.begin("owner", &rolled, false, (NOW + WEEK * 2) * 1000), Step::Skip(_)));
+        assert_eq!(book.accounts["owner"].key, first, "OFF and time cannot replace an unresolved key");
+    }
+
+    #[test]
+    fn usage_natural_recovery_does_not_reconcile_a_lost_consume_reply() {
+        let mut book = ResetBook::empty();
+        let Step::Consume(first) = book.begin("owner", &limited_read(), true, NOW * 1000) else { panic!("expected admission") };
+        assert_eq!(book.begin("owner", &allowed_read(), true, (NOW + WEEK) * 1000), Step::Recovered);
+        assert!(book.accounts["owner"].closed_at.is_none(), "Allowed is not a consume receipt");
+        assert_eq!(book.begin("owner", &limited_read(), true, (NOW + WEEK * 2) * 1000), Step::Consume(first.clone()));
+        book.settle("owner", &first, Some("alreadyRedeemed"), (NOW + WEEK * 2) * 1000);
+        assert_eq!(book.begin("owner", &allowed_read(), true, (NOW + WEEK * 2) * 1000), Step::Recovered);
+        assert!(book.accounts["owner"].closed_at.is_some(), "same-key terminal reconciliation allows closure");
+        let Step::Consume(next) = book.begin("owner", &limited_read(), true, (NOW + WEEK * 3) * 1000) else { panic!("expected a new episode") };
+        assert_ne!(first, next);
+    }
+
+    #[test]
+    fn usage_unrecognized_reset_outcome_keeps_its_key_until_reconciled() {
+        let mut book = ResetBook::empty();
+        let Step::Consume(first) = book.begin("owner", &limited_read(), true, NOW * 1000) else { panic!("expected admission") };
+        book.settle("owner", &first, Some("future-unknown-outcome"), NOW * 1000 + 1);
+        assert!(!book.accounts["owner"].reconciled());
+        assert!(book.accounts["owner"].settled_at.is_none());
+        assert_eq!(book.begin("owner", &allowed_read(), true, (NOW + WEEK) * 1000), Step::Recovered);
+        assert!(book.accounts["owner"].closed_at.is_none());
+        assert_eq!(book.begin("owner", &limited_read(), true, (NOW + WEEK * 2) * 1000), Step::Consume(first.clone()));
+        assert!(matches!(book.begin("owner", &limited_read(), false, (NOW + WEEK * 2) * 1000), Step::Skip(_)));
+        assert_eq!(book.accounts["owner"].key, first);
+        book.settle("owner", &first, Some("alreadyRedeemed"), (NOW + WEEK * 2) * 1000);
+        assert!(book.accounts["owner"].reconciled());
+        assert!(book.close_if_recovered("owner", &allowed_read(), (NOW + WEEK * 2) * 1000));
+        let Step::Consume(next) = book.begin("owner", &limited_read(), true, (NOW + WEEK * 3) * 1000) else { panic!("expected new episode after reconciliation") };
+        assert_ne!(first, next);
     }
 
     #[test]
@@ -1786,6 +2116,31 @@ mod tests {
             },
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn usage_failed_fresh_read_cannot_redeem_from_an_old_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let resets = Resets::new(dir.path().to_path_buf());
+        let consumes = AtomicUsize::new(0);
+        let mut process = ProcUsage::default();
+        process.accept_read(limited_read(), 0, 100).unwrap();
+        let failed = process.accept_read(json!({"rateLimits": null}), process.revision, 101).ok();
+        assert!(process.last.is_some(), "a prior display/known-limit record still exists");
+        let outcome = redeem_with(
+            &resets, true,
+            || {
+                let fresh = failed.as_ref().map(|r| (r.snapshot.clone(), r.account.clone()));
+                async move { fresh }
+            },
+            |_| {
+                consumes.fetch_add(1, Ordering::SeqCst);
+                async { Ok(json!({"outcome": "reset"})) }
+            },
+        ).await;
+        assert!(matches!(outcome, Redeem::Skipped(_)));
+        assert_eq!(consumes.load(Ordering::SeqCst), 0);
+        assert!(!dir.path().join(RESETS_FILE).exists(), "failed reads admit no reset episode");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

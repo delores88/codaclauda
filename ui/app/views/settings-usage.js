@@ -56,7 +56,7 @@ export function usageStatusText(provider, status) {
     const parts = [];
     for (const key of ['secondary', 'primary']) {
       const w = limits[key];
-      if (!w || !Number.isFinite(Number(w.usedPercent))) continue;
+      if (!w || typeof w.usedPercent !== 'number' || !Number.isFinite(w.usedPercent)) continue;
       const name = WINDOW_NAMES[w.windowDurationMins] || (w.windowDurationMins ? `${w.windowDurationMins}-minute` : key);
       const reset = when(w.resetsAt);
       parts.push(`${name} window ${Math.round(Number(w.usedPercent))}% used${reset ? `, resets on its own ${reset}` : ''}`);
@@ -69,7 +69,7 @@ export function usageStatusText(provider, status) {
     if (limits.spendControlReached === true) parts.push('spend cap reached');
     else if (limits.spendControlReached !== false) parts.push('spend-cap state not reported');
     const count = snap.rateLimitResetCredits?.availableCount;
-    parts.push(Number.isInteger(count) ? `${count} earned reset credit${count === 1 ? '' : 's'} to redeem` : 'earned reset credits not reported');
+    parts.push(Number.isInteger(count) && count >= 0 ? `${count} earned reset credit${count === 1 ? '' : 's'} to redeem` : 'earned reset credits not reported');
     const state = status.state || (status.limited ? 'limited' : snap.ordinaryUsageAllowed === true ? 'allowed' : 'unknown');
     const lead = state === 'limited' ? 'Plan limit reached. ' : state === 'unknown' ? 'Plan limit state not reported. ' : '';
     return `${lead}${parts.join(' · ')}`;
@@ -85,7 +85,7 @@ export function billingLabel(billing) {
     case 'credits': return 'ChatGPT credits (plan limit reached)';
     case 'usage-credits': return 'Claude usage credits (plan limit reached)';
     case 'reset': return 'Your plan, after redeeming an earned reset credit';
-    case 'unknown': return 'Your plan (Codex did not report the limit state)';
+    case 'unknown': return 'Billing not reported (Codex did not report the limit state)';
     default: return 'Your plan';
   }
 }

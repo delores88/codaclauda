@@ -51,8 +51,6 @@ const INBOX_PAGE: u64 = 20;
 const HOUR_MS: u64 = 60 * 60 * 1000;
 const DAY_MS: u64 = 24 * HOUR_MS;
 const DEFAULT_PAIR_PER_HOUR: u64 = 60;
-/// The guard 0.5 saved for everyone (on, 20 an hour); pause was its only behavior.
-const GUARD_05_DEFAULT: u64 = 20;
 
 /// What the guard does when a pair reaches its hourly count.
 #[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -84,9 +82,9 @@ impl Default for LoopGuard {
     }
 }
 
-/// A guard saved before 0.6 has no mode. Left at 0.5's default (on, 20) it
-/// becomes the 0.6 default (notify, 60); a guard the owner changed keeps its
-/// on/off and count, with 0.5's pause behavior. A saved mode is always kept.
+/// A guard saved before 0.6 has no mode. Preserve its on/off, count and pause
+/// behavior: 0.5 did not record whether 20 was a default or an explicit choice.
+/// Only an absent guard gets the new default. A saved mode is always kept.
 impl<'de> Deserialize<'de> for LoopGuard {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -100,7 +98,6 @@ impl<'de> Deserialize<'de> for LoopGuard {
         let saved = Saved::deserialize(deserializer)?;
         Ok(match saved.mode {
             Some(mode) => LoopGuard { on: saved.on, mode, pair_per_hour: saved.pair_per_hour },
-            None if saved.on && saved.pair_per_hour == GUARD_05_DEFAULT => LoopGuard::default(),
             None => LoopGuard { on: saved.on, mode: GuardMode::Pause, pair_per_hour: saved.pair_per_hour },
         })
     }
@@ -236,13 +233,15 @@ impl Book {
             return Err(("WAKE_DISABLED", "Wake on mail is off in Settings.".into()));
         }
         self.prune(now);
+        // An explicit owner pause also applies to a wake already admitted and
+        // waiting for dispatch. Idempotency skips recounting, never this check.
+        if pair.is_some_and(|pair| self.paused_pairs.contains_key(pair)) {
+            return Err(("WAKE_PAIR_PAUSED", "The owner paused these two sessions waking each other (Settings → Team). No new turn is dispatched until the owner resumes them.".into()));
+        }
         if self.reservations.contains_key(key) {
             return Ok(false);
         }
         if let Some(pair) = pair {
-            if self.paused_pairs.contains_key(pair) {
-                return Err(("WAKE_PAIR_PAUSED", "The owner paused these two sessions waking each other (Settings → Team). The message stays unread until the owner resumes them.".into()));
-            }
             let recent = self.pairs.get(pair).map_or(&[][..], Vec::as_slice);
             if self.loop_guard.mode == GuardMode::Pause && guard_holds(self.loop_guard, recent, now) {
                 return Err((
@@ -1236,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn the_notify_guard_never_pauses_and_0_5_guards_migrate_to_notify_at_60_or_more() {
+    fn the_notify_guard_never_pauses_and_all_saved_0_5_guard_choices_are_preserved() {
         let now = 10 * DAY_MS;
         let mut book = Book::default();
         assert_eq!(serde_json::to_value(book.loop_guard).unwrap(), json!({"on": true, "mode": "notify", "pairPerHour": 60}));
@@ -1247,10 +1246,10 @@ mod tests {
             assert_eq!(book.guard_reached(&pair, now), n >= 59, "{n}");
         }
         assert!(book.notice_due(&pair, now) && !book.notice_due(&pair, now + 1));
-        // A 0.5 guard left at 0.5's default becomes the 0.6 default; one the owner changed is kept
-        // with 0.5's pause behavior; a saved mode is always kept.
+        // 0.5 stored no provenance for an explicit choice of 20, so every saved
+        // guard keeps its pause behavior. Only an absent guard gets the new default.
         for (saved, expected) in [
-            (json!({"on": true, "pairPerHour": 20}), LoopGuard { on: true, mode: GuardMode::Notify, pair_per_hour: 60 }),
+            (json!({"on": true, "pairPerHour": 20}), LoopGuard { on: true, mode: GuardMode::Pause, pair_per_hour: 20 }),
             (json!({"on": true, "pairPerHour": 5}), LoopGuard { on: true, mode: GuardMode::Pause, pair_per_hour: 5 }),
             (json!({"on": false, "pairPerHour": 20}), LoopGuard { on: false, mode: GuardMode::Pause, pair_per_hour: 20 }),
             (json!({"on": false, "pairPerHour": 500}), LoopGuard { on: false, mode: GuardMode::Pause, pair_per_hour: 500 }),
@@ -1285,10 +1284,14 @@ mod tests {
         assert!(paused);
         book.paused_pairs.insert(key, now);
         assert_eq!(book.reserve("s", "m9", Some(&pair), now).unwrap_err().0, "WAKE_PAIR_PAUSED");
+        // m0 was admitted before the pause; its dequeue check must still refuse.
+        assert_eq!(book.reserve("s", "m0", Some(&pair), now + 1).unwrap_err().0, "WAKE_PAIR_PAUSED");
+        assert_eq!(book.pairs[&pair].len(), 3, "the refused dequeue never recounts the reservation");
         assert!(book.reserve("s", "o2", Some(&other), now).unwrap());
         assert!(book.reserve("s", "from-owner", None, now).unwrap());
         assert_eq!(book.pair_view(now)[0]["paused"], true);
         book.paused_pairs.clear();
+        assert!(!book.reserve("s", "m0", Some(&pair), now + 2).unwrap(), "resuming preserves reservation idempotency");
         assert!(book.reserve("s", "m9", Some(&pair), now).unwrap());
         for bad in [json!({"key": "peer>s", "paused": true}), json!({"key": pair, "paused": "yes"}), json!({})] {
             assert_eq!(parse_pair(&bad).unwrap_err().0, "INVALID_ARGUMENTS", "{bad}");

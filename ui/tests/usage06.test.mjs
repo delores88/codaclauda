@@ -48,6 +48,11 @@ test('the plan line separates the natural reset from earned reset credits and ke
   // Absent ordinaryUsageAllowed, credits, spend cap and reset count: "not reported", never zero or "none".
   const sparse = usageStatusText('codex', { snapshot: { rateLimits: { primary: { usedPercent: 41, windowDurationMins: 300 } } }, limited: false });
   assert.match(sparse, /^Plan limit state not reported\. 5-hour window 41% used · ChatGPT credits not reported · spend-cap state not reported · earned reset credits not reported$/);
+  for (const usedPercent of [null, undefined, '', false, '0', NaN]) {
+    const unknown = usageStatusText('codex', { snapshot: { rateLimits: { primary: { usedPercent, windowDurationMins: 300 } }, rateLimitResetCredits: { availableCount: -1 } } });
+    assert.doesNotMatch(unknown, /window .*% used/, 'unreported or malformed usage must not become zero percent');
+    assert.match(unknown, /earned reset credits not reported$/);
+  }
   assert.match(usageStatusText('claude', { snapshot: { status: 'rejected', rateLimitType: 'seven_day', resetsAt: 1792832400 }, overage: true }),
     /^Plan limit reached \(seven day\), resets on its own .+ · on usage credits$/);
   assert.equal(usageStatusText('claude', { snapshot: {} }), 'Plan state not reported');

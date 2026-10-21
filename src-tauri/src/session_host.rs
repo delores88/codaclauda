@@ -322,6 +322,8 @@ struct Proc {
     /// The saved usage when this process first reported, and whether it
     /// restored the provider's earlier totals (see `merge_usage`).
     usage_base: Mutex<Option<(Usage, Option<bool>)>>,
+    /// Fresh usage admission belongs to this process, never another chat's cache.
+    usage_policy: Mutex<usage::ProcUsage>,
     /// (name, command) of the owner's MCP servers passed to this launch.
     mcp: Mutex<Vec<(String, String)>>,
 }
@@ -412,6 +414,7 @@ fn spawn_owned(
             runtime_lease: Mutex::new(Some(lease)),
             context: AtomicU64::new(0),
             usage_base: Mutex::new(None),
+            usage_policy: Mutex::new(usage::ProcUsage::default()),
             mcp: Mutex::new(Vec::new()),
         }),
         stdout,
@@ -2302,7 +2305,7 @@ impl Inner {
             .await?;
         session_policy::verify_codex_account(&account)?;
         // 0.6: the plan snapshot the usage gate decides on (never fatal).
-        self.read_codex_limits(proc).await;
+        let _ = self.read_codex_limits(proc).await;
         let mut base = json!({"cwd": record.cwd, "sandbox": sandbox_mode(&record.access), "approvalPolicy": "never"});
         if let Some(model) = &record.model {
             base["model"] = json!(model);
@@ -2434,6 +2437,7 @@ impl Inner {
             // A compaction runs as a provider turn whose id arrives only in
             // its notifications, so there is no start reply to wait for.
             if method == "turn/start" || method == "thread/compact/start" {
+                self.check_usage_dispatch(id, turn_id, proc)?;
                 if let Some(turn) = lock(&self.state).turns.get_mut(id) {
                     turn.dispatched = true;
                     turn.start_pending = method == "turn/start";
@@ -3060,6 +3064,7 @@ impl Inner {
             Provider::Claude => {
                 let _lifecycle = lock(&self.lifecycle);
                 self.check_dispatch(&record.id, turn_id, &proc)?;
+                self.check_usage_dispatch(&record.id, turn_id, &proc)?;
                 if let Some(turn) = lock(&self.state).turns.get_mut(&record.id) {
                     turn.dispatched = true;
                 }

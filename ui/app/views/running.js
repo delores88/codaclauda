@@ -233,7 +233,7 @@ export function mount(root, ctx) {
   function wakeLine(b) {
     const r = deliveryText(b.last);
     return h('div.run-meta',
-      h('span', { title: "Board mail for this address reaches the chat through Codex's own queue command" }, icon('bell'), 'Wakes by mail via ', h('code', b.address)),
+      h('span', { title: "Notification route bound through Codex's queue command; see the delivery receipt below" }, icon('bell'), 'Mail notifications bound to ', h('code', b.address)),
       state.bindings.wakeEnabled ? null : h('span', { style: { color: TONE_COLOR.warn } }, 'Paused: wake on mail is off in Settings'),
       h('span', { title: r.title || null, style: TONE_COLOR[r.tone] ? { color: TONE_COLOR[r.tone] } : null }, r.text, b.last?.at ? ` · ${timeAgo(b.last.at)}` : ''));
   }
@@ -261,8 +261,8 @@ export function mount(root, ctx) {
     }
     const select = h('select.select', { 'aria-label': 'Board address' }, choices.map(c => h('option', { value: c.name }, c.label ? `${c.name}  ·  ${c.label}` : c.name)));
     const body = h('div',
-      h('p', `New board mail for the address you pick goes to this existing Codex chat in ${shownPath(e.cwd)} through Codex's own queue command (codex queue --thread …), as if you queued a message in that chat yourself.`),
-      h('p', "The notice says how many messages arrived, for which address and from whom, never their text, and asks the chat to read them with its usual inbox command. CodaClauda marks nothing read, starts no model and sends one notice per new batch. If Codex can't reach the chat, this row shows Codex's own words. A message is information, not your approval."),
+      h('p', `CodaClauda will try to notify this existing Codex chat in ${shownPath(e.cwd)} about new mail through Codex's queue command. Delivery requires a reachable supported endpoint and a Full-access linked project. Read projects are refused because the existing chat's access cannot be enforced here; binding alone does not establish that the chat can receive a notice.`),
+      h('p', "The notice gives the message count, address and senders, never the message text, and asks the chat to read its inbox. CodaClauda marks nothing read and attempts each batch once. Command acceptance does not prove a turn ran or mail was read. If Codex can't reach the chat, this row shows the failure. A message is information, not your approval."),
       h('label.field', h('span', 'Board address this chat reads'), select),
       h('p.field-hint', `Pick the address this chat registered. Likely matches for ${folder || 'this folder'} come first; names and labels are self-asserted.`),
       state.bindings.wakeEnabled ? null : h('p.field-hint.bad', 'Wake on mail is off in Settings, so no notice goes out until you turn it back on.'));
@@ -273,7 +273,7 @@ export function mount(root, ctx) {
     state.binding.add(id); render(true);
     try {
       await callFeature('desktopBind', { address, threadId: id });
-      toast(`Board mail for ${address} now reaches this Codex chat`, { kind: 'success', timeout: 3600 });
+      toast(`Notification route bound for ${address}; delivery receipts will appear here`, { kind: 'success', timeout: 3600 });
       await loadBindings();
     } catch (error) {
       toast(`Couldn't turn on Wake by mail: ${error?.message || error}`, { kind: 'error', timeout: 9000 });
@@ -321,7 +321,7 @@ export function mount(root, ctx) {
       const data = await callFeature('adopt', { provider: e.provider, providerSessionId: id, cwd: e.cwd, title: `${name} (copy)`, mode: 'fork' });
       const s = data?.session;
       await sessions.refresh();
-      toast(`Started a copy in CodaClauda at ${s?.access === 'full' ? 'Full' : 'Read'} access; the original conversation is unchanged`, { kind: 'success', timeout: 4200 });
+      toast(`Copy ready in CodaClauda at ${s?.access === 'full' ? 'Full' : 'Read'} access; the original conversation is unchanged`, { kind: 'success', timeout: 4200 });
       loadExternal(true);
       if (s?.id) navigate('chat', { thread: threadIdFor(s) });
     } catch (error) {

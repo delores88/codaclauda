@@ -3,13 +3,14 @@
 Running > On this PC lists the Claude Code and Codex conversations found in
 their own folders on this PC, from metadata only: the folder, the last change
 and whether it changed in the last 15 minutes. Two separate owner actions use
-them. Neither one wakes, refreshes or changes the other app's window, and
-neither one edits a transcript.
+them. Copying leaves the original conversation untouched. A separately bound
+notification can cause Codex to run a turn; its actual desktop route remains
+unverified. Neither path edits provider transcript files.
 
 ## Wake by mail (Codex)
 
 Wake by mail binds a board mailbox address to one existing Codex chat. New
-board mail for that address then reaches the chat through Codex's own
+board mail for that address is submitted through Codex's own
 supported command, "Queue a message for an existing session"
 ([developer commands](https://learn.chatgpt.com/docs/developer-commands),
 codex-cli 0.163):
@@ -24,7 +25,8 @@ no local daemon answers ("local daemon connection failed; starting embedded
 app server"), which would not be your desktop chat. With it, an unavailable
 endpoint makes the delivery fail and be reported as unreachable; it is never
 rerouted. Whether the Codex desktop app keeps that local endpoint running is
-not yet established on this PC, so the first delivery receipt is the evidence.
+not yet established on this PC. A command receipt alone does not establish
+that a desktop recipient ran or acknowledged the notice.
 The receipt states only what Codex reported: `queued` means the command was
 accepted, not that the chat ran a turn or read its mail.
 
@@ -47,10 +49,19 @@ read on the board.
 - a Codex rollout named for that thread exists under the normal Codex sessions
   folder. Only the file name is matched, plus the `cwd` and `id` of its first
   record, as the On this PC list already reads them;
-- that `cwd` is inside a linked project, compared on canonical paths. The
-  binding records the folder and project id;
+- that `cwd` is inside one unambiguous linked project, compared on canonical
+  paths, with current Full access. A missing saved preference retains the
+  linked folder's Full default; saved Read, malformed access, or unverifiable
+  project settings refuse binding. Saved GitHub access is checked for an exact
+  GitHub remote when no local preference exists;
 - no CodaClauda session writes that thread, whether started or resumed there.
   A copy made with Continue as a copy is a different thread.
+
+CodaClauda cannot impose Read on an existing Codex desktop chat, which keeps
+its own app's permissions. The binding records the verified physical folder,
+project id and physical project root; an older binding without that root must
+be rebound. An unresolved project link or multiple aliases for the selected
+root are refused rather than choosing a different access setting.
 
 **Delivery** runs on the wake poll (every 10 s) while the app is open and the
 global wake switch is on. Turning that switch off pauses delivery and stops a
@@ -58,12 +69,15 @@ notice in progress. For each binding with unread mail newer than its cursor,
 CodaClauda:
 
 1. checks the binding again: the address is still free, the rollout still
-   exists with the same folder, and that folder is still inside a linked
-   project. If any check fails, the batch is recorded as `refused` and Codex is
-   not run;
-2. saves the batch as `sending` before Codex starts, so a crash or a failed
-   save can never send the same batch twice;
-3. runs the Codex executable CodaClauda already resolves. It is started
+   exists with the same physical folder, and that folder is still inside the
+   same linked project and physical root at current Full access. If any check
+   fails, the batch is recorded as `refused` and Codex is not run;
+2. saves the batch as `sending` before Codex starts, so a crash after admission leaves an ambiguous receipt and the application
+   does not automatically resend that batch;
+3. re-reads current access, project and session context immediately before
+   process creation. That final check and creation share brief admission locks with
+   unbind/rebind and the global wake setting; no lock spans the command's wait.
+   It runs the Codex executable CodaClauda already resolves. It is started
    directly with no shell and no input, in a kill-on-close job, with the same
    stripped environment as every Codex launch (API-key variables removed) and a
    30 s timeout;
@@ -85,8 +99,11 @@ row and is not retried until more mail arrives. Receipt statuses:
 | `refused` | The binding failed its re-check. Codex was not run. |
 | `sending` / `unknown` | CodaClauda stopped or lost track of Codex mid-delivery, so the outcome is unknown. |
 
-**Unbind** (`desktop_unbind { address }`) takes effect at once and stops a
-notice in progress. A binding whose chat is no longer listed still shows on
+**Unbind** (`desktop_unbind { address }`) prevents a not-yet-admitted command
+from starting and stops a notice command in progress. Rebinding an address
+also cancels its previous delivery generation. Neither action can recall a
+notice Codex already accepted; an interrupted delivery can remain ambiguous.
+A binding whose chat is no longer listed still shows on
 Running > On this PC, so it can always be removed. `desktop_bindings_get`
 returns every binding with its last receipt, plus `wakeEnabled` and
 `pollSeconds`.
@@ -110,7 +127,10 @@ titled "… (copy)" that copies the conversation so far on its first launch,
 through the existing fork path: Claude `--resume <id> --fork-session`, Codex
 `thread/fork`. It runs at the project's current access, or Read when the
 folder is neither a linked project nor the owner's own, with wake on for the
-new CodaClauda chat. Board mail then wakes the copy, not the other app. The
+new CodaClauda chat. Folder and linked-project comparisons use canonical paths,
+so an alias cannot turn a linked Read project into an unlinked Full folder.
+Unresolvable or ambiguous project routing is refused. The copy retains the
+verified physical folder. Board mail then wakes the copy, not the other app. The
 original conversation is never changed: it stays as it is in its own app,
 which is not woken. If Claude reports the original session instead of a fork,
 that turn is stopped before it replies. If Codex cannot fork, the chat says so

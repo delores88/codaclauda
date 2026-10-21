@@ -29,8 +29,9 @@ Settings → Team → *Sessions waking each other* shows, for each pair, how man
 times they woke each other in the last hour. **Pause** on a pair stops those two
 waking each other until you **Resume** it, whatever the guard's mode; their mail
 waits unread. Your own messages never count. Turn the guard off to remove the
-notice and the limit. A guard you changed in 0.5 keeps its setting (with 0.5's
-pause behavior); one left at 0.5's default (on, 20) becomes the 0.6 default.
+notice and the limit. Every saved 0.5 guard keeps its on/off choice, count and
+pause behavior, including a saved count of 20. Only an absent guard gets the
+new Notify-at-60 default; the owner can explicitly choose Notify in Settings.
 
 **Agents can start teammates.** Settings → Team → *Agents can start teammates in
 my projects*, on by default, with *Agent-started sessions working at once*

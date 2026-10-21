@@ -279,20 +279,24 @@ impl Book {
         }
     }
 
-    /// Every project the team knows: saved entries first, then linked
-    /// projects (ui-state.json) that no entry covers. An entry covers a linked
+    /// Current linked projects and registered folders, with saved choices first.
+    /// Orphan preferences remain in the book, but cannot authorize a root after
+    /// the owner unlinks it. An entry covers a linked
     /// project that shares an id or its folder (by spelling or real path), so
     /// a saved choice is never shadowed by the owner's default.
     fn targets(&self, ui: Option<&Value>) -> Vec<Target> {
-        let mut out: Vec<Target> = self.projects.iter().map(|(id, p)| self.target(id, p)).collect();
-        for l in linked(ui) {
+        let links = linked(ui);
+        let covers = |t: &Target, l: &Linked| {
             let real = real_folder(&l.cwd).map(|r| normalize_path(&r));
-            let covered = out.iter().any(|t| {
-                l.ids.contains(&t.id)
-                    || t.ids.iter().any(|x| l.ids.contains(x))
-                    || normalize_path(&t.cwd) == normalize_path(&l.cwd)
-                    || real.as_ref().is_some_and(|r| real_folder(&t.cwd).is_some_and(|t| normalize_path(&t) == *r))
-            });
+            l.ids.contains(&t.id)
+                || t.ids.iter().any(|x| l.ids.contains(x))
+                || normalize_path(&t.cwd) == normalize_path(&l.cwd)
+                || real.as_ref().is_some_and(|r| real_folder(&t.cwd).is_some_and(|t| normalize_path(&t) == *r))
+        };
+        let mut out: Vec<Target> = self.projects.iter().map(|(id, p)| self.target(id, p))
+            .filter(|t| t.auto || links.iter().any(|l| covers(t, l))).collect();
+        for l in links {
+            let covered = out.iter().any(|t| covers(t, &l));
             if !covered {
                 out.push(Target {
                     id: l.id,
@@ -352,8 +356,17 @@ fn linked(ui: Option<&Value>) -> Vec<Linked> {
 /// `(owner, name)` of a GitHub remote, lower case; nothing else of the URL is kept.
 fn github_repo(remote: &str) -> Option<(String, String)> {
     let lower = remote.trim().to_ascii_lowercase();
-    let at = lower.find("github.com")?;
-    let rest = lower[at + "github.com".len()..].strip_prefix([':', '/'])?;
+    let path = if let Some(rest) = lower.strip_prefix("git@github.com:") {
+        rest.to_owned()
+    } else {
+        let url = url::Url::parse(&lower).ok()?;
+        if !matches!(url.scheme(), "https" | "http" | "ssh" | "git")
+            || url.host_str() != Some("github.com") || url.query().is_some() || url.fragment().is_some() {
+            return None;
+        }
+        url.path().strip_prefix('/')?.to_owned()
+    };
+    let rest = path.as_str();
     let rest = rest.trim_end_matches('/');
     let rest = rest.strip_suffix(".git").unwrap_or(rest);
     let (owner, name) = rest.split_once('/')?;
@@ -619,6 +632,14 @@ pub(super) enum Probe {
 
 const FORMAT: &str = r#"{"start": {"provider": "claude" or "codex", "project": "<project id or folder path>", "title": "<short title>", "prompt": "<the teammate's first message>"}}"#;
 
+fn checked_ui(ui_state: &Result<Option<Value>, String>) -> Result<Option<&Value>, String> {
+    let state = ui_state.as_ref().map_err(Clone::clone)?.as_ref();
+    if state.is_some_and(|v| !v.is_object()) {
+        return Err("its saved project settings are invalid; the owner must review them in Projects".into());
+    }
+    Ok(state)
+}
+
 /// The project's current level as Projects shows it: the first of its ids
 /// with a saved record wins; otherwise `default`. An unreadable or invalid
 /// saved level refuses instead of guessing.
@@ -628,11 +649,7 @@ fn project_access(
     ids: &[String],
     default: &'static str,
 ) -> Result<&'static str, String> {
-    let state = ui_state.as_ref().map_err(Clone::clone)?;
-    if state.as_ref().is_some_and(|v| !v.is_object()) {
-        return Err("its saved project settings are invalid; the owner must review them in Projects".into());
-    }
-    let saved = state.as_ref().and_then(|s| s.get("projectAccess"));
+    let saved = checked_ui(ui_state)?.and_then(|s| s.get("projectAccess"));
     if saved.is_some_and(|v| !v.is_object()) {
         return Err("its saved access settings are invalid; the owner must review them in Projects".into());
     }
@@ -726,7 +743,9 @@ pub(super) fn plan(
         .filter(|c| !c.is_control())
         .take(200)
         .collect();
-    let ui = ui_state.as_ref().ok().and_then(Option::as_ref);
+    let ui = checked_ui(ui_state).map_err(|why| {
+        refuse("TEAM_ACCESS_UNAVAILABLE", format!("Agents cannot start teammates in {wanted}: {why}."), FIX_ACCESS)
+    })?;
     let targets = book.targets(ui);
     let unknown = || {
         refuse(
@@ -1120,7 +1139,7 @@ pub(super) async fn track<H: TeamHost + Sync>(host: &H, store: &Store) -> Result
                 Probe::Completed => Some(h.completed(&id, now)),
                 Probe::Ended(status, error) => Some(match status.as_str() {
                     "cancelled" | "interrupted" => h.fail(&id, "TEAM_INTERRUPTED", "The teammate's first turn was stopped or interrupted (for example CodaClauda closed) before it finished. It was not replayed; inspect any partial work.".into(), FIX_INTERRUPTED, now),
-                    _ => h.fail(&id, "TEAM_FIRST_TURN_FAILED", format!("The teammate's first turn did not run: {}", error.as_deref().unwrap_or("no reason was recorded")), FIX_START, now),
+                    _ => h.fail(&id, "TEAM_FIRST_TURN_FAILED", format!("The teammate's first turn did not complete: {}", error.as_deref().unwrap_or("no reason was recorded")), FIX_START, now),
                 }),
                 Probe::Missing => Some(h.fail(&id, "TEAM_OUTCOME_UNKNOWN", "The teammate's session or its first turn is no longer recorded, so its outcome is unknown.".into(), FIX_INTERRUPTED, now)),
             };
@@ -1139,8 +1158,8 @@ pub(super) async fn track<H: TeamHost + Sync>(host: &H, store: &Store) -> Result
     first_error.map_or(Ok(()), Err)
 }
 
-/// One poll's page: cancels first, so a cancel posted while CodaClauda was
-/// closed wins over its request; then requests, oldest first; then `track`.
+/// One poll's complete unread batch: cancels first, so a cancel posted while
+/// CodaClauda was closed wins over its request; then oldest first; then `track`.
 pub(super) async fn handle_page<H: TeamHost + Sync>(host: &H, store: &Store, page: &[Value], failure: Option<&str>) -> Result<(), String> {
     let mut first_error = None;
     let (cancels, rest): (Vec<&Value>, Vec<&Value>) = page.iter().partition(|m| cancel_target(m).is_some());
@@ -1160,6 +1179,25 @@ pub(super) async fn handle_page<H: TeamHost + Sync>(host: &H, store: &Store, pag
         }
     }
     first_error.map_or(Ok(()), Err)
+}
+
+/// Read the complete unread batch before making any start decision. A cancel
+/// posted while the app was closed must win even when it is on a later page.
+async fn read_team_messages(store: &Store) -> Result<Vec<Value>, String> {
+    let mut messages = Vec::new();
+    let mut since = 0;
+    loop {
+        let inbox = mail(store, "inbox", json!({"addr": TEAM_ADDRESS, "unread": true, "limit": INBOX_PAGE, "since": since}))
+            .await.map_err(|e| format!("Could not read {TEAM_ADDRESS}: {e}"))?;
+        let page = inbox["messages"].as_array().ok_or("The team inbox returned an invalid page.")?;
+        messages.extend(page.iter().cloned());
+        if inbox["has_more"] != true {
+            return Ok(messages);
+        }
+        let next = inbox["next_cursor"].as_u64().filter(|next| *next > since)
+            .ok_or("The team inbox cursor did not advance; no request was started.")?;
+        since = next;
+    }
 }
 
 /// The reply without free text: request, session and address ids, the code
@@ -1199,7 +1237,8 @@ fn check_admission(
     if let Some(message) = &book.failure {
         return Err(("TEAM_STORAGE_FAILED", message.clone()));
     }
-    let targets = book.targets(ui_state.as_ref().ok().and_then(Option::as_ref));
+    let ui = checked_ui(ui_state).map_err(|why| ("TEAM_ACCESS_UNAVAILABLE", why))?;
+    let targets = book.targets(ui);
     let wanted = record.project_id.as_str();
     let target = targets
         .iter()
@@ -1487,10 +1526,7 @@ impl Inner {
                 .map_err(|e| format!("Could not register {TEAM_ADDRESS}: {e}"))?;
             self.team_registered.store(true, Ordering::SeqCst);
         }
-        let inbox = mail(&store, "inbox", json!({"addr": TEAM_ADDRESS, "unread": true, "limit": INBOX_PAGE}))
-            .await
-            .map_err(|e| format!("Could not read {TEAM_ADDRESS}: {e}"))?;
-        let page = inbox["messages"].as_array().cloned().unwrap_or_default();
+        let page = read_team_messages(&store).await?;
         let failure = lock(&self.team).failure.clone();
         handle_page(self, &store, &page, failure.as_deref()).await
     }
@@ -1682,6 +1718,7 @@ mod tests {
     fn admission_rechecks_team_slots_switch_and_access_before_an_asleep_session_wakes() {
         let dir = tempfile::tempdir().unwrap();
         let mut book = project(dir.path(), true, Limit::Finite(1));
+        let linked = ui(&[dir.path()], json!({}));
         let record = Record { id: "a".into(), project_id: "local:c:/work/app".into(),
             cwd: dir.path().to_string_lossy().into_owned(), access: "full".into(),
             started_by: Some(json!({"messageId":"m1"})), ..Record::default() };
@@ -1689,23 +1726,23 @@ mod tests {
         other.id = "b".into();
         let mut state = State::default();
         state.records = vec![record.clone(), other];
-        assert!(check_admission(&book, &state, &record, &Ok(None)).is_ok());
+        assert!(check_admission(&book, &state, &record, &linked).is_ok());
         state.launching.insert("b".into(), "turn-b".into());
-        assert_eq!(check_admission(&book, &state, &record, &Ok(None)).unwrap_err().0, "TEAM_GUARD");
+        assert_eq!(check_admission(&book, &state, &record, &linked).unwrap_err().0, "TEAM_GUARD");
         state.launching.clear();
         state.launching.insert("a".into(), "turn-a".into());
-        assert!(check_admission(&book, &state, &record, &Ok(None)).is_ok(), "the session's own reservation is not counted twice");
-        let read = Ok(Some(json!({"projectAccess":{"local:c:/work/app":{"level":"read"}}})));
+        assert!(check_admission(&book, &state, &record, &linked).is_ok(), "the session's own reservation is not counted twice");
+        let read = ui(&[dir.path()], json!({"local:c:/work/app":{"level":"read"}}));
         assert_eq!(check_admission(&book, &state, &record, &read).unwrap_err().0, "TEAM_ACCESS_CHANGED");
         for invalid in [json!(null), json!("read"), json!({"level":"invalid"})] {
-            let ui = Ok(Some(json!({"projectAccess":{"local:c:/work/app":invalid}})));
-            assert_eq!(check_admission(&book, &state, &record, &ui).unwrap_err().0, "TEAM_ACCESS_UNAVAILABLE");
+            let saved = ui(&[dir.path()], json!({"local:c:/work/app":invalid}));
+            assert_eq!(check_admission(&book, &state, &record, &saved).unwrap_err().0, "TEAM_ACCESS_UNAVAILABLE");
         }
         for invalid in [json!(null), json!([]), json!("read")] {
             assert_eq!(check_admission(&book, &state, &record, &Ok(Some(invalid))).unwrap_err().0, "TEAM_ACCESS_UNAVAILABLE");
         }
         book.projects.get_mut("local:c:/work/app").unwrap().agents_can_start = Some(false);
-        assert_eq!(check_admission(&book, &state, &record, &Ok(None)).unwrap_err().0, "TEAM_SWITCH_OFF");
+        assert_eq!(check_admission(&book, &state, &record, &linked).unwrap_err().0, "TEAM_SWITCH_OFF");
         let mut owner = record.clone();
         owner.started_by = None;
         assert!(check_admission(&book, &state, &owner, &Ok(None)).is_ok());
@@ -1789,6 +1826,15 @@ mod tests {
         let state = State { records: vec![record.clone()], ..State::default() };
         assert!(check_admission(&saved, &state, &record, &linked).is_ok());
         assert_eq!(check_admission(&saved, &state, &record, &unlinked).unwrap_err().0, "TEAM_PROJECT_UNKNOWN", "unlinking the root revokes it at the next wake");
+        // A saved owner override is a preference, not a replacement for the removed link.
+        let mut overridden = saved.clone();
+        overridden.projects.insert(parent.clone(), entry(&root, Some(true), Some(Limit::Finite(8))));
+        assert!(plan(&overridden, &request("overridden-linked", &id), &linked, &folders, &NONE).is_ok());
+        for wanted in [&id, &parent] {
+            assert_eq!(plan(&overridden, &request("overridden-unlinked", wanted), &unlinked, &folders, &NONE).unwrap_err().code, "TEAM_PROJECT_UNKNOWN");
+        }
+        assert_eq!(check_admission(&overridden, &state, &record, &unlinked).unwrap_err().0, "TEAM_PROJECT_UNKNOWN");
+        assert!(overridden.projects.contains_key(&parent), "unlinking must retain the owner's preference for a later relink");
         // A parent switched off keeps its folders off.
         let mut off = saved.clone();
         off.projects.insert(parent, ProjectTeam { agents_can_start: Some(false), ..entry(&root, None, None) });
@@ -1802,26 +1848,44 @@ mod tests {
     }
 
     #[test]
+    fn github_ownership_requires_the_exact_remote_host() {
+        for remote in ["https://github.com/Delores88/tool.git", "ssh://git@github.com/Delores88/tool.git", "git@github.com:Delores88/tool.git"] {
+            assert_eq!(github_repo(remote), Some(("delores88".into(), "tool".into())), "{remote}");
+        }
+        for remote in ["https://notgithub.com/delores88/tool.git", "https://github.com.evil.test/delores88/tool.git", "https://evil.test/github.com/delores88/tool.git", "https://github.com@evil.test/delores88/tool.git"] {
+            assert_eq!(github_repo(remote), None, "{remote}");
+        }
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("other-owned");
+        fs::create_dir_all(child.join(".git")).unwrap();
+        fs::write(child.join(".git/config"), "[remote \"origin\"]\nurl = https://notgithub.com/delores88/tool.git\n").unwrap();
+        let linked = ui(&[root.path()], json!({}));
+        let planned = plan(&Book::default(), &request("spoofed-origin", &child.to_string_lossy()), &linked, &Folders::default(), &NONE).unwrap();
+        assert_eq!(planned.access, "read", "a lookalike host cannot grant Full to a folder outside the owner's profile");
+    }
+
+    #[test]
     fn switch_off_refuses_and_switch_on_starts_at_the_projects_own_access_level() {
         let dir = tempfile::tempdir().unwrap();
+        let linked = ui(&[dir.path()], json!({}));
         let off = project(dir.path(), false, Limit::Finite(8));
-        let refusal = plan(&off, &request("m1", "local:c:/work/app"), &Ok(None), &Folders::default(), &NONE).unwrap_err();
+        let refusal = plan(&off, &request("m1", "local:c:/work/app"), &linked, &Folders::default(), &NONE).unwrap_err();
         assert_eq!(refusal.code, "TEAM_SWITCH_OFF");
         assert_eq!(refusal.message, "Agents cannot start teammates in App: the owner turned off Agents can start teammates for this project.");
         assert_eq!(plan(&off, &request("m1", "elsewhere"), &Ok(None), &Folders::default(), &NONE).unwrap_err().code, "TEAM_PROJECT_UNKNOWN");
         let on = project(dir.path(), true, Limit::Finite(8));
         // The level saved under any of the project's ids is used, never raised.
-        let ui = Ok(Some(json!({"projectAccess": {"gh:ben/app": {"level": "read"}}})));
+        let read = ui(&[dir.path()], json!({"gh:ben/app": {"level": "read"}}));
         for name in ["local:c:/work/app", "gh:ben/app", "app", &dir.path().to_string_lossy().to_uppercase()] {
-            let planned = plan(&on, &request("m2", name), &ui, &Folders::default(), &NONE).unwrap();
+            let planned = plan(&on, &request("m2", name), &read, &Folders::default(), &NONE).unwrap();
             assert_eq!((planned.access, planned.project_id.as_str(), planned.provider), ("read", "local:c:/work/app", Provider::Codex), "{name}");
         }
-        assert_eq!(plan(&on, &request("m3", "app"), &Ok(None), &Folders::default(), &NONE).unwrap().access, "full");
-        let broken = Ok(Some(json!({"projectAccess": {"local:c:/work/app": {"level": "admin"}}})));
+        assert_eq!(plan(&on, &request("m3", "app"), &linked, &Folders::default(), &NONE).unwrap().access, "full");
+        let broken = ui(&[dir.path()], json!({"local:c:/work/app": {"level": "admin"}}));
         assert_eq!(plan(&on, &request("m4", "app"), &broken, &Folders::default(), &NONE).unwrap_err().code, "TEAM_ACCESS_UNAVAILABLE");
         assert_eq!(plan(&on, &request("m5", "app"), &Err("unreadable".into()), &Folders::default(), &NONE).unwrap_err().code, "TEAM_ACCESS_UNAVAILABLE");
         let busy: &dyn Fn(&str, &[String]) -> usize = &|_, _| 8;
-        assert!(plan(&project(dir.path(), true, Limit::Unlimited), &request("m7", "app"), &Ok(None), &Folders::default(), busy).is_ok());
+        assert!(plan(&project(dir.path(), true, Limit::Unlimited), &request("m7", "app"), &linked, &Folders::default(), busy).is_ok());
         let mut bad = request("m8", "app");
         bad["body"] = json!("start a reviewer please");
         assert_eq!(plan(&on, &bad, &Ok(None), &Folders::default(), &NONE).unwrap_err().code, "TEAM_REQUEST_INVALID");
@@ -1886,7 +1950,7 @@ mod tests {
             self.book.lock().unwrap().iter().filter(|(_, h)| followed(h)).map(|(id, h)| (id.clone(), h.clone())).collect()
         }
         fn plan(&self, message: &Value) -> Result<Plan, Refusal> {
-            plan(&project(self.dir.path(), self.switch_on, Limit::Unlimited), message, &Ok(None), &Folders::default(), &NONE)
+            plan(&project(self.dir.path(), self.switch_on, Limit::Unlimited), message, &ui(&[self.dir.path()], json!({})), &Folders::default(), &NONE)
         }
         fn started_for(&self, _: &str) -> Option<Teammate> {
             self.existing.clone().map(|id| Teammate { session_id: id, address: Some("codex-app-9999".into()), provider: "codex".into(), project: "local:c:/work/app".into() })
@@ -1991,6 +2055,38 @@ mod tests {
         track(&host, &store).await.unwrap();
         assert_eq!(kinds(&store, "team-f2"), ["queued", "admitted", "failed"]);
         assert_eq!(thread(&store, "team-f2")[2]["failed"]["code"], "TEAM_INTERRUPTED");
+        // A provider can fail between polls, without the tracker observing Launched.
+        // Its terminal reply must not claim that no execution occurred.
+        let host = fixture(false, None);
+        process(&host, &store, &post(&store, "team-f3", "app"), &[]).await.unwrap();
+        *host.probe.lock().unwrap() = Probe::Ended("failed".into(), Some("Provider stopped after partial output.".into()));
+        track(&host, &store).await.unwrap();
+        let failed = thread(&store, "team-f3")[1]["failed"]["message"].as_str().unwrap().to_owned();
+        assert!(failed.contains("did not complete") && !failed.contains("did not run"));
+    }
+
+    #[tokio::test]
+    async fn a_cancel_on_a_later_inbox_page_wins_before_any_start() {
+        let (_root, store) = board();
+        let host = fixture(false, None);
+        post(&store, "paged-start", "app");
+        // Fill the first page with passive notices, leaving the cancel on page two.
+        for n in 1..INBOX_PAGE {
+            mailbox::api(&store, "post", &json!({"id": format!("paged-notice-{n}"), "from": "claude-app-0001",
+                "to": TEAM_ADDRESS, "kind": "notice", "subject": "Information", "body": "No action requested."})).unwrap();
+        }
+        post_cancel(&store, "paged-cancel", "claude-app-0001", "paged-start");
+        assert_eq!(unread(&store, TEAM_ADDRESS).len(), INBOX_PAGE as usize);
+        let messages = read_team_messages(&store).await.unwrap();
+        assert_eq!(messages.len(), INBOX_PAGE as usize + 1);
+        assert_eq!(messages.last().unwrap()["id"], "paged-cancel");
+        handle_page(&host, &store, &messages, None).await.unwrap();
+        assert_eq!(*host.starts.lock().unwrap(), 0);
+        assert_eq!(host.known("paged-start").unwrap().status, CANCELLED);
+        assert!(read_team_messages(&store).await.unwrap().is_empty());
+        let result = mailbox::api(&store, "wait-reply", &json!({"id": "paged-start", "terminal": true, "timeout": 0})).unwrap();
+        let body: Value = serde_json::from_str(result["reply"]["body"].as_str().unwrap()).unwrap();
+        assert_eq!(body["cancelled"]["requestId"], "paged-start");
     }
 
     #[tokio::test]

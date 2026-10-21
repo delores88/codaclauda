@@ -18,15 +18,16 @@ the local coordination board.
 
 ## Current status
 
-[Version 0.4.1](https://github.com/delores88/codaclauda/releases/tag/v0.4.1)
-is installed, published and accepted in the Marketplace. Twelve bounded installed
-workflow checks passed. Native Marketplace listing and authenticated download
-verification remain separate evidence layers; they were not observed for 0.4.1.
+[Version 0.5.0](https://github.com/delores88/codaclauda/releases/tag/v0.5.0)
+is installed, published and accepted in the Marketplace. Nine bounded installed
+workflow cases passed. Native Marketplace UI and authenticated served-installer
+verification remain separate evidence layers; they were not observed for 0.5.0.
 
-The instructions below describe **0.5.0 source**, including owner-configured
-limits, teammate starts, worktree tools, forks and hand-offs. Build, installation,
+The instructions below describe **0.6.0 source**, including inherited teammate
+settings, delivery receipts, explicit conversation copies and usage controls.
+Build, installation,
 actual workflow acceptance and Marketplace admission require separate receipts;
-see [the 0.5.0 release scope](docs/RELEASE-0.5.0.md). Source availability alone
+see [the 0.6.0 release scope](docs/RELEASE-0.6.0.md). Source availability alone
 does not establish that this version is installed or published.
 
 The released passive mailbox supports named addresses, durable questions and
@@ -86,7 +87,28 @@ global switch in Settings. The owner's wake loop guard and applicable concurrenc
 settings still apply. While on, the open app can send incoming mailbox content to that
 owned provider session. Sender labels are not verified identities, and incoming
 messages do not grant new permissions. Turn wake off when you do not want it to
-consume provider usage. Existing desktop-chat mailboxes remain passive.
+consume provider usage. Existing desktop-chat mailboxes remain passive unless
+the owner explicitly binds the separate Codex notification route described below.
+
+**Settings → Usage** controls whether CodaClauda-owned sessions may use supported
+provider credits or earned Codex resets when a plan is limited. New settings
+default on; saved Off choices are retained. Off controls admission, not the
+provider's billing system: a turn crossing a limit or starting with unreported
+limit state can still use credits. Balances are credit units and per-turn costs
+are estimates. A definitively unstarted held turn can be cancelled or retried
+once at a validated reset time. Partially executed work is never replayed
+automatically. No API profile or account switching is involved.
+
+**Running → On this PC → Continue as a copy** creates a separate owned
+conversation through the provider's fork operation. The original is not resumed
+in place. Optional **Wake by mail** binds a registered address to one existing
+Codex thread in a currently Full-access linked project. Read or unverifiable
+project access refuses delivery because the external thread's sandbox cannot be
+enforced by the queue command. It attempts a counts-only notice through the
+supported local queue endpoint. Binding and command acceptance do not prove
+execution or recipient acknowledgment; an unavailable endpoint is reported.
+Claude desktop push remains unavailable. See [the copy and notification
+boundaries](docs/ADOPT.md).
 
 **Schedules** can send a saved prompt to an owned provider session at an interval
 or a daily local time. They run only while CodaClauda is open; there is no operating
@@ -142,7 +164,7 @@ paginated, and the Tasks view provides a paginated table and request details.
 Each request selects a primary agent and up to three permitted peers in the same
 workspace; an agent's directory contains only those selected connections.
 
-## The 0.5.0 desktop interface
+## The 0.6.0 desktop interface
 
 Use the left sidebar to move between these views:
 
@@ -173,9 +195,13 @@ separate history. Check the conversation label before sending.
 A saved mailbox message is not evidence of a reply, and a
 downloaded update is not installed until setup and restart succeed.
 
-Projects → Teammates is off by default. Enabling it lets incoming team requests
-start sessions in that project at its current access level. The finite guard
-(eight by default, or Unlimited) also applies when those sessions wake again.
+Settings → Team supplies an owner default for linked projects without a saved
+override: teammate starts on, with Unlimited agent-started sessions. Existing
+project Off, Read and finite guard settings are retained. Projects → Teammates
+can override the default. Requests can register real child folders only within
+currently linked project roots and never raise their access. Durable receipts
+separate queued, admitted and terminal outcomes; queued requests can be cancelled.
+The configured concurrency guard also applies when those sessions wake again.
 Disabling it prevents further turns from agent-started sessions; it does not
 claim to stop a turn already running. Use Stop for active work. A stricter project
 access level requires a new teammate at that level. See [team behavior](docs/TEAM.md).
@@ -243,7 +269,8 @@ These guarantees apply to dedicated requests and their runtime grants.
 
 Both agents receive a private MCP connection when CodaClauda launches their
 request. No global `.mcp.json` or Codex configuration change is needed. A generic
-global inbox server and automatic wakeup of existing chats are not implemented.
+global inbox server is not implemented. The separate, explicitly bound Codex
+notification route does not establish automatic delivery to arbitrary chats.
 
 DGXBridge optionally runs authorized build/test commands and returns job
 receipts through its public CLI. CodaClauda does not replace its runner, require
