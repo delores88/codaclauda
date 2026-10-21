@@ -1572,7 +1572,7 @@ impl Inner {
         if turn.origin["kind"] == "schedule" {
             self.schedule_finished(&turn.origin, &turn.id, &status, failure.as_deref());
         }
-        self.notify_turn(id, &status);
+        self.notify_turn(id, &turn.id, &status);
         // Each 'done' releases the next queued turn, in order.
         self.queue_next(id);
         true

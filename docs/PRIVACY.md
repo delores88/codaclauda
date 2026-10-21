@@ -152,16 +152,23 @@ include full chat message text in these notices; it can include a shortened chat
 title or the two mailbox addresses held by the wake loop guard. The service receives normal
 network information and follows its own data policy.
 
-**Message your agents from your phone** is a separate owner setting, off until
-set up in Settings > Phone. While enabled and the desktop app is open, it polls
-a generated, hard-to-guess topic at `ntfy.sh`. Anyone who knows the topic can
-read or send its messages; the topic does not authenticate Ben. Received text
+**Message your agents from your phone** is an owner setting, on by default.
+Nothing is sent or polled without the owner's saved notification topic URL in
+Settings > Phone. While enabled and the desktop app is open, it polls that same
+topic for phone messages and sends replies there. Keep the topic name long and
+random. Anyone who knows the topic can read or send its messages; the topic
+does not authenticate Ben. Received text
 becomes a local board notice from `owner-phone`, labeled as unverified. Existing
 wake settings may send that notice to the selected provider at its current
 project access. A phone message grants no authority or additional access.
 
 Board messages addressed to `owner-phone` send the sender address and the first
-1,000 characters of the body to the owner's existing outbound ntfy topic.
+1,000 characters of the body to that same topic. Phone replies go to the agent
+that most recently messaged the phone, unless the text begins with an explicit
+`@address` or session name. If no agent has messaged the phone, the app asks for
+a recipient and lists a few active session names. All app publications carry
+an app tag and returned message identifiers are saved so its own notifications
+are not processed as phone messages. These tags are not proof of identity.
 Inbound text and complete outbound text are checked by the mailbox credential
 scanner before forwarding, including text beyond that limit. Refusals use fixed
 messages without echoing the input. This pattern scanner cannot identify every
