@@ -484,3 +484,22 @@ recheck access and revocation, and retry at most once at a validated reset.
 Partial or unknown execution never silently replays. No API profile, provider
 account switching, credential copying or live spending probe is required to
 test the deterministic policy and concurrency branches.
+
+## Version 0.6.1 phone conversations
+
+One saved ntfy HTTPS topic carries incoming phone messages, agent replies and
+turn notices. The owner controls messaging in Settings > Phone; a saved Off is
+preserved. Explicit @name/address routing and the last confirmed sender choose
+the recipient without a most-recently-active fallback. Ben's phone messages use
+`owner-phone`, distinct from `owner`, and are ordinary owner messages under his
+direct authorization. Existing project access, grants and session controls remain
+in force; topic tags and message IDs prevent loops, not authenticate a sender.
+
+Incoming messages and outgoing replies pass the credential scanner. Routing,
+cursors and delivery outcomes persist in phone.json; transport diagnostics omit
+message bodies. Ambiguous outbound outcomes are retained without automatic
+resend. Send test uses a fixed notice for the saved topic, never starts an agent
+and reports ntfy acceptance separately from phone display. See [PHONE.md](PHONE.md)
+for the full controls, storage and delivery contract and [RELEASE-0.6.1.md](RELEASE-0.6.1.md)
+for the narrow release evidence. These source contracts do not establish installed
+phone or provider acceptance.

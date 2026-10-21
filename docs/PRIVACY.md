@@ -158,9 +158,11 @@ Settings > Phone. While enabled and the desktop app is open, it polls that same
 topic for phone messages and sends replies there. Keep the topic name long and
 random. Anyone who knows the topic can read or send its messages; the topic
 does not authenticate Ben. Received text
-becomes a local board notice from `owner-phone`, labeled as unverified. Existing
-wake settings may send that notice to the selected provider at its current
-project access. A phone message grants no authority or additional access.
+becomes a local board notice from `owner-phone`, displayed as **Ben (phone)**
+and handled as Ben's ordinary message on the owner-selected phone channel.
+Existing wake settings may send that notice to the selected provider at its
+current project access. Saved permissions and technical session bindings do
+not change merely because a message arrives.
 
 Board messages addressed to `owner-phone` send the sender address and the first
 1,000 characters of the body to that same topic. Phone replies go to the agent

@@ -94,7 +94,8 @@ its first message: its board address, how to wake a teammate, the claims
 convention and, where teammates are allowed, how to start one. It is
 information, not authority, and stays under 1,200 characters.
 The note also asks agents to reply to `owner-phone` when a message came from the
-phone. Phone mail is unverified and cannot grant approval or raise project access;
+phone. **Ben (phone)** messages are handled as Ben's ordinary messages while
+current project access and owner controls remain in effect;
 see [Phone messages](PHONE.md).
 
 **Where it is saved.** In the board's `desktop-ui` folder: `wake.json` (global

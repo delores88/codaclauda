@@ -18,17 +18,18 @@ the local coordination board.
 
 ## Current status
 
-[Version 0.5.0](https://github.com/delores88/codaclauda/releases/tag/v0.5.0)
-is installed, published and accepted in the Marketplace. Nine bounded installed
-workflow cases passed. Native Marketplace UI and authenticated served-installer
-verification remain separate evidence layers; they were not observed for 0.5.0.
+[Version 0.6.0](https://github.com/delores88/codaclauda/releases/tag/v0.6.0)
+is installed, published and accepted in the Marketplace. Eight bounded native
+UI, settings-persistence and passive-cancellation observations passed. These do
+not establish paid provider execution, earned-reset redemption or desktop-route
+delivery. Native Marketplace UI and authenticated served-installer verification
+remain separate evidence layers.
 
-The instructions below describe **0.6.0 source**, including inherited teammate
-settings, delivery receipts, explicit conversation copies and usage controls.
-Build, installation,
-actual workflow acceptance and Marketplace admission require separate receipts;
-see [the 0.6.0 release scope](docs/RELEASE-0.6.0.md). Source availability alone
-does not establish that this version is installed or published.
+The instructions below describe **0.6.1 source**, adding one-topic phone
+conversations and an explicit Send test action to the existing desktop controls.
+Build, installation, actual phone workflow acceptance and Marketplace admission
+require separate receipts; see [the 0.6.1 release scope](docs/RELEASE-0.6.1.md).
+Source availability alone does not establish that 0.6.1 is installed or published.
 
 The released passive mailbox supports named addresses, durable questions and
 replies, acknowledgments, bounded waits and atomic shared-resource claims.
@@ -99,6 +100,16 @@ are estimates. A definitively unstarted held turn can be cancelled or retried
 once at a validated reset time. Partially executed work is never replayed
 automatically. No API profile or account switching is involved.
 
+**Settings → Phone** uses one saved ntfy HTTPS topic for phone messages,
+agent replies and turn notifications. Subscribe to that topic on your phone,
+then publish `@name Your message` to choose an agent; ordinary follow-ups go to
+the last agent that successfully messaged that topic. Ben's phone messages use
+the distinct `owner-phone` address and enter as ordinary owner messages under
+his direct authorization. Existing project access and session controls still
+apply. **Send test** sends one fixed notice without starting an agent; ntfy
+acceptance and display on the phone are separate outcomes. Keep the app open
+and the PC online. See [phone setup, routing and privacy](docs/PHONE.md).
+
 **Running → On this PC → Continue as a copy** creates a separate owned
 conversation through the provider's fork operation. The original is not resumed
 in place. Optional **Wake by mail** binds a registered address to one existing
@@ -164,7 +175,7 @@ paginated, and the Tasks view provides a paginated table and request details.
 Each request selects a primary agent and up to three permitted peers in the same
 workspace; an agent's directory contains only those selected connections.
 
-## The 0.6.0 desktop interface
+## The 0.6.1 desktop interface
 
 Use the left sidebar to move between these views:
 
@@ -180,7 +191,7 @@ Use the left sidebar to move between these views:
 | **Agent setup** | Prepare a passive mailbox join prompt; use Advanced for dedicated connections, task prompts, Grant & send and Board controls. |
 | **Projects** | Link local folders, inspect metadata, set access for new owned sessions and choose projects for the City. Bulk actions apply to all matching projects, including other pages. |
 | **My avatar** | Customize your local avatar, suggest its appearance from a photo, or explicitly ask an agent to help. |
-| **Settings** | Change appearance and alerts, owner limits, MCP tools and optional phone push, or use Updates to acquire and explicitly install an available update. |
+| **Settings** | Change appearance and alerts, owner limits and MCP tools; configure phone conversations and Send test, or use Updates to acquire and explicitly install an available update. |
 | **Running** | Inspect app-owned sessions, their activity and mailbox addresses. |
 
 **Mailbox** conversations remain passive. Messages wait until the recipient

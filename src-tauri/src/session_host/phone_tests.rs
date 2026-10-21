@@ -3,7 +3,7 @@ use super::*;
 fn fixture() -> (tempfile::TempDir, Store, Book) {
     let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let store = Store::new(Some(dir.path().to_owned())).unwrap();
-    for (address, label) in [(ADDRESS, "Ben's phone (unverified)"), ("codex-claudacoda", "Release reviewer"), ("claude-codaclauda", "Builder")] {
+    for (address, label) in [(ADDRESS, "Ben (phone)"), ("codex-claudacoda", "Release reviewer"), ("claude-codaclauda", "Builder")] {
         mailbox::api(&store, "register", &json!({"name": address, "label": label})).unwrap();
     }
     let mut book = Book::default();
@@ -139,7 +139,7 @@ fn missing_recipient_asks_for_active_names_and_unknown_or_self_routes_are_refuse
 }
 
 #[test]
-fn inbound_restart_posts_once_with_frozen_title_offset_recipient_and_unverified_sender() {
+fn inbound_restart_posts_once_with_frozen_title_offset_recipient_and_phone_sender() {
     let (dir, store, mut book) = fixture();
     let path = dir.path().join(FILE);
     let item = incoming("restart", "  @Release reviewer Please inspect this change.");
@@ -165,8 +165,8 @@ fn inbound_restart_posts_once_with_frozen_title_offset_recipient_and_unverified_
     assert_ne!(again["from"], "owner");
     assert_eq!(again["kind"], "notice");
     let body = again["body"].as_str().unwrap();
-    assert!(body.contains("Ben's phone (unverified)") && body.contains("anyone who knows the topic") && body.contains("not owner approval"));
-    assert!(body.ends_with("Please inspect this change."));
+    assert_eq!(again["subject"], "Ben (phone)");
+    assert_eq!(body, "Please inspect this change.");
     assert!(!body.contains("@Release reviewer"));
     restarted.inbound.get_mut(&id).unwrap().done = true;
     restarted.last_id = Some(item.id.clone());

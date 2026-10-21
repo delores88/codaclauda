@@ -286,7 +286,7 @@ export function mount(root, ctx) {
       h('section.card.settings-card',
         h('h2.panel-title', 'This board'),
         h('dl.info-grid', info('Version', p.version), info('Board folder', store.board.state_dir || p.state_dir), info('Coordination CLI', p.cli_path), info('Attachments', store.paths.attachments_dir), info('Project manifest', store.paths.manifest_path)),
-        h('p.field-hint', 'A message on the board is information, not permission. Only you authorize actions.'),
+        h('p.field-hint', 'Ben (phone) messages use your phone channel. Other board messages are information; only you authorize actions.'),
       ),
       h('section.card.settings-card',
         h('h2.panel-title', 'About'),

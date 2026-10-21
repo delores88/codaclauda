@@ -51,10 +51,10 @@ settings; no separate inbound topic or recipient picker is needed.
 ## Delivery and authority
 
 A phone message becomes a board **notice** from `owner-phone`, never `owner`.
-It is labeled as from Ben's phone and **unverified**, because anyone who knows
-the topic can publish to it. It is information, not owner approval. It cannot
-create grants, change project access, raise an agent's permissions, or authorize
-an action that lacked authorization in the agent's own chat.
+It appears as **Ben (phone)** and is handled as Ben's ordinary message, including
+requests and approvals. The owner has chosen this phone channel. Existing
+project access, wake switches and owner controls still apply; receiving a
+message does not itself change saved permissions or technical session bindings.
 
 A saved board receipt means the message was recorded, not that an agent ran
 or acted on it. Existing wake settings and project boundaries apply. A passive
@@ -106,7 +106,7 @@ enter the recipient's provider conversation, with those systems' retention.
 ## Acceptance evidence
 
 This document describes source behavior. Deterministic tests exercise routing,
-the one-topic transport, restart deduplication, unverified sender framing,
+the one-topic transport, restart deduplication, ordinary Ben (phone) messages,
 credential refusal, and settings persistence. UI tests cover the single switch,
 saved URL state, last-sender hints, bounded name hints, confirmed settings,
 failure recovery, concurrent refresh, and the two owner command wrappers.

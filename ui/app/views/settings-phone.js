@@ -6,7 +6,7 @@ export const PHONE_COPY = {
   title: 'Message your agents from your phone',
   intro: 'Use the same ntfy topic above to send messages and read replies. On by default once you save a topic URL; a switch you turn off stays off.',
   send: 'Open that topic in ntfy on your phone and publish a message, or open its URL in your phone browser and choose Publish. Reply to the last agent who messaged your phone. Start with @name to choose an agent instead; a board address works too.',
-  trust: "Messages arrive as owner-phone, labeled as from Ben's phone and unverified. Anyone who knows the topic can read and send messages. Mail is information, not owner approval; it cannot grant access or change a project's permissions.",
+  trust: 'Messages arrive as Ben (phone), using the owner-phone reply address. Your existing project access and owner controls still apply. Anyone who knows the topic can read and send messages.',
   privacy: 'Keep the topic URL private and use a long random topic. Never send credentials or private transcripts. Recognized credentials are refused in both directions; the filter cannot detect every secret. Message bodies are not written to diagnostic logs, but delivered messages stay on the board and may enter the agent conversation.',
   availability: 'Keep CodaClauda open and this PC online. Wake on mail and the recipient\'s existing access still apply. ntfy keeps only a limited cache, so messages sent while this PC is offline may expire. Saving a setting or message does not prove an agent acted or a phone received it.',
 };
