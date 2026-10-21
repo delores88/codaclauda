@@ -10,7 +10,9 @@
 //! owner approval. An agent-started teammate that admission refuses answers
 //! each waiting sender once with the code and the setting to change; the mail
 //! stays unread. While the app runs it keeps `host-heartbeat.json` fresh
-//! (H1), so the CLI can tell a sender whether anything will read its post.
+//! (H1): it names this exact board and the installation bound to it, so the
+//! CLI can tell a sender whether anything will read its post. The same poll
+//! delivers mail to owner-bound Codex desktop chats (`desktop_queue.rs`).
 //!
 //! There is no cap on how many sessions wake or how often. One owner setting
 //! remains, the loop guard (`wake.json` `loopGuard`, on, notify, 60 by
@@ -18,7 +20,9 @@
 //! (both directions together) `pairPerHour` times in the last hour get the
 //! owner one notice per pair and hour. In "notify" mode (0.6 default) waking
 //! never pauses; in "pause" mode (0.5) they stop waking each other, the
-//! message stays unread and is retried later. 'owner' never forms a pair.
+//! message stays unread and is retried later. Each pair's count for the last
+//! hour is shown to the owner, who can also pause one pair until resuming it
+//! (`pausedPairs`). An owner's saved guard is kept. 'owner' never forms a pair.
 
 use super::{
     Failure, Inner, Queued, Record, Wakes, ensure_dirs, event, host, limits::JS_SAFE_MAX, lock,
@@ -26,7 +30,7 @@ use super::{
     team::{self, TEAM_POLL_SECONDS},
     write_atomic,
 };
-use coord_core::{mailbox, store::Store};
+use coord_core::{heartbeat, mailbox, store::Store};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -47,6 +51,8 @@ const INBOX_PAGE: u64 = 20;
 const HOUR_MS: u64 = 60 * 60 * 1000;
 const DAY_MS: u64 = 24 * HOUR_MS;
 const DEFAULT_PAIR_PER_HOUR: u64 = 60;
+/// The guard 0.5 saved for everyone (on, 20 an hour); pause was its only behavior.
+const GUARD_05_DEFAULT: u64 = 20;
 
 /// What the guard does when a pair reaches its hourly count.
 #[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -78,7 +84,9 @@ impl Default for LoopGuard {
     }
 }
 
-/// A guard saved before 0.6 has no mode: it becomes notify, at least 60 an hour.
+/// A guard saved before 0.6 has no mode. Left at 0.5's default (on, 20) it
+/// becomes the 0.6 default (notify, 60); a guard the owner changed keeps its
+/// on/off and count, with 0.5's pause behavior. A saved mode is always kept.
 impl<'de> Deserialize<'de> for LoopGuard {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -92,11 +100,8 @@ impl<'de> Deserialize<'de> for LoopGuard {
         let saved = Saved::deserialize(deserializer)?;
         Ok(match saved.mode {
             Some(mode) => LoopGuard { on: saved.on, mode, pair_per_hour: saved.pair_per_hour },
-            None => LoopGuard {
-                on: saved.on,
-                mode: GuardMode::Notify,
-                pair_per_hour: saved.pair_per_hour.max(DEFAULT_PAIR_PER_HOUR),
-            },
+            None if saved.on && saved.pair_per_hour == GUARD_05_DEFAULT => LoopGuard::default(),
+            None => LoopGuard { on: saved.on, mode: GuardMode::Pause, pair_per_hour: saved.pair_per_hour },
         })
     }
 }
@@ -151,6 +156,9 @@ pub(crate) struct Book {
     /// Pair → when the owner was last told the guard held it (once an hour).
     #[serde(default)]
     guard_notices: BTreeMap<String, u64>,
+    /// Pairs the owner paused (Settings → Team), → when; they stay paused until resumed.
+    #[serde(default)]
+    paused_pairs: BTreeMap<String, u64>,
     #[serde(skip)]
     failure: Option<String>,
     /// `<address>:<message id>` whose teammate refusal was answered this run.
@@ -167,6 +175,7 @@ impl Default for Book {
             reservations: BTreeMap::new(),
             loop_guard: LoopGuard::default(),
             guard_notices: BTreeMap::new(),
+            paused_pairs: BTreeMap::new(),
             failure: None,
             answered: HashSet::new(),
         }
@@ -231,6 +240,9 @@ impl Book {
             return Ok(false);
         }
         if let Some(pair) = pair {
+            if self.paused_pairs.contains_key(pair) {
+                return Err(("WAKE_PAIR_PAUSED", "The owner paused these two sessions waking each other (Settings → Team). The message stays unread until the owner resumes them.".into()));
+            }
             let recent = self.pairs.get(pair).map_or(&[][..], Vec::as_slice);
             if self.loop_guard.mode == GuardMode::Pause && guard_holds(self.loop_guard, recent, now) {
                 return Err((
@@ -255,12 +267,46 @@ impl Book {
         self.loop_guard.mode == GuardMode::Notify
             && guard_holds(self.loop_guard, self.pairs.get(pair).map_or(&[][..], Vec::as_slice), now)
     }
+
+    /// The owner's per-pair view: wakes in the last hour, busiest first.
+    fn pair_view(&self, now: u64) -> Vec<Value> {
+        let keys: std::collections::BTreeSet<&String> =
+            self.pairs.keys().chain(self.paused_pairs.keys()).filter(|k| k.starts_with("pair:")).collect();
+        let mut view: Vec<(u64, Value)> = keys
+            .into_iter()
+            .map(|key| {
+                let (a, b) = key["pair:".len()..].split_once('|').unwrap_or(("", ""));
+                let hour = self.pairs.get(key).map_or(0, |t| t.iter().filter(|t| now.saturating_sub(**t) < HOUR_MS).count() as u64);
+                let value = json!({"key": key, "a": a, "b": b, "lastHour": hour,
+                    "reached": guard_holds(self.loop_guard, self.pairs.get(key).map_or(&[][..], Vec::as_slice), now),
+                    "paused": self.paused_pairs.contains_key(key)});
+                (hour, value)
+            })
+            .collect();
+        view.sort_by(|x, y| y.0.cmp(&x.0));
+        view.into_iter().map(|(_, v)| v).collect()
+    }
+}
+
+/// Owner input {key, paused}: pause or resume one pair.
+fn parse_pair(value: &Value) -> Result<(String, bool), Failure> {
+    let invalid = |m: &str| ("INVALID_ARGUMENTS", m.to_owned());
+    let key = value["key"]
+        .as_str()
+        .filter(|k| k.starts_with("pair:") && k.contains('|') && k.len() <= 400 && !k.chars().any(char::is_control))
+        .ok_or_else(|| invalid("pair.key must be a pair key from wake_settings_get."))?;
+    let paused = value["paused"].as_bool().ok_or_else(|| invalid("pair.paused must be true or false."))?;
+    Ok((key.to_owned(), paused))
 }
 
 /// H1: what the CLI reads to tell a sender whether its post will be picked up.
-fn heartbeat(pid: u32, at: u64, addresses: Vec<String>, team: bool) -> Value {
-    json!({"pid": pid, "at": at, "version": env!("CARGO_PKG_VERSION"), "teamPollSeconds": TEAM_POLL_SECONDS,
-        "wakePollSeconds": WAKE_POLL_SECONDS, "addresses": addresses, "team": team})
+/// It names this exact board and the installation (its settings folder, whose
+/// board binding names this board); a heartbeat for anything else does not count.
+fn heartbeat(pid: u32, at: u64, board: &Path, settings: Option<&Path>, addresses: Vec<String>, team: bool, team_error: Option<String>) -> Value {
+    json!({"schema": heartbeat::SCHEMA, "pid": pid, "at": at, "version": env!("CARGO_PKG_VERSION"),
+        "board": board.to_string_lossy(), "installation": settings.and_then(heartbeat::installation_id),
+        "settingsDir": settings.map(|s| s.to_string_lossy().into_owned()), "teamPollSeconds": TEAM_POLL_SECONDS,
+        "wakePollSeconds": WAKE_POLL_SECONDS, "addresses": addresses, "team": team, "teamError": team_error})
 }
 
 /// Writes are atomic (a rename, no fsync: it is rewritten every few seconds);
@@ -467,6 +513,13 @@ pub(super) fn spawn_watcher(inner: Arc<Inner>) {
             inner.team_tick().await;
             if tick % every == 0 {
                 inner.wake_tick().await;
+                // Owner-bound Codex desktop chats, under the same global wake switch.
+                // Spawned: one `codex queue` may take up to 30 s and must not hold up
+                // team or wake ticks; poll_bound never overlaps itself.
+                if inner.wake_enabled() {
+                    let desk = inner.clone();
+                    tauri::async_runtime::spawn(async move { super::desktop_queue::poll_bound(&desk).await });
+                }
             }
         }
     });
@@ -655,7 +708,8 @@ impl Inner {
         } else {
             Vec::new()
         };
-        let beat = heartbeat(std::process::id(), now_ms(), addresses, self.team_default_on());
+        let settings = self.app.try_state::<crate::board::BoardBinding>().map(|b| b.settings_dir().to_path_buf());
+        let beat = heartbeat(std::process::id(), now_ms(), &self.board, settings.as_deref(), addresses, self.team_default_on(), team::inbox_error());
         BEAT.write(&self.dir.join(HEARTBEAT_FILE), &beat);
     }
 
@@ -667,13 +721,14 @@ impl Inner {
     fn wake_settings(&self) -> Result<Value, Failure> {
         let book = lock(&self.wake);
         book.check()?;
-        Ok(json!({"enabled": book.enabled, "loopGuard": book.loop_guard}))
+        Ok(json!({"enabled": book.enabled, "loopGuard": book.loop_guard, "pairs": book.pair_view(now_ms())}))
     }
 
     fn set_wake_settings(
         &self,
         enabled: Option<bool>,
         loop_guard: Option<&Value>,
+        pair: Option<&Value>,
     ) -> Result<Value, Failure> {
         let _lifecycle = lock(&self.lifecycle);
         let mut book = lock(&self.wake);
@@ -685,13 +740,21 @@ impl Inner {
         if let Some(value) = loop_guard {
             updated.loop_guard = parse_guard(updated.loop_guard, value)?;
         }
+        if let Some(value) = pair {
+            let (key, paused) = parse_pair(value)?;
+            if paused {
+                updated.paused_pairs.insert(key, now_ms());
+            } else {
+                updated.paused_pairs.remove(&key);
+            }
+        }
         if let Err(failure) = self.save_wake(&updated) {
             book.enabled = false;
             book.failure = Some(failure.1.clone());
             return Err(failure);
         }
         *book = updated;
-        Ok(json!({"enabled": book.enabled, "loopGuard": book.loop_guard}))
+        Ok(json!({"enabled": book.enabled, "loopGuard": book.loop_guard, "pairs": book.pair_view(now_ms())}))
     }
 
     /// 0.5: a new session starts with wake on and its own board address. Any
@@ -748,7 +811,7 @@ impl Inner {
                 format!("Wake loop guard paused {from} and {address} waking each other."),
             ),
             GuardMode::Notify => (
-                format!("Wake loop guard: {from} and {address} woke each other {per_hour} times in the last hour. They keep waking each other; to end a loop, Stop one of the chats, or choose Pause in Settings → Limits → Wake loop guard."),
+                format!("Wake loop guard: {from} and {address} woke each other {per_hour} times in the last hour. They keep waking each other; to end a loop, Stop one of the chats, pause these two in Settings → Team, or choose Pause in Settings → Limits → Wake loop guard."),
                 format!("Wake loop guard: {from} and {address} woke each other {per_hour} times in an hour."),
             ),
         };
@@ -949,6 +1012,8 @@ impl Inner {
                         }
                         continue;
                     }
+                    // The owner paused this pair: its mail waits unread, without a notice each poll.
+                    Err(("WAKE_PAIR_PAUSED", _)) => continue,
                     // This stable wake identity was durably admitted before
                     // (by 0.4.1, whose origin differed); it never replays.
                     Err(("TURN_ID_CONFLICT", _)) => {
@@ -1006,14 +1071,16 @@ pub(crate) async fn wake_settings_get(app: tauri::AppHandle) -> Value {
     reply(host(&app).wake_settings())
 }
 
-/// Either field may be left out: { enabled?, loopGuard?: { on?, mode?, pairPerHour? } }.
+/// Any field may be left out: { enabled?, loopGuard?: { on?, mode?, pairPerHour? },
+/// pair?: { key, paused } } → { enabled, loopGuard, pairs: [{ key, a, b, lastHour, reached, paused }] }.
 #[tauri::command]
 pub(crate) async fn wake_settings_set(
     app: tauri::AppHandle,
     enabled: Option<bool>,
     loop_guard: Option<Value>,
+    pair: Option<Value>,
 ) -> Value {
-    reply(host(&app).set_wake_settings(enabled, loop_guard.as_ref()))
+    reply(host(&app).set_wake_settings(enabled, loop_guard.as_ref(), pair.as_ref()))
 }
 
 #[cfg(test)]
@@ -1180,24 +1247,76 @@ mod tests {
             assert_eq!(book.guard_reached(&pair, now), n >= 59, "{n}");
         }
         assert!(book.notice_due(&pair, now) && !book.notice_due(&pair, now + 1));
-        // Saved 0.5 guards (no mode) become notify with at least 60 an hour; the owner's on/off stays.
+        // A 0.5 guard left at 0.5's default becomes the 0.6 default; one the owner changed is kept
+        // with 0.5's pause behavior; a saved mode is always kept.
         for (saved, expected) in [
             (json!({"on": true, "pairPerHour": 20}), LoopGuard { on: true, mode: GuardMode::Notify, pair_per_hour: 60 }),
-            (json!({"on": false, "pairPerHour": 500}), LoopGuard { on: false, mode: GuardMode::Notify, pair_per_hour: 500 }),
+            (json!({"on": true, "pairPerHour": 5}), LoopGuard { on: true, mode: GuardMode::Pause, pair_per_hour: 5 }),
+            (json!({"on": false, "pairPerHour": 20}), LoopGuard { on: false, mode: GuardMode::Pause, pair_per_hour: 20 }),
+            (json!({"on": false, "pairPerHour": 500}), LoopGuard { on: false, mode: GuardMode::Pause, pair_per_hour: 500 }),
             (json!({"on": true, "mode": "pause", "pairPerHour": 5}), LoopGuard { on: true, mode: GuardMode::Pause, pair_per_hour: 5 }),
+            (json!({"on": true, "mode": "notify", "pairPerHour": 3}), LoopGuard { on: true, mode: GuardMode::Notify, pair_per_hour: 3 }),
         ] {
-            assert_eq!(serde_json::from_value::<LoopGuard>(saved).unwrap(), expected);
+            assert_eq!(serde_json::from_value::<LoopGuard>(saved.clone()).unwrap(), expected, "{saved}");
+        }
+        // Through a saved wake.json too.
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let path = dir.path().join(WAKE_FILE);
+        fs::write(&path, json!({"schema": "codaclauda.wake/1", "enabled": true, "times": {}, "pairs": {}, "loopGuard": {"on": true, "pairPerHour": 7}}).to_string()).unwrap();
+        assert_eq!(read_book(&path, true).unwrap().loop_guard, LoopGuard { on: true, mode: GuardMode::Pause, pair_per_hour: 7 });
+    }
+
+    #[test]
+    fn the_owner_sees_each_pairs_count_and_can_pause_one_pair() {
+        let now = 10 * DAY_MS;
+        let mut book = Book::default();
+        let pair = pair_key("claude-alpha-0001", "codex-beta-0002");
+        let other = pair_key("claude-alpha-0001", "codex-gamma-0003");
+        for n in 0..3 {
+            assert!(book.reserve("s", &format!("m{n}"), Some(&pair), now).unwrap());
+        }
+        assert!(book.reserve("s", "o1", Some(&other), now).unwrap());
+        assert!(book.reserve("s", "old", Some(&other), now - HOUR_MS).unwrap());
+        let view = book.pair_view(now);
+        assert_eq!(view[0], json!({"key": pair, "a": "claude-alpha-0001", "b": "codex-beta-0002", "lastHour": 3, "reached": false, "paused": false}));
+        assert_eq!(view[1]["lastHour"], 1, "wakes older than an hour do not count");
+        // Paused by the owner: that pair's mail waits (notify mode or not); other pairs and owner mail still wake.
+        let (key, paused) = parse_pair(&json!({"key": pair, "paused": true})).unwrap();
+        assert!(paused);
+        book.paused_pairs.insert(key, now);
+        assert_eq!(book.reserve("s", "m9", Some(&pair), now).unwrap_err().0, "WAKE_PAIR_PAUSED");
+        assert!(book.reserve("s", "o2", Some(&other), now).unwrap());
+        assert!(book.reserve("s", "from-owner", None, now).unwrap());
+        assert_eq!(book.pair_view(now)[0]["paused"], true);
+        book.paused_pairs.clear();
+        assert!(book.reserve("s", "m9", Some(&pair), now).unwrap());
+        for bad in [json!({"key": "peer>s", "paused": true}), json!({"key": pair, "paused": "yes"}), json!({})] {
+            assert_eq!(parse_pair(&bad).unwrap_err().0, "INVALID_ARGUMENTS", "{bad}");
         }
     }
 
     #[test]
-    fn the_heartbeat_has_the_shared_shape_and_is_gone_after_a_clean_exit() {
-        let beat = heartbeat(42, 1_700_000_000_000, vec!["claude-app-0001".into()], true);
-        assert_eq!(
-            beat,
-            json!({"pid": 42, "at": 1_700_000_000_000u64, "version": env!("CARGO_PKG_VERSION"), "teamPollSeconds": 5,
-                "wakePollSeconds": WAKE_POLL_SECONDS, "addresses": ["claude-app-0001"], "team": true})
-        );
+    fn the_heartbeat_is_bound_to_its_board_and_installation_and_gone_after_a_clean_exit() {
+        // What the app writes is what the CLI accepts as this board's host lease, and nothing else.
+        let root = tempfile::tempdir().unwrap();
+        let board = root.path().join("board");
+        let settings = root.path().join(".CodaClauda.claudacoda-settings");
+        fs::create_dir_all(board.join("desktop-ui")).unwrap();
+        fs::create_dir_all(&settings).unwrap();
+        fs::write(settings.join(heartbeat::BINDING_FILE), json!({"schema": 1, "install_root": root.path().join("CodaClauda"), "state_dir": board}).to_string()).unwrap();
+        let now = 1_700_000_000_000u64;
+        let written = heartbeat(42, now, &board, Some(&settings), vec!["claude-app-0001".into()], true, None);
+        assert_eq!((written["installation"].as_str().map(str::len), written["teamPollSeconds"].as_u64()), (Some(32), Some(5)));
+        fs::write(board.join("desktop-ui").join(HEARTBEAT_FILE), written.to_string()).unwrap();
+        assert!(matches!(heartbeat::lease(&board, now + 1000), heartbeat::Lease::Available(b) if b.addresses == ["claude-app-0001"]));
+        let elsewhere = root.path().join("other-board");
+        fs::create_dir_all(elsewhere.join("desktop-ui")).unwrap();
+        fs::write(elsewhere.join("desktop-ui").join(HEARTBEAT_FILE), written.to_string()).unwrap();
+        assert!(matches!(heartbeat::lease(&elsewhere, now), heartbeat::Lease::Unavailable { .. }), "a copy on another board does not count");
+        let failing = heartbeat(42, now, &board, Some(&settings), Vec::new(), true, Some("Mailbox is invalid".into()));
+        assert_eq!(failing["teamError"], "Mailbox is invalid");
+
+        let beat = heartbeat(42, now, &board, None, Vec::new(), true, None);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(HEARTBEAT_FILE);
         let local = Beat { closed: Mutex::new(false) };

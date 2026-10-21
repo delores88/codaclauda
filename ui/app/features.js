@@ -14,9 +14,15 @@
  *   prStatus           session_pr_status({ id }) → { url|null, state|null, checks:[{ name, status, conclusion }] }
  *   compact            session_compact({ id }) → { ok: true } | error COMPACT_UNSUPPORTED
  *   external           external_sessions_list() → { sessions:[{ provider, cwd, projectHint, modifiedAt, active, owned, providerSessionId }] }
- *   adopt              session_adopt({ provider, providerSessionId, cwd, title? }) → { session, existing? } (0.6)
+ *   adopt              session_adopt({ provider, providerSessionId, cwd, title?, mode?: 'continue'|'fork' }) → { session, existing?, copy? } (0.6);
+ *                      Continue refuses CONVERSATION_ACTIVE (changed < 15 min ago) and CONVERSATION_BOUND (Codex, Wake by mail on)
+ *   desktopBindings    desktop_bindings_get() → { bindings:[{ address, provider, threadId, cwd, projectId, boundAt, cursor, last }], wakeEnabled, pollSeconds } (0.6)
+ *   desktopBind        desktop_bind({ address, threadId }) → { binding, bindings } (0.6, owner only)
+ *   desktopUnbind      desktop_unbind({ address }) → { unbound, bindings } (0.6)
  *   usageGet / usageSet  usage_settings_get() / usage_settings_set({ provider, useCredits?, useResets? }) → { codex, claude, error } (0.6)
- *   usageStatus        usage_status({ provider }) → { snapshot, at, limited, resetsAt } (0.6)
+ *   usageStatus        usage_status({ provider }) → { snapshot, at, limited, resetsAt, state?, resetCredits? } (0.6)
+ *   continue           session_continue({ id, turnId }) → { accepted, turnId, queued } (0.6; the recorded usageStopped turn, once ended)
+ *   retryHeld          session_retry_held({ id }) → { released, turnId? } (0.6; Try now for a held turn)
  *   mcpGet / mcpSet    mcp_servers_get({ projectId }) / mcp_servers_set({ projectId, servers }) → { servers }
  *   notifyGet / notifySet  notify_settings_get() / notify_settings_set({ ntfyUrl, onFinish, onError }) → same
  *   notifyTest         notify_test() (optional; the Settings test button needs it)
@@ -38,6 +44,8 @@ export const COMMANDS = {
   ciStatus: 'ci_status', limitsGet: 'session_limits_get', limitsSet: 'session_limits_set',
   teamGet: 'team_settings_get', teamSet: 'team_settings_set',
   adopt: 'session_adopt', usageGet: 'usage_settings_get', usageSet: 'usage_settings_set', usageStatus: 'usage_status',
+  desktopBindings: 'desktop_bindings_get', desktopBind: 'desktop_bind', desktopUnbind: 'desktop_unbind',
+  continue: 'session_continue', retryHeld: 'session_retry_held',
 };
 export const UNSUPPORTED_TEXT = 'Needs CodaClauda 0.5 desktop';
 
@@ -154,3 +162,70 @@ export function patchLines(patch, limit = 4000) {
   while (out.length && out.at(-1).kind === 'ctx' && !out.at(-1).text) out.pop();
   return out;
 }
+
+/* ---------- 0.6 Wake by mail for Codex desktop chats and Continue / Fork instead ---------- */
+
+/** Board addresses that are never a desktop chat's own inbox. */
+export const RESERVED_ADDRESSES = ['owner', 'codaclauda-team'];
+const squash = text => String(text ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/** The board addresses a Codex desktop chat can be woken through: every known address except the reserved ones and
+ *  CodaClauda sessions' own (`taken`). Likely ones come first: the folder's name in the address or its label, then codex-*.
+ *  → [{ name, label, likely }] (labels are self-asserted display text). */
+export function wakeAddressChoices(addresses, { taken = [], folder = '' } = {}) {
+  const skip = new Set([...RESERVED_ADDRESSES, ...taken].map(a => String(a).toLowerCase()));
+  const hint = squash(folder);
+  const seen = new Set();
+  const rows = [];
+  for (const a of Array.isArray(addresses) ? addresses : []) {
+    const name = typeof a?.name === 'string' ? a.name.trim().toLowerCase() : '';
+    if (!name || skip.has(name) || seen.has(name)) continue;
+    seen.add(name);
+    const label = typeof a.label === 'string' && a.label.trim() !== a.name ? a.label.trim() : '';
+    const named = hint.length >= 3 && (squash(name).includes(hint) || squash(label).includes(hint));
+    const score = (named ? 2 : 0) + (name.startsWith('codex-') ? 1 : 0);
+    rows.push({ name, label, likely: score > 0, score });
+  }
+  rows.sort((x, y) => y.score - x.score || x.name.localeCompare(y.name));
+  return rows.map(({ score, ...row }) => row);
+}
+
+const RECEIPT_TONE = { queued: 'ok', sending: 'warn', timeout: 'warn', unknown: 'warn', unreachable: 'warn', cancelled: 'neutral' };
+const RECEIPT_LABEL = {
+  queued: 'Queued in that chat', sending: 'Outcome unknown', unreachable: "Codex couldn't reach that chat", failed: 'Codex failed',
+  timeout: 'No answer from Codex', cancelled: 'Stopped', 'not-started': "Codex didn't start", refused: 'Not sent', unknown: 'Outcome unknown',
+};
+
+/** desktop_bindings_get → bindings with plain fields only. */
+export function normalizeBindings(list) {
+  const text = v => (typeof v === 'string' ? v : '');
+  return (Array.isArray(list) ? list : []).filter(b => b && typeof b === 'object' && text(b.address) && text(b.threadId)).map(b => {
+    const r = b.last && typeof b.last === 'object' ? b.last : null;
+    return {
+      address: b.address, threadId: b.threadId, cwd: text(b.cwd), projectId: text(b.projectId), boundAt: Number(b.boundAt) || 0,
+      last: r ? { at: Number(r.at) || 0, status: text(r.status) || 'unknown', exitCode: Number.isInteger(r.exitCode) ? r.exitCode : null,
+        messages: Number(r.messages) || 0, more: r.more === true, senders: Array.isArray(r.senders) ? r.senders.filter(s => typeof s === 'string') : [],
+        detail: text(r.detail), stdout: text(r.stdout), stderr: text(r.stderr) } : null,
+    };
+  });
+}
+
+/** A binding's last delivery receipt → { tone: 'ok'|'warn'|'bad'|'neutral', text, title } for one line under its row. */
+export function deliveryText(receipt) {
+  if (!receipt) return { tone: 'neutral', text: 'No new mail since it was bound.', title: '' };
+  const label = RECEIPT_LABEL[receipt.status] || 'Outcome unknown';
+  const count = `${receipt.messages}${receipt.more ? '+' : ''} message${receipt.messages === 1 && !receipt.more ? '' : 's'}`;
+  const from = receipt.senders.length ? ` from ${receipt.senders.slice(0, 3).join(', ')}${receipt.senders.length > 3 ? ` +${receipt.senders.length - 3}` : ''}` : '';
+  const text = receipt.status === 'queued' ? `${label}: ${count}${from}` : `${count}: ${receipt.detail || label}`;
+  const title = [receipt.detail, receipt.exitCode == null ? '' : `exit ${receipt.exitCode}`, receipt.stdout && `stdout: ${receipt.stdout}`, receipt.stderr && `stderr: ${receipt.stderr}`]
+    .filter(Boolean).join('\n');
+  return { tone: RECEIPT_TONE[receipt.status] || 'bad', text, title };
+}
+
+/** Why Continue in CodaClauda would be refused for this row (mirrors external.rs), else null. Fork instead is always possible. */
+export function continueBlock(row, binding) {
+  if (binding) return { code: 'CONVERSATION_BOUND', text: `This Codex conversation wakes by mail in its own app (bound to ${binding.address}). Continuing it here too would give it two writers. Turn off Wake by mail for it first, or choose Fork instead for a separate copy.` };
+  if (row?.active) return { code: 'CONVERSATION_ACTIVE', text: 'This conversation changed in the last 15 minutes, so it may still be open in another app. Continuing it here at the same time would give it two writers. Close it there and continue once it has had no changes for 15 minutes, or choose Fork instead for a separate copy.' };
+  return null;
+}
+export const CONTINUE_REFUSALS = ['CONVERSATION_ACTIVE', 'CONVERSATION_BOUND'];

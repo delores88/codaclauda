@@ -44,7 +44,7 @@ function register(name, label) {
 /* Preview only: a copied join prompt "is pasted" into a pretend chat that registers ~5 s later,
  * so Agent setup's "Waiting… → Joined ✓" can be seen. Also callable as codaMock.join(address, label). */
 function simulateJoins() {
-  globalThis.codaMock = { join: register, teamStart: projectId => mockTeamStart(projectId), sparkOffline: on => { sparkRemoteDown = on === 'throw' ? 'throw' : Boolean(on); }, addCollaborator, weather: code => { weatherForced = code || null; }, weatherFail: on => { weatherFails = Boolean(on); } };
+  globalThis.codaMock = { join: register, teamStart: projectId => mockTeamStart(projectId), usageHold: (id, text) => mockUsageHold(id, text), usageStop: id => mockUsageStop(id), sparkOffline: on => { sparkRemoteDown = on === 'throw' ? 'throw' : Boolean(on); }, addCollaborator, weather: code => { weatherForced = code || null; }, weatherFail: on => { weatherFails = Boolean(on); } };
   const clip = globalThis.navigator?.clipboard;
   if (!clip?.writeText || clip.writeText.mockJoins) return;
   const write = clip.writeText.bind(clip);
@@ -144,6 +144,37 @@ function addCollaborator() {
 
 const stats = (path, loc, files, commits, langs) => ({ path, name: path.split(/[\\/]/).pop(), files, bytes: loc * 38, loc, languages: langs.map(([name, share]) => ({ name, bytes: Math.round(loc * 38 * share) })), git: { commits, commits_7d: Math.min(commits, 14), last_commit_at: ago(30), branch: 'main', remote: '' }, truncated: false });
 
+const TEAM_INBOX = 'codaclauda-team';
+/** Like coord-core's reply_kind: a one-key JSON body queued / admitted (0.6.0: received) is an acknowledgement. */
+function replyKind(message) {
+  try {
+    const body = JSON.parse(message.body);
+    const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : [];
+    return keys.length === 1 && ['queued', 'admitted', 'received'].includes(keys[0]) ? 'acknowledgement' : 'terminal';
+  } catch { return 'terminal'; }
+}
+/** Like heartbeat.rs + mailbox.rs: the durable receipt, the preview app's host lease (always available here),
+ *  who reads the address, and for a start request its queued state. */
+function mockDelivery(m) {
+  const team = m.to === TEAM_INBOX;
+  const session = (sessionStore?.sessions || []).some(s => s.wake && s.mailboxAddress === m.to);
+  const reader = team ? 'app' : session ? 'session' : 'agent';
+  const delivery = { receipt: 'saved', board: 'C:\\mock\\board', host: 'available', hostDetail: null, installation: 'preview-installation', reader,
+    pickupSeconds: reader === 'agent' ? null : team ? 5 : 10,
+    note: reader === 'agent' ? `${m.to} reads its inbox when it next checks. Saved is not read; a message is information, not authority.`
+      : `CodaClauda is running on this board and reads ${m.to} every ${team ? 5 : 10} s (preview).` };
+  if (team) {
+    let body = null;
+    try { body = JSON.parse(m.body); } catch { /* not JSON */ }
+    if (body?.start && typeof body.start === 'object') {
+      delivery.request = m.kind === 'question'
+        ? { state: 'queued', requestId: m.id, cancel: `To cancel it before a teammate launches, post --kind notice to ${TEAM_INBOX} with body {"cancel":{"requestId":"${m.id}"}} and a new --id. Ben can cancel it in Settings > Team.`, note: 'Nothing has started yet. Replies follow: queued, then admitted once a teammate actually launches, then the outcome.' }
+        : { state: 'passive', note: 'A notice never starts a teammate. Post the same body with --kind question to ask for one.' };
+    } else if (typeof body?.cancel?.requestId === 'string') delivery.request = { state: 'cancel-requested', requestId: body.cancel.requestId };
+  }
+  return delivery;
+}
+
 function mockReply(to, subject) {
   setTimeout(() => {
     messages.push(msg(to, 'owner', 'reply', `Re: ${subject}`, `Got it — working on **${subject}** now.\n\n- [x] Read your message\n- [ ] Make the change\n\nInline math works too: $e^{i\\pi}+1=0$.`, 0));
@@ -179,7 +210,23 @@ const handlers = {
     const list = messages.filter(m => m.to === addr && m.sequence > since).slice(0, limit);
     return { messages: list, next_cursor: list.at(-1)?.sequence ?? since, has_more: false };
   },
-  'mailbox-post': payload => { const m = { ...msg(payload.from, payload.to, payload.kind, payload.subject, payload.body, 0), ...payload, id: payload.id }; messages.push(m); if (payload.to !== 'owner') mockReply(payload.to, payload.subject); return m; },
+  'mailbox-post': payload => {
+    const m = { ...msg(payload.from, payload.to, payload.kind, payload.subject, payload.body, 0), ...payload, id: payload.id || `mock-${seq}` };
+    messages.push(m);
+    if (payload.to !== 'owner' && payload.to !== TEAM_INBOX) mockReply(payload.to, payload.subject);
+    return { ...m, delivery: mockDelivery(m) };
+  },
+  /* Like coord-core: the first reply of any kind, or with terminal the first that is not an acknowledgement
+   * (queued / admitted) plus the latest acknowledgement. The preview never waits. */
+  'mailbox-wait-reply': ({ id, terminal = false }) => {
+    if (!messages.some(m => m.id === id)) throw new Error('Original mailbox message is unavailable');
+    if (typeof terminal !== 'boolean') throw new Error('terminal must be boolean');
+    const replies = messages.filter(m => m.reply_to === id).sort((a, b) => a.sequence - b.sequence);
+    const reply = (terminal ? replies.find(m => replyKind(m) === 'terminal') : replies[0]) || null;
+    const out = { timed_out: !reply, reply_kind: reply ? replyKind(reply) : null, reply };
+    if (terminal) out.acknowledgement = [...replies].reverse().find(m => replyKind(m) === 'acknowledgement') || null;
+    return out;
+  },
   'mailbox-ack': ({ id }) => { const m = messages.find(x => x.id === id); if (m) m.read_at = now(); return { read_at: now() }; },
   grant: args => grantFrom(args),
   'grant-revoke': ({ id }) => { // like coord-core: idempotent, ends the grant now (old readers see expiry too)
@@ -342,6 +389,16 @@ function submit(id, text, attachments = [], origin = null) {
   const session = findSession(id);
   if (!String(text).trim() && !attachments.length) throw new Error('Type a message first.');
   const item = { turnId: `t_${hex(6)}`, text, attachments, origin };
+  if ((!origin || origin.kind === 'continue') && session.usageStopped) { session.usageStopped = null; saveSessions(); usageState(session); }
+  // A held turn keeps its place (usage.rs): later turns wait behind it.
+  if (session.held && !sessionTurns.has(id)) {
+    const queue = sessionQueues.get(id) || [];
+    if (queue.length >= QUEUE_MAX) throw new Error(`${QUEUE_MAX} messages are already waiting for this agent. Let it catch up or stop it, then send again.`);
+    queue.push(item);
+    sessionQueues.set(id, queue);
+    queuedEvent(id, queue.length);
+    return { accepted: true, turnId: item.turnId, queued: queue.length };
+  }
   if (sessionTurns.has(id)) {
     const queue = sessionQueues.get(id) || [];
     if (queue.length >= QUEUE_MAX) throw new Error(`${QUEUE_MAX} messages are already waiting for this agent. Let it catch up or stop it, then send again.`);
@@ -383,7 +440,41 @@ function mockWakeTick() {
 
 const slug = cwd => String(cwd || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '') || 'project';
 /** Like the engine's list: live = an owned process (here: a turn now, or activity in the last 10 minutes). */
-const listed = s => ({ ...s, queued: sessionQueues.get(s.id)?.length || 0, live: sessionTurns.has(s.id) || (s.status !== 'stopped' && Boolean(s.providerSessionId) && Date.now() - s.lastActivityAt < 10 * 60e3) });
+const listed = s => ({ ...s, held: s.held || null, queued: sessionQueues.get(s.id)?.length || 0, live: sessionTurns.has(s.id) || (s.status !== 'stopped' && Boolean(s.providerSessionId) && Date.now() - s.lastActivityAt < 10 * 60e3) });
+/* 0.6 usage state (usage.rs): the live 'usage' event carries held and usageStopped. */
+const usageState = session => sessionEmit({ id: session.id, kind: 'usage', usage: session.usage || emptyUsage(), held: session.held || null, usageStopped: session.usageStopped || null }, false);
+function cancelHeld(session) {
+  const held = session.held;
+  if (!held) return false;
+  session.held = null;
+  saveSessions();
+  sessionEmit({ id: session.id, turnId: held.turnId, kind: 'done', status: 'cancelled' }, false);
+  usageState(session);
+  return true;
+}
+/** After a held turn is cancelled, the next queued turn starts (nothing else is running). */
+function releaseQueue(session) {
+  const queue = sessionQueues.get(session.id);
+  if (!sessionTurns.has(session.id) && queue?.length) { runTurn(session, queue.shift()); queuedEvent(session.id, queue.length); }
+}
+/** Preview only: hold the chat's next turn at a pretend plan limit (never sent) with no usable reset reported. */
+function mockUsageHold(id, text = 'A turn held at the preview plan limit.') {
+  const session = findSession(id);
+  session.held = { turnId: `t_${hex(6)}`, provider: session.provider, reason: 'no credits or reset could be used', retryAt: null, retried: false, since: Date.now(), payload: text,
+    text: `${agentName(session.provider)}'s plan limit is reached and no credits or reset could be used. Nothing was sent. No usable reset time was reported, so no retry is scheduled. Waiting for the plan to reset; check Settings > Usage. Try now sends it when you choose; Stop cancels it.` };
+  saveSessions();
+  usageState(session);
+  return session.held;
+}
+/** Preview only: mark the chat's last turn as stopped by the provider at its usage limit after it was sent. */
+function mockUsageStop(id) {
+  const session = findSession(id);
+  const last = [...(sessions().logs[id] || [])].reverse().find(ev => ev.kind === 'user');
+  session.usageStopped = { turnId: last?.turnId || `t_${hex(6)}`, provider: session.provider, at: Date.now() };
+  saveSessions();
+  usageState(session);
+  return session.usageStopped;
+}
 const sessionHandlers = {
   session_list: () => ({ sessions: sessions().sessions.map(listed) }),
   session_start: ({ args = {} }) => {
@@ -404,6 +495,7 @@ const sessionHandlers = {
   session_send: ({ id, text = '', attachments = [] }) => submit(id, text, attachments),
   session_stop: ({ id }) => {
     const session = findSession(id);
+    if (cancelHeld(session)) { releaseQueue(session); return { stopped: true }; }
     if (sessionTurns.has(id)) finishTurn(session, 'interrupted');
     return { stopped: true };
   },
@@ -412,6 +504,7 @@ const sessionHandlers = {
     const dropped = sessionQueues.get(id) || [];
     sessionQueues.delete(id);
     session.status = 'stopped';
+    cancelHeld(session);
     if (sessionTurns.has(id)) finishTurn(session, 'interrupted');
     for (const item of dropped) {
       sessionEmit({ id, turnId: item.turnId, kind: 'done', status: 'cancelled' }, false);
@@ -430,8 +523,9 @@ const sessionHandlers = {
     sessionEmit({ id, kind: 'status', status: session.status });
     return { session: listed(session) };
   },
-  wake_settings_get: () => ({ enabled: sessions().wakeEnabled !== false, loopGuard: loopGuard() }),
-  wake_settings_set: ({ enabled, loopGuard: guard } = {}) => {
+  wake_settings_get: () => ({ enabled: sessions().wakeEnabled !== false, loopGuard: loopGuard(), pairs: mockPairs() }),
+  /* Like wake.rs: { enabled?, loopGuard?, pair?: { key, paused } }; a paused pair stays paused until resumed. */
+  wake_settings_set: ({ enabled, loopGuard: guard, pair } = {}) => {
     const store = sessions();
     const next = loopGuard();
     if (guard !== undefined) {
@@ -440,20 +534,35 @@ const sessionHandlers = {
       if (guard.mode !== undefined) { if (!['notify', 'pause'].includes(guard.mode)) throw coded('INVALID_ARGUMENTS', 'loopGuard.mode must be "notify" or "pause".'); next.mode = guard.mode; }
       if (guard.pairPerHour !== undefined) { if (!Number.isSafeInteger(guard.pairPerHour) || guard.pairPerHour < 1) throw coded('INVALID_ARGUMENTS', 'pairPerHour must be a whole number from 1 to 9007199254740991.'); next.pairPerHour = guard.pairPerHour; }
     }
+    if (pair !== undefined) {
+      if (!pair || typeof pair.key !== 'string' || !pair.key.startsWith('pair:') || !pair.key.includes('|')) throw coded('INVALID_ARGUMENTS', 'pair.key must be a pair key from wake_settings_get.');
+      if (typeof pair.paused !== 'boolean') throw coded('INVALID_ARGUMENTS', 'pair.paused must be true or false.');
+      store.pausedPairs ||= {};
+      if (pair.paused) store.pausedPairs[pair.key] = Date.now(); else delete store.pausedPairs[pair.key];
+    }
     if (enabled !== undefined) store.wakeEnabled = Boolean(enabled);
     store.loopGuard = next;
     saveSessions();
-    return { enabled: store.wakeEnabled !== false, loopGuard: { ...next } };
+    return { enabled: store.wakeEnabled !== false, loopGuard: { ...next }, pairs: mockPairs() };
   },
   /* 0.6 team starts: the owner's standing switch (on, Unlimited by default) covers every linked project
    * without its own entry; an entry may override it. Like team.rs, get lists every linked project with its
    * effective setting, followsDefault and autoRegistered. */
   team_settings_get: () => {
     const book = teamBook();
-    return { address: 'codaclauda-team', pollSeconds: 5, ownerDefault: { ...book.ownerDefault }, defaults: { ...book.ownerDefault }, projects: teamTargets(book) };
+    return { address: 'codaclauda-team', pollSeconds: 5, ownerDefault: { ...book.ownerDefault }, defaults: { ...book.ownerDefault }, projects: teamTargets(book), requests: teamRequests(), inboxError: null };
   },
   team_settings_set: ({ project = {} }) => {
     const book = teamBook();
+    if (project.cancelRequest !== undefined) {   // like team.rs: only a queued request can be cancelled
+      teamRequests();
+      const request = mockRequests.find(r => r.requestId === project.cancelRequest);
+      if (!request) throw coded('REQUEST_NOT_FOUND', 'That team request is not saved.');
+      if (request.status !== 'queued') throw coded('REQUEST_NOT_CANCELLABLE', request.sessionId ? `Its teammate already launched as session ${request.sessionId}; Stop it in Running instead.` : `It already ended (${request.status}).`);
+      Object.assign(request, { status: 'cancelled', cancellable: false, at: Date.now() });
+      writeJson(TEAM_REQUESTS_KEY, mockRequests);
+      return { cancelled: true, requestId: request.requestId, requests: teamRequests() };
+    }
     if (project.ownerDefault !== undefined) {
       const next = { ...book.ownerDefault }, input = project.ownerDefault;
       if (!input || typeof input !== 'object') throw coded('INVALID_ARGUMENTS', 'ownerDefault must be an object with agentsCanStart and maxAgentStartedLive.');
@@ -482,7 +591,27 @@ const sessionHandlers = {
   },
 };
 const loopGuard = () => ({ on: true, mode: 'notify', pairPerHour: 60, ...(sessions().loopGuard || {}) });
+/** Preview pairs: the first two wake-on sessions, as if they had woken each other a few times this hour, plus any paused pair. */
+function mockPairs() {
+  const store = sessions(), paused = store.pausedPairs || {};
+  const addresses = store.sessions.filter(s => s.wake && s.mailboxAddress).map(s => s.mailboxAddress).slice(0, 2).sort();
+  const keys = new Set(Object.keys(paused));
+  if (addresses.length === 2) keys.add(`pair:${addresses[0]}|${addresses[1]}`);
+  const guard = loopGuard();
+  return [...keys].map(key => {
+    const [a, b] = key.slice('pair:'.length).split('|');
+    const lastHour = addresses.length === 2 && key === `pair:${addresses[0]}|${addresses[1]}` ? 3 : 0;
+    return { key, a, b, lastHour, reached: guard.on && lastHour >= guard.pairPerHour, paused: Boolean(paused[key]) };
+  }).sort((x, y) => y.lastHour - x.lastHour);
+}
 const TEAM_KEY = 'mock.team';
+const TEAM_REQUESTS_KEY = 'mock.teamRequests';
+let mockRequests = null;
+/** Recent team requests, newest first, as team_settings_get lists them. */
+const teamRequests = () => {
+  mockRequests ||= readJson(TEAM_REQUESTS_KEY, null) || [];
+  return [...mockRequests].sort((a, b) => b.at - a.at).slice(0, 50).map(r => ({ ...r, cancellable: r.status === 'queued' }));
+};
 const teamBook = () => { const book = readJson(TEAM_KEY, null) || {}; book.projects ||= {}; book.ownerDefault = { agentsCanStart: true, maxAgentStartedLive: 'unlimited', ...(book.ownerDefault || {}) }; return book; };
 const mockPath = path => String(path || '').replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase();
 const teamView = (book, p) => ({
@@ -501,18 +630,30 @@ function teamTargets(book) {
   }
   return out;
 }
-/** Preview: an agent's codaclauda-team request starting a teammate (codaMock.teamStart()). A folder path on
- *  the preview Desktop registers like team.rs does (Read unless it is under C:\Users\Ben). */
+/** Preview: an agent's codaclauda-team request starting a teammate (codaMock.teamStart()). It is listed queued,
+ *  then admitted, then completed, as team.rs answers. A folder path inside a preview linked folder registers like
+ *  team.rs does (Read unless it is under C:\Users\Ben); a folder elsewhere is refused (existing is not enough). */
 function mockTeamStart(projectId) {
   const book = teamBook();
+  const linkedRoots = (readJson('mock.desktop', null)?.projects?.local || []).map(item => mockPath(item.path));
+  const underLinked = path => linkedRoots.some(root => mockPath(path).startsWith(`${root}/`));
   if (projectId && /^[A-Za-z]:\\/.test(projectId) && !teamTargets(book)[`local:${mockPath(projectId)}`]) {
+    if (!underLinked(projectId)) return `Agents cannot start teammates in ${projectId}: it is not a linked project, nor a real folder inside one.`;
     book.projects[`local:${mockPath(projectId)}`] = { name: projectId.split('\\').pop(), cwd: projectId, ids: [`local:${mockPath(projectId)}`], autoAccess: /^c:\\users\\ben\\/i.test(projectId) ? 'full' : 'read', updatedAt: Date.now() };
     writeJson(TEAM_KEY, book);
   }
   const [id, entry] = Object.entries(teamTargets(book)).find(([key, p]) => p.agentsCanStart && (!projectId || key === projectId || key === `local:${mockPath(projectId)}`)) || [];
   if (!id) return 'Agents cannot start teammates there: turn on Settings → Team, or the project in Projects → Teammates.';
-  const { session } = sessionHandlers.session_start({ args: { provider: 'codex', projectId: id, cwd: entry.cwd, access: entry.access || 'read', title: 'Reviewer (started by an agent)', startedBy: { address: 'claude-codaclauda', messageId: `mock-team-${hex(3)}`, at: Date.now() } } });
-  submit(session.id, 'claude-codaclauda asked CodaClauda to start you. Review the diff.', [], { kind: 'team', from: 'claude-codaclauda' });
+  const requestId = `mock-team-${hex(3)}`;
+  teamRequests();
+  const request = { requestId, from: 'claude-codaclauda', subject: 'Need a reviewer', status: 'queued', at: Date.now(), sessionId: null, address: null, code: null };
+  mockRequests.push(request);
+  const { session } = sessionHandlers.session_start({ args: { provider: 'codex', projectId: id, cwd: entry.cwd, access: entry.access || 'read', title: 'Reviewer (started by an agent)', startedBy: { address: 'claude-codaclauda', messageId: requestId, at: Date.now() } } });
+  Object.assign(request, { status: 'launching', sessionId: session.id, address: session.mailboxAddress, at: Date.now() });
+  writeJson(TEAM_REQUESTS_KEY, mockRequests);
+  submit(session.id, 'claude-codaclauda asked CodaClauda to start you. Review the diff.', [], { kind: 'team', from: 'claude-codaclauda', messageId: requestId });
+  setTimeout(() => { Object.assign(request, { status: 'admitted', at: Date.now() }); writeJson(TEAM_REQUESTS_KEY, mockRequests); }, 400);
+  setTimeout(() => { Object.assign(request, { status: 'completed', at: Date.now() }); writeJson(TEAM_REQUESTS_KEY, mockRequests); }, 2500);
   return session.mailboxAddress;
 }
 
@@ -654,6 +795,8 @@ const MCP_PRESETS = [
 ];
 const FAKE_EXTERNAL_IDS = ['3f1c2a9e-7b4d-4e21-9a0c-5d8e6f1b2c3a', 'a7e9d1c4-2b6f-4a83-8c15-9e0d3b7f4a62', '0199c3b2-5e7a-7d41-b8f0-2c6a9e4d1f73', '0199b8e1-4c2d-7a95-a3e6-8f1d0c5b7e24', 'c2d4e6f8-1a3b-4c5d-8e7f-9a0b1c2d3e4f'];
 const USAGE_KEY = 'mock.usage';
+const BINDINGS_KEY = 'mock.desktopBindings';
+const mockBindings = () => (readJson(BINDINGS_KEY, []) || []).filter(b => b && typeof b.address === 'string');
 /* Like usage.rs: every flag is on unless saved exactly false. */
 const usageSettings = () => {
   const saved = readJson(USAGE_KEY, {}) || {};
@@ -746,21 +889,92 @@ const v05Handlers = {
     return { sessions: [...fake, ...mine].sort((a, b) => b.modifiedAt - a.modifiedAt) };
   },
   /* 0.6 (H6): resume that exact provider conversation as a CodaClauda session, wake on, at the project's
-   * current access (Read when the folder is not a linked project). */
+   * current access (Read when the folder is not a linked project). Like external.rs: an existing CodaClauda
+   * session is returned as is; Continue is refused while the conversation is bound for Wake by mail
+   * (CONVERSATION_BOUND, checked first) or changed in the last 15 minutes (CONVERSATION_ACTIVE); mode 'fork'
+   * starts a separate copy (no provider ids, forkFrom = the original, adoptedFrom.copy) and never touches it. */
   session_adopt: input => {
     const a = input?.args && typeof input.args === 'object' ? input.args : input || {};
     if (!['claude', 'codex'].includes(a.provider)) throw coded('INVALID_ARGUMENTS', 'provider must be claude or codex.');
-    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(String(a.providerSessionId || ''))) throw coded('INVALID_ARGUMENTS', 'providerSessionId must name the provider conversation.');
-    if (!/^[A-Za-z]:\\/.test(String(a.cwd || ''))) throw coded('PROJECT_MISSING', `${a.cwd || 'That folder'} is not an existing project folder.`);
+    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(String(a.providerSessionId || ''))) throw coded('INVALID_ARGUMENTS', 'That is not a Claude Code or Codex conversation id.');
+    if (a.mode != null && !['', 'continue', 'fork'].includes(String(a.mode).trim())) throw coded('INVALID_ARGUMENTS', 'mode must be continue or fork.');
+    const fork = String(a.mode || '').trim() === 'fork';
     const existing = sessions().sessions.find(s => s.provider === a.provider && (s.providerSessionId === a.providerSessionId || s.threadId === a.providerSessionId));
-    if (existing) return { session: listed(existing), existing: true };   // like external.rs: never a second copy
+    if (existing && !fork) return { session: listed(existing), existing: true };   // never a second writer
+    const row = v05Handlers.external_sessions_list().sessions.find(e => e.provider === a.provider && e.providerSessionId === a.providerSessionId);
+    if (!row) throw coded('SESSION_NOT_FOUND', `That ${agentName(a.provider)} conversation is no longer on this PC.`);
+    if (!/^[A-Za-z]:\\/.test(String(a.cwd || ''))) throw coded('PROJECT_MISSING', `${a.cwd || 'That folder'} is not an existing project folder.`);
+    if (!fork) {
+      const bound = a.provider === 'codex' ? mockBindings().find(b => b.threadId === a.providerSessionId) : null;
+      if (bound) throw coded('CONVERSATION_BOUND', `This ${agentName(a.provider)} conversation wakes by mail in its own app (bound to ${bound.address}). Continuing it here too would give it two writers. Turn off Wake by mail for it first, or choose Fork instead for a separate copy.`);
+      if (Date.now() - row.modifiedAt < 15 * 60e3) throw coded('CONVERSATION_ACTIVE', `This ${agentName(a.provider)} conversation changed less than 15 minutes ago, so it may still be open in another app. Continuing it here at the same time would give it two writers. Close it there and continue once it has had no changes for 15 minutes, or choose Fork instead for a separate copy.`);
+    }
     const linked = (readJson('mock.desktop', null)?.projects?.local || []).find(p => mockPath(p.path) === mockPath(a.cwd));
     const level = linked ? readJson('mock.desktop', null)?.projectAccess?.[`local:${mockPath(a.cwd)}`]?.level || 'full' : 'read';
-    const { session } = sessionHandlers.session_start({ args: { provider: a.provider, projectId: linked ? `local:${mockPath(a.cwd)}` : a.cwd, cwd: a.cwd, access: level, title: a.title || `Adopted ${agentName(a.provider)} chat` } });
+    const title = String(a.title || '').trim().slice(0, 200) || `${agentName(a.provider)} conversation${fork ? ' (copy)' : ''}`;
+    const { session } = sessionHandlers.session_start({ args: { provider: a.provider, projectId: linked ? `local:${mockPath(a.cwd)}` : a.cwd, cwd: a.cwd, access: level, title } });
     const record = findSession(session.id);
+    if (fork) {
+      Object.assign(record, { forkFrom: a.providerSessionId, adoptedFrom: { provider: a.provider, providerSessionId: a.providerSessionId, copy: true } });
+      saveSessions();
+      return { session: listed(record), copy: true };
+    }
     Object.assign(record, { providerSessionId: a.providerSessionId, threadId: a.provider === 'codex' ? a.providerSessionId : null, adoptedFrom: { provider: a.provider, providerSessionId: a.providerSessionId } });
     saveSessions();
     return { session: listed(record) };
+  },
+  /* 0.6 Wake by mail for an existing Codex desktop chat (desktop_queue.rs). Owner only. Like the engine: the address
+   * must be registered on the board, not reserved and not a CodaClauda session's; the thread must be a Codex
+   * conversation on this "PC" whose folder is inside a linked project and that no CodaClauda session writes.
+   * A refusal saves nothing; rebinding the same pair keeps its cursor and receipt. The preview never runs codex. */
+  desktop_bindings_get: () => ({ bindings: mockBindings(), wakeEnabled: sessions().wakeEnabled !== false, pollSeconds: 10 }),
+  desktop_bind: ({ address, threadId } = {}) => {
+    const name = String(address || '').trim().toLowerCase();
+    if (!/^[a-z0-9._-]{1,80}$/.test(name)) throw coded('INVALID_ARGUMENTS', 'address must be a board address (letters, digits, dots, underscores or hyphens).');
+    if (['owner', TEAM_INBOX].includes(name)) throw coded('ADDRESS_RESERVED', `${name} is not a chat's own inbox; pick the address that Codex chat registered.`);
+    if (sessions().sessions.some(s => s.mailboxAddress === name)) throw coded('ADDRESS_TAKEN', `${name} belongs to a CodaClauda session, which wakes by mail on its own.`);
+    if (!addresses.some(a => a.name === name)) throw coded('ADDRESS_UNKNOWN', `${name} is not registered on the board. Have that chat register it with its usual mailbox command first.`);
+    const thread = String(threadId || '').trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(thread)) throw coded('INVALID_ARGUMENTS', 'threadId must be a Codex conversation id.');
+    const found = v05Handlers.external_sessions_list().sessions.find(c => c.provider === 'codex' && c.providerSessionId === thread);
+    if (!found) throw coded('THREAD_NOT_FOUND', 'No Codex conversation with that id is on this PC.');
+    const root = (readJson('mock.desktop', null)?.projects?.local || []).map(p => p.path).filter(p => mockPath(found.cwd) === mockPath(p) || mockPath(found.cwd).startsWith(`${mockPath(p)}/`)).sort((x, y) => y.length - x.length)[0];
+    if (!root) throw coded('PROJECT_NOT_LINKED', `That Codex conversation works in ${found.cwd}, which is not inside one of your linked projects. Link the project in Projects first.`);
+    if (found.owned) throw coded('CONTINUED_IN_CODACLAUDA', 'A CodaClauda session already writes this conversation and wakes by mail itself. Two writers would interleave; use that chat instead.');
+    const kept = mockBindings().find(b => b.address === name && b.threadId === thread);
+    const binding = kept ? { ...kept, cwd: found.cwd, projectId: `local:${mockPath(root)}` } : { address: name, provider: 'codex', threadId: thread, cwd: found.cwd, projectId: `local:${mockPath(root)}`, boundAt: Date.now(), cursor: 0, last: null };
+    const bindings = [...mockBindings().filter(b => b.address !== name), binding];
+    writeJson(BINDINGS_KEY, bindings);
+    return { binding, bindings };
+  },
+  desktop_unbind: ({ address } = {}) => {
+    const name = String(address || '').trim().toLowerCase();
+    if (!/^[a-z0-9._-]{1,80}$/.test(name)) throw coded('INVALID_ARGUMENTS', 'address must be a board address.');
+    const before = mockBindings(), bindings = before.filter(b => b.address !== name);
+    writeJson(BINDINGS_KEY, bindings);
+    return { unbound: bindings.length !== before.length, bindings };
+  },
+  /* 0.6 usage limits (usage.rs). A held turn never reached a provider: Try now releases it through normal admission
+   * (the preview has no plan limit, so it is sent); Stop or close cancels it. Continue is a new owner turn for the
+   * recorded usageStopped turn once it has ended (origin { kind: 'continue', turnId }); nothing is replayed.
+   * Preview only: codaMock.usageHold(id) / codaMock.usageStop(id) put a chat into those states. */
+  session_retry_held: ({ id }) => {
+    const session = findSession(id);
+    const held = session.held;
+    if (!held) throw coded('NOT_HELD', 'This chat has no held turn.');
+    if (session.status === 'stopped') throw coded('SESSION_CLOSED', 'This chat is closed; its held turn was not sent.');
+    session.held = null;
+    saveSessions();
+    usageState(session);
+    const item = { turnId: held.turnId, text: held.payload || held.text, attachments: [], origin: null };
+    if (sessionTurns.has(id)) { const queue = sessionQueues.get(id) || []; queue.unshift(item); sessionQueues.set(id, queue); queuedEvent(id, queue.length); } else runTurn(session, item);
+    return { released: true, turnId: held.turnId };
+  },
+  session_continue: ({ id, turnId }) => {
+    const session = findSession(id);
+    if (session.usageStopped?.turnId !== turnId) throw coded('NOT_STOPPED', 'That turn is not the one stopped at the usage limit.');
+    if (sessionTurns.get(id)?.turnId === turnId) throw coded('SESSION_BUSY', 'Wait for the stopped turn to finish before continuing.');
+    return { ...submit(id, `Continue from turn ${turnId}, which stopped at the usage limit after it was sent. Part of it may already have run: check what was done before repeating any step.`, [], { kind: 'continue', turnId }), duplicate: false };
   },
   /* 0.6 usage setting (usage.rs): app-wide, all on by default; the preview never contacts a provider. */
   usage_settings_get: () => usageSettings(),
@@ -777,10 +991,10 @@ const v05Handlers = {
   },
   usage_status: input => {
     const provider = (input?.args && typeof input.args === 'object' ? input.args : input || {}).provider;
-    if (provider === 'claude') return { provider, snapshot: null, at: null, limited: false, overage: false, resets: 'unsupported' };
+    if (provider === 'claude') return { provider, snapshot: null, at: null, limited: false, overage: false, resetsAt: null, resets: 'unsupported' };
     if (provider !== 'codex') throw coded('INVALID_ARGUMENTS', 'provider must be claude or codex.');
     const at = Date.now(), soon = Math.round(at / 1000) + 3 * 3600;
-    return { provider, at, limited: false, resetsAt: null, snapshot: { ordinaryUsageAllowed: true, rateLimits: { planType: 'pro', primary: { usedPercent: 41, windowDurationMins: 300, resetsAt: soon }, secondary: { usedPercent: 76, windowDurationMins: 10080, resetsAt: soon + 3 * 86400 }, credits: { hasCredits: true, unlimited: false, balance: '11.86' }, spendControlReached: false, rateLimitReachedType: null }, rateLimitResetCredits: { availableCount: 1 } } };
+    return { provider, at, state: 'allowed', limited: false, resetsAt: null, resetCredits: 1, accountReported: true, snapshot: { ordinaryUsageAllowed: true, rateLimits: { planType: 'pro', primary: { usedPercent: 41, windowDurationMins: 300, resetsAt: soon }, secondary: { usedPercent: 76, windowDurationMins: 10080, resetsAt: soon + 3 * 86400 }, credits: { hasCredits: true, unlimited: false, balance: '11.86' }, spendControlReached: false, rateLimitReachedType: null }, rateLimitResetCredits: { availableCount: 1 } } };
   },
   mcp_servers_get: ({ projectId }) => ({ servers: readJson(MCP_KEY, {})[projectId] || [], presets: structuredClone(MCP_PRESETS) }),
   mcp_servers_set: ({ projectId, servers = [] }) => {
@@ -875,6 +1089,9 @@ const desktopHandlers = {
   weather_now: weatherNow,
   geocode_place: geocodePlace,
 };
+
+/** For node tests: the handler tables, without starting the preview timers. */
+export const mockHandlers = () => ({ rpc: handlers, desktop: desktopHandlers, preview: { usageHold: mockUsageHold, usageStop: mockUsageStop } });
 
 export function createMock() {
   simulateJoins();

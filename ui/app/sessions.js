@@ -9,8 +9,11 @@
  * the count), and 'wake' events mark a turn started by a board message. Agent text is untrusted; views
  * render it through markdown.js or textContent only. Transcripts never go through the desktop UI state file.
  * 0.5: records gain worktreePath, branch and usage { input, output, cached, costUsd, contextPct }; a
- * 'usage' event updates usage live. fork / handoff / compact go through features.js (feature-detected). */
-import { desktop } from './bridge.js';
+ * 'usage' event updates usage live. fork / handoff / compact go through features.js (feature-detected).
+ * 0.6: records and 'usage' events carry billing, lastTurnCredits (an estimate), held (a turn the usage gate held
+ * before sending: { turnId, text, retryAt|null, retried }) and usageStopped ({ turnId } of a sent turn the provider
+ * stopped at its limit); continueTurn / retryHeld are the owner's actions for them. */
+import { desktop, invoke } from './bridge.js';
 import { buildTranscript, compactEvents, stripContext, toMs } from './session-model.js';
 import { call as callFeature } from './features.js';
 
@@ -104,9 +107,12 @@ class Sessions extends EventTarget {
     const s = this.session(e.id);
     if (e.kind === 'usage') {   // token and context meters only: no transcript line, no unread mark
       if (s && e.usage && typeof e.usage === 'object') s.usage = { ...(s.usage || {}), ...e.usage };
-      // 0.6: where turns are billed when not the plan, and the last turn's credit cost.
+      // 0.6: where turns are billed when not the plan, and the last turn's credit estimate.
       if (s && 'billing' in e) s.billing = e.billing || null;
       if (s && 'lastTurnCredits' in e) s.lastTurnCredits = e.lastTurnCredits || null;
+      // 0.6: a turn held at the plan limit (never sent), and a sent turn the provider stopped at its usage limit.
+      if (s && 'held' in e) s.held = e.held || null;
+      if (s && 'usageStopped' in e) s.usageStopped = e.usageStopped || null;
       if (s) this.changed();
       return;
     }
@@ -258,6 +264,24 @@ class Sessions extends EventTarget {
   }
 
   async stop(id) { await desktop.sessionStop({ id }); }
+
+  /** 0.6 Continue after a usage-limit stop: a new owner turn that names the original (session_continue); never a replay. */
+  async continueTurn(id, turnId) {
+    const args = { id, turnId };
+    const data = await (typeof desktop.sessionContinue === 'function' ? desktop.sessionContinue(args) : invoke('session_continue', args));
+    const s = this.session(id);
+    if (s?.usageStopped?.turnId === turnId) s.usageStopped = null;
+    this.changed();
+    this.scheduleRefresh(600);
+    return data;
+  }
+
+  /** 0.6 Try now for a held turn (session_retry_held): normal admission, then a fresh usage check. Stop cancels it instead. */
+  async retryHeld(id) {
+    const data = await (typeof desktop.sessionRetryHeld === 'function' ? desktop.sessionRetryHeld({ id }) : invoke('session_retry_held', { id }));
+    this.scheduleRefresh(600);
+    return data;
+  }
 
   async close(id) {
     await desktop.sessionClose({ id });

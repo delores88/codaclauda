@@ -1,17 +1,24 @@
 /* Settings → Team (0.6). The owner's standing switch "Agents can start teammates in my projects" (on by
  * default) and how many agent-started sessions may work at once in one project (Unlimited by default). Both
  * apply to every linked project without its own setting; Projects → a project → Teammates overrides them for
- * that project. An agent asks by posting to codaclauda-team; while CodaClauda is open it answers within
- * seconds: "received", then "started" or "refused" with the setting to change. A teammate never gets more
- * access than its project has. A folder an agent asks for on the Desktop or inside a linked project registers
- * as a project (Full when it is yours, otherwise Read) and is added to Projects. See docs/TEAM.md.
- *   team_settings_get() → { address, pollSeconds, ownerDefault: { agentsCanStart, maxAgentStartedLive }, projects }
- *   team_settings_set({ project: { ownerDefault: { agentsCanStart?, maxAgentStartedLive? } } }) → { ownerDefault } */
+ * that project, and a saved project setting is never replaced by this default. An agent asks by posting to
+ * codaclauda-team; while CodaClauda is open it answers "queued" within seconds, then "admitted" once the
+ * teammate's first turn reaches its provider, then the outcome. A teammate never gets more access than its
+ * project has. A real folder inside a linked project (reached without links or junctions) registers as a
+ * project (Full when it is yours, otherwise Read) and is added to Projects. See docs/TEAM.md.
+ * The card also lists recent requests (a queued one can be cancelled) and, per pair of CodaClauda sessions,
+ * how often they woke each other in the last hour, with Pause/Resume for that pair.
+ *   team_settings_get() → { address, pollSeconds, ownerDefault, projects, requests, inboxError }
+ *   team_settings_set({ project: { ownerDefault: { agentsCanStart?, maxAgentStartedLive? } } }) → { ownerDefault }
+ *   team_settings_set({ project: { cancelRequest } }) → { cancelled, requestId, requests }
+ *   wake_settings_get() → { enabled, loopGuard, pairs: [{ key, a, b, lastHour, reached, paused }] }
+ *   wake_settings_set({ pair: { key, paused } }) → same */
 import { desktop } from '../bridge.js';
-import { team, TEAM_ADDRESS } from '../team.js';
+import { team, TEAM_ADDRESS, requestRows, pairRows } from '../team.js';
 import { limitValue, isUnlimited, UNLIMITED } from '../budgets.js';
 
 export const OWNER_DEFAULT = Object.freeze({ agentsCanStart: true, maxAgentStartedLive: UNLIMITED });
+const REQUESTS_SHOWN = 8;
 
 const normalizePath = path => String(path || '').replaceAll('\\', '/').replace(/^\/\/\?\/UNC\//i, '//').replace(/^\/\/\?\//, '').replace(/\/+$/, '').toLowerCase();
 const baseName = path => String(path || '').split(/[\\/]/).filter(Boolean).pop() || String(path || '');
@@ -43,10 +50,22 @@ export function teamSummary(projects) {
   return [own.length ? `Own setting in Projects: ${own.join(', ')}.` : '', registered.length ? `Folders agents registered: ${registered.join(', ')}.` : ''].filter(Boolean).join(' ');
 }
 
+/** One request row: "claude-app-0001 · Need a reviewer · Working (codex-app-0b1c)". */
+export function requestLine(row) {
+  const extra = row.address ? ` (${row.address})` : row.code ? ` (${row.code})` : '';
+  return `${row.from || 'unknown sender'} · ${row.subject || 'no subject'} · ${row.label}${extra}`;
+}
+
+/** One pair row: "claude-a ↔ codex-b: 12 wakes in the last hour". */
+export function pairLine(pair) {
+  const n = pair.lastHour;
+  return `${pair.a} ↔ ${pair.b}: ${n} ${n === 1 ? 'wake' : 'wakes'} in the last hour${pair.reached ? ' (guard reached)' : ''}${pair.paused ? ' · paused by you' : ''}`;
+}
+
 /** → { node, load() }: a persistent card. */
 export function teamSettings({ ui }) {
   const { h, icon, toast } = ui;
-  const state = { saved: null, error: '', busy: false, pollSeconds: 5 };
+  const state = { saved: null, error: '', busy: false, pollSeconds: 5, pairs: [], pairsError: '', pairBusy: '' };
   const supported = () => typeof desktop.teamSettingsGet === 'function' && typeof desktop.teamSettingsSet === 'function';
 
   const onInput = h('input', { type: 'checkbox', 'aria-label': 'Agents can start teammates in my projects', onchange: event => save({ agentsCanStart: event.currentTarget.checked }) });
@@ -55,11 +74,16 @@ export function teamSettings({ ui }) {
   const guardSave = h('button.btn.small.primary', { type: 'button', onclick: () => saveGuard() }, icon('check'), 'Save');
   const status = h('span.field-hint.ntfy-status', { role: 'status' });
   const summary = h('p.field-hint');
+  const inboxError = h('p.inline-error', { role: 'alert', hidden: true });
+  const requestList = h('div', { style: { display: 'grid', gap: '6px' } });
+  const pairList = h('div', { style: { display: 'grid', gap: '6px' } });
+  const pairStatus = h('span.field-hint', { role: 'status' });
+  const refresh = h('button.btn.small.ghost', { type: 'button', title: 'Read requests and wake counts again', onclick: () => load() }, icon('refresh'), 'Refresh');
   const node = h('section.card.settings-card.team-card',
     h('h2.panel-title', 'Team'),
     h('div.setting-row',
       h('div.setting-text', h('strong', 'Agents can start teammates in my projects'),
-        h('span.field-hint', `On (the default): an agent can ask for a new Claude Code or Codex session by posting to ${TEAM_ADDRESS}, in any linked project or in a folder on your Desktop or inside a linked project. The teammate starts at that project's access level, never higher, with wake on. To turn one project off, use Projects → the project → Teammates.`)),
+        h('span.field-hint', `On (the default): an agent can ask for a new Claude Code or Codex session by posting to ${TEAM_ADDRESS}, in any linked project or in a real folder inside one. The teammate starts at that project's access level, never higher, with wake on. To turn one project off, use Projects → the project → Teammates; a project's own setting is kept.`)),
       h('label.switch', onInput, h('span'))),
     h('div.setting-row',
       h('div.setting-text', h('strong', 'Agent-started sessions working at once'),
@@ -67,6 +91,16 @@ export function teamSettings({ ui }) {
       h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: 'none', flexWrap: 'wrap' } },
         count, h('label.checkbox-label', unlimited, h('span', 'Unlimited')), guardSave)),
     summary,
+    inboxError,
+    h('div.setting-row', { style: { display: 'block' } },
+      h('div.setting-text', h('strong', 'Recent requests'),
+        h('span.field-hint', 'Each request is answered queued, then admitted once its teammate actually launches, then with its outcome. A queued one has not started and can be cancelled.')),
+      requestList),
+    h('div.setting-row', { style: { display: 'block' } },
+      h('div.setting-text', h('strong', 'Sessions waking each other'),
+        h('span.field-hint', 'Per pair of CodaClauda sessions, both directions together, in the last hour. Pause stops that pair waking each other until you resume it; their messages wait unread. The loop guard is in Limits above.'), pairStatus),
+      pairList),
+    h('div', { style: { display: 'flex', justifyContent: 'flex-end' } }, refresh),
     h('p.field-hint', 'Your switches are the authority. A board message is information; its sender name is self-asserted and cannot raise access. Every request gets a reply, including refusals, with the setting that would change the answer.'));
 
   const guardValue = () => limitValue(count.value, unlimited.checked, 1);
@@ -75,6 +109,21 @@ export function teamSettings({ ui }) {
     onInput.checked = state.saved.agentsCanStart;
     unlimited.checked = state.saved.maxAgentStartedLive === UNLIMITED;
     count.value = unlimited.checked ? '' : String(state.saved.maxAgentStartedLive);
+  }
+  function renderRequests() {
+    const rows = requestRows(team.requests).slice(0, REQUESTS_SHOWN);
+    requestList.replaceChildren(...(rows.length ? rows.map(row => h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'space-between' } },
+      h('span.field-hint', { title: `${row.hint}${row.requestId ? ` Request ${row.requestId}.` : ''}` }, requestLine(row)),
+      row.cancellable ? h('button.btn.small.ghost', { type: 'button', onclick: () => cancelRequest(row) }, 'Cancel') : null))
+      : [h('span.field-hint', 'No requests yet.')]));
+  }
+  function renderPairs() {
+    const rows = state.pairs;
+    pairStatus.textContent = state.pairsError ? `Couldn't read wake counts: ${state.pairsError}` : '';
+    pairList.replaceChildren(...(rows.length ? rows.map(pair => h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'space-between' } },
+      h('span.field-hint', pairLine(pair)),
+      h('button.btn.small.ghost', { type: 'button', disabled: state.pairBusy === pair.key, onclick: () => setPair(pair, !pair.paused) }, pair.paused ? 'Resume' : 'Pause')))
+      : [h('span.field-hint', state.pairsError ? '' : 'No two sessions have woken each other in the last hour.')]));
   }
   function render() {
     node.hidden = !supported();
@@ -92,6 +141,17 @@ export function teamSettings({ ui }) {
           : state.busy ? 'Saving…' : dirty ? 'Not saved yet.' : `Now ${state.saved.maxAgentStartedLive === UNLIMITED ? 'Unlimited' : state.saved.maxAgentStartedLive}. CodaClauda reads ${TEAM_ADDRESS} every ${state.pollSeconds} s while it is open.`;
     summary.textContent = teamSummary(team.projects);
     summary.hidden = !summary.textContent;
+    inboxError.hidden = !team.inboxError;
+    inboxError.textContent = team.inboxError ? `CodaClauda could not finish reading ${TEAM_ADDRESS}: ${team.inboxError}. Agents posting there are told so.` : '';
+    renderRequests();
+    renderPairs();
+  }
+  async function loadPairs() {
+    if (typeof desktop.wakeSettingsGet !== 'function') return;
+    try {
+      state.pairs = pairRows((await desktop.wakeSettingsGet())?.pairs);
+      state.pairsError = '';
+    } catch (error) { state.pairsError = error?.message || String(error); }
   }
   async function load() {
     if (!supported()) { render(); return; }
@@ -101,6 +161,7 @@ export function teamSettings({ ui }) {
       fill(data?.ownerDefault);
       state.error = '';
     } catch (error) { state.error = error?.message || String(error); }
+    await loadPairs();
     render();
     team.load();
   }
@@ -111,7 +172,7 @@ export function teamSettings({ ui }) {
       const data = await desktop.teamSettingsSet({ ownerDefault: patch });
       if (!data?.ownerDefault) throw new Error('Team settings did not confirm the change.');
       fill(data.ownerDefault);
-      if ('agentsCanStart' in patch) toast(state.saved.agentsCanStart ? 'Agents can start teammates in your projects' : 'Agents cannot start teammates (except in projects you turned on in Projects)', { kind: 'success', timeout: 3600 });
+      if ('agentsCanStart' in patch) toast(state.saved.agentsCanStart ? 'Agents can start teammates in your projects (projects with their own setting keep it)' : 'Agents cannot start teammates (except in projects you turned on in Projects)', { kind: 'success', timeout: 3600 });
       else toast(`Agent-started sessions at once: ${state.saved.maxAgentStartedLive === UNLIMITED ? 'Unlimited' : state.saved.maxAgentStartedLive}`, { kind: 'success', timeout: 3000 });
       team.load();
     } catch (error) {
@@ -123,6 +184,25 @@ export function teamSettings({ ui }) {
     const v = guardValue();
     if (v == null || !state.saved || v === state.saved.maxAgentStartedLive) { render(); return; }
     save({ maxAgentStartedLive: v });
+  }
+  async function cancelRequest(row) {
+    try {
+      await team.cancelRequest(row.requestId);
+      toast(`Cancelled ${row.subject || row.requestId}; ${row.from || 'its sender'} is told within seconds.`, { kind: 'success', timeout: 4200 });
+    } catch (error) {
+      toast(`Couldn't cancel it: ${error?.message || error}`, { kind: 'error', timeout: 8000 });
+      team.load();
+    }
+  }
+  async function setPair(pair, paused) {
+    if (state.pairBusy) return;
+    state.pairBusy = pair.key; renderPairs();
+    try {
+      state.pairs = pairRows((await desktop.wakeSettingsSet({ pair: { key: pair.key, paused } }))?.pairs);
+      toast(paused ? `Paused ${pair.a} and ${pair.b} waking each other; their messages wait unread.` : `${pair.a} and ${pair.b} can wake each other again.`, { kind: 'success', timeout: 4200 });
+    } catch (error) {
+      toast(`Couldn't change that pair: ${error?.message || error}`, { kind: 'error', timeout: 8000 });
+    } finally { state.pairBusy = ''; renderPairs(); }
   }
   team.on('change', render);
   render();

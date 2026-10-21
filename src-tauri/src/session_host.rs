@@ -21,9 +21,11 @@
 //!
 //! 0.6 continues a Claude or Codex conversation found on this PC as a
 //! CodaClauda session (`external.rs`, adopt) and follows the owner's usage
-//! setting when a plan limit is reached: weekly resets, ChatGPT or Claude
-//! usage credits, or a wait for the reset (`usage.rs`).
+//! setting when a plan limit is reached: earned reset credits, ChatGPT or
+//! Claude usage credits, or a held turn that keeps its ledger entry until a
+//! reported reset; a turn already sent is never replayed (`usage.rs`).
 
+pub(crate) mod desktop_queue;
 pub(crate) mod external;
 pub(crate) mod fork;
 pub(crate) mod limits;
@@ -268,14 +270,20 @@ struct Record {
     /// 0.6: { provider, providerSessionId } of the conversation this session continues.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     adopted_from: Option<Value>,
-    /// 0.6: "credits" (ChatGPT) or "usage-credits" (Claude) while past the plan limit.
+    /// 0.6: "credits" (ChatGPT), "usage-credits" (Claude), "reset" (after an
+    /// earned reset credit) or "unknown" (the limit state was not reported).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     billing: Option<String>,
-    /// 0.6 Codex: the thread's credit estimate so far, and the last turn's share.
+    /// 0.6 Codex: the thread's credit estimate so far (None: unknown), and the
+    /// last turn's estimated share ({ turnId, micros|null, at, estimate }).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     credits_micros: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_turn_credits: Option<Value>,
+    /// 0.6: { turnId, provider, at } of a sent turn the provider stopped at its
+    /// usage limit; the owner may Continue it with a new turn (never a replay).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage_stopped: Option<Value>,
 }
 
 /// Wake counters shown in the UI: rolling hour and day, and all time.
@@ -480,10 +488,12 @@ impl Queued {
 }
 
 /// Turns that need no automation revalidation: the owner's own, Codex
-/// compact-now, a hand-off's summary (0.5), and a team start's first turn,
-/// authorized by the project switch when its session was created.
+/// compact-now, a hand-off's summary (0.5), a team start's first turn,
+/// authorized by the project switch when its session was created, and the
+/// owner's Continue after a usage-limit stop (0.6, `usage.rs`).
 fn owner_equivalent_origin(origin: &Value) -> bool {
-    origin.is_null() || matches!(origin["kind"].as_str(), Some("compact" | "handoff" | "team"))
+    origin.is_null()
+        || matches!(origin["kind"].as_str(), Some("compact" | "handoff" | "team" | "continue"))
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -518,6 +528,10 @@ struct DurableTurn {
     error: Option<String>,
     payload: Option<Queued>,
     history_saved: bool,
+    /// 0.6: status "held" when the usage gate refused it before anything was
+    /// sent; kept after release so its one automatic retry is never re-armed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hold: Option<usage::Hold>,
 }
 
 impl DurableTurn {
@@ -532,6 +546,7 @@ impl DurableTurn {
             error: None,
             payload: Some(item.clone()),
             history_saved: false,
+            hold: None,
         }
     }
 
@@ -764,6 +779,7 @@ impl State {
 
     /// Recovery never reconstructs a runnable queue. Both queued and active
     /// acceptances become inspectable interruptions, including automation.
+    /// A held turn (0.6) never reached a provider, so it stays held.
     fn interrupt_pending(&mut self) -> (bool, Vec<(String, Option<String>)>) {
         let known: HashSet<_> = self.ledger.keys().cloned().collect();
         let mut legacy = Vec::new();
@@ -781,7 +797,11 @@ impl State {
                 changed = true;
             }
         }
-        for turn in self.ledger.values_mut().filter(|turn| !turn.terminal()) {
+        for turn in self
+            .ledger
+            .values_mut()
+            .filter(|turn| !turn.terminal() && turn.status != "held")
+        {
             turn.settle("interrupted", Some("CodaClauda closed before this turn completed. It was not replayed; inspect any partial work before sending again."));
             changed = true;
         }
@@ -901,8 +921,8 @@ struct Inner {
     team_registered: AtomicBool,
     /// 0.6 owner usage setting and the latest plan snapshots (`usage.rs`).
     usage: Mutex<usage::Book>,
-    /// Turns already given their one usage-limit retry.
-    usage_retries: Mutex<HashSet<String>>,
+    /// Armed one-retry timers of held turns ("<turn>@<reset>"), never twice.
+    usage_timers: Mutex<HashSet<String>>,
 }
 
 /// Tauri-managed handle to the session engine.
@@ -937,7 +957,7 @@ impl SessionHost {
             team: Mutex::new(team::Book::default()),
             team_registered: AtomicBool::new(false),
             usage: Mutex::new(usage::Book::default()),
-            usage_retries: Mutex::new(HashSet::new()),
+            usage_timers: Mutex::new(HashSet::new()),
         });
         inner.load()?;
         inner.load_wake();
@@ -946,6 +966,7 @@ impl SessionHost {
         inner.load_limits();
         inner.load_team();
         inner.load_usage();
+        inner.restore_holds();
         let reaper = inner.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -1093,7 +1114,8 @@ fn read_snapshot(path: &Path) -> Result<(Vec<Record>, BTreeMap<String, DurableTu
             || !turn.fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
             || !valid_turn_id(id)
             || !seen.contains(&turn.session_id)
-            || !(turn.terminal() || matches!(turn.status.as_str(), "queued" | "active"))
+            || !(turn.terminal() || matches!(turn.status.as_str(), "queued" | "active" | "held"))
+            || (turn.status == "held" && (turn.hold.is_none() || turn.payload.is_none()))
             || !valid_payload
             || (turn.history_saved && turn.payload.is_some())
             || turn
@@ -2292,6 +2314,7 @@ impl Inner {
             .map(|r| (r.thread_id.clone(), r.fork_from.clone(), r.adopted_from.clone()))
             .unwrap_or_default();
         let mut fresh = false;
+        let resumed = known.clone();
         let result = match known {
             // A fork's first launch copies its source thread (0.5).
             None if fork.is_some() => {
@@ -2371,6 +2394,7 @@ impl Inner {
             .as_str()
             .unwrap_or(&thread)
             .to_owned();
+        let copied = codex_resumed_as_copy(adopted.as_ref(), resumed.as_deref(), &thread);
         let _lifecycle = lock(&self.lifecycle);
         if !lock(&self.state)
             .live
@@ -2389,6 +2413,10 @@ impl Inner {
             r.thread_id = Some(thread);
             r.provider_session_id = Some(session);
         })?;
+        if copied {
+            self.publish(event(&record.id, Some(turn_id), "notice", json!({"tone": "warn",
+                "text": "Codex continued this conversation as a copy with a new thread ID (the original may be open in another app). The original conversation is unchanged."})), true);
+        }
         Ok(())
     }
 
@@ -2449,6 +2477,17 @@ impl Inner {
 
     fn list(&self) -> Value {
         let state = lock(&self.state);
+        // 0.6: a turn the usage gate held before sending, per chat.
+        let now = now_ms() / 1000;
+        let held: HashMap<&str, Value> = state
+            .ledger
+            .values()
+            .filter(|t| t.status == "held")
+            .filter_map(|t| {
+                let hold = t.hold.as_ref()?;
+                Some((t.session_id.as_str(), usage::held_view(&t.turn_id, hold, now)))
+            })
+            .collect();
         let sessions: Vec<Value> = state
             .records
             .iter()
@@ -2456,6 +2495,7 @@ impl Inner {
                 let mut value =
                     serde_json::to_value(record).expect("A record contains only JSON values");
                 value["queued"] = json!(state.queues.get(&record.id).map_or(0, VecDeque::len));
+                value["held"] = held.get(record.id.as_str()).cloned().unwrap_or(Value::Null);
                 // Team view: awake = an owned process (or one starting), asleep = none.
                 value["live"] = json!(
                     state.live.contains_key(&record.id) || state.launching.contains_key(&record.id)
@@ -2669,7 +2709,7 @@ impl Inner {
             let before = state.queues.get(id).map_or(0, VecDeque::len);
             if item.origin["kind"] == "schedule"
                 && item.origin["trigger"] != "manual"
-                && (state.session_busy(id) || before > 0)
+                && (state.session_busy(id) || before > 0 || state.held_turn(id).is_some())
             {
                 return Err((
                     "SESSION_BUSY",
@@ -2703,6 +2743,10 @@ impl Inner {
             return Err(("STORAGE_FAILED", message));
         }
         self.publish(user, false);
+        // 0.6: an owner send (or Continue) moves on from a usage-limit stop.
+        if item.origin.is_null() || item.origin["kind"] == "continue" {
+            self.clear_usage_stopped(id);
+        }
         let (outcome, waiting) = self.admit_queued(id, Some(turn_id.as_str()));
         if waiting != before {
             self.publish_queued(id, waiting);
@@ -2739,7 +2783,8 @@ impl Inner {
     /// None: nothing can start now. Some(Err): the front turn could not be
     /// admitted and has left the queue.
     fn take_next(&self, state: &mut State, id: &str) -> Option<Result<Started, (Queued, Failure)>> {
-        if state.session_busy(id) {
+        // A held turn (0.6) keeps its place: later turns wait behind it.
+        if !state.startable(id) {
             return None;
         }
         let item = state.queues.get_mut(id)?.pop_front()?;
@@ -2951,8 +2996,15 @@ impl Inner {
         let provider = Provider::parse(&record.provider).ok_or("Unknown provider.")?;
         // 0.6 usage setting: Claude decides from its last rate-limit event,
         // before any process starts; Codex asks its account once started.
+        // A hold happens before anything reaches the provider (`usage.rs`).
         if provider == Provider::Claude {
-            self.claude_usage_gate(&record.id, turn_id).await?;
+            match self.claude_usage_gate(&record.id, turn_id) {
+                usage::Gate::Send => {}
+                usage::Gate::Stopped => return Ok(()),
+                usage::Gate::Hold(hold) => {
+                    return self.hold_turn(&record.id, turn_id, proc.as_ref(), hold);
+                }
+            }
             if !self.turn_active(&record.id, turn_id) {
                 return Ok(());
             }
@@ -2965,7 +3017,13 @@ impl Inner {
             return Ok(()); // stopped while the agent was starting
         }
         if provider == Provider::Codex {
-            self.codex_usage_gate(&record.id, &proc, turn_id).await?;
+            match self.codex_usage_gate(&record.id, &proc, turn_id).await {
+                usage::Gate::Send => {}
+                usage::Gate::Stopped => return Ok(()),
+                usage::Gate::Hold(hold) => {
+                    return self.hold_turn(&record.id, turn_id, Some(&proc), hold);
+                }
+            }
             if !self.turn_active(&record.id, turn_id) {
                 return Ok(());
             }
@@ -3071,9 +3129,18 @@ impl Inner {
                 return Err(("SESSION_NOT_FOUND", "That chat no longer exists.".into()));
             };
             let proc = state.live.get(id).map(|l| l.proc.clone());
-            let Some(turn) = state.turns.get_mut(id) else {
+            if !state.turns.contains_key(id) {
+                // 0.6: Stop cancels a held turn; it was never sent.
+                let held = state.cancel_held(id);
+                let saved = if held.is_some() { self.save(&state) } else { Ok(()) };
+                drop(state);
+                if let Some(item) = held {
+                    self.held_cancelled(id, &item, true);
+                }
+                saved.map_err(|message| ("STORAGE_FAILED", message))?;
                 return Ok(json!({"stopped": true}));
-            };
+            }
+            let turn = state.turns.get_mut(id).expect("checked above");
             turn.stopping = true;
             (turn.id.clone(), turn.provider_turn.clone(), proc, thread)
         };
@@ -3123,12 +3190,14 @@ impl Inner {
 
     fn close(&self, id: &str) -> Result<Value, Failure> {
         let _lifecycle = lock(&self.lifecycle);
-        let (live, turn, dropped, saved) = {
+        let (live, turn, dropped, held, saved) = {
             let mut state = lock(&self.state);
             let Some(record) = state.records.iter_mut().find(|r| r.id == id) else {
                 return Err(("SESSION_NOT_FOUND", "That chat no longer exists.".into()));
             };
             record.status = "stopped".into();
+            // 0.6: closing cancels a held turn too; it was never sent.
+            let held = state.cancel_held(id);
             let proc = state.live.get(id).map(|live| live.proc.clone());
             let turn = if proc.is_some() {
                 if let Some(turn) = state.turns.get_mut(id) {
@@ -3155,13 +3224,16 @@ impl Inner {
                 }
             }
             let saved = self.save(&state);
-            (proc, turn, dropped, saved)
+            (proc, turn, dropped, held, saved)
         };
         if let Some(turn) = turn {
             let _ = self.write_settlement(&turn.id, true);
             if turn.origin["kind"] == "schedule" {
                 self.schedule_finished(&turn.origin, &turn.id, "interrupted", None);
             }
+        }
+        if let Some(item) = held {
+            self.held_cancelled(id, &item, false);
         }
         for item in &dropped {
             let _ = self.write_settlement(&item.turn_id, true);
@@ -3315,6 +3387,14 @@ fn launch_env() -> BTreeMap<OsString, OsString> {
         !STRIPPED_ENV.contains(&name.as_str()) && session_policy::retain_launch_env(&name)
     });
     env
+}
+
+/// 0.6: an adopted Codex conversation that `thread/resume` answered with a
+/// different thread id was continued as a copy (as Claude reports its own).
+/// A Fork-instead copy (`adoptedFrom.copy`) is a copy by design, never flagged.
+fn codex_resumed_as_copy(adopted: Option<&Value>, resumed: Option<&str>, returned: &str) -> bool {
+    resumed.is_some_and(|thread| thread != returned)
+        && adopted.is_some_and(|a| a["copy"] != true && a["providerSessionId"].as_str() == resumed)
 }
 
 fn sandbox_mode(access: &str) -> &'static str {
@@ -3655,6 +3735,19 @@ mod tests {
             status: "idle".into(),
             ..Record::default()
         }
+    }
+
+    #[test]
+    fn an_adopted_codex_thread_resumed_under_a_new_id_is_reported_as_a_copy() {
+        let original = "0199a8f2-1c2d-7e3f-8a9b-0c1d2e3f4a5b";
+        let adopted = json!({"provider": "codex", "providerSessionId": original});
+        assert!(codex_resumed_as_copy(Some(&adopted), Some(original), "0199a8f2-0000-7e3f-8a9b-0c1d2e3f4a5b"));
+        assert!(!codex_resumed_as_copy(Some(&adopted), Some(original), original), "same thread: continued itself");
+        // Already moved to the new id: said once, not on every later launch.
+        assert!(!codex_resumed_as_copy(Some(&adopted), Some("0199a8f2-0000-7e3f-8a9b-0c1d2e3f4a5b"), "x"));
+        let fork_copy = json!({"provider": "codex", "providerSessionId": original, "copy": true});
+        assert!(!codex_resumed_as_copy(Some(&fork_copy), Some(original), "x"), "Fork instead is a copy by design");
+        assert!(!codex_resumed_as_copy(None, Some(original), "x"));
     }
 
     #[test]

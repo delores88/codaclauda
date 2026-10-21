@@ -74,26 +74,45 @@ fn process_round_trip_preserves_utf8_idempotence_cursor_ack_and_reply() {
 }
 
 #[test]
-fn post_says_who_picks_it_up_and_a_bare_reply_answers_the_newest_message() {
+fn post_reports_the_receipt_and_host_lease_and_wait_reply_can_wait_for_the_outcome() {
+    use coord_core::heartbeat::{BINDING_FILE, SCHEMA, installation_id};
+    use serde_json::json;
     let f = Fixture::new();
-    let (code, saved) = f.post("team-one", "codex-claudacoda", "codaclauda-team", "question", b"{}", &[]);
+    let (code, saved) = f.post("team-one", "codex-claudacoda", "codaclauda-team", "question", br#"{"start":{}}"#, &[]);
     assert_eq!(code, 0);
-    assert_eq!(saved["data"]["delivery"]["state"], "app_not_running");
-    let beat = f.root.join("board/desktop-ui");
-    fs::create_dir_all(&beat).unwrap();
+    let delivery = &saved["data"]["delivery"];
+    assert_eq!((delivery["receipt"].as_str(), delivery["host"].as_str(), delivery["request"]["state"].as_str()), (Some("saved"), Some("unavailable"), Some("queued")));
+    // A fresh heartbeat for this board, from an installation bound to this board.
+    let board = f.root.join("board").canonicalize().unwrap();
+    let settings = f.root.join(".app.claudacoda-settings");
+    fs::create_dir_all(&settings).unwrap();
+    fs::write(settings.join(BINDING_FILE), json!({"schema": 1, "install_root": f.root.join("app"), "state_dir": board}).to_string()).unwrap();
+    fs::create_dir_all(board.join("desktop-ui")).unwrap();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-    let heartbeat = serde_json::json!({"pid": 1, "at": now, "version": "0.6.0", "teamPollSeconds": 5, "wakePollSeconds": 60, "addresses": [], "team": true});
-    fs::write(beat.join("host-heartbeat.json"), heartbeat.to_string()).unwrap();
-    let (_, saved) = f.post("team-two", "codex-claudacoda", "codaclauda-team", "question", b"{}", &[]);
-    assert_eq!(saved["data"]["delivery"], serde_json::json!({"state": "received", "pickup_seconds": 5}));
+    let heartbeat = json!({"schema": SCHEMA, "pid": 1, "at": now, "version": "0.6.1", "board": board, "installation": installation_id(&settings),
+        "settingsDir": settings, "teamPollSeconds": 5, "wakePollSeconds": 10, "addresses": [], "team": true});
+    fs::write(board.join("desktop-ui/host-heartbeat.json"), heartbeat.to_string()).unwrap();
+    let (_, saved) = f.post("team-two", "codex-claudacoda", "codaclauda-team", "question", br#"{"start":{}}"#, &[]);
+    let delivery = &saved["data"]["delivery"];
+    assert_eq!((delivery["host"].as_str(), delivery["pickupSeconds"].as_u64()), (Some("available"), Some(5)));
+    assert_eq!(delivery["installation"], heartbeat["installation"]);
     let (_, saved) = f.post("plain-one", "codex-claudacoda", "owner", "question", b"Ready?", &[]);
-    assert_eq!(saved["data"]["delivery"]["state"], "passive");
+    assert_eq!(saved["data"]["delivery"]["reader"], "agent");
+    // A bare reply answers the one open question; with none open it is refused naming --reply-to.
     let (code, reply) = f.post("reply-one", "owner", "codex-claudacoda", "reply", b"Yes.", &[]);
     assert_eq!(code, 0);
     assert_eq!(reply["data"]["reply_to"], "plain-one");
     let (code, error) = f.post("reply-two", "owner", "codex-marketplace", "reply", b"Yes.", &[]);
     assert_eq!(code, 2);
     assert!(error["error"]["message"].as_str().unwrap().contains("--reply-to"));
+    // wait-reply: the first reply says it is an acknowledgement; --terminal waits past it.
+    let queued = br#"{"queued":{"requestId":"team-one"}}"#;
+    assert_eq!(f.post("ack-one", "codaclauda-team", "codex-claudacoda", "reply", queued, &["--reply-to", "team-one"]).0, 0);
+    let (_, first) = f.run(&["wait-reply", "team-one", "--timeout", "0"]);
+    assert_eq!((first["data"]["reply"]["id"].as_str(), first["data"]["reply_kind"].as_str()), (Some("ack-one"), Some("acknowledgement")));
+    let (code, waited) = f.run(&["wait-reply", "team-one", "--timeout", "0", "--terminal"]);
+    assert_eq!(code, 0);
+    assert_eq!((waited["data"]["timed_out"].as_bool(), waited["data"]["acknowledgement"]["id"].as_str()), (Some(true), Some("ack-one")));
 }
 
 #[test]

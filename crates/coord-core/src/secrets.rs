@@ -6,13 +6,6 @@
 //!
 //! Separator rule (every alternative except private-key blocks). The INLINE
 //! alternatives are concatenations of these pieces:
-//!   (?:(?-u:\b)|_)                 before sk-, gh?_ and bearer: an ASCII word
-//!                                  start (zero width) or '_', so a prefix
-//!                                  after an ASCII letter or digit, as in
-//!                                  "task-..." or "desk-...", is not a key
-//!   (?-i:\x{17F})k-                U+017F, which (?i) also accepts for 's' but
-//!                                  is not an ASCII word character, is matched
-//!                                  with no word start at all
 //!   sk-(?:ant-)?[a-z0-9_-]{12,}    letters, digits, '_' and '-'
 //!   gh[pousr]_[a-z0-9_]{15,}       letters, digits and '_'
 //!   bearer\s+[a-z0-9._-]+          letters, whitespace, digits, '.', '_' and '-'
@@ -25,16 +18,12 @@
 //! variants (U+017F, U+212A), `\s` is Unicode White_Space (no ASCII
 //! punctuation), and the only negated class lists all three. So no INLINE match
 //! contains a separator byte, and because the separators are ASCII they never
-//! occur inside a multi-byte character. The pattern has no anchors or
-//! look-around. Its only assertion, the ASCII word start, looks at the byte
-//! before a match: one in the same separator-free stretch, or a separator, or
-//! the file start. A separator is not a word byte, and the start of a stretch
-//! scanned alone counts as the same non-word edge. (ASCII, not Unicode, so the
-//! regex DFAs keep running on non-ASCII text.) So whether a span matches
-//! depends only on its own stretch, and a leftmost-first scan reaches the start
-//! of every separator-free stretch with no match in progress. The INLINE
-//! matches of a whole text are therefore exactly the INLINE matches of each
-//! separator-free stretch scanned alone, and a window is redacted correctly when it is scanned together with
+//! occur inside a multi-byte character. The pattern has no anchors, word
+//! boundaries or look-around, so whether a span matches depends only on its own
+//! text, and a leftmost-first scan reaches the start of every separator-free
+//! stretch with no match in progress. The INLINE matches of a whole text are
+//! therefore exactly the INLINE matches of each separator-free stretch scanned
+//! alone, and a window is redacted correctly when it is scanned together with
 //! the stretches it touches: back to the previous separator and forward to the
 //! next one (or the start/end of the file). If either separator is more than
 //! 1 MiB away the read fails closed instead (READ_UNVERIFIABLE).
@@ -60,8 +49,11 @@ use std::sync::OnceLock;
 /// A private-key block: a BEGIN marker, any text, and the first END marker.
 const PEM_BLOCK: &str =
     r"-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----.*?-----END (?:[A-Z ]*PRIVATE KEY)-----";
-/// Every other alternative; none can contain a separator (see above).
-const INLINE: &str = r#"(?:(?-u:\b)|_)(?:sk-(?:ant-)?[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{15,}|bearer\s+[a-z0-9._-]+)|(?-i:\x{17F})k-(?:ant-)?[a-z0-9_-]{12,}|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|client[_-]?secret)["']?\s*[:=]\s*["']?[^\s,;"'}]+"#;
+/// Every other alternative; none can contain a separator (see above). Key
+/// prefixes match inside words too ("xsk-...", an escaped "\nghp_..."), so
+/// stream and file redaction never depends on what precedes a key. Only the
+/// mailbox's refusal (`mailbox_credential`) spares ordinary compound words.
+const INLINE: &str = r#"sk-(?:ant-)?[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{15,}|bearer\s+[a-z0-9._-]+|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|client[_-]?secret)["']?\s*[:=]\s*["']?[^\s,;"'}]+"#;
 /// Bytes of a run searched backward from a tail to classify its marker.
 const LOOKBACK: usize = 4096;
 /// Longer than any spelling of "PRIVATE KEY-----" (at most 18 bytes).
@@ -83,6 +75,73 @@ fn tail() -> &'static bytes::Regex {
 
 pub fn redact(text: &str) -> String {
     pattern().replace_all(text, "[REDACTED]").into_owned()
+}
+
+/// Credential names the mailbox watches for assignments and statements.
+const NAMES: &str = r"pairing[ _-]*(?:code|token)|session[ _-]*(?:token|capability)|claudacoda[ _-]*session[ _-]*capability|codaclauda[ _-]*capability|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization|token|secret|password|passwd|pwd";
+
+fn mailbox_rules() -> &'static [Regex; 4] {
+    static RULES: OnceLock<[Regex; 4]> = OnceLock::new();
+    RULES.get_or_init(|| {
+        let rule = |source: String| Regex::new(&source).expect("fixed mailbox credential expression");
+        [
+            // Always: private keys, JWTs and AWS access key ids.
+            rule(r"(?i)-----BEGIN[ A-Z]*PRIVATE KEY-----|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|\bAKIA[A-Z0-9]{16}\b".into()),
+            // Key prefixes and bearer tokens, judged by what precedes them (see mailbox_credential).
+            rule(r"(?i)sk-(?:ant-)?[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{15,}|bearer\s+[a-z0-9._~+/-]{16,}".into()),
+            // An assignment, or a quoted "name": value / name: "value" pair (config, JSON).
+            rule(format!(r#"(?i)(?:{NAMES})["']?\s*=\s*["']?[^\s,;"'}}]+|["'](?:{NAMES})["']\s*:\s*["']?([^\s,;"'}}]+)|(?:{NAMES})\s*:\s*["']([^\s,;"'}}]+)"#)),
+            // A statement, "name: value" or "name is value"; refused only for a credential-like value.
+            rule(format!(r#"(?i)(?:{NAMES})\s*(?::|\bis\b)\s*([^\s,;"'}}]+)"#)),
+        ]
+    })
+}
+
+/// Mixed upper and lower case letters and digits, as generated keys have.
+fn generated(value: &str) -> bool {
+    value.bytes().any(|b| b.is_ascii_digit()) && value.bytes().any(|b| b.is_ascii_uppercase()) && value.bytes().any(|b| b.is_ascii_lowercase())
+}
+
+/// A value after "token:" or "password is" that looks like a credential, not a word.
+fn credential_like(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let prefixed = ["sk-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "eyj", "akia", "xox", "glpat-", "bearer"].iter().any(|p| lower.starts_with(p));
+    let digits = value.bytes().any(|b| b.is_ascii_digit());
+    prefixed
+        || (digits && value.len() >= 4)
+        || (value.len() >= 16 && value.bytes().any(|b| b.is_ascii_uppercase()) && value.bytes().any(|b| b.is_ascii_lowercase()))
+}
+
+/// The mailbox's refusal rule (0.6). A post is refused, not redacted, so this
+/// is narrower than `redact` in two ways, and only these two:
+/// - an `sk-`, `gh?_` or `bearer` prefix right after an ASCII letter or digit,
+///   as in "task-", "desk-", "risk-", "ask-", "mask-", "laughs_" or
+///   "flagbearer", is an ordinary word unless its value mixes upper and lower
+///   case letters and digits, as generated keys do (so "x%3Dsk-proj-AbC1..."
+///   is still refused);
+/// - the credential names (token, secret, password, authorization, pairing
+///   code, session capability...) are refused in an assignment (`=`), in a
+///   quoted `"name": value` pair, or with `:` / `is` when the value looks like
+///   a credential: a key prefix, a digit in 4 or more characters, or 16 or
+///   more mixed-case characters. "the token is ready", "secret: none" and
+///   "authorization: granted" are prose.
+/// Private keys, JWTs and AWS key ids are always refused. Like
+/// every pattern, this is not proof that a text holds no secret.
+pub fn mailbox_credential(text: &str) -> bool {
+    let [always, keys, shaped, statement] = mailbox_rules();
+    if always.is_match(text) {
+        return true;
+    }
+    let in_word = |at: usize| text[..at].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric());
+    let value = |key: &str| key.rsplit(char::is_whitespace).next().unwrap_or("").to_owned();
+    if keys.find_iter(text).any(|m| !in_word(m.start()) || generated(&value(m.as_str()))) {
+        return true;
+    }
+    let placeholder = |v: &str| ["null", "none", "true", "false"].contains(&v.to_ascii_lowercase().as_str());
+    if shaped.captures_iter(text).any(|c| c.get(1).or(c.get(2)).is_none_or(|v| !placeholder(v.as_str()))) {
+        return true;
+    }
+    statement.captures_iter(text).any(|c| c.get(1).is_some_and(|v| credential_like(v.as_str())))
 }
 
 /// A byte no INLINE match can contain.
@@ -503,22 +562,64 @@ mod tests {
         assert!(pattern().is_match(&odd) && !blocks(odd.as_bytes(), 2).is_empty());
     }
 
+    const WORDS: [&str; 7] = ["task-", "desk-", "risk-", "ask-", "mask-", "laughs_", "ghost_"];
+    const PREFIXES: [&str; 5] = ["sk-ant-", "sk-proj-", "ghp_", "ghs_", "Bearer "];
+    /// A generated-looking key body: mixed case and digits.
+    const BODY: &str = "Ab3dEf6hIj9kLm2nOp5qRs8t";
+
     #[test]
-    fn key_prefixes_must_start_a_word() {
-        let tail = "abcdefghijklmnopqrstuvwxyz";
-        for word in ["task-", "desk-", "ghost_", "laughs_", "flagbearer ", "1sk-", "x9ghp_"] {
-            let text = format!("see {word}{tail}, now");
-            assert_eq!(redact(&text), text, "{word}");
-            let mut scan = WriteScan::new(1 << 20);
-            scan.feed(text.as_bytes()).unwrap();
-            assert!(scan.finish().is_ok(), "{word}");
-        }
-        // '_' before a prefix is redacted with it.
-        for (lead, kept) in [("", ""), (" ", " "), ("=", "="), ("\"", "\""), ("(", "("), ("\n", "\n"), ("\u{e9}", "\u{e9}"), ("x_", "x")] {
-            for prefix in ["sk-ant-", "sk-proj-", "sk-", "ghp_", "ghs_", "Bearer "] {
-                assert_eq!(redact(&format!("{lead}{prefix}{tail}")), format!("{kept}[REDACTED]"), "{lead:?} {prefix}");
+    fn the_mailbox_spares_compound_words_and_refuses_true_keys() {
+        for word in WORDS {
+            for tail in ["review-notes-for-today", "abcdefghijklmnopqrstuvwxyz", "0001-release-checklist"] {
+                let text = format!("see {word}{tail}, now");
+                assert!(!mailbox_credential(&text), "{text}");
             }
         }
+        for prefix in PREFIXES {
+            for lead in ["", " ", "=", "\"", "(", "\n", "x_", "\u{e9}", "key%3D", "\\n"] {
+                assert!(mailbox_credential(&format!("{lead}{prefix}{BODY}")), "{lead:?}{prefix}");
+            }
+            // A key glued to a word is still refused when it looks generated.
+            assert!(mailbox_credential(&format!("mask{prefix}{BODY}")), "glued {prefix}");
+        }
+        assert!(!mailbox_credential("the flagbearer of the release, the bearer of news"));
+    }
+
+    #[test]
+    fn the_mailbox_keyword_filter_refuses_credential_shapes_not_prose() {
+        for prose in ["the token is ready", "secret: none", "authorization: granted", "Your session token is valid for an hour.",
+            "The password is required on first login.", "pairing code: shown in the app", "token budget: unlimited, no secrets here"] {
+            assert!(!mailbox_credential(prose), "{prose}");
+        }
+        // Built at run time so no source line itself looks like a credential to a scanner.
+        let built = [format!("secret: {}{}", "Correct", "HorseBatteryStaple"), format!("{0}BEGIN PRIVATE KEY{0}", "-".repeat(5)), format!("{}{}", "AKIA", "ABCDEFGHIJKLMNOP")];
+        for shape in ["password=hunter2", "token = opaque-example", "api_key: abc123def", "the password is hunter2", "pairing code: 123456",
+            r#"{"token": "ready"}"#, "password: 'hunter'", "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+            "CLAUDACODA_SESSION_CAPABILITY=private-example", "access_token is sk-proj-abc"].into_iter().chain(built.iter().map(String::as_str)) {
+            assert!(mailbox_credential(shape), "{shape}");
+        }
+        assert!(!mailbox_credential(r#"{"token": null}"#));
+    }
+
+    #[test]
+    fn stream_and_file_redaction_keeps_matching_keys_inside_words() {
+        // The mailbox rule above is narrower; redaction is not: a key is redacted whatever precedes it.
+        for prefix in PREFIXES {
+            for lead in ["", " ", "=", "\n", "x_", "key%3D", "\\n", "mask", "1"] {
+                let text = format!("{lead}{prefix}{BODY}");
+                let redacted = redact(&text);
+                assert!(!redacted.contains(BODY) && redacted.contains("[REDACTED]"), "{text:?} -> {redacted:?}");
+                let mut scan = WriteScan::new(1 << 20);
+                let refused = scan.feed(text.as_bytes()).and_then(|()| scan.finish().map(|_| ())).unwrap_err().to_string();
+                assert!(refused.contains("recognizable credential") && !refused.contains(BODY), "{refused}");
+            }
+        }
+        // Over-redaction of a compound word is accepted in files and streams; a leak is not.
+        assert_ne!(redact("see task-abcdefghijklmnop"), "see task-abcdefghijklmnop");
+        // A window cut through a key is redacted with the stretches around it.
+        let (before, window) = ("x = sk-ant-Ab3", "dEf6hIj9kLm2nOp, rest");
+        let out = redact_window(before.as_bytes(), window, b"", before.len() as u64, &[]);
+        assert_eq!(out, "[REDACTED], rest");
     }
 
     #[test]
@@ -564,6 +665,21 @@ mod stream_answer_tests {
         let mut actual = String::new();
         output.read_to_string(&mut actual).unwrap();
         assert_eq!(actual, redact(&text));
+    }
+    #[test]
+    fn a_key_split_across_the_read_buffer_is_still_redacted() {
+        let mut input = tempfile::tempfile().unwrap();
+        let mut output = tempfile::tempfile().unwrap();
+        // Glued to a word ("x"), starting 5 bytes before the 1 MiB read buffer ends.
+        let lead = "a,".repeat(((1 << 20) - 6) / 2);
+        let text = format!("{lead}x{}{}, tail", "sk-ant-", "Ab3dEf6hIj9kLm2nOp5qRs8t");
+        input.write_all(text.as_bytes()).unwrap();
+        redact_file(&mut input, 0, &mut output, 1 << 16, str::to_owned).unwrap();
+        output.seek(SeekFrom::Start(0)).unwrap();
+        let mut actual = String::new();
+        output.read_to_string(&mut actual).unwrap();
+        assert_eq!(actual, redact(&text));
+        assert!(actual.ends_with("x[REDACTED], tail") && !actual.contains("Ab3dEf6h"));
     }
     #[test]
     fn unverifiable_answer_context_fails_without_exposing_partial_output() {

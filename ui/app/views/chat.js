@@ -26,6 +26,7 @@ import { LEVELS, ACCESS_NOTE, BROWSER_UNAVAILABLE, levelInfo } from '../access.j
 import { wake, wakeCounts, WAKE_POLL_SECONDS, WAKE_UNAVAILABLE_TEXT } from '../wake.js';
 import { has as hasFeature, call as callFeature, normalizeUsage, tokens, money, patchLines, repoOf } from '../features.js';
 import { openInstructions, openMcpTools, MCP_NOTE } from '../project-tools.js';
+import { usageBanner, billingLabel, creditEstimateText } from './settings-usage.js';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'needs-owner']);
 const MAX_FILES = 10;
@@ -822,8 +823,9 @@ export function mount(root, ctx) {
       hasUsage(u)
         ? h('dl.res-facts',
           h('dt', 'Tokens'), h('dd', `${tokens(u.input)} in · ${tokens(u.output)} out${u.cached ? ` · ${tokens(u.cached)} cached` : ''}`),
-          claude || !s.lastTurnCredits || !Number.isFinite(Number(s.lastTurnCredits.micros)) ? null : h('dt', 'Last turn'),
-          claude || !s.lastTurnCredits || !Number.isFinite(Number(s.lastTurnCredits.micros)) ? null : h('dd', `${(Number(s.lastTurnCredits.micros) / 1e6).toFixed(2)} credits`))
+          // 0.6: Codex's own per-turn credit estimate (account/usage/read), never an invoice or money.
+          claude || !creditEstimateText(s.lastTurnCredits) ? null : h('dt', 'Last turn'),
+          claude || !creditEstimateText(s.lastTurnCredits) ? null : h('dd', { title: "Codex's estimate of this turn's share of the thread's credits" }, creditEstimateText(s.lastTurnCredits)))
         : h('p.field-hint', 'Shown after the first reply.'),
       h('dl.res-facts', h('dt', 'Billing'), h('dd', billingText(s))),
       h('div.ctx-meter', { title: u.contextPct != null ? `Context ${Math.round(u.contextPct)}% full` : 'Context fill not reported yet' },
@@ -833,11 +835,32 @@ export function mount(root, ctx) {
       compact);
   }
   /** Where this chat's turns are billed (Settings > Usage decides what happens at the plan limit). */
-  function billingText(s) {
-    if (s.billing === 'credits') return 'ChatGPT credits (plan limit reached)';
-    if (s.billing === 'usage-credits') return 'Claude usage credits (plan limit reached)';
-    if (s.billing === 'reset') return 'Plan, after a weekly reset';
-    return 'Your plan';
+  function billingText(s) { return billingLabel(s.billing); }
+
+  /* ----- 0.6 usage banner: a turn held at the plan limit (never sent) or a sent turn stopped at its usage limit ----- */
+  const usageBusy = new Set();   // session ids with a Try now / Continue / Stop in flight
+  function renderUsageBanner(info) {
+    const rows = info.sessions.map(s => [s, usageBanner(s, { running: sessions.running(s.id) })]).filter(([, b]) => b);
+    const sig = rows.length ? JSON.stringify(['usage', info.id, rows.map(([s, b]) => [s.id, b.kind, b.turnId, b.text, usageBusy.has(s.id)])]) : '';
+    if (sig === state.bannerSig) return;
+    state.bannerSig = sig;
+    if (!sig) { statusArea.replaceChildren(); return; }
+    statusArea.replaceChildren(...rows.map(([s, b]) => {
+      const busy = usageBusy.has(s.id);
+      const button = (label, iconName, run, primary) => h(`button.btn.small${primary ? '.primary' : ''}.wait-action`, { type: 'button', disabled: busy, onclick: () => usageAction(s, run) }, icon(iconName), label);
+      const actions = b.actions.map(a => (a === 'continue' ? button('Continue', 'arrowRight', () => sessions.continueTurn(s.id, b.turnId), true)
+        : a === 'retry' ? button('Try now', 'refresh', () => sessions.retryHeld(s.id), true)
+          : button('Stop', 'close', () => sessions.stop(s.id), false)));
+      return h('div.wait-banner', { role: 'status' },
+        h('span.wait-icon', icon(b.kind === 'held' ? 'clock' : 'alert')),
+        h('div.wait-text', h('strong', info.shared ? `${providerLabel(s.provider)}: ${b.title}` : b.title), h('p', b.text), h('div.res-actions', actions)));
+    }));
+  }
+  async function usageAction(s, run) {
+    // null, not '': a banner that is gone after the action renders '' and must still be cleared.
+    usageBusy.add(s.id); state.bannerSig = null; schedule();
+    try { await run(); } catch (error) { toast(`${providerLabel(s.provider, true)}: ${error?.message || error}`, { kind: 'error', timeout: 8000 }); }
+    finally { usageBusy.delete(s.id); state.bannerSig = null; schedule(); }
   }
   async function compactSession(s) {
     state.meterBusy.add(s.id); state.resSig = ''; renderResources();
@@ -1025,7 +1048,8 @@ export function mount(root, ctx) {
     const access = project ? store.projectAccess(project.id) : null;
     const sig = JSON.stringify([info.id, project?.id, project?.name, project?.path, project?.url, access?.level, info.access,
       wake.enabled, wake.sessionSupported(), [...state.wakeBusy], state.extraVersion, [...state.meterBusy],
-      info.sessions.map(s => [s.id, s.provider, s.status, s.access, s.providerSessionId, s.threadId, s.cwd, sessions.running(s.id), s.wake, s.mailboxAddress, s.wakes, s.usage || null, s.worktreePath || '', s.branch || ''])]);
+      info.sessions.map(s => [s.id, s.provider, s.status, s.access, s.providerSessionId, s.threadId, s.cwd, sessions.running(s.id), s.wake, s.mailboxAddress, s.wakes, s.usage || null, s.worktreePath || '', s.branch || '',
+        s.billing || null, s.lastTurnCredits || null])]);
     if (sig === state.resSig) return;
     state.resSig = sig;
     const block = (iconName, title, ...body) => h('section.res-block', h('h4', icon(iconName), title), ...body);
@@ -1208,7 +1232,7 @@ export function mount(root, ctx) {
       const node = state.msgCache.get(`s:${item.key}`)?.node?.querySelector('.stream-text');
       if (node && node.textContent !== item.text) node.textContent = item.text;
     }
-    if (state.bannerSig) { statusArea.replaceChildren(); state.bannerSig = ''; }
+    renderUsageBanner(info);
     const fresh = all.filter(x => !state.knownIds.has(x.key));
     for (const x of fresh) state.knownIds.add(x.key);
     if (switched || state.restoreOnShow) restoreScroll(info.id);

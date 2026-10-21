@@ -28,8 +28,9 @@ enum Action {
         #[command(subcommand)]
         command: MailboxAction,
     },
-    /// Save a passive message. Its contents do not grant task authority.
-    /// The result's "delivery" says whether a running CodaClauda app will pick it up.
+    /// Save a passive message. Its contents do not grant task authority, and posting never starts anything.
+    /// The result's "delivery" gives the durable board receipt, the app's host lease
+    /// (available, unavailable or unknown) and, for a start request, its queued state.
     Post {
         #[arg(long)]
         to: String,
@@ -41,7 +42,8 @@ enum Action {
         subject: String,
         #[arg(long)]
         body_file: PathBuf,
-        /// Message being answered. A reply without it answers the newest message from --to to --from.
+        /// Message being answered. A reply without it answers the one open question or notice from --to to
+        /// --from; with none or several open, the post is refused and lists the candidate ids.
         #[arg(long)]
         reply_to: Option<String>,
         #[arg(long)]
@@ -62,10 +64,14 @@ enum Action {
         limit: u64,
     },
     Ack { addr: String, id: String },
+    /// Waits for the first reply ("reply_kind" says acknowledgement or terminal).
     WaitReply {
         id: String,
         #[arg(long, default_value_t = 20)]
         timeout: u64,
+        /// Skip acknowledgements (queued, admitted) and wait for the terminal outcome.
+        #[arg(long)]
+        terminal: bool,
     },
     Claims {
         #[arg(long)]
@@ -191,7 +197,11 @@ fn run(args: Cli) -> Result<Option<Value>> {
         }
         Action::Inbox { addr, since, unread, limit } => owner_api(&store, "mailbox-inbox", &json!({"addr":addr,"since":since,"unread":unread,"limit":limit}), &cli)?,
         Action::Ack { addr, id } => owner_api(&store, "mailbox-ack", &json!({"addr":addr,"id":id}), &cli)?,
-        Action::WaitReply { id, timeout } => owner_api(&store, "mailbox-wait-reply", &json!({"id":id,"timeout":timeout}), &cli)?,
+        Action::WaitReply { id, timeout, terminal } => {
+            let mut input = json!({"id":id,"timeout":timeout});
+            if terminal { input["terminal"] = json!(true); }
+            owner_api(&store, "mailbox-wait-reply", &input, &cli)?
+        }
         Action::Claims { resource } => {
             let mut input = json!({});
             if let Some(value) = resource { input["resource"] = json!(value); }

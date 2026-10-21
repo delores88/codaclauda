@@ -8,7 +8,9 @@
  * editor (project-tools.js) from the access line or the row menu, and its Teammates switch: whether
  * agents may start teammates there (team.js). 0.6: a project follows Settings → Team (on, Unlimited by
  * default) unless it has its own setting here; folders an agent's request registered are added to the
- * list at the level they were registered at, and unlinking one forgets the registration. */
+ * list at the level they were registered at, and unlinking one forgets the registration. The Teammates
+ * form opens only once the saved settings are read, so it can never replace a project's own setting
+ * with the default. */
 import { openNewProjectDialog } from '../newproject.js';
 import { LEVELS, ACCESS_NOTE, BROWSER_UNAVAILABLE, levelInfo } from '../access.js';
 import { openInstructions, openMcpTools, MCP_NOTE } from '../project-tools.js';
@@ -453,7 +455,7 @@ export function mount(root, ctx) {
       p.scannedAt || 0, Boolean(p.stats?.git), info.linked, info.manifest, info.scanning,
       info.agents.map(a => [a.id, a.name, a.provider, a.look]),
       info.access.level, info.access.explicit,
-      team.supported(), info.team.agentsCanStart, info.team.maxAgentStartedLive, info.teamDefault,
+      team.supported(), team.loaded(), info.team.agentsCanStart, info.team.maxAgentStartedLive, info.teamDefault,
     ]);
   }
 
@@ -585,13 +587,19 @@ export function mount(root, ctx) {
         hasFeature('mcpGet') ? h('button.btn.small.ghost', { type: 'button', dataset: { fk: 'mcp' }, title: MCP_NOTE, onclick: () => openMcpTools(ctx, currentProject(p.id) || p) }, icon('plug'), 'MCP tools') : null,
         hasFeature('instructionsRead') ? h('button.btn.small.ghost', { type: 'button', dataset: { fk: 'instructions' }, title: 'Edit CLAUDE.md and AGENTS.md at the project root', onclick: () => openInstructions(ctx, currentProject(p.id) || p) }, icon('file'), 'Instructions') : null) : null,
       team.supported() && p.path ? h('button.btn.small.ghost', { type: 'button', dataset: { fk: 'team' }, 'aria-pressed': String(info.team.agentsCanStart),
-        title: `${info.team.agentsCanStart ? `Agents can start teammates here (${info.team.maxAgentStartedLive === 'unlimited' ? 'no limit' : `at most ${info.team.maxAgentStartedLive} working at once`})` : 'Agents cannot start teammates here'}${info.teamDefault ? ', following Settings → Team' : ', this project\'s own setting'}`,
-        onclick: () => openTeam(currentProject(p.id) || p) }, icon('agents'), info.team.agentsCanStart ? 'Teammates: on' : 'Teammates: off') : null);
+        title: !team.loaded() ? 'Reading the team settings…' : `${info.team.agentsCanStart ? `Agents can start teammates here (${info.team.maxAgentStartedLive === 'unlimited' ? 'no limit' : `at most ${info.team.maxAgentStartedLive} working at once`})` : 'Agents cannot start teammates here'}${info.teamDefault ? ', following Settings → Team' : ', this project\'s own setting'}`,
+        onclick: () => openTeam(currentProject(p.id) || p) }, icon('agents'), !team.loaded() ? 'Teammates' : info.team.agentsCanStart ? 'Teammates: on' : 'Teammates: off') : null);
   }
 
   /** Whether agents may start teammates in one project, and how many of them may work at once:
    *  Settings → Team for every project, unless this project has its own setting. */
   function openTeam(p) {
+    // Until the saved settings are read, a project's own setting is unknown: never offer a form that could replace it.
+    if (!team.loaded()) {
+      Promise.resolve(team.load()).then(() => (team.loaded() ? openTeam(p)
+        : toast(`Couldn't read the team settings${team.error ? `: ${team.error}` : ''}. Nothing was changed.`, { kind: 'error', timeout: 8000 })));
+      return;
+    }
     const current = team.get(p);
     const follows = h('input', { type: 'checkbox', checked: teamFollowsDefault(p), 'aria-label': 'Use my setting from Settings → Team', onchange: () => sync() });
     const on = h('input', { type: 'checkbox', checked: current.agentsCanStart, 'aria-label': `Agents can start teammates in ${p.name}` });
@@ -633,7 +641,9 @@ export function mount(root, ctx) {
     return !saved || saved.followsDefault !== false;
   }
 
-  /** Folders an agent's start request registered join Projects at the level they were registered at. */
+  /** Folders an agent's start request registered join Projects at the level they were registered at. Only a
+   *  Read level is written: a linked folder is Full by default anyway, and a written Full could outrank a Read
+   *  you saved under another id of the same project. An existing record is never replaced. */
   function adoptTeamFolders() {
     if (typeof store.updateDesktop !== 'function') return;
     const fresh = teamAdoptions(team.projects, store.desktop.projects.local);
@@ -642,7 +652,7 @@ export function mount(root, ctx) {
       d.projectAccess ||= {};
       for (const f of fresh) {
         d.projects.local.push({ path: f.path, name: f.name, addedAt: Date.now(), fromTeam: true });
-        if (!d.projectAccess[f.id]) d.projectAccess[f.id] = { level: f.level, playwright: false, updatedAt: Date.now() };
+        if (f.level === 'read' && !d.projectAccess[f.id]) d.projectAccess[f.id] = { level: 'read', playwright: false, updatedAt: Date.now() };
       }
     });
     toast(`Added ${fresh.map(f => `${f.name} (${levelInfo(f.level).long})`).join(', ')}: an agent asked to start a teammate there.`, { timeout: 7000 });

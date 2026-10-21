@@ -5,13 +5,19 @@
  *                 (asleep = no live process), the board claims it holds and who started it (0.5);
  *   On this PC    Claude Code and Codex sessions found on disk (external_sessions_list), metadata
  *                 only: provider, folder, last change and whether it changed in the last 15 minutes.
- *                 0.6: "Continue in CodaClauda" (session_adopt) resumes one as a wake-on session.
+ *                 0.6: "Continue in CodaClauda" (session_adopt) resumes one as a wake-on CodaClauda session; it is
+ *                 refused while the conversation changed in the last 15 minutes or (Codex) wakes by mail, and
+ *                 "Fork instead" starts a separate, labeled copy. Neither wakes the other app's window.
+ *                 0.6 Codex rows: "Wake by mail" binds a board address to that existing chat (desktop_bind);
+ *                 new mail then reaches it through Codex's own `codex queue` command, and the row shows the
+ *                 last delivery receipt and Unbind. Bindings whose chat is not listed still show, so Unbind is
+ *                 always reachable.
  * Data comes from sessions.js, schedules.js and features.js; titles and paths render as text only. */
 import { sessions, UNAVAILABLE_TEXT } from '../sessions.js';
 import { schedules, SCHEDULES_UNAVAILABLE_TEXT } from '../schedules.js';
 import { providerLabel, toMs } from '../session-model.js';
 import { cadenceText, untilText, runStatus } from '../schedule-model.js';
-import { has as hasFeature, call as callFeature, normalizeUsage, tokens } from '../features.js';
+import { has as hasFeature, call as callFeature, normalizeUsage, tokens, wakeAddressChoices, normalizeBindings, deliveryText, continueBlock, CONTINUE_REFUSALS } from '../features.js';
 import { agentAvatar } from '../avatar/spec.js';
 
 const baseName = path => String(path || '').split(/[\\/]/).filter(Boolean).pop() || '';
@@ -22,7 +28,8 @@ const EXTERNAL_REFRESH = 60e3;
 export function mount(root, ctx) {
   const { store, ui, navigate } = ctx;
   const { h, icon, toast, pill, portrait, timeAgo, clockTime, fullTime, emptyState } = ui;
-  const state = { visible: false, raf: 0, sig: '', stopping: new Set(), external: { state: 'idle', list: [], error: '', at: 0 }, showAll: false, teamAll: false, ticker: 0, adopting: new Set() };
+  const state = { visible: false, raf: 0, sig: '', stopping: new Set(), external: { state: 'idle', list: [], error: '', at: 0 }, showAll: false, teamAll: false, ticker: 0, adopting: new Set(),
+    bindings: { state: 'idle', list: [], wakeEnabled: true, error: '' }, binding: new Set() };
   ui.registerIcons({
     branch: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M18 10a6 6 0 0 1-6 6H6"/>',
     lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
@@ -87,12 +94,15 @@ export function mount(root, ctx) {
     const now = Date.now();
     const scheds = (schedules.list || []).filter(s => s.enabled !== false).sort((a, b) => (toMs(a.nextRunAt) || Infinity) - (toMs(b.nextRunAt) || Infinity));
     const ext = state.external;
-    const shownExt = state.showAll ? ext.list : ext.list.filter(e => e.active);
+    const shownExt = state.showAll ? ext.list : ext.list.filter(e => e.active || bindingFor(e));
+    const listed = ext.state === 'loaded' ? shownExt.slice(0, 200) : [];
+    const unlisted = state.bindings.list.filter(b => !listed.some(e => e.provider === 'codex' && e.providerSessionId === b.threadId));
     const minute = Math.floor(Date.now() / 30e3);
     const sig = JSON.stringify([sessions.available, schedules.available, minute, [...state.stopping],
       work.map(s => [s.id, s.title, s.provider, s.status, sessions.queued(s.id), s.lastActivityAt, s.usage || null]),
       scheds.map(s => [s.id, s.name, s.nextRunAt, s.sessionId, s.sessionId ? sessions.running(s.sessionId) : false, schedules.lastRun(s)?.status]),
       ext.state, ext.error, shownExt.map(e => [e.provider, e.cwd, e.modifiedAt, e.active, e.owned]), ext.list.length, state.showAll, hasFeature('external'), hasFeature('adopt'), [...state.adopting],
+      hasFeature('desktopBind'), state.bindings.state, state.bindings.wakeEnabled, [...state.binding], state.bindings.list.map(b => [b.address, b.threadId, b.last?.at, b.last?.status]),
       state.teamAll, mates.map(({ s, state: st }) => [s.id, s.title, st, s.wake, s.mailboxAddress, s.startedBy?.address, claimsOf(s.mailboxAddress, now)])]);
     if (!force && sig === state.sig) return;
     state.sig = sig;
@@ -122,10 +132,12 @@ export function mount(root, ctx) {
     extToggle.hidden = !ext.list.length || active === ext.list.length;
     extToggle.textContent = state.showAll ? 'Active only' : `Show all ${ext.list.length}`;
     extRefresh.disabled = ext.state === 'loading';
-    extHost.replaceChildren(...(ext.state === 'error' ? [h('p.run-empty.bad', icon('alert'), `Couldn't list them: ${ext.error}`)]
+    extHost.replaceChildren(...[...(ext.state === 'error' ? [h('p.run-empty.bad', icon('alert'), `Couldn't list them: ${ext.error}`)]
       : ext.state !== 'loaded' ? [h('p.run-empty', h('span.spinner'), 'Looking for sessions…')]
-        : shownExt.length ? shownExt.slice(0, 200).map(extRow)
-          : [h('p.run-empty', icon('check'), ext.list.length ? 'None changed in the last 15 minutes.' : 'No Claude Code or Codex sessions found on this PC.')]));
+        : listed.length ? listed.map(extRow)
+          : [h('p.run-empty', icon('check'), ext.list.length ? 'None changed in the last 15 minutes.' : 'No Claude Code or Codex sessions found on this PC.')]),
+    ...unlisted.map(unlistedRow),
+    state.bindings.state === 'error' ? h('p.run-empty.bad', icon('alert'), `Couldn't read Wake by mail bindings: ${state.bindings.error}`) : null].filter(Boolean));
   }
 
   function workRow(s) {
@@ -191,45 +203,143 @@ export function mount(root, ctx) {
     const provider = e.provider === 'codex' ? 'codex' : e.provider === 'claude' ? 'claude' : 'other';
     const name = e.projectHint || baseName(e.cwd) || 'Unknown folder';
     const project = store.projects.find(p => p.path && shownPath(p.path).toLowerCase().replace(/[\\/]+$/, '') === shownPath(e.cwd).toLowerCase().replace(/[\\/]+$/, ''));
+    const binding = bindingFor(e);
+    const actions = [
+      canAdopt(e) ? h('button.btn.small', { type: 'button', disabled: state.adopting.has(e.providerSessionId), title: 'Continue this conversation as a CodaClauda session with wake on. The other app is not woken and shows the new turns only after it reopens the conversation.', onclick: () => adopt(e, project) }, state.adopting.has(e.providerSessionId) ? h('span.spinner') : icon('chat'), 'Continue in CodaClauda') : null,
+      canWake(e) && !binding ? h('button.btn.small', { type: 'button', disabled: state.binding.has(e.providerSessionId), title: "Notify this existing Codex chat through Codex's own queue command when board mail arrives for its address", onclick: () => wakeByMail(e, project) }, state.binding.has(e.providerSessionId) ? h('span.spinner') : icon('bell'), 'Wake by mail') : null,
+      binding && hasFeature('desktopUnbind') ? unbindButton(binding) : null,
+      e.cwd ? h('button.btn.small.ghost', { type: 'button', onclick: () => ctx.bridge.desktop.openExternal(e.cwd).catch(() => ui.copyText(shownPath(e.cwd), 'Path copied')) }, icon('folder'), 'Folder') : null,
+    ].filter(Boolean);
+    // Three buttons beside the text would squeeze out the title: they get their own line.
+    const wide = actions.length >= 3 ? { style: { gridColumn: '1 / -1', justifyContent: 'flex-end' } } : null;
     return h(`article.card.run-row.ext${e.active ? '.active' : ''}`,
       portrait(look(provider === 'other' ? 'claude' : provider), { size: 30, provider, status: e.active ? 'active' : 'offline' }),
       h('div.run-text',
         h('div.run-title', h('strong', { title: name }, project?.name || name), pill(provider === 'other' ? 'Agent' : providerLabel(provider), provider === 'other' ? 'neutral' : provider), e.active ? pill('active', 'success') : null),
         h('div.run-meta',
           e.cwd ? h('span.mono', { title: shownPath(e.cwd) }, shownPath(e.cwd)) : null,
-          e.modifiedAt ? h('span', { title: fullTime(e.modifiedAt) }, `changed ${timeAgo(e.modifiedAt)}`) : null)),
-      h('div.run-actions',
-        canAdopt(e) ? h('button.btn.small', { type: 'button', disabled: state.adopting.has(e.providerSessionId), title: 'Continue this conversation as a CodaClauda session with wake on, so board mail reaches it', onclick: () => adopt(e, project) }, state.adopting.has(e.providerSessionId) ? h('span.spinner') : icon('chat'), 'Continue in CodaClauda') : null,
-        e.cwd ? h('button.btn.small.ghost', { type: 'button', onclick: () => ctx.bridge.desktop.openExternal(e.cwd).catch(() => ui.copyText(shownPath(e.cwd), 'Path copied')) }, icon('folder'), 'Folder') : null));
+          e.modifiedAt ? h('span', { title: fullTime(e.modifiedAt) }, `changed ${timeAgo(e.modifiedAt)}`) : null),
+        binding ? wakeLine(binding) : null),
+      h('div.run-actions', wide, actions));
+  }
+
+  /* 0.6 Wake by mail: an owner binding from a board address to this existing Codex chat. New mail for the
+   * address reaches the chat through Codex's own `codex queue` command: a short notice with counts and sender
+   * names, never the message text; the chat reads its own inbox and CodaClauda acknowledges nothing. */
+  const bindingFor = e => (e.provider === 'codex' && e.providerSessionId ? state.bindings.list.find(b => b.threadId === e.providerSessionId) || null : null);
+  const canWake = e => hasFeature('desktopBind') && e.provider === 'codex' && Boolean(e.providerSessionId) && !e.owned;
+  const TONE_COLOR = { ok: 'var(--success)', warn: 'var(--warning)', bad: 'var(--danger)' };
+
+  function wakeLine(b) {
+    const r = deliveryText(b.last);
+    return h('div.run-meta',
+      h('span', { title: "Board mail for this address reaches the chat through Codex's own queue command" }, icon('bell'), 'Wakes by mail via ', h('code', b.address)),
+      state.bindings.wakeEnabled ? null : h('span', { style: { color: TONE_COLOR.warn } }, 'Paused: wake on mail is off in Settings'),
+      h('span', { title: r.title || null, style: TONE_COLOR[r.tone] ? { color: TONE_COLOR[r.tone] } : null }, r.text, b.last?.at ? ` · ${timeAgo(b.last.at)}` : ''));
+  }
+  function unbindButton(b) {
+    const busy = state.binding.has(b.threadId);
+    return h('button.btn.small.ghost', { type: 'button', disabled: busy, title: `Stop notifying this chat about mail for ${b.address}; a notice being sent now is stopped`, onclick: () => unbindWake(b) }, busy ? h('span.spinner') : icon('bell'), 'Unbind');
+  }
+  /** A binding whose chat is not in the list above (older, hidden or gone): still visible, so Unbind always works. */
+  function unlistedRow(b) {
+    return h('article.card.run-row.ext',
+      portrait(look('codex'), { size: 30, provider: 'codex', status: 'offline' }),
+      h('div.run-text',
+        h('div.run-title', h('strong', { title: shownPath(b.cwd) }, store.project(b.projectId)?.name || baseName(b.cwd) || 'Codex chat'), pill(providerLabel('codex'), 'codex')),
+        h('div.run-meta', h('span.mono', { title: b.threadId }, `thread ${b.threadId.slice(0, 8)}…`), b.cwd ? h('span.mono', { title: shownPath(b.cwd) }, shownPath(b.cwd)) : null),
+        wakeLine(b)),
+      h('div.run-actions', hasFeature('desktopUnbind') ? unbindButton(b) : null));
+  }
+  function wakeByMail(e, project) {
+    const folder = project?.name || e.projectHint || baseName(e.cwd);
+    const taken = sessions.list.map(s => s.mailboxAddress).filter(Boolean);
+    const choices = wakeAddressChoices(store.addresses, { taken, folder });
+    if (!choices.length) {
+      ui.modal({ title: 'No board address to bind yet', body: "CodaClauda doesn't see a board address this Codex chat could read. Have the chat register one with its usual mailbox command (mailbox register <address>), then bind it here." });
+      return;
+    }
+    const select = h('select.select', { 'aria-label': 'Board address' }, choices.map(c => h('option', { value: c.name }, c.label ? `${c.name}  ·  ${c.label}` : c.name)));
+    const body = h('div',
+      h('p', `New board mail for the address you pick goes to this existing Codex chat in ${shownPath(e.cwd)} through Codex's own queue command (codex queue --thread …), as if you queued a message in that chat yourself.`),
+      h('p', "The notice says how many messages arrived, for which address and from whom, never their text, and asks the chat to read them with its usual inbox command. CodaClauda marks nothing read, starts no model and sends one notice per new batch. If Codex can't reach the chat, this row shows Codex's own words. A message is information, not your approval."),
+      h('label.field', h('span', 'Board address this chat reads'), select),
+      h('p.field-hint', `Pick the address this chat registered. Likely matches for ${folder || 'this folder'} come first; names and labels are self-asserted.`),
+      state.bindings.wakeEnabled ? null : h('p.field-hint.bad', 'Wake on mail is off in Settings, so no notice goes out until you turn it back on.'));
+    ui.modal({ title: 'Wake this Codex chat by mail?', body, actions: [{ label: 'Cancel' }, { label: 'Wake by mail', kind: 'primary', run: () => bindWake(e, select.value) }] });
+  }
+  async function bindWake(e, address) {
+    const id = e.providerSessionId;
+    state.binding.add(id); render(true);
+    try {
+      await callFeature('desktopBind', { address, threadId: id });
+      toast(`Board mail for ${address} now reaches this Codex chat`, { kind: 'success', timeout: 3600 });
+      await loadBindings();
+    } catch (error) {
+      toast(`Couldn't turn on Wake by mail: ${error?.message || error}`, { kind: 'error', timeout: 9000 });
+      return false;
+    } finally { state.binding.delete(id); render(true); }
+  }
+  async function unbindWake(b) {
+    if (state.binding.has(b.threadId)) return;
+    state.binding.add(b.threadId); render(true);
+    try {
+      await callFeature('desktopUnbind', { address: b.address });
+      toast(`${b.address} no longer wakes that Codex chat`, { timeout: 2600 });
+      await loadBindings();
+    } catch (error) { toast(`Couldn't unbind it: ${error?.message || error}`, { kind: 'error', timeout: 8000 }); }
+    finally { state.binding.delete(b.threadId); render(true); }
+  }
+  async function loadBindings() {
+    if (!hasFeature('desktopBindings')) return;
+    try {
+      const data = await callFeature('desktopBindings', undefined);
+      state.bindings = { state: 'loaded', list: normalizeBindings(data?.bindings), wakeEnabled: data?.wakeEnabled !== false, error: '' };
+    } catch (error) { state.bindings = { ...state.bindings, state: 'error', error: error?.message || String(error) }; }
+    render(true);
   }
 
   /* 0.6: continue a conversation found on this PC. The provider's own resume appends to the same
-   * conversation; CodaClauda never edits the transcript. The other app does not show the new turns
-   * until it reopens it, so the two must not be used at once. */
+   * conversation; CodaClauda never edits the transcript and never wakes the other app, which shows the new
+   * turns only after it reopens the conversation. Continue is refused while the other app may still write it
+   * (changed in the last 15 minutes, or bound for Wake by mail); Fork instead is a separate, labeled copy. */
   function canAdopt(e) {
     return hasFeature('adopt') && !e.owned && Boolean(e.providerSessionId) && Boolean(e.cwd) && (e.provider === 'claude' || e.provider === 'codex');
   }
   function adopt(e, project) {
-    const label = providerLabel(e.provider, true);
+    const block = continueBlock(e, bindingFor(e));
+    if (block) return offerFork(e, project, block.text);
     ui.modal({
       title: 'Continue in CodaClauda?',
-      body: `CodaClauda resumes this ${label} conversation in ${shownPath(e.cwd)} as its own session with wake on, at the project's current access (Read when the folder is not one of your projects). Close it in the other app first and don't use both at once: the other app won't show the new turns until you reopen it there.`,
-      actions: [{ label: 'Cancel' }, { label: 'Continue here', kind: 'primary', run: () => runAdopt(e, project) }],
+      body: `CodaClauda resumes this ${providerLabel(e.provider, true)} conversation in ${shownPath(e.cwd)} as its own session with wake on, at the project's current access (Read when the folder is not one of your projects). Board mail then wakes that CodaClauda session, not the other app, and the other app shows these turns only after you reopen the conversation there, so don't use both at once. Fork instead starts a separate copy and leaves the original as it is.`,
+      actions: [{ label: 'Cancel' }, { label: 'Fork instead', run: () => runAdopt(e, project, 'fork') }, { label: 'Continue here', kind: 'primary', run: () => runAdopt(e, project, 'continue') }],
     });
   }
-  async function runAdopt(e, project) {
+  function offerFork(e, project, why) {
+    ui.modal({
+      title: 'Fork instead?',
+      body: `${why} A fork is a new CodaClauda chat holding a copy of the conversation so far, labeled as a copy; the original stays as it is in its own app.`,
+      actions: [{ label: 'Cancel' }, { label: 'Fork instead', kind: 'primary', run: () => runAdopt(e, project, 'fork') }],
+    });
+  }
+  async function runAdopt(e, project, mode = 'continue') {
     const id = e.providerSessionId;
     if (state.adopting.has(id)) return;
     state.adopting.add(id); render(true);
+    const name = project?.name || e.projectHint || baseName(e.cwd) || providerLabel(e.provider, true);
     try {
-      const data = await callFeature('adopt', { provider: e.provider, providerSessionId: id, cwd: e.cwd, title: `${project?.name || e.projectHint || baseName(e.cwd) || providerLabel(e.provider, true)} (continued)` });
+      const data = await callFeature('adopt', { provider: e.provider, providerSessionId: id, cwd: e.cwd, title: `${name} (${mode === 'fork' ? 'copy' : 'continued'})`, mode });
       const s = data?.session;
       await sessions.refresh();
-      toast(data?.existing ? 'Already continued in CodaClauda; opening it' : `Continued in CodaClauda at ${s?.access === 'full' ? 'Full' : 'Read'} access`, { kind: 'success', timeout: 3600 });
+      toast(data?.copy ? 'Started a separate copy in CodaClauda; the original conversation is unchanged'
+        : data?.existing ? 'Already continued in CodaClauda; opening it'
+          : `Continued in CodaClauda at ${s?.access === 'full' ? 'Full' : 'Read'} access. The other app shows these turns only after you reopen it there.`, { kind: 'success', timeout: 4200 });
       loadExternal(true);
       if (s?.id) navigate('chat', { thread: threadIdFor(s) });
-    } catch (error) { toast(`Couldn't continue it: ${error?.message || error}`, { kind: 'error', timeout: 8000 }); }
-    finally { state.adopting.delete(id); render(true); }
+    } catch (error) {
+      if (CONTINUE_REFUSALS.includes(error?.code)) offerFork(e, project, error.message);
+      else toast(`Couldn't ${mode === 'fork' ? 'fork' : 'continue'} it: ${error?.message || error}`, { kind: 'error', timeout: 8000 });
+    } finally { state.adopting.delete(id); render(true); }
   }
 
   async function stop(s) {
@@ -264,8 +374,9 @@ export function mount(root, ctx) {
       sessions.refresh(); schedules.refresh();
       render(true);
       loadExternal();
+      loadBindings();
       clearInterval(state.ticker);
-      state.ticker = setInterval(() => { if (state.visible) { sessions.refresh(); render(); loadExternal(); } }, 15e3);
+      state.ticker = setInterval(() => { if (state.visible) { sessions.refresh(); render(); loadExternal(); loadBindings(); } }, 15e3);
     },
     hide() { state.visible = false; clearInterval(state.ticker); state.ticker = 0; },
   };

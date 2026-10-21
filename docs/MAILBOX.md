@@ -66,9 +66,13 @@ question. Substitute the actual question ID and reply contents:
 & $MailboxCli --state-dir $MailboxBoard --json ack 'codex-claudacoda' 'ACTUAL-QUESTION-ID'
 ```
 
-Without `--reply-to`, a reply answers the newest retained message from its
-recipient to its sender (the result's `reply_to` names it). When there is none,
-the post is refused, nothing is saved and the error names `--reply-to`.
+Without `--reply-to`, a reply answers the one open thread: the question or
+notice from its recipient to its sender that the sender has not replied to yet
+(the result's `reply_to` names it). With none open, or several, the post is
+refused, nothing is saved, and the error names `--reply-to` and lists the
+candidate ids. `--reply-to` works for a notice too. The resolved parent is part
+of the saved post, so retrying the same id, with or without `--reply-to`, returns
+the original reply.
 
 All commands are noninteractive. Exit 0 is success, including a bounded wait
 that returns `timed_out: true`; exit 2 is an invalid/refused request or operation
@@ -79,28 +83,43 @@ is refused. Do not treat an unknown outcome as permission to post with a new ID.
 `inbox` returns oldest first, up to 20 by default (100 maximum), with
 `next_cursor` and `has_more`. Pass `--since` with that cursor for the next page.
 Use `--unread` to filter, and explicitly `ack` each message after reading it.
-`wait-reply` accepts 0–60 seconds and returns the first matching reply or a timeout.
+`wait-reply` accepts 0–60 seconds and returns the first matching reply or a
+timeout, with `reply_kind`: `acknowledgement` for an app progress reply
+(`{"queued"}` or `{"admitted"}`), `terminal` for anything else. Add `--terminal`
+to skip acknowledgements and wait for the terminal reply; the result then also
+carries the latest `acknowledgement` (or null).
 
 ## Who picks a message up
 
 Every successful `post` result (and the `mailbox-post` owner operation) has a
-`delivery` field. Saving never depends on it; it says who will read the message:
+`delivery` field. Saving never depends on it:
 
-- `{"state":"received","pickup_seconds":n}`: the CodaClauda app is running and
-  polls this address. That is `codaclauda-team` (every 5 s) or one of its own
-  sessions with wake on (the owner's wake poll interval).
-- `{"state":"app_not_running","fix":"Open CodaClauda (Start menu > CodaClauda). ..."}`:
-  the address is `codaclauda-team` or a session listed in the app's last
-  heartbeat, and the app is not running. The message waits, saved, until it
-  starts. A clean exit removes the heartbeat, so session addresses then read as
-  `passive`.
-- `{"state":"passive","note":"..."}`: any other address. Its chat reads the
-  inbox when it next checks.
+- `receipt`: always `saved`. The message is durably on the board in `board`.
+- `host`: the CodaClauda app's host lease for this exact board.
+  - `available`: a heartbeat at most 30 s old that names this board and comes
+    from an installation whose board binding names this board.
+  - `unavailable`: no heartbeat (never run, or closed cleanly), a stale one, or
+    one for another board or installation, which does not count. `hostDetail`
+    says which.
+  - `unknown`: the heartbeat or its installation's binding cannot be read or
+    found, or is malformed, or the running app reports that it could not read
+    `codaclauda-team`.
+    `hostDetail` has the error.
+- `installation`: the id of the installation whose heartbeat counted, or null.
+- `reader`: `app` for `codaclauda-team`, `session` for a CodaClauda session with
+  wake on (as the app's heartbeat lists it), `agent` for any other address,
+  whose chat reads its inbox when it next checks.
+- `pickupSeconds`: how often the app checks that address, only while the host is
+  available and the reader is `app` or `session`.
+- `request` (posts to `codaclauda-team` only): `{"state": "queued", "requestId",
+  "cancel"}` for a start request (a question), `passive` for a notice (it never
+  starts anything), `cancel-requested` for a cancel.
+- `note`: the same in one sentence.
 
-The app signals that it is running with `<board>/desktop-ui/host-heartbeat.json`,
-rewritten on every poll and removed on a clean exit; older than 30 s is not
-running. `received` means a reader will see the message, not that anyone acted
-on it. A message is information, not authority, whatever the delivery state.
+The app writes `<board>/desktop-ui/host-heartbeat.json` on every poll and
+removes it on a clean exit. `available` means a reader will see the message
+soon, not that anyone acted on it; replies say what happened. A message is
+information, not authority, whatever the delivery state.
 
 ## Shared resources
 
@@ -132,12 +151,19 @@ lasts while the retained message exists; use globally unique IDs beyond that
 window. Sequence cursors never reset when old messages are removed.
 
 Bodies are capped at 32 KiB of UTF-8. A credential-pattern scan refuses recognized
-keys, tokens, password assignments and pairing codes before storing the post.
-Key prefixes such as `sk-`, `ghp_` and `Bearer` count only at the start of a
-word (or after `_`), so ordinary words like `task-` or `desk-` are not refused.
-This guard cannot recognize every possible secret: never intentionally post one.
-Refusals do not echo the submitted secret. Subject, label and resource fields
-are also scanned. Arbitrary message content is displayed as plain text.
+keys, tokens, password assignments and pairing codes before storing the post:
+private keys, JWTs, AWS key ids, `sk-`/`ghp_`-style keys and bearer tokens,
+`password=`/`token=` assignments, quoted `"token": value` pairs, and
+`token:`/`password is` statements whose value looks like a credential (a key
+prefix, a digit in 4 or more characters, or 16 or more mixed-case characters).
+Ordinary words and prose pass: `task-`, `desk-` or `laughs_` before letters (a
+key glued to a word is still refused when it mixes case and digits), "the token
+is ready", "secret: none", "authorization: granted". This narrower rule is the
+mailbox's own; redaction of streams and files still matches key prefixes inside
+words. This guard cannot recognize every possible secret: never intentionally
+post one. A refusal is one fixed sentence that never echoes the input. Subject,
+label and resource fields are also scanned. Arbitrary message content is
+displayed as plain text.
 
 Sessions started by CodaClauda receive `mailbox_post`, `mailbox_inbox`,
 `mailbox_ack`, `mailbox_wait_reply` and `mailbox_claims` through their existing

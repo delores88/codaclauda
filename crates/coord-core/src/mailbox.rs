@@ -1,6 +1,7 @@
 //! Passive, self-asserted mailboxes. This sidecar never reads or writes the
 //! coordination state, launches providers, or grants authority to act. A post
-//! reads only the desktop app's heartbeat, to say who will pick it up.
+//! reads only the desktop app's host lease (heartbeat.rs), to say who will
+//! pick it up; a passive post never starts anything.
 use crate::{heartbeat, store::Store};
 use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
@@ -8,11 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::Path,
-    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -189,11 +189,10 @@ fn transaction<T>(store: &Store, now: u64, action: impl FnOnce(&mut Mailbox) -> 
     Ok(result)
 }
 
+/// The mailbox's own credential rule: real key shapes and credential
+/// assignments are refused; ordinary words and prose mentions are not.
 fn secret(text: &str) -> bool {
-    static EXTRA: OnceLock<regex::Regex> = OnceLock::new();
-    crate::redact(text) != text || EXTRA.get_or_init(|| regex::Regex::new(
-        r#"(?i)(?:-----BEGIN[ A-Z]*PRIVATE KEY-----|(?:pairing[ _-]*(?:code|token)|session[ _-]*(?:token|capability)|claudacoda[ _-]*session[ _-]*capability|codaclauda[ _-]*capability|authorization|token|secret|password|passwd|pwd)["']?\s*(?::|=|\bis\b)\s*["']?[^\s,;"'}]+|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|\bAKIA[A-Z0-9]{16}\b)"#
-    ).expect("fixed mailbox credential expression")).is_match(text)
+    crate::secrets::mailbox_credential(text)
 }
 fn text(args: &Value, key: &str, max: usize, empty: bool) -> Result<String> {
     let value = args.get(key).and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("Mailbox text field is missing or invalid"))?;
@@ -233,7 +232,7 @@ fn resource(args: &Value) -> Result<String> {
     ensure!(!value.chars().any(char::is_control), "Mailbox resource cannot contain control characters");
     Ok(value.trim().to_owned())
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct Post {
     to: String,
     from: String,
@@ -262,10 +261,29 @@ fn post(args: &Value) -> Result<(String, Post)> {
     };
     Ok((id, Post { to: name(args, "to")?, from: name(args, "from")?, kind, subject, body, reply_to, resource, ttl }))
 }
+/// The digest behind stable ids: the post with its parent resolved.
+fn digest(post: &Post) -> Result<String> {
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(post)?)))
+}
+/// Questions and notices from `to` to `from` that `from` has not replied to, newest first.
+fn open_threads<'a>(state: &'a Mailbox, from: &str, to: &str) -> Vec<&'a Message> {
+    let all = || state.messages.values().map(|v| &v.message);
+    let answered: HashSet<&str> = all().filter(|m| m.from == from && m.to == to).filter_map(|m| m.reply_to.as_deref()).collect();
+    let mut open: Vec<_> = all()
+        .filter(|m| m.from == to && m.to == from && matches!(m.kind.as_str(), "question" | "notice") && !answered.contains(m.id.as_str()))
+        .collect();
+    open.sort_by_key(|m| std::cmp::Reverse(m.sequence));
+    open
+}
 fn save_post(state: &mut Mailbox, id: &str, post: &Post, now: u64) -> Result<Value> {
-    let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(post)?));
     if let Some(existing) = state.messages.get(id) {
-        ensure!(existing.digest == digest, "Message ID already exists with a different payload");
+        // A retry takes the parent the first post resolved, then compares.
+        let mut resolved = post.clone();
+        if resolved.kind == "reply" && resolved.reply_to.is_none() {
+            resolved.reply_to = existing.message.reply_to.clone();
+        }
+        // The second digest is how a 0.6.0 inferred reply was saved.
+        ensure!(existing.digest == digest(&resolved)? || existing.digest == digest(post)?, "Message ID already exists with a different payload");
         return Ok(serde_json::to_value(&existing.message)?);
     }
     state.address(&post.from)?;
@@ -275,16 +293,23 @@ fn save_post(state: &mut Mailbox, id: &str, post: &Post, now: u64) -> Result<Val
         state.addresses.insert(post.to.clone(), Address { name: post.to.clone(), label, created_at: now });
     }
     state.address(&post.to)?;
-    // A reply without reply_to answers the newest message from its recipient to its sender.
-    let reply_to = match &post.reply_to {
-        None if post.kind == "reply" => Some(
-            state.messages.values().map(|v| &v.message).filter(|m| m.from == post.to && m.to == post.from)
-                .max_by_key(|m| m.sequence).map(|m| m.id.clone())
-                .ok_or_else(|| anyhow::anyhow!("Nothing from {} to {} is retained to reply to; pass --reply-to <message id>", post.to, post.from))?,
-        ),
-        value => value.clone(),
-    };
-    if let Some(parent_id) = &reply_to {
+    let mut post = post.clone();
+    // A reply without reply_to answers the open question or notice from its recipient, when exactly one is open.
+    if post.kind == "reply" && post.reply_to.is_none() {
+        let open = open_threads(state, &post.from, &post.to);
+        post.reply_to = Some(match open.as_slice() {
+            [only] => only.id.clone(),
+            [] => bail!("Nothing from {} to {} is waiting for a reply; pass --reply-to <message id>", post.to, post.from),
+            many => {
+                let mut ids: Vec<&str> = many.iter().take(10).map(|m| m.id.as_str()).collect();
+                if many.len() > 10 {
+                    ids.push("...");
+                }
+                bail!("{} messages from {} to {} are waiting for a reply ({}); pass --reply-to with one of these ids", many.len(), post.to, post.from, ids.join(", "))
+            }
+        });
+    }
+    if let Some(parent_id) = &post.reply_to {
         let parent = &state.messages.get(parent_id).ok_or_else(|| anyhow::anyhow!("Reply message is unavailable or outside retention"))?.message;
         ensure!(parent.to == post.from && parent.from == post.to, "Reply must reverse the original sender and recipient");
     }
@@ -306,16 +331,50 @@ fn save_post(state: &mut Mailbox, id: &str, post: &Post, now: u64) -> Result<Val
             state.claims.remove(resource);
         }
     }
+    let digest = digest(&post)?;
     let sequence = state.next_sequence;
     state.next_sequence = sequence.checked_add(1).ok_or_else(|| anyhow::anyhow!("Mailbox sequence limit reached"))?;
     let message = Message {
         id: id.to_owned(), sequence, to: post.to.clone(), from: post.from.clone(), kind: post.kind.clone(),
         subject: post.subject.clone(), body: post.body.clone(), created_at: now, read_at: None,
-        reply_to, resource: post.resource.clone(),
+        reply_to: post.reply_to.clone(), resource: post.resource.clone(),
     };
     let result = serde_json::to_value(&message)?;
     state.messages.insert(id.to_owned(), StoredMessage { message, digest });
     Ok(result)
+}
+
+/// App progress replies; every other reply is a terminal answer. 0.6.0 said "received".
+const ACKNOWLEDGEMENTS: [&str; 3] = ["queued", "admitted", "received"];
+/// "acknowledgement" for a reply whose body is one of those JSON objects, else "terminal".
+fn reply_kind(message: &Message) -> &'static str {
+    let single = serde_json::from_str::<Value>(&message.body).ok().and_then(|v| match v {
+        Value::Object(o) if o.len() == 1 => o.keys().next().cloned(),
+        _ => None,
+    });
+    if single.is_some_and(|k| ACKNOWLEDGEMENTS.contains(&k.as_str())) { "acknowledgement" } else { "terminal" }
+}
+
+/// What a post to codaclauda-team asks for, as its sender should understand it.
+fn team_request(post: &Post, id: &str, host: &str) -> Value {
+    let body: Value = serde_json::from_str(&post.body).unwrap_or(Value::Null);
+    let start = body.get("start").is_some_and(Value::is_object);
+    let cancel = format!(
+        r#"To cancel it before a teammate launches, post --kind notice to {} with body {{"cancel":{{"requestId":"{id}"}}}} and a new --id. Ben can cancel it in Settings > Team."#,
+        heartbeat::TEAM_ADDRESS
+    );
+    match (post.kind.as_str(), start) {
+        ("question", true) => json!({
+            "state": "queued", "requestId": id, "cancel": cancel,
+            "note": if host == "available" { "Nothing has started yet. Replies follow: queued, then admitted once a teammate actually launches, then the outcome." }
+                else { "Nothing has started. It stays queued and starts only when CodaClauda runs within 24 hours, unless it is cancelled first; after that it is refused, never started late." },
+        }),
+        ("notice", true) => json!({"state": "passive", "note": "A notice never starts a teammate. Post the same body with --kind question to ask for one."}),
+        _ => match body["cancel"]["requestId"].as_str() {
+            Some(target) => json!({"state": "cancel-requested", "requestId": target}),
+            None => Value::Null,
+        },
+    }
 }
 
 /// Plain addresses identify the caller's asserted role only. No operation here
@@ -351,7 +410,12 @@ fn api_with_clock(store: &Store, op: &str, args: &Value, clock: &dyn Fn() -> u64
             let (id, post) = post(args)?;
             let now = clock();
             let mut saved = transaction(store, now, |state| save_post(state, &id, &post, now))?;
-            saved["delivery"] = heartbeat::delivery(&store.root, &post.to, now.saturating_mul(1000));
+            let mut delivery = heartbeat::delivery(&store.root, &post.to, now.saturating_mul(1000));
+            if post.to == heartbeat::TEAM_ADDRESS {
+                let host = delivery["host"].as_str().unwrap_or("unknown").to_owned();
+                delivery["request"] = team_request(&post, &id, &host);
+            }
+            saved["delivery"] = delivery;
             Ok(saved)
         }
         "inbox" => {
@@ -384,17 +448,33 @@ fn api_with_clock(store: &Store, op: &str, args: &Value, clock: &dyn Fn() -> u64
             })
         }
         "wait-reply" => {
-            fields(args, &["id", "timeout"], &["id"])?;
+            // Default: the first reply of any kind (unchanged). terminal: the first
+            // reply that is not an acknowledgement, plus the latest acknowledgement.
+            fields(args, &["id", "timeout", "terminal"], &["id"])?;
             let id = identifier(args, "id")?;
             let timeout = number(args, "timeout", 20, 0, 60)?;
+            let terminal = match args.get("terminal") {
+                None => false,
+                Some(v) => v.as_bool().ok_or_else(|| anyhow::anyhow!("terminal must be boolean"))?,
+            };
             let deadline = Instant::now() + Duration::from_secs(timeout);
             loop {
-                let reply = transaction(store, clock(), |state| {
+                let (reply, acknowledgement) = transaction(store, clock(), |state| {
                     ensure!(state.messages.contains_key(&id), "Original mailbox message is unavailable");
-                    Ok(state.messages.values().map(|v| &v.message).filter(|m| m.reply_to.as_deref() == Some(id.as_str())).min_by_key(|m| m.sequence).cloned())
+                    let mut replies: Vec<&Message> = state.messages.values().map(|v| &v.message).filter(|m| m.reply_to.as_deref() == Some(id.as_str())).collect();
+                    replies.sort_by_key(|m| m.sequence);
+                    if !terminal {
+                        return Ok((replies.first().map(|m| (*m).clone()), None));
+                    }
+                    let last = replies.iter().rev().find(|m| reply_kind(m) == "acknowledgement").map(|m| (*m).clone());
+                    Ok((replies.iter().find(|m| reply_kind(m) == "terminal").map(|m| (*m).clone()), last))
                 })?;
                 if reply.is_some() || Instant::now() >= deadline {
-                    return Ok(json!({"timed_out":reply.is_none(),"reply":reply}));
+                    let mut out = json!({"timed_out":reply.is_none(),"reply_kind":reply.as_ref().map(reply_kind),"reply":reply});
+                    if terminal {
+                        out["acknowledgement"] = json!(acknowledgement);
+                    }
+                    return Ok(out);
                 }
                 std::thread::sleep(Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())));
             }
@@ -469,7 +549,7 @@ mod tests {
     fn reply_pair_is_reversed_and_timeout_is_success() {
         let (_dir, store) = fixture();
         at(&store, "post", message("question"), 100).unwrap();
-        assert_eq!(at(&store, "wait-reply", json!({"id":"question","timeout":0}), 101).unwrap(), json!({"reply":null,"timed_out":true}));
+        assert_eq!(at(&store, "wait-reply", json!({"id":"question","timeout":0}), 101).unwrap(), json!({"reply":null,"reply_kind":null,"timed_out":true}));
         let mut reply = json!({"id":"answer","to":"owner","from":"codex-marketplace","kind":"reply","reply_to":"question","subject":"Re: Review","body":"Reviewed."});
         assert!(at(&store, "post", reply.clone(), 102).is_err());
         reply["from"] = json!("codex-claudacoda");
@@ -479,26 +559,86 @@ mod tests {
         assert_eq!(waited["reply"]["id"], "answer");
     }
     #[test]
-    fn reply_without_reply_to_answers_the_newest_message_or_names_the_flag() {
+    fn a_bare_reply_needs_exactly_one_open_thread_and_retries_are_idempotent() {
         let (_dir, store) = fixture();
         let reply = |id: &str| json!({"id":id,"to":"owner","from":"codex-claudacoda","kind":"reply","subject":"Re","body":"Done."});
+        // Zero open threads: refused, nothing saved, the flag is named.
         let error = at(&store, "post", reply("early"), 100).unwrap_err().to_string();
         assert!(error.contains("--reply-to"), "{error}");
         assert!(!store.root.join("mailbox.json").exists(), "a refused reply is not saved");
-        at(&store, "post", message("older"), 101).unwrap();
-        at(&store, "post", message("newer"), 102).unwrap();
-        assert_eq!(at(&store, "post", reply("answer"), 103).unwrap()["reply_to"], "newer");
-        let mut notice = message("notice"); notice["kind"] = json!("notice"); notice["reply_to"] = json!("older");
-        assert!(at(&store, "post", notice, 104).is_err());
+        // Exactly one open question: answered, with the inferred parent saved.
+        at(&store, "post", message("first"), 101).unwrap();
+        assert_eq!(at(&store, "post", reply("answer-1"), 102).unwrap()["reply_to"], "first");
+        // Retrying the same id is idempotent, bare or naming that parent, though nothing is open now.
+        let again = at(&store, "post", reply("answer-1"), 103).unwrap();
+        assert_eq!((again["reply_to"].as_str(), again["sequence"].as_u64()), (Some("first"), Some(2)));
+        let mut explicit = reply("answer-1");
+        explicit["reply_to"] = json!("first");
+        assert_eq!(at(&store, "post", explicit, 104).unwrap()["sequence"], 2);
+        // Several open (a notice counts): refused, naming every candidate id.
+        let mut notice = message("second");
+        notice["kind"] = json!("notice");
+        at(&store, "post", notice, 105).unwrap();
+        at(&store, "post", message("third"), 106).unwrap();
+        let error = at(&store, "post", reply("answer-2"), 107).unwrap_err().to_string();
+        assert!(error.contains("--reply-to") && error.contains("(third, second)") && !error.contains("first"), "{error}");
+        // An explicit reply to a notice works, after which one thread is open again.
+        let mut to_notice = reply("answer-2");
+        to_notice["reply_to"] = json!("second");
+        at(&store, "post", to_notice, 108).unwrap();
+        assert_eq!(at(&store, "post", reply("answer-3"), 109).unwrap()["reply_to"], "third");
+        // The sender/recipient relation, changed retries and reply_to on other kinds are still refused.
+        let mut wrong = reply("answer-4");
+        wrong["from"] = json!("codex-marketplace");
+        wrong["reply_to"] = json!("third");
+        assert!(at(&store, "post", wrong, 110).is_err());
+        let mut changed = reply("answer-1");
+        changed["reply_to"] = json!("third");
+        assert!(at(&store, "post", changed, 111).is_err());
+        let mut bad = message("bad");
+        bad["kind"] = json!("notice");
+        bad["reply_to"] = json!("first");
+        assert!(at(&store, "post", bad, 112).is_err());
     }
     #[test]
-    fn team_posts_save_before_the_app_runs_and_say_so() {
+    fn wait_reply_tells_acknowledgements_from_terminal_answers() {
+        let (_dir, store) = fixture();
+        let team = heartbeat::TEAM_ADDRESS;
+        at(&store, "post", json!({"id":"ask","to":team,"from":"codex-claudacoda","kind":"question","subject":"Need a reviewer","body":"{\"start\":{}}"}), 100).unwrap();
+        let answer = |id: &str, body: Value| json!({"id":id,"to":"codex-claudacoda","from":team,"kind":"reply","reply_to":"ask","subject":"Re","body":body.to_string()});
+        at(&store, "post", answer("q", json!({"queued":{"requestId":"ask"}})), 101).unwrap();
+        // The default still returns the first reply, and now says it is only an acknowledgement.
+        let first = at(&store, "wait-reply", json!({"id":"ask","timeout":0}), 102).unwrap();
+        assert_eq!((first["reply"]["id"].as_str(), first["reply_kind"].as_str()), (Some("q"), Some("acknowledgement")));
+        let wait = |now: u64| at(&store, "wait-reply", json!({"id":"ask","timeout":0,"terminal":true}), now).unwrap();
+        let pending = wait(102);
+        assert_eq!((pending["timed_out"].as_bool(), pending["acknowledgement"]["id"].as_str()), (Some(true), Some("q")));
+        at(&store, "post", answer("a", json!({"admitted":{"requestId":"ask","sessionId":"s_1"}})), 103).unwrap();
+        at(&store, "post", answer("done", json!({"completed":{"requestId":"ask"}})), 104).unwrap();
+        let done = wait(105);
+        assert_eq!((done["reply"]["id"].as_str(), done["reply_kind"].as_str(), done["acknowledgement"]["id"].as_str()), (Some("done"), Some("terminal"), Some("a")));
+        assert!(at(&store, "wait-reply", json!({"id":"ask","terminal":"yes"}), 106).is_err());
+    }
+    #[test]
+    fn team_posts_save_before_the_app_runs_and_say_so_honestly() {
         let (_dir, store) = fixture();
         let request = json!({"id":"start-1","to":heartbeat::TEAM_ADDRESS,"from":"codex-claudacoda","kind":"question","subject":"Need a reviewer","body":"{\"start\":{}}"});
-        let saved = at(&store, "post", request, 100).unwrap();
-        assert_eq!(saved["delivery"]["state"], "app_not_running");
+        let saved = at(&store, "post", request.clone(), 100).unwrap();
+        let delivery = &saved["delivery"];
+        assert_eq!((delivery["receipt"].as_str(), delivery["host"].as_str(), delivery["reader"].as_str()), (Some("saved"), Some("unavailable"), Some("app")));
+        assert_eq!((delivery["request"]["state"].as_str(), delivery["request"]["requestId"].as_str()), (Some("queued"), Some("start-1")));
+        assert!(delivery["request"]["cancel"].as_str().unwrap().contains(r#"{"cancel":{"requestId":"start-1"}}"#));
+        assert!(delivery["request"]["note"].as_str().unwrap().contains("starts only when CodaClauda runs"));
         assert_eq!(at(&store, "inbox", json!({"addr":heartbeat::TEAM_ADDRESS}), 101).unwrap()["messages"][0]["id"], "start-1");
-        assert_eq!(at(&store, "post", message("plain"), 102).unwrap()["delivery"]["state"], "passive");
+        // A notice is passive: saved, and never a start request.
+        let mut notice = request;
+        notice["id"] = json!("start-2");
+        notice["kind"] = json!("notice");
+        assert_eq!(at(&store, "post", notice, 102).unwrap()["delivery"]["request"]["state"], "passive");
+        let plain = at(&store, "post", message("plain"), 103).unwrap();
+        assert_eq!((plain["delivery"]["reader"].as_str(), plain["delivery"].get("request")), (Some("agent"), None));
+        // Posting started nothing: the coordination state was never created.
+        assert!(!store.root.join("state.json").exists());
     }
     #[test]
     fn claim_conflicts_expire_and_only_holder_can_release() {
@@ -543,16 +683,26 @@ mod tests {
     #[test]
     fn secret_and_size_rejection_never_persists_input() {
         let (_dir, store) = fixture();
-        let samples = ["password=hunter2", "pairing code: 123456", "token=opaque-example", "sk-ant-abcdefghijklmnopqrstuv", "-----BEGIN PRIVATE KEY-----", "CLAUDACODA_SESSION_CAPABILITY=private-example"];
-        for value in samples {
+        // Generated-looking values are built at run time so no source line looks like a credential.
+        let generated = ["Ab3dEf6h", "Ij9kLm2n", "Op5qRs8t"].concat();
+        let samples = ["password=hunter2".to_owned(), "pairing code: 123456".into(), "token=opaque-example".into(), "sk-ant-abcdefghijklmnopqrstuv".into(),
+            "-----BEGIN PRIVATE KEY-----".into(), "CLAUDACODA_SESSION_CAPABILITY=private-example".into(), format!("Bearer {generated}"),
+            format!("x\\nghp_{generated}"), "the password is hunter2".into()];
+        for value in samples.iter().map(String::as_str) {
             for field in ["body", "subject", "resource"] {
                 let mut args = message("secret"); args[field] = json!(value);
                 let err = at(&store, "post", args, 100).unwrap_err().to_string();
-                assert!(!err.contains(value));
+                // The refusal is one fixed sentence: it never echoes any part of the input.
+                assert_eq!(err, "Mailbox content contains a recognizable credential or pairing code", "{value}");
                 assert!(!store.root.join("mailbox.json").exists());
             }
             assert!(at(&store, "register", json!({"name":"role","label":value}), 100).is_err());
         }
+        // Prose and compound words are saved: only credential shapes are refused.
+        let mut prose = message("prose");
+        prose["body"] = json!("The token is ready; secret: none; authorization: granted. See task-review-notes-for-today and desk-automation-tools.");
+        at(&store, "post", prose, 100).unwrap();
+        at(&store, "register", json!({"name":"claude-desk-automation-tools-3f2a"}), 100).unwrap();
         let mut args = message("bytes"); args["body"] = json!("é".repeat(16385));
         assert!(at(&store, "post", args.clone(), 100).is_err());
         args["body"] = json!("é".repeat(16384));

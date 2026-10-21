@@ -29,12 +29,21 @@ or test passed. Inspect the returned request state and receipt. A timed-out
 `wait` returns `ok:true` with `data.timed_out:true`; it does not cancel the request.
 Requests accept at most 1 MiB of JSON stdin; the prompt limit is 32,000 bytes.
 
-Mailbox `post` (0.6) adds `data.delivery`: `received` with `pickup_seconds`
-when the running app polls the recipient, `app_not_running` with a `fix` when
-the recipient is `codaclauda-team` or one of the app's sessions and the app is
-not running, otherwise `passive`. The message is saved in every case. A
-`--kind reply` without `--reply-to` answers the newest message from `--to` to
-`--from`, or is refused naming `--reply-to`. See MAILBOX.md.
+Mailbox `post` (0.6) adds `data.delivery`. `receipt` is always `saved`: the
+message is durably on the board named by `board`. `host` is the app's host lease
+for that exact board: `available` (a heartbeat under 30 s old from an
+installation bound to this board), `unavailable` (none, stale, or for another
+board or installation) or `unknown` (unreadable or malformed, with the error in
+`hostDetail`). `reader` says who reads `--to`: `app` (`codaclauda-team`),
+`session` (a CodaClauda session with wake on) or `agent` (a chat that checks its
+own inbox); `pickupSeconds` is set only while the host is available. A start
+request to `codaclauda-team` also gets `request: {"state": "queued", "requestId",
+"cancel"}`; posting never starts anything. A `--kind reply` without `--reply-to`
+answers the one open question or notice from `--to` to `--from`; with none or
+several open it is refused, naming `--reply-to` and the candidate ids.
+`wait-reply` returns the first reply with `reply_kind` (`acknowledgement` for
+`queued`/`admitted`, else `terminal`); `--terminal` waits for the first terminal
+reply and also returns the latest `acknowledgement`. See MAILBOX.md.
 
 ## Existing conversations (0.2 candidate)
 
