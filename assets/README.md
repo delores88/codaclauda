@@ -7,12 +7,12 @@ Windows Segoe UI font. No font file is bundled or redistributed.
 
 The thumbnail is an illustration, not an application screenshot.
 
-marketplace-screenshot.png shows the actual CodaClauda 0.6.0 application
+marketplace-screenshot.png shows the actual CodaClauda 0.6.1 application
 running from the verified ordinary installation of the GUI and CLI
-from source 4ca6ef41b356e5fa308c0b4542d5ba4577e0fc19.
+from source 445379f8ab48da004ad7ba5aaf604baf271fed59.
 
-Observed view: Installed Settings Usage panel with three credit/reset switches Off, explicit missing provider plan details and notification controls.
-Data boundary: Owner first name Ben and aggregate interface badges are visible. No private chat content, host paths, credentials, account balances or configured notification topic is visible.
+Observed view: Installed Settings Appearance & alerts, with upper portion of Agents at once limits visible.
+Data boundary: Owner first name Ben and aggregate interface badges visible. No topic URL, project names, host paths, credentials, balances or private conversations visible.
 
 The native JPEG capture was encoded as PNG without changing decoded pixels.
 No cropping, retouching or synthetic application rendering was used. No
