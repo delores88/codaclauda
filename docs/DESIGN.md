@@ -503,3 +503,18 @@ and reports ntfy acceptance separately from phone display. See [PHONE.md](PHONE.
 for the full controls, storage and delivery contract and [RELEASE-0.6.1.md](RELEASE-0.6.1.md)
 for the narrow release evidence. These source contracts do not establish installed
 phone or provider acceptance.
+
+## Version 0.6.2 phone poll correction
+
+ntfy polls can contain message_clear, message_delete, poll_request and future
+non-message events. They are never routed as phone text. Valid same-topic IDs
+advance the durable cursor in stream order, only after preceding messages have
+been handled. Ephemeral open/keepalive events do not replace the cursor. An
+unknown event without a trusted topic/ID is ignored without changing the cursor;
+malformed JSON and invalid real-message envelopes still fail validation.
+
+Per-event owner-settings checks and the phone gate remain in place. A failed
+delivery or state save stops later cursor progress; handled message receipts
+remain idempotent across restart. Successful progress clears only the obsolete
+unsupported-event diagnostic, retaining unrelated refusal/unknown-push evidence.
+This narrow source fix does not prove live phone or provider delivery.

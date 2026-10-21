@@ -89,6 +89,14 @@ impl Default for Book {
 }
 
 impl Book {
+    fn advance_cursor(&mut self, id: &str) {
+        self.last_id = Some(id.into());
+        // Retire only the obsolete 0.6.1 parser error after actual progress.
+        // Unknown outbound outcomes and credential refusals remain evidence.
+        if self.last_error.as_deref() == Some("ntfy returned an unsupported event.") {
+            self.last_error = None;
+        }
+    }
     fn current(&self, revision: u64) -> bool {
         self.enabled && !self.storage_failed && self.topic_digest.is_some() && self.revision == revision
     }
@@ -201,8 +209,17 @@ struct Incoming {
     tags: Vec<String>,
 }
 
-/// ntfy's /json?poll=1 response is JSONL; open/keepalive are not messages.
-fn parse_poll(bytes: &[u8], topic: &str) -> Result<Vec<Incoming>, Failure> {
+#[derive(Debug)]
+enum PollEvent {
+    Message(Incoming),
+    /// A cached non-message event: move the cursor without routing its payload.
+    Skip(String),
+}
+
+/// ntfy's JSONL stream also contains control events and future event types.
+/// Keep their validated cursors in order; ephemeral open/keepalive IDs are not
+/// cached message cursors and must not replace the last handled ID.
+fn parse_poll(bytes: &[u8], topic: &str) -> Result<Vec<PollEvent>, Failure> {
     if bytes.len() > POLL_BYTES { return Err(failure("PHONE_POLL_TOO_LARGE", "The ntfy poll exceeded its size limit. Check the topic for unwanted traffic.")); }
     let text = std::str::from_utf8(bytes).map_err(|_| failure("PHONE_POLL_INVALID", "ntfy returned invalid message data."))?;
     let mut out = Vec::new();
@@ -211,13 +228,33 @@ fn parse_poll(bytes: &[u8], topic: &str) -> Result<Vec<Incoming>, Failure> {
         match value["event"].as_str() {
             Some("open" | "keepalive") => continue,
             Some("message") => {},
-            _ => return Err(failure("PHONE_POLL_INVALID", "ntfy returned an unsupported event.")),
+            Some(_) => {
+                // Ignore unknown payloads, but never persist a cursor from a
+                // different topic or an invalid/missing ID.
+                if value["topic"].as_str() == Some(topic)
+                    && let Some(id) = value["id"].as_str().filter(|id| valid_event_id(id)) {
+                    out.push(PollEvent::Skip(id.into()));
+                }
+                continue;
+            },
+            None => return Err(failure("PHONE_POLL_INVALID", "ntfy returned invalid message data.")),
         }
         let item: Incoming = serde_json::from_value(value).map_err(|_| failure("PHONE_POLL_INVALID", "ntfy returned invalid message data."))?;
         if item.topic != topic || !valid_event_id(&item.id) { return Err(failure("PHONE_POLL_INVALID", "ntfy returned invalid message identifiers.")); }
-        out.push(item);
+        out.push(PollEvent::Message(item));
     }
     Ok(out)
+}
+
+/// Each callback finishes its durable update before the next event is visited.
+/// False means owner settings changed; an error leaves later cursors untouched.
+async fn walk_poll<'a, F, Fut>(items: &'a [PollEvent], mut apply: F) -> Result<(), Failure>
+where F: FnMut(&'a PollEvent) -> Fut,
+      Fut: std::future::Future<Output = Result<bool, Failure>> {
+    for item in items {
+        if !apply(item).await? { break; }
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -320,15 +357,17 @@ fn post_args(namespace: &str, item: &Incoming, receipt: &InboundReceipt) -> Valu
     json!({"id": id, "from": ADDRESS, "to": receipt.to, "kind": "notice", "subject": "Ben (phone)", "body": text})
 }
 fn prepare(book: &mut Book, item: &Incoming, choices: &[Recipient], feedback: impl FnOnce(&str) -> Option<String>) -> Result<bool, Failure> {
-    if book.own(item) { book.last_id = Some(item.id.clone()); return Ok(false); }
+    if book.own(item) { book.advance_cursor(&item.id); return Ok(false); }
     let id = scoped(book.topic_digest.as_deref().unwrap_or(""), &item.id);
     let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&(&item.title, &item.message)).unwrap_or_default()));
     if let Some(saved) = book.inbound.get(&id) {
         if saved.digest != digest { return Err(failure("PHONE_ID_COLLISION", "ntfy reused a message ID with changed text. Nothing further was forwarded.")); }
-        return Ok(!saved.done);
+        let pending = !saved.done;
+        if !pending { book.advance_cursor(&item.id); }
+        return Ok(pending);
     }
     let now = coord_core::now();
-    if item.time < book.created_at || item.time < now.saturating_sub(RETENTION) { return Ok(false); }
+    if item.time < book.created_at || item.time < now.saturating_sub(RETENTION) { book.advance_cursor(&item.id); return Ok(false); }
     book.inbound.retain(|_, r| !r.done || r.at >= now.saturating_sub(RETENTION));
     if book.inbound.len() >= RECEIPT_LIMIT { return Err(failure("PHONE_RECEIPT_LIMIT", "Too many recent phone messages. Older receipts expire after 30 days.")); }
     let routed = if mailbox_credential(&item.title) { Err(SCAN_REFUSAL.into()) }
@@ -384,7 +423,7 @@ async fn bounded_body(mut response: reqwest::Response, max: usize) -> Result<Vec
     }
     Ok(bytes)
 }
-async fn poll(url: &str, since: Option<&str>, created: u64) -> Result<Vec<Incoming>, Failure> {
+async fn poll(url: &str, since: Option<&str>, created: u64) -> Result<Vec<PollEvent>, Failure> {
     let topic = topic_name(url)?;
     let client = notify::client().ok_or_else(|| failure("PHONE_NETWORK_FAILED", "The HTTPS client is unavailable."))?;
     let first = created.saturating_sub(1).to_string();
@@ -511,7 +550,7 @@ impl Inner {
             self.change_phone(|b| { b.inbound.get_mut(&id).unwrap().feedback = Some("The message could not be confirmed on the board. CodaClauda will retry the same message ID; check Settings > Phone.".into()); Ok(()) })?;
             return Err(failure("PHONE_BOARD_FAILED", "The phone message could not be confirmed on the board. The same message ID will be retried."));
         }
-        self.change_phone(|book| { book.inbound.get_mut(&id).unwrap().done = true; book.last_id = Some(item.id.clone()); Ok(()) })
+        self.change_phone(|book| { book.inbound.get_mut(&id).unwrap().done = true; book.advance_cursor(&item.id); Ok(()) })
     }
     /// Called under phone_gate, so URL changes/disable cannot race publication.
     pub(super) async fn phone_publish_locked(&self, url: &str, publication: Publication) -> Result<Value, Failure> {
@@ -589,16 +628,22 @@ impl Inner {
             if !self.phone_current(snapshot.revision) { return Ok(()); }
             self.phone_register()?
         };
-        if let Ok(items) = &fetched {
-            for item in items {
+        let consumed = match &fetched {
+            Ok(items) => walk_poll(items, |item| async {
                 let _gate = self.phone_gate.lock().await;
-                if !self.phone_current(snapshot.revision) { return Ok(()); }
-                if let Err((_, message)) = self.phone_incoming(item, &store) { self.phone_error(&message); break; }
-            }
-        }
+                if !self.phone_current(snapshot.revision) { return Ok(false); }
+                match item {
+                    PollEvent::Message(message) => self.phone_incoming(message, &store)?,
+                    PollEvent::Skip(id) => self.change_phone(|book| { book.advance_cursor(id); Ok(()) })?,
+                }
+                Ok(true)
+            }).await,
+            Err(error) => Err(error.clone()),
+        };
+        if let Err((_, message)) = &consumed { self.phone_error(message); }
         self.phone_feedback(snapshot.revision).await?;
         self.phone_outbound(snapshot.revision, &store).await?;
-        fetched.map(|_| ())
+        consumed
     }
 }
 

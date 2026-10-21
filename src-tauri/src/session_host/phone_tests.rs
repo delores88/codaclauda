@@ -41,17 +41,125 @@ fn recorded_ntfy_jsonl_preserves_titles_tags_and_text_without_control_events() {
     );
     let parsed = parse_poll(recording.as_bytes(), "fixture").unwrap();
     assert_eq!(parsed.len(), 2);
-    assert_eq!(parsed[0].id, "messageone");
-    assert_eq!(parsed[0].title, "Review");
-    assert_eq!(parsed[0].message, "@Release reviewer café ☕\nsecond line");
-    assert_eq!(parsed[1].tags, vec![APP_TAG.to_owned(), "white_check_mark".into()]);
+    let PollEvent::Message(first) = &parsed[0] else { panic!("expected first message") };
+    let PollEvent::Message(second) = &parsed[1] else { panic!("expected second message") };
+    assert_eq!(first.id, "messageone");
+    assert_eq!(first.title, "Review");
+    assert_eq!(first.message, "@Release reviewer café ☕\nsecond line");
+    assert_eq!(second.tags, vec![APP_TAG.to_owned(), "white_check_mark".into()]);
     assert!(parse_poll(recording.as_bytes(), "different").is_err());
-    for invalid in [b"{bad json}\n".as_slice(), b"{\"event\":\"unexpected\"}", b"{\"event\":\"message\",\"id\":\"bad/id\",\"time\":1,\"topic\":\"fixture\"}", &[0xff]] {
+    for invalid in [b"{bad json}\n".as_slice(), b"{\"event\":null}", b"{\"event\":\"message\",\"id\":\"bad/id\",\"time\":1,\"topic\":\"fixture\"}", &[0xff]] {
         assert!(parse_poll(invalid, "fixture").is_err());
     }
     assert_eq!(parse_poll(&vec![b'x'; POLL_BYTES + 1], "fixture").unwrap_err().0, "PHONE_POLL_TOO_LARGE");
     assert_eq!(published_id(b"{\"id\":\"pushreceipt\",\"event\":\"message\"}").unwrap(), "pushreceipt");
     assert_eq!(published_id(b"{\"id\":\"bad/id\"}").unwrap_err().0, "PHONE_PUSH_UNKNOWN");
+}
+
+fn mixed_poll() -> Vec<PollEvent> {
+    // Synthetic JSONL recording, with no real phone topic or private text.
+    let recording = concat!(
+        "{\"event\":\"message\",\"id\":\"firstphone\",\"time\":1800000000,\"topic\":\"fixture\",\"message\":\"@codex-claudacoda First fixture message\"}\n",
+        "{\"event\":\"message_clear\",\"id\":\"clearone\",\"time\":1800000001,\"topic\":\"fixture\"}\n",
+        "{\"event\":\"message_clear\",\"id\":\"cleartwo\",\"time\":1800000002,\"topic\":\"fixture\"}\n",
+        "{\"event\":\"message_delete\",\"id\":\"deleteone\",\"time\":1800000003,\"topic\":\"fixture\"}\n",
+        "{\"event\":\"message\",\"id\":\"secondphone\",\"time\":1800000004,\"topic\":\"fixture\",\"message\":\"@codex-claudacoda Second fixture message\"}\n",
+        "{\"event\":\"poll_request\",\"id\":\"pollrequest\",\"time\":1800000005,\"topic\":\"fixture\"}\n",
+        "{\"event\":\"future_control\",\"id\":\"futureevent\",\"time\":1800000006,\"topic\":\"fixture\",\"message\":\"Never route this control payload\"}\n"
+    );
+    // Rebase the synthetic recording so age filtering remains meaningful on
+    // future test dates; event order comes from JSONL, not these timestamps.
+    let recording = recording.lines().map(|line| {
+        let mut value: Value = serde_json::from_str(line).unwrap();
+        value["time"] = json!(coord_core::now());
+        value.to_string()
+    }).collect::<Vec<_>>().join("\n");
+    parse_poll(recording.as_bytes(), "fixture").unwrap()
+}
+
+// Exercise the shared ordered walker with the real receipt persistence, routing
+// and passive mailbox API. No HTTP, app host or provider is started by fixtures.
+fn apply_fixture(book: &mut Book, path: &Path, store: &Store, event: &PollEvent) -> Result<bool, Failure> {
+    match event {
+        PollEvent::Skip(id) => book.advance_cursor(id),
+        PollEvent::Message(item) => {
+            let pending = prepare(book, item, &choices(), |_| None)?;
+            persist(path, book)?;
+            if pending {
+                let id = receipt_id(book, &item.id);
+                let namespace = book.topic_digest.as_deref().unwrap();
+                mailbox::api(store, "post", &post_args(namespace, item, &book.inbound[&id]))
+                    .map_err(|_| failure("PHONE_BOARD_FAILED", "fixture board post failed"))?;
+                book.inbound.get_mut(&id).unwrap().done = true;
+                book.advance_cursor(&item.id);
+            }
+        },
+    }
+    persist(path, book)?;
+    Ok(true)
+}
+
+#[tokio::test]
+async fn mixed_control_events_advance_durably_and_deliver_only_messages_once_after_restart() {
+    let (dir, store, mut book) = fixture();
+    let path = dir.path().join(FILE);
+    let events = mixed_poll();
+    book.last_error = Some("ntfy returned an unsupported event.".into());
+    walk_poll(&events, |event| std::future::ready(apply_fixture(&mut book, &path, &store, event))).await.unwrap();
+    let mut restarted = read_book(&path).unwrap();
+    assert_eq!(restarted.last_id.as_deref(), Some("futureevent"));
+    assert!(restarted.last_error.is_none());
+    assert_eq!(restarted.inbound.len(), 2);
+    walk_poll(&events, |event| std::future::ready(apply_fixture(&mut restarted, &path, &store, event))).await.unwrap();
+    assert_eq!(read_book(&path).unwrap().last_id.as_deref(), Some("futureevent"));
+    let inbox = mailbox::api(&store, "inbox", &json!({"addr": "codex-claudacoda"})).unwrap();
+    let messages = inbox["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["body"], "First fixture message");
+    assert_eq!(messages[1]["body"], "Second fixture message");
+    assert!(!fs::read_to_string(&path).unwrap().contains("Never route this control payload"));
+    restarted.last_error = Some(UNKNOWN_PUSH.into());
+    restarted.advance_cursor("anothercontrol");
+    assert_eq!(restarted.last_error.as_deref(), Some(UNKNOWN_PUSH));
+}
+
+#[tokio::test]
+async fn failed_delivery_or_owner_stop_cannot_advance_past_later_control_events() {
+    let (dir, store, mut book) = fixture();
+    let path = dir.path().join(FILE);
+    let events = mixed_poll();
+    let result = walk_poll(&events, |event| {
+        let result = if matches!(event, PollEvent::Message(item) if item.id == "secondphone") {
+            Err(failure("PHONE_BOARD_FAILED", "fixture delivery failure"))
+        } else { apply_fixture(&mut book, &path, &store, event) };
+        std::future::ready(result)
+    }).await;
+    assert_eq!(result.unwrap_err().0, "PHONE_BOARD_FAILED");
+    let mut restarted = read_book(&path).unwrap();
+    assert_eq!(restarted.last_id.as_deref(), Some("deleteone"));
+    assert_eq!(restarted.inbound.len(), 1);
+    walk_poll(&events, |_| std::future::ready(Ok(false))).await.unwrap();
+    assert_eq!(read_book(&path).unwrap().last_id.as_deref(), Some("deleteone"));
+    walk_poll(&events, |event| std::future::ready(apply_fixture(&mut restarted, &path, &store, event))).await.unwrap();
+    assert_eq!(read_book(&path).unwrap().last_id.as_deref(), Some("futureevent"));
+    assert_eq!(mailbox::api(&store, "inbox", &json!({"addr":"codex-claudacoda"})).unwrap()["messages"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn unknown_events_never_route_payloads_or_persist_unvalidated_or_ephemeral_cursors() {
+    for event in ["message_clear", "message_delete", "poll_request", "future_event"] {
+        let valid = json!({"event":event,"id":"safecontrol","topic":"fixture","message":{"unrecognized":"payload"}});
+        assert!(matches!(&parse_poll(valid.to_string().as_bytes(), "fixture").unwrap()[0], PollEvent::Skip(id) if id == "safecontrol"));
+        for fields in [json!({"event":event}),json!({"event":event,"id":"bad/id","topic":"fixture"}),json!({"event":event,"id":"safeid","topic":"different"})] {
+            assert!(parse_poll(fields.to_string().as_bytes(), "fixture").unwrap().is_empty());
+        }
+    }
+    for event in ["open", "keepalive"] {
+        assert!(parse_poll(json!({"event":event,"id":"ephemeral","topic":"fixture"}).to_string().as_bytes(), "fixture").unwrap().is_empty());
+    }
+    for invalid in [json!({"event":"message","id":"validid","time":1,"topic":"different"}),json!({"event":"message","id":"validid","time":1,"topic":"fixture","message":{}})] {
+        assert!(parse_poll(invalid.to_string().as_bytes(), "fixture").is_err());
+    }
 }
 
 #[test]

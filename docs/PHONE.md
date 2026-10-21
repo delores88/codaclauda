@@ -67,6 +67,10 @@ Keep CodaClauda open and this PC online. Its host polls the saved topic with a
 timeout and persists its cursor and delivery records, so reopening does not
 intentionally replay a handled message. The [official ntfy subscription API](https://docs.ntfy.sh/subscribe/api/)
 documents JSON lines, message ids, polling, and the limited server cache.
+Notification-clear, delete and other non-message events are skipped. Valid
+same-topic event IDs advance the cursor in order, so reading a notification
+does not block later phone messages. Delivery failures stop cursor progress
+before later events; existing receipts prevent duplicate board messages.
 Messages can expire during a long offline period. Phone notifications also
 depend on the phone's connection and notification settings.
 

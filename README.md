@@ -18,18 +18,19 @@ the local coordination board.
 
 ## Current status
 
-[Version 0.6.0](https://github.com/delores88/codaclauda/releases/tag/v0.6.0)
-is installed, published and accepted in the Marketplace. Eight bounded native
-UI, settings-persistence and passive-cancellation observations passed. These do
-not establish paid provider execution, earned-reset redemption or desktop-route
-delivery. Native Marketplace UI and authenticated served-installer verification
-remain separate evidence layers.
+[Version 0.6.1](https://github.com/delores88/codaclauda/releases/tag/v0.6.1)
+is installed, published and accepted in the Marketplace. Five bounded native
+observations include one test notification accepted by ntfy and reported by
+the owner as received on his iPhone. Incoming phone messages and agent replies
+were not established by that acceptance. A later owner test exposed a parser
+blocker when ntfy sends notification-clear events.
 
-The instructions below describe **0.6.1 source**, adding one-topic phone
-conversations and an explicit Send test action to the existing desktop controls.
-Build, installation, actual phone workflow acceptance and Marketplace admission
-require separate receipts; see [the 0.6.1 release scope](docs/RELEASE-0.6.1.md).
-Source availability alone does not establish that 0.6.1 is installed or published.
+This **0.6.2 source** corrects that poll blocker while preserving ordered durable
+cursors and message deduplication. Build, installation, live phone delivery and
+Marketplace admission require separate receipts; see the
+[0.6.2 hotfix scope](docs/RELEASE-0.6.2.md). Source availability is not installed
+acceptance. Native Marketplace UI and authenticated served bytes remain separate
+evidence limits.
 
 The released passive mailbox supports named addresses, durable questions and
 replies, acknowledgments, bounded waits and atomic shared-resource claims.
