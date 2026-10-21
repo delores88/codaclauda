@@ -46,7 +46,7 @@ fn check_url(raw: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
-fn client() -> Option<&'static reqwest::Client> {
+pub(super) fn client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -95,6 +95,7 @@ impl Inner {
             on_finish,
             on_error,
         };
+        self.phone_check_reply_url(settings.ntfy_url.as_deref())?;
         let mut value = json!(settings);
         value["schema"] = json!("codaclauda.notify/1");
         ensure_dirs(&self.dir)
@@ -102,6 +103,10 @@ impl Inner {
             .map_err(|e| ("STORAGE_FAILED", format!("Could not save notify.json: {e}")))?;
         *lock(&self.notify) = settings.clone();
         Ok(json!(settings))
+    }
+
+    pub(super) fn phone_reply_url(&self) -> Option<String> {
+        lock(&self.notify).ntfy_url.clone()
     }
 
     /// Called once per finished turn (from `finish_turn`).
@@ -172,7 +177,9 @@ pub(crate) async fn notify_settings_set(
     on_finish: Option<bool>,
     on_error: Option<bool>,
 ) -> Value {
-    reply(host(&app).notify_set(ntfy_url, on_finish.unwrap_or(false), on_error.unwrap_or(false)))
+    let inner = host(&app);
+    let _gate = inner.phone_gate.lock().await;
+    reply(inner.notify_set(ntfy_url, on_finish.unwrap_or(false), on_error.unwrap_or(false)))
 }
 
 #[cfg(test)]

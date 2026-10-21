@@ -6,6 +6,7 @@ import { weatherSettings } from './settings-weather.js';
 import { limitsSettings } from './settings-limits.js';
 import { teamSettings } from './settings-team.js';
 import { usageSettings } from './settings-usage.js';
+import { phoneSettings } from './settings-phone.js';
 import { wake, guardText, WAKE_UNAVAILABLE_TEXT } from '../wake.js';
 import { has as hasFeature, call as callFeature, validNtfyUrl, UNSUPPORTED_TEXT } from '../features.js';
 
@@ -36,6 +37,7 @@ export function mount(root, ctx) {
   const limitsCard = limitsSettings(ctx);     // persistent: Agents at once, Board requests at once, grant defaults, wake loop guard
   const teamCard = teamSettings(ctx);         // persistent: Agents can start teammates in my projects, and its guard
   const usageCard = usageSettings(ctx);       // persistent (0.6): weekly resets and usage credits past a plan limit
+  const phoneCard = phoneSettings(ctx);       // owner-local inbound topic, separate from outbound notification settings
 
   /* ---------- Wake on mail (global switch; each session also has its own, on by default since 0.5) ---------- */
   let wakeSaving = false;
@@ -76,13 +78,15 @@ export function mount(root, ctx) {
   const testBtn = h('button.btn.small', { type: 'button', onclick: () => testNotify() }, icon('bell'), 'Send test');
   const notifyStatus = h('span.field-hint.ntfy-status', { role: 'status' });
   const notifyCard = h('section.card.settings-card.notify-card',
-    h('h2.panel-title', 'Phone notifications'),
-    h('p.muted', 'Optional push to your phone through ntfy (free and open source). Install the ntfy app, subscribe to a long, hard-to-guess topic and paste its https URL here. CodaClauda posts a short notice when a session turn finishes or fails, and only then; the in-app toast and chime stay as they are.'),
+    h('h2.panel-title', 'Phone'),
+    h('h3.panel-title', 'Phone notifications and replies'),
+    h('p.muted', 'Optional push to your phone through ntfy (free and open source). Install the ntfy app, subscribe to a long, hard-to-guess topic and paste its https URL here. This is also the destination for agent replies when phone messages are on below. The switches choose turn-finished and turn-error notices; they do not turn replies off.'),
     h('div.ntfy-row', ntfyInput, saveBtn, testBtn),
     notifyStatus,
     h('div.setting-row', h('div.setting-text', h('strong', 'When a turn finishes'), h('span.field-hint', 'A reply is ready, including wakes and scheduled runs.')), h('label.switch', finishInput, h('span'))),
     h('div.setting-row', h('div.setting-text', h('strong', 'When a turn ends with an error')), h('label.switch', errorInput, h('span'))),
-    h('p.field-hint', 'Anyone who knows the topic can read what is posted to it. The test button posts once, only when you press it.'));
+    h('p.field-hint', 'Anyone who knows the topic can read what is posted to it. The test button posts once, only when you press it.'),
+    phoneCard.node);
   function renderNotify() {
     const supported = hasFeature('notifyGet') && hasFeature('notifySet');
     const loaded = note.state === 'loaded';
@@ -110,6 +114,7 @@ export function mount(root, ctx) {
       ntfyInput.value = note.saved?.ntfyUrl || '';
       finishInput.checked = note.saved?.onFinish === true;
       errorInput.checked = note.saved?.onError === true;
+      phoneCard.setReplySettings(note.saved);
     } catch (error) { note.state = 'error'; note.error = error?.message || String(error); }
     renderNotify();
   }
@@ -123,6 +128,7 @@ export function mount(root, ctx) {
       note.saved = saved && typeof saved === 'object' ? saved : { ntfyUrl: check.url || null, onFinish: finishInput.checked, onError: errorInput.checked };
       ntfyInput.value = note.saved.ntfyUrl || '';
       finishInput.checked = note.saved.onFinish === true; errorInput.checked = note.saved.onError === true;
+      phoneCard.setReplySettings(note.saved);
       ui.toast(note.saved.ntfyUrl ? 'Phone notifications saved' : 'Phone notifications off', { kind: 'success', timeout: 2600 });
       return true;
     } catch (error) {
@@ -268,7 +274,7 @@ export function mount(root, ctx) {
   }
   render();
   return {
-    show() { visible = true; render(); updateOperation('status'); wake.load(); limitsCard.load(); teamCard.load(); usageCard.load(); if (note.state !== 'loaded') loadNotify(); },
+    show() { visible = true; render(); updateOperation('status'); wake.load(); limitsCard.load(); teamCard.load(); usageCard.load(); phoneCard.load(); if (note.state !== 'loaded') loadNotify(); },
     hide() { visible = false; },
   };
 }

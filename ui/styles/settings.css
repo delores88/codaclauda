@@ -14,4 +14,8 @@
 .settings-card .ntfy-row .btn { justify-self: auto; }
 .ntfy-status { margin-top: -6px; overflow-wrap: anywhere; }
 .ntfy-status.bad { color: var(--danger); }
+.phone-messages { display: grid; gap: 12px; }
+.phone-messages .setting-row { border-top: 1px solid var(--border); padding-top: 16px; }
+.phone-steps { margin: 0; padding-left: 22px; color: var(--muted); }
+.phone-steps li + li { margin-top: 6px; }
 @media (max-width: 640px) { .ntfy-row { flex-wrap: wrap; } }

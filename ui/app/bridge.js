@@ -189,6 +189,11 @@ export const desktop = {
   notifySettingsGet: () => invoke('notify_settings_get'),
   /** ntfyUrl must be https (null or '' turns push off) → { ntfyUrl, onFinish, onError } */
   notifySettingsSet: ({ ntfyUrl = null, onFinish = false, onError = false } = {}) => invoke('notify_settings_set', { ntfyUrl: ntfyUrl || null, onFinish: Boolean(onFinish), onError: Boolean(onError) }),
+  /** Owner-only phone messaging (0.6.1): { enabled, inboundUrl|null, defaultRecipient|null, recipients:[{address,label}], lastError|null }. */
+  phoneSettingsGet: () => invoke('phone_settings_get'),
+  phoneSettingsSet: ({ enabled, defaultRecipient = null } = {}) => invoke('phone_settings_set', { enabled: Boolean(enabled), defaultRecipient: defaultRecipient || null }),
+  /** Create or replace the private inbound topic. This alone does not turn messaging on. */
+  phoneSettingsRegenerate: () => invoke('phone_settings_regenerate'),
   /** Owner setting: CodaClauda sessions working at once (Settings → Limits) → { maxLive, queueMax } */
   sessionLimitsGet: () => invoke('session_limits_get'),
   /** maxLive is a whole number ≥ 1 or 'unlimited' (the default) → { maxLive, queueMax } */

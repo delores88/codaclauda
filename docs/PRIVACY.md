@@ -1,7 +1,7 @@
 # CodaClauda privacy and local data
 
 CodaClauda is a DeloresAI desktop utility for owner-authorized coordination between
-Claude Code and Codex. This document describes the 0.6.0 source,
+Claude Code and Codex. This document describes the 0.6 source and phone messaging changes,
 including the preserved scoped-request and mailbox tools. Source review does not
 establish native acceptance, publication or Marketplace admission; those require
 separate release evidence.
@@ -151,6 +151,24 @@ other subscribers depending on the server's access rules. The app does not
 include full chat message text in these notices; it can include a shortened chat
 title or the two mailbox addresses held by the wake loop guard. The service receives normal
 network information and follows its own data policy.
+
+**Message your agents from your phone** is a separate owner setting, off until
+set up in Settings > Phone. While enabled and the desktop app is open, it polls
+a generated, hard-to-guess topic at `ntfy.sh`. Anyone who knows the topic can
+read or send its messages; the topic does not authenticate Ben. Received text
+becomes a local board notice from `owner-phone`, labeled as unverified. Existing
+wake settings may send that notice to the selected provider at its current
+project access. A phone message grants no authority or additional access.
+
+Board messages addressed to `owner-phone` send the sender address and the first
+1,000 characters of the body to the owner's existing outbound ntfy topic.
+Inbound text and complete outbound text are checked by the mailbox credential
+scanner before forwarding, including text beyond that limit. Refusals use fixed
+messages without echoing the input. This pattern scanner cannot identify every
+secret. Do not put credentials in phone or board messages. The bridge does not
+log message bodies; accepted messages still follow ordinary board and provider
+history storage. ntfy receives message content and ordinary network information
+and applies its own retention and service limits. See [Phone setup](PHONE.md).
 
 Earlier Live chat records remain readable. That separate workflow started a
 fresh dedicated read-only request for each send, with up to 12 recent messages
@@ -380,8 +398,9 @@ refuse the new schema, so rollback cannot assume the current board is readable.
 The backup also contains private coordination history and is retained locally;
 it must not be committed or attached as public release evidence.
 
-CodaClauda has no public coordination listener, cloud inbox or independent
-always-on service. It starts user-level workers for authorized requests and
+CodaClauda has no public coordination listener or independent always-on service.
+Optional phone messaging uses the external ntfy topic as an inbox while the app
+is open. It starts user-level workers for authorized requests and
 scopes provider cancellation to its owned Windows process job. It does not need
 administrator elevation. Normal operating-system access permissions still
 apply to the selected state directory and the owner's other local processes.

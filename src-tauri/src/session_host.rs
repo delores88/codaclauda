@@ -31,6 +31,7 @@ pub(crate) mod fork;
 pub(crate) mod limits;
 pub(crate) mod mcp;
 pub(crate) mod notify;
+pub(crate) mod phone;
 pub(crate) mod schedule;
 pub(crate) mod team;
 pub(crate) mod usage;
@@ -919,6 +920,9 @@ struct Inner {
     schedules: Mutex<Vec<schedule::Schedule>>,
     run_lock: Mutex<()>,
     notify: Mutex<notify::Settings>,
+    phone: Mutex<phone::Book>,
+    /// Owner changes and delivery commits serialize; a fetched old topic never delivers after regeneration.
+    phone_gate: tokio::sync::Mutex<()>,
     team: Mutex<team::Book>,
     /// The team inbox address is registered once per run.
     team_registered: AtomicBool,
@@ -957,6 +961,8 @@ impl SessionHost {
             schedules: Mutex::new(Vec::new()),
             run_lock: Mutex::new(()),
             notify: Mutex::new(notify::Settings::default()),
+            phone: Mutex::new(phone::Book::default()),
+            phone_gate: tokio::sync::Mutex::new(()),
             team: Mutex::new(team::Book::default()),
             team_registered: AtomicBool::new(false),
             usage: Mutex::new(usage::Book::default()),
@@ -966,6 +972,7 @@ impl SessionHost {
         inner.load_wake();
         inner.load_schedules();
         inner.load_notify();
+        inner.load_phone();
         inner.load_limits();
         inner.load_team();
         inner.load_usage();
@@ -979,6 +986,7 @@ impl SessionHost {
         });
         wake::spawn_watcher(inner.clone());
         schedule::spawn_ticker(inner.clone());
+        phone::spawn_watcher(inner.clone());
         Ok(Self { inner })
     }
 }
