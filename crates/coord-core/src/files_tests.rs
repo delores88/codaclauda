@@ -351,3 +351,115 @@ fn tool_calls_are_counted_and_legacy_grants_keep_04_file_tools() {
     let error = tool(&store, "legacy", "messages", json!({"id":"legacy"})).unwrap_err();
     assert_eq!(error.to_string(), "Owner tool-call budget reached; stop and report remaining work");
 }
+
+#[test]
+fn concurrent_upload_chunks_share_one_exact_offset_and_commit_receipt_is_replay_safe() {
+    let (_temp, store, grant) = fixture(false, Unlimited);
+    running(&store, &grant, "parallel-writer", "delegate");
+    let begin = tool(
+        &store,
+        "parallel-writer",
+        "write_begin",
+        json!({"path":"src/concurrent.txt","expect_version":"absent"}),
+    )
+    .unwrap();
+    let upload = begin["upload_id"].as_str().unwrap().to_owned();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let root = store.root.clone();
+    let barrier2 = barrier.clone();
+    let upload2 = upload.clone();
+    let peer = std::thread::spawn(move || {
+        let store = Store::new(Some(root)).unwrap();
+        barrier2.wait();
+        tool(
+            &store,
+            "parallel-writer",
+            "write_chunk",
+            json!({"upload_id":upload2,"offset":0,"content":"second;"}),
+        )
+    });
+    barrier.wait();
+    let first = tool(
+        &store,
+        "parallel-writer",
+        "write_chunk",
+        json!({"upload_id":upload,"offset":0,"content":"first;"}),
+    );
+    let second = peer.join().unwrap();
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    let result = tool(
+        &store,
+        "parallel-writer",
+        "write_commit",
+        json!({"upload_id":upload}),
+    )
+    .unwrap();
+    let target = Path::new(&grant.project).join("src/concurrent.txt");
+    assert_eq!(result["version"], sha(&fs::read(&target).unwrap()));
+    fs::write(&target, "subsequent owner edit;").unwrap();
+    let replay = tool(
+        &store,
+        "parallel-writer",
+        "write_commit",
+        json!({"upload_id":upload}),
+    )
+    .unwrap();
+    assert_eq!(replay["version"], result["version"]);
+    assert_eq!(replay["replayed_receipt"], true);
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "subsequent owner edit;"
+    );
+    assert!(
+        tool(
+            &store,
+            "parallel-writer",
+            "write_abort",
+            json!({"upload_id":upload})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn applying_upload_receipt_never_replays_an_ambiguous_write() {
+    let (_temp, store, grant) = fixture(false, Unlimited);
+    running(&store, &grant, "uncertain-writer", "delegate");
+    let begin = tool(
+        &store,
+        "uncertain-writer",
+        "write_begin",
+        json!({"path":"src/unknown.txt","expect_version":"absent"}),
+    )
+    .unwrap();
+    let upload = begin["upload_id"].as_str().unwrap();
+    tool(
+        &store,
+        "uncertain-writer",
+        "write_chunk",
+        json!({"upload_id":upload,"offset":0,"content":"staged;"}),
+    )
+    .unwrap();
+    let staging = store.root.join("staging/uncertain-writer");
+    let mut receipt: Value =
+        serde_json::from_slice(&fs::read(staging.join(format!("{upload}.json"))).unwrap()).unwrap();
+    receipt["outcome"] = json!({"status":"applying","result":{"path":"src/unknown.txt"}});
+    let outcomes = store.root.join("write-results/uncertain-writer");
+    fs::create_dir_all(&outcomes).unwrap();
+    fs::write(
+        outcomes.join(format!("{upload}.json")),
+        serde_json::to_vec(&receipt).unwrap(),
+    )
+    .unwrap();
+    let error = tool(
+        &store,
+        "uncertain-writer",
+        "write_commit",
+        json!({"upload_id":upload}),
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("WRITE_OUTCOME_UNKNOWN"));
+    assert!(!Path::new(&grant.project).join("src/unknown.txt").exists());
+    files_io::remove_staging(&store.root, "uncertain-writer").unwrap();
+    assert!(outcomes.join(format!("{upload}.json")).exists());
+}

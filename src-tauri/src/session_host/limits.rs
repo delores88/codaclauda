@@ -1,7 +1,8 @@
 //! Owner setting for how many CodaClauda agent processes may work at once
 //! (Settings → Limits → Agents at once): a whole number or "unlimited", the
 //! default. Saved as `session-limits.json` next to the other session
-//! settings; a missing or unreadable file means the default. Only the owner's
+//! settings; only a missing file means the default. Invalid saved settings
+//! block new launches until the owner saves a valid value. Only the owner's
 //! own webview reaches these commands. `Limit` is also the number-or-unlimited
 //! shape of the other app-side owner settings (team guard).
 
@@ -69,12 +70,16 @@ pub(crate) fn parse_limit(value: &Value, label: &str, min: u64) -> Result<Limit,
         })
 }
 
-/// The saved value, or the default (unlimited) for a missing or unreadable file.
-fn parse(bytes: Option<&[u8]>) -> Limit {
-    bytes
-        .and_then(|b| serde_json::from_slice::<Value>(b).ok())
-        .and_then(|v| parse_limit(&v["maxLive"], "Agents at once", 1).ok())
-        .unwrap_or(Limit::Unlimited)
+/// Only an absent file receives defaults; malformed persisted policy cannot
+/// silently widen the owner's finite setting.
+fn parse(bytes: Option<&[u8]>) -> Result<Limit, String> {
+    let Some(bytes) = bytes else { return Ok(Limit::Unlimited); };
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|_| "Saved Agents at once settings are invalid; save a valid value in Settings → Limits.".to_owned())?;
+    if value["schema"] != "codaclauda.session-limits/1" {
+        return Err("Saved Agents at once settings have an unsupported schema; the file was preserved.".into());
+    }
+    parse_limit(&value["maxLive"], "Agents at once", 1)
 }
 
 fn view(max_live: Limit) -> Value {
@@ -83,11 +88,20 @@ fn view(max_live: Limit) -> Value {
 
 impl Inner {
     pub(super) fn load_limits(&self) {
-        let bytes = fs::read(self.dir.join(LIMITS_FILE)).ok();
-        lock(&self.state).max_live = parse(bytes.as_deref());
+        let loaded = match fs::read(self.dir.join(LIMITS_FILE)) {
+            Ok(bytes) => parse(Some(&bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => parse(None),
+            Err(e) => Err(format!("Saved Agents at once settings could not be read: {e}")),
+        };
+        let mut state = lock(&self.state);
+        match loaded {
+            Ok(limit) => { state.max_live = limit; state.limit_failure = None; }
+            Err(message) => { state.limit_failure = Some(message); }
+        }
     }
 
     fn limits_set(&self, max_live: &Value) -> Result<Value, Failure> {
+        let _lifecycle = lock(&self.lifecycle);
         let limit = parse_limit(max_live, "Agents at once", 1)
             .map_err(|message| ("INVALID_ARGUMENTS", message))?;
         // A finite value must also fit this machine's counters (checked, never saturated).
@@ -113,7 +127,9 @@ impl Inner {
                     format!("Could not save session-limits.json: {e}"),
                 )
             })?;
-        lock(&self.state).max_live = limit;
+        let mut state = lock(&self.state);
+        state.max_live = limit;
+        state.limit_failure = None;
         Ok(view(limit))
     }
 }
@@ -122,8 +138,12 @@ impl Inner {
 
 #[tauri::command]
 pub(crate) async fn session_limits_get(app: tauri::AppHandle) -> Value {
-    let max_live = lock(&host(&app).state).max_live;
-    reply(Ok(view(max_live)))
+    let host = host(&app);
+    let state = lock(&host.state);
+    match &state.limit_failure {
+        Some(message) => reply(Err(("LIMITS_STORAGE_FAILED", message.clone()))),
+        None => reply(Ok(view(state.max_live))),
+    }
 }
 
 #[tauri::command]
@@ -137,13 +157,13 @@ mod tests {
 
     #[test]
     fn agents_at_once_round_trips_numbers_and_unlimited_and_defaults_to_unlimited() {
-        assert_eq!(parse(None), Limit::Unlimited);
+        assert_eq!(parse(None).unwrap(), Limit::Unlimited);
         for bad in [&b"not json"[..], br#"{"maxLive":0}"#, br#"{"maxLive":-1}"#, br#"{"maxLive":2.5}"#, br#"{"maxLive":"6"}"#, br#"{"maxLive":null}"#, b"{}"] {
-            assert_eq!(parse(Some(bad)), Limit::Unlimited, "{}", String::from_utf8_lossy(bad));
+            assert!(parse(Some(bad)).is_err(), "{}", String::from_utf8_lossy(bad));
         }
         for limit in [Limit::Finite(1), Limit::Finite(12), Limit::Finite(JS_SAFE_MAX), Limit::Unlimited] {
             let saved = serde_json::to_vec(&json!({"schema": "codaclauda.session-limits/1", "maxLive": limit})).unwrap();
-            assert_eq!(parse(Some(&saved)), limit);
+            assert_eq!(parse(Some(&saved)).unwrap(), limit);
             assert_eq!(view(limit)["maxLive"], limit.to_json());
         }
         assert_eq!(view(Limit::Unlimited)["maxLive"], "unlimited");

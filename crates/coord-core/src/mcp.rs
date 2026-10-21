@@ -179,17 +179,12 @@ fn authorize_call(store: &Store, request: &str, capability: &str, name: &str) ->
         ensure!(!r.terminal() && !r.cancel_requested, "Request is no longer active");
         let g = s.grants.get(&r.grant_id).context("Owner grant not found")?.clone();
         g.ensure_active(now())?;
-        let polling = matches!(name, "wait" | "messages");
+        let polling = matches!(name, "wait" | "messages" | "cancel");
         // A waiting request resumes work only into a free slot, so a finite
         // `concurrent` is never exceeded (C7). It stays waiting otherwise.
         if !polling {
-            if let Some(other) = scheduler::is_waiting(s, r).then(|| r.waiting_on.clone()).flatten() {
-                let concurrent = crate::policy::read(&store.root)?.concurrent;
-                ensure!(
-                    concurrent.allows(scheduler::counts(s).active),
-                    "SLOT_BUSY: all {concurrent} board slots are in use while request {other}, which you are waiting on, still runs. Call wait on {other} again; it returns when that request finishes."
-                );
-            }
+            let concurrent = crate::policy::read(&store.root)?.concurrent;
+            scheduler::resume(s, request, concurrent)?;
         }
         let rr = s.requests.get_mut(request).unwrap();
         rr.count_mcp_call(&g, name)?;

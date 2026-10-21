@@ -157,7 +157,7 @@ export function openMcpTools({ ui, store }, project, { onSaved } = {}) {
             field('Name', 'name', { placeholder: 'playwright' }),
             field('Command', 'command', { placeholder: 'playwright-mcp' }),
             field('Arguments (one per line)', 'args', { multiline: true, rows: 2 }),
-            field('Environment (NAME=value per line)', 'env', { multiline: true, rows: 2, placeholder: 'Avoid secrets here' })));
+            field('Environment (NAME=value per line; saved as plaintext)', 'env', { multiline: true, rows: 2, placeholder: 'Do not enter credentials here' })));
       }) : [h('p.muted.mcp-empty', 'No MCP tools for this project. Add one, or start from a preset below.')]),
       h('div.res-actions', h('button.btn.small', { type: 'button', onclick: () => addRow({}) }, icon('plus'), 'Add server')));
     const presets = dialog?.querySelector('.mcp-presets');

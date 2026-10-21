@@ -133,6 +133,11 @@ impl PemScanner {
         }
     }
 
+    /// Drain completed ranges so whole-file consumers can spool them to disk.
+    pub(crate) fn drain_blocks(&mut self) -> Vec<(u64, u64)> {
+        std::mem::take(&mut self.blocks)
+    }
+
     /// The recorded blocks, with an unclosed one running to the end of the file.
     pub fn finish(mut self, size: u64) -> Vec<(u64, u64)> {
         if let Some((start, _)) = self.open.take() {
@@ -191,6 +196,113 @@ impl PemScanner {
             self.blocks.push((start, end));
         }
     }
+}
+
+/// Redact a potentially unbounded answer without collecting it in memory.
+/// PEM ranges are spooled, then non-PEM text is processed at proven separators.
+/// No output is published if a separator-free context exceeds the transport
+/// scanner bound: the caller retains its private input and reports needs-owner.
+pub(crate) fn redact_file(
+    input: &mut std::fs::File,
+    start: u64,
+    output: &mut std::fs::File,
+    run_limit: usize,
+    clean: impl Fn(&str) -> String,
+) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut ranges = tempfile::tempfile()?;
+    let mut pem = PemScanner::new(0, u64::MAX);
+    let mut buffer = vec![0u8; 1 << 20];
+    let mut size = 0u64;
+    input.seek(SeekFrom::Start(start))?;
+    loop {
+        let n = input.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        pem.feed(&buffer[..n]);
+        size = size.checked_add(n as u64).context("Answer size overflow")?;
+        for (from, to) in pem.drain_blocks() {
+            ranges.write_all(&from.to_le_bytes())?;
+            ranges.write_all(&to.to_le_bytes())?;
+        }
+    }
+    for (from, to) in pem.finish(size) {
+        ranges.write_all(&from.to_le_bytes())?;
+        ranges.write_all(&to.to_le_bytes())?;
+    }
+    ranges.seek(SeekFrom::Start(0))?;
+    input.seek(SeekFrom::Start(start))?;
+    let mut position = 0u64;
+    let mut run = Vec::new();
+    let flush = |run: &mut Vec<u8>, out: &mut std::fs::File| -> Result<()> {
+        let text = std::str::from_utf8(run).context("Provider answer is not UTF-8")?;
+        out.write_all(redact(&clean(text)).as_bytes())?;
+        run.clear();
+        Ok(())
+    };
+    loop {
+        let mut pair = [0u8; 16];
+        let (from, to, last) = match ranges.read(&mut pair[..1])? {
+            0 => (size, size, true),
+            _ => {
+                ranges.read_exact(&mut pair[1..])?;
+                (
+                    u64::from_le_bytes(pair[..8].try_into().unwrap()),
+                    u64::from_le_bytes(pair[8..].try_into().unwrap()),
+                    false,
+                )
+            }
+        };
+        ensure!(
+            position <= from && from <= to && to <= size,
+            "Invalid answer redaction range"
+        );
+        while position < from {
+            let take = (from - position).min(buffer.len() as u64) as usize;
+            input.read_exact(&mut buffer[..take])?;
+            position += take as u64;
+            // Adapter clean_text's secret value class can contain '}', so only
+            // comma/semicolon are common proven separators of both patterns.
+            for part in buffer[..take].split_inclusive(|b| matches!(b, b',' | b';')) {
+                // Batch complete contexts instead of compiling/scanning regexes
+                // for every punctuation mark. Before enforcing the context
+                // bound, discard only the already-proven complete prefix.
+                if run.len().saturating_add(part.len()) > run_limit {
+                    if let Some(end) = run.iter().rposition(|b| matches!(b, b',' | b';')) {
+                        let suffix = run.split_off(end + 1);
+                        flush(&mut run, output)?;
+                        run = suffix;
+                    }
+                }
+                ensure!(
+                    run.len()
+                        .checked_add(part.len())
+                        .is_some_and(|n| n <= run_limit),
+                    "ANSWER_REDACTION_UNVERIFIABLE: a separator-free answer context exceeds the {run_limit}-byte scanner frame; original private output is retained for owner inspection"
+                );
+                run.extend_from_slice(part);
+                if run.len() >= run_limit.min(1 << 20)
+                    && part.last().is_some_and(|b| matches!(b, b',' | b';')) {
+                    flush(&mut run, output)?;
+                }
+            }
+        }
+        if last {
+            flush(&mut run, output)?;
+            break;
+        }
+        // Replace a PEM range before applying inline patterns. Keep the marker
+        // in the same run so credentials spanning it are never split unsafely.
+        run.extend_from_slice(b"[REDACTED]");
+        ensure!(
+            run.len() <= run_limit,
+            "ANSWER_REDACTION_UNVERIFIABLE: redaction context exceeds scanner frame"
+        );
+        position = to;
+        input.seek(SeekFrom::Start(start + to))?;
+    }
+    Ok(())
 }
 
 fn floor_boundary(text: &str, mut at: usize) -> usize {
@@ -400,5 +512,38 @@ mod tests {
         let mut scan = WriteScan::new(8);
         scan.feed(&[b'a', 0xE2, 0x82]).unwrap();
         assert!(scan.finish().is_err(), "truncated character");
+    }
+}
+
+#[cfg(test)]
+mod stream_answer_tests {
+    use super::*;
+    use std::io::{Read, Seek, SeekFrom, Write};
+    #[test]
+    fn file_redaction_keeps_cross_chunk_credentials_and_pem_private() {
+        let mut input = tempfile::tempfile().unwrap();
+        let mut output = tempfile::tempfile().unwrap();
+        let lead = "plain, ".repeat(160_000);
+        let dashes = "-".repeat(5);
+        let text = format!(
+            "{lead}password\n=fixture-value; {dashes}BEGIN RSA PRIVATE KEY{dashes}\n{}\n{dashes}END RSA PRIVATE KEY{dashes}; end",
+            "sensitive,".repeat(160_000)
+        );
+        input.write_all(text.as_bytes()).unwrap();
+        redact_file(&mut input, 0, &mut output, 1024, str::to_owned).unwrap();
+        output.seek(SeekFrom::Start(0)).unwrap();
+        let mut actual = String::new();
+        output.read_to_string(&mut actual).unwrap();
+        assert_eq!(actual, redact(&text));
+    }
+    #[test]
+    fn unverifiable_answer_context_fails_without_exposing_partial_output() {
+        let mut input = tempfile::tempfile().unwrap();
+        let mut output = tempfile::tempfile().unwrap();
+        input.write_all(&vec![b'x'; 4096]).unwrap();
+        let error = redact_file(&mut input, 0, &mut output, 1024, str::to_owned).unwrap_err();
+        assert!(error.to_string().contains("ANSWER_REDACTION_UNVERIFIABLE"));
+        assert_eq!(input.metadata().unwrap().len(), 4096);
+        assert_eq!(output.metadata().unwrap().len(), 0);
     }
 }

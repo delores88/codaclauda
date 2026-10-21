@@ -11,7 +11,7 @@
 //! hardening as desktop.rs (no fsmonitor, no signature display, no external
 //! diff or textconv programs). Commit hooks stay as the repository set them.
 
-use super::{Failure, Inner, Record, ensure_dirs, host, lock, reply};
+use super::{Failure, Inner, Record, canonical_folder, ensure_dirs, host, reply};
 use crate::desktop::{failure_line, gh_output, is_link};
 use serde_json::{Value, json};
 use std::{
@@ -156,6 +156,9 @@ pub(super) async fn create(dir: &Path, id: &str, cwd: &Path) -> Result<Tree, Fai
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "project".into());
     ensure_dirs(dir).map_err(|e| ("WORKTREE_FAILED", format!("Session storage is unavailable: {e}")))?;
+    if canonical_folder(dir)?.starts_with(canonical_folder(&repo_root)?) {
+        return Err(("WORKTREE_FAILED", "Session storage is inside this repository. Choose a board outside the project before creating worktrees.".into()));
+    }
     let holder = dir.join(WORKTREE_DIR);
     make_dir(&holder)?;
     let holder = holder.join(short);
@@ -249,19 +252,108 @@ fn cut(text: &mut String, limit: usize) -> bool {
     true
 }
 
-impl Inner {
-    /// No turn, launch or queued turn may be using the session.
-    fn require_idle(&self, id: &str) -> Result<(), Failure> {
-        let state = lock(&self.state);
-        if state.session_busy(id) || state.queues.get(id).is_some_and(|q| !q.is_empty()) {
-            return Err((
-                "SESSION_BUSY",
-                "Wait for the agent to finish (or stop it) first.".into(),
-            ));
+/// Refuse an existing operation without changing its index, files or metadata.
+fn no_pending_git_operation(git_dir: &Path) -> Result<(), Failure> {
+    for name in [
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "rebase-merge",
+        "rebase-apply",
+        "sequencer",
+        "BISECT_LOG",
+    ] {
+        match fs::symlink_metadata(git_dir.join(name)) {
+            Ok(_) => return Err(("GIT_OPERATION_IN_PROGRESS", "This checkout already has a Git operation in progress. Finish or cancel it yourself before using this action; CodaClauda has not changed it.".into())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(_) => return Err(("GIT_OPERATION_IN_PROGRESS", "Git operation metadata could not be inspected; no changes were started.".into())),
         }
-        Ok(())
     }
+    Ok(())
+}
 
+async fn git_metadata(root: &Path, flag: &str) -> Result<PathBuf, Failure> {
+    let path = PathBuf::from(git_ok(root, &["rev-parse", flag], GIT_QUICK).await?);
+    canonical_folder(&if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    })
+}
+
+async fn require_git_idle(root: &Path) -> Result<(), Failure> {
+    no_pending_git_operation(&git_metadata(root, "--absolute-git-dir").await?)
+}
+
+fn github_origin(remote: &str) -> Result<String, Failure> {
+    let invalid = || {
+        ("PR_REMOTE_UNSUPPORTED", "PR actions require exactly one origin push URL for a repository on github.com, using HTTPS or git@github.com SSH.".into())
+    };
+    let remote = remote.trim();
+    let path = remote
+        .strip_prefix("https://github.com/")
+        .or_else(|| remote.strip_prefix("git@github.com:"))
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
+        .ok_or_else(invalid)?;
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let parts: Vec<_> = path.split('/').collect();
+    if parts.len() != 2
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || *part == "."
+                || *part == ".."
+                || !part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        })
+    {
+        return Err(invalid());
+    }
+    Ok(path.to_owned())
+}
+
+async fn origin_repo(root: &Path) -> Result<(String, String), Failure> {
+    let remote = git_ok(
+        root,
+        &["remote", "get-url", "--push", "--all", "origin"],
+        GIT_QUICK,
+    )
+    .await?;
+    let repo = github_origin(&remote)?;
+    Ok((repo, remote))
+}
+
+fn checked_pr(
+    pr: &Value,
+    repo: &str,
+    branch: Option<&str>,
+    base: Option<&str>,
+) -> Result<(String, u64), Failure> {
+    let invalid = || {
+        ("PR_MISMATCH", "GitHub CLI returned a PR outside the expected origin repository, branch or base. No PR identity was saved.".into())
+    };
+    let url = pr["url"].as_str().ok_or_else(invalid)?;
+    let prefix = format!("https://github.com/{repo}/pull/");
+    let number = url
+        .get(prefix.len()..)
+        .filter(|_| {
+            url.get(..prefix.len())
+                .is_some_and(|v| v.eq_ignore_ascii_case(&prefix))
+        })
+        .filter(|value| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .ok_or_else(invalid)?;
+    if branch.is_some_and(|b| pr["headRefName"].as_str() != Some(b))
+        || base.is_some_and(|b| pr["baseRefName"].as_str() != Some(b))
+        || pr["isCrossRepository"].as_bool() != Some(false)
+    {
+        return Err(invalid());
+    }
+    Ok((url.to_owned(), number))
+}
+
+impl Inner {
     fn worktree_of(record: &Record) -> Result<(PathBuf, String), Failure> {
         match (&record.worktree_path, &record.branch) {
             (Some(root), Some(branch)) if Path::new(root).is_dir() => {
@@ -278,12 +370,62 @@ impl Inner {
         }
     }
 
+    /// Bind the path and branch to this app's registered worktree before any mutation.
+    async fn validate_worktree(
+        &self,
+        record: &Record,
+    ) -> Result<(PathBuf, String, PathBuf), Failure> {
+        let (root, branch) = Self::worktree_of(record)?;
+        let canonical_root = canonical_folder(&root)?;
+        let owned = canonical_folder(&self.dir.join(WORKTREE_DIR))?;
+        let expected_holder = owned.join(record.id.get(2..10).unwrap_or(&record.id));
+        if canonical_root.parent() != Some(expected_holder.as_path()) {
+            return Err(("WORKTREE_MISMATCH", "The saved worktree is outside this chat's managed folder; no changes were started.".into()));
+        }
+        let top = git_ok(&root, &["rev-parse", "--show-toplevel"], GIT_QUICK).await?;
+        let actual_branch = git_ok(
+            &root,
+            &["symbolic-ref", "--quiet", "--short", "HEAD"],
+            GIT_QUICK,
+        )
+        .await?;
+        if canonical_folder(Path::new(&top))? != canonical_root || actual_branch != branch {
+            return Err(("WORKTREE_MISMATCH", "The worktree root or checked-out branch has changed. Restore the recorded branch before using this action.".into()));
+        }
+        let repo = PathBuf::from(record.repo_root.as_deref().ok_or((
+            "NO_WORKTREE",
+            "The original checkout is not recorded.".into(),
+        ))?);
+        if git_metadata(&root, "--git-common-dir").await?
+            != git_metadata(&repo, "--git-common-dir").await?
+        {
+            return Err((
+                "WORKTREE_MISMATCH",
+                "The worktree and original checkout no longer share the same Git repository."
+                    .into(),
+            ));
+        }
+        require_git_idle(&root).await?;
+        Ok((root, branch, repo))
+    }
+
+    fn operation_paths(record: &Record) -> Result<Vec<PathBuf>, Failure> {
+        let root = Self::worktree_of(record)?.0;
+        let repo = record.repo_root.as_ref().ok_or((
+            "NO_WORKTREE",
+            "The original checkout is not recorded.".into(),
+        ))?;
+        Ok(vec![root, PathBuf::from(repo)])
+    }
+
     /// Stages everything in the worktree and commits it when anything changed.
     async fn commit_all(root: &Path, message: &str) -> Result<bool, Failure> {
         git_ok(root, &["add", "-A"], GIT_SLOW).await?;
         let staged = git(root, &["diff", "--cached", "--quiet"], GIT_QUICK).await?;
-        if staged.status.code() != Some(1) {
-            return Ok(false);
+        match staged.status.code() {
+            Some(0) => return Ok(false),
+            Some(1) => {},
+            _ => return Err(("GIT_FAILED", "Git could not determine whether the staged changes differ; no commit was attempted.".into())),
         }
         git_ok(root, &["commit", &format!("--message={message}")], GIT_SLOW)
             .await
@@ -356,93 +498,88 @@ impl Inner {
 
     async fn apply(&self, id: &str, message: Option<&str>) -> Result<Value, Failure> {
         let record = self.record_of(id)?;
-        self.require_idle(id)?;
-        let (root, branch) = Self::worktree_of(&record)?;
+        let _reservation = self.reserve_folder_operation(&Self::operation_paths(&record)?)?;
+        let (root, branch, repo) = self.validate_worktree(&record).await?;
+        // Refuse unrelated owner work before staging or committing the agent branch.
+        require_git_idle(&repo).await?;
+        let base = record.base_branch.as_deref().ok_or((
+            "BASE_NOT_CHECKED_OUT",
+            "The original checkout had no branch. Choose a branch before applying this worktree."
+                .into(),
+        ))?;
+        let current = git_ok(
+            &repo,
+            &["symbolic-ref", "--quiet", "--short", "HEAD"],
+            GIT_QUICK,
+        )
+        .await?;
+        if current != base {
+            return Err((
+                "BASE_NOT_CHECKED_OUT",
+                format!(
+                    "Check out {base} in {} first. No commit or merge was attempted.",
+                    shown(&repo)
+                ),
+            ));
+        }
+        if !git_ok(
+            &repo,
+            &["status", "--porcelain", "--untracked-files=normal"],
+            GIT_QUICK,
+        )
+        .await?
+        .is_empty()
+        {
+            return Err(("BASE_DIRTY", "The original checkout has local changes. Commit or preserve them yourself before applying this worktree.".into()));
+        }
         let message: String = message
-            .map(|m| m.trim().chars().filter(|c| *c == '\n' || !c.is_control()).take(4000).collect())
+            .map(|m| {
+                m.trim()
+                    .chars()
+                    .filter(|c| *c == '\n' || !c.is_control())
+                    .take(4000)
+                    .collect()
+            })
             .filter(|m: &String| !m.trim().is_empty())
             .unwrap_or_else(|| format!("CodaClauda: {}", record.title));
         let committed = Self::commit_all(&root, &message).await?;
-        let mut merged = false;
-        if let (Some(repo), Some(base)) = (&record.repo_root, &record.base_branch) {
-            let repo = PathBuf::from(repo);
-            let current = git_ok(&repo, &["symbolic-ref", "--quiet", "--short", "HEAD"], GIT_QUICK)
-                .await
-                .unwrap_or_default();
-            if &current != base {
-                return Err((
-                    "BASE_NOT_CHECKED_OUT",
-                    format!(
-                        "Check out {base} in {} first (it has {} checked out). The changes {} on {branch}.",
-                        shown(&repo),
-                        if current.is_empty() { "a detached HEAD".to_owned() } else { current },
-                        if committed { "were committed" } else { "stay" }
-                    ),
-                ));
-            }
-            let range = format!("{base}..{branch}");
-            let ahead = git_ok(&repo, &["rev-list", "--count", &range], GIT_QUICK)
-                .await?
-                .parse::<u64>()
-                .unwrap_or(0);
-            if ahead > 0 {
-                if let Err((_, problem)) = git_ok(&repo, &["merge", "--no-edit", &branch], GIT_SLOW).await {
-                    let _ = git(&repo, &["merge", "--abort"], GIT_QUICK).await;
-                    return Err((
-                        "MERGE_FAILED",
-                        format!("Git could not merge {branch} into {base}: {problem} The merge was aborted; the changes stay committed on {branch}."),
-                    ));
-                }
-                merged = true;
-            }
-        }
-        if merged {
+        let range = format!("{base}..{branch}");
+        let ahead = git_ok(&repo, &["rev-list", "--count", &range], GIT_QUICK)
+            .await?
+            .parse::<u64>()
+            .map_err(|_| {
+                (
+                    "GIT_FAILED",
+                    "Git returned an unreadable revision count.".into(),
+                )
+            })?;
+        if ahead > 0 {
+            // Never abort: even a failed/timed-out command may have changed the index.
+            git_ok(&repo, &["merge", "--no-overwrite-ignore", "--no-edit", &branch], GIT_SLOW).await.map_err(|(_, problem)| (
+                "MERGE_FAILED", format!("Git did not confirm merging {branch} into {base}: {problem} Inspect the original checkout before another action. No abort or retry was attempted; the worktree commit is retained.")))?;
             let head = git_ok(&root, &["rev-parse", "HEAD"], GIT_QUICK).await?;
-            let _ = self.with_record(id, |r| r.base_commit = Some(head));
+            self.with_record(id, |r| r.base_commit = Some(head))
+                .map_err(|m| ("STORAGE_FAILED", m))?;
         }
-        Ok(json!({"committed": committed, "merged": merged, "branch": branch}))
+        Ok(json!({"committed": committed, "merged": ahead > 0, "branch": branch}))
     }
 
     async fn discard(self: &Arc<Self>, id: &str) -> Result<Value, Failure> {
         let record = self.record_of(id)?;
-        self.require_idle(id)?;
-        let (Some(root), Some(branch), Some(repo)) = (&record.worktree_path, &record.branch, &record.repo_root) else {
-            return Err(("NO_WORKTREE", "This chat does not have its own worktree.".into()));
-        };
-        if lock(&self.state).live.contains_key(id) {
-            self.close(id)?;
-            for _ in 0..100 {
-                if !lock(&self.state).live.contains_key(id) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            if lock(&self.state).live.contains_key(id) {
-                return Err((
-                    "SESSION_BUSY",
-                    "The agent has not confirmed it stopped; try again in a moment.".into(),
-                ));
-            }
+        let _reservation = self.reserve_folder_operation(&Self::operation_paths(&record)?)?;
+        let (root, branch, repo) = self.validate_worktree(&record).await?;
+        require_git_idle(&repo).await?;
+        let root_text = shown(&root);
+        // Exactly one removal. Unknown outcomes stay inspectable; no prune/retry loop.
+        git_ok(&repo, &["worktree", "remove", "--force", &root_text], GIT_SLOW).await.map_err(|(_, problem)| (
+            "WORKTREE_REMOVE_UNCONFIRMED", format!("Git did not confirm removing the worktree: {problem} Inspect it before another action; no retry, prune or branch deletion was attempted.")))?;
+        if root.exists() {
+            return Err(("WORKTREE_REMOVE_UNCONFIRMED", "Git reported success but the worktree folder remains. No branch deletion was attempted.".into()));
         }
-        let repo = PathBuf::from(repo);
-        let mut removed = false;
-        for _ in 0..4 {
-            let done = git(&repo, &["worktree", "remove", "--force", root], GIT_SLOW).await;
-            if done.is_ok_and(|o| o.status.success()) || !Path::new(root).exists() {
-                removed = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-        let _ = git(&repo, &["worktree", "prune"], GIT_QUICK).await;
-        if !removed {
-            return Err((
-                "WORKTREE_BUSY",
-                "Git could not remove the worktree; a program may still have files open in it. Close it and try again.".into(),
-            ));
-        }
-        let _ = git(&repo, &["branch", "-D", branch], GIT_QUICK).await;
-        if let Some(holder) = Path::new(root).parent() {
+        let branch_removed = git_ok(&repo, &["branch", "-D", &branch], GIT_QUICK)
+            .await
+            .is_ok();
+        if let Some(holder) = root.parent() {
             let _ = fs::remove_dir(holder);
         }
         self.with_record(id, |r| {
@@ -452,65 +589,206 @@ impl Inner {
             r.status = "stopped".into();
         })
         .map_err(|message| ("STORAGE_FAILED", message))?;
-        self.publish(super::event(id, None, "status", json!({"status": "stopped"})), false);
-        Ok(json!({"discarded": true}))
+        self.publish(
+            super::event(id, None, "status", json!({"status": "stopped"})),
+            false,
+        );
+        Ok(
+            json!({"discarded": true, "branchDeletionConfirmed": branch_removed,
+            "message": if branch_removed { "Worktree and branch removed." } else { "Worktree removed; Git did not confirm branch deletion. Inspect the original repository before deleting the branch yourself." }}),
+        )
+    }
+
+    fn save_pr(&self, id: &str, url: &str, number: u64) -> Result<Value, Failure> {
+        self.with_record(id, |r| {
+            r.pr_url = Some(url.to_owned());
+            r.pr_number = Some(number);
+        })
+        .map_err(|message| ("STORAGE_FAILED", message))?;
+        Ok(json!({"url": url, "number": number}))
     }
 
     async fn pr_create(&self, id: &str, title: &str, body: &str) -> Result<Value, Failure> {
         let record = self.record_of(id)?;
-        self.require_idle(id)?;
-        let (root, branch) = Self::worktree_of(&record)?;
-        let title: String = title.trim().chars().filter(|c| !c.is_control()).take(256).collect();
+        let _reservation = self.reserve_folder_operation(&Self::operation_paths(&record)?)?;
+        let (root, branch, _) = self.validate_worktree(&record).await?;
+        let (repo, origin) = origin_repo(&root).await?;
+        // Include the host so inherited GH_HOST cannot redirect this action.
+        let gh_repo = format!("github.com/{repo}");
+        let title: String = title
+            .trim()
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(256)
+            .collect();
         if title.is_empty() {
             return Err(("INVALID_ARGUMENTS", "Give the pull request a title.".into()));
         }
         if body.len() > 60_000 {
-            return Err(("INPUT_TOO_LARGE", "The pull request description is too long.".into()));
+            return Err((
+                "INPUT_TOO_LARGE",
+                "The pull request description is too long.".into(),
+            ));
+        }
+        // Reconcile a prior unknown create outcome before any new remote mutation.
+        let existing = gh_output(
+            &[
+                "pr",
+                "list",
+                "--repo",
+                &gh_repo,
+                "--head",
+                &branch,
+                "--state",
+                "open",
+                "--json",
+                "url,headRefName,baseRefName,isCrossRepository",
+            ],
+            GH_WAIT,
+            Some(&root),
+        )
+        .await?;
+        if !existing.status.success() {
+            return Err((
+                "PR_FAILED",
+                "Could not reconcile existing origin PRs; no commit, push or create was attempted."
+                    .into(),
+            ));
+        }
+        let existing: Value = serde_json::from_slice(&existing.stdout).map_err(|_| {
+            (
+                "PR_FAILED",
+                "GitHub CLI returned unreadable PR data; no push or create was attempted.".into(),
+            )
+        })?;
+        let existing = existing.as_array().ok_or((
+            "PR_FAILED",
+            "GitHub CLI returned unexpected PR data.".into(),
+        ))?;
+        if !existing.is_empty() {
+            if existing.len() != 1 {
+                return Err((
+                    "PR_MISMATCH",
+                    "More than one PR matches this branch. Inspect GitHub before creating another."
+                        .into(),
+                ));
+            }
+            let (url, number) = checked_pr(
+                &existing[0],
+                &repo,
+                Some(&branch),
+                record.base_branch.as_deref(),
+            )?;
+            return self.save_pr(id, &url, number);
         }
         Self::commit_all(&root, &title).await?;
-        git_ok(&root, &["push", "--set-upstream", "origin", &branch], GIT_PUSH)
-            .await
-            .map_err(|(_, m)| ("PUSH_FAILED", format!("Git could not push {branch}: {m}")))?;
+        if origin_repo(&root).await?.1 != origin {
+            return Err((
+                "PR_REMOTE_CHANGED",
+                "The origin push URL changed; no push or PR creation was attempted.".into(),
+            ));
+        }
+        git_ok(
+            &root,
+            &["push", "--set-upstream", "origin", &branch],
+            GIT_PUSH,
+        )
+        .await
+        .map_err(|(_, m)| {
+            (
+                "PUSH_FAILED",
+                format!(
+                    "Git did not confirm pushing {branch}: {m} Inspect the remote before retrying."
+                ),
+            )
+        })?;
         let title_arg = format!("--title={title}");
         let body_arg = format!("--body={body}");
-        let mut args = vec!["pr", "create", "--head", branch.as_str()];
+        let mut args = vec![
+            "pr",
+            "create",
+            "--repo",
+            gh_repo.as_str(),
+            "--head",
+            branch.as_str(),
+        ];
         if let Some(base) = &record.base_branch {
             args.extend(["--base", base.as_str()]);
         }
         args.extend([title_arg.as_str(), body_arg.as_str()]);
-        let output = gh_output(&args, GH_WAIT, Some(&root)).await?;
+        let output = gh_output(&args, GH_WAIT, Some(&root)).await.map_err(|(_, m)| ("PR_OUTCOME_UNKNOWN", format!("PR creation was not confirmed: {m} A later explicit attempt will first reconcile existing PRs.")))?;
         if !output.status.success() {
-            return Err(("PR_FAILED", format!("GitHub CLI could not create the pull request: {}", failure_line(&output.stderr))));
+            return Err((
+                "PR_OUTCOME_UNKNOWN",
+                format!(
+                    "GitHub CLI did not confirm PR creation: {} A later explicit attempt will first reconcile existing PRs.",
+                    failure_line(&output.stderr)
+                ),
+            ));
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let url = stdout
-            .lines()
-            .map(str::trim)
-            .find(|l| l.starts_with("https://") && l.contains("/pull/"))
-            .ok_or(("PR_FAILED", "GitHub CLI did not report the new pull request.".to_owned()))?
-            .to_owned();
-        let number = url.rsplit('/').next().and_then(|n| n.parse::<u64>().ok());
-        let _ = self.with_record(id, |r| {
-            r.pr_url = Some(url.clone());
-            r.pr_number = number;
-        });
-        Ok(json!({"url": url, "number": number}))
+        // Read back the exact target after creation; a printed URL is not enough.
+        let output = gh_output(
+            &[
+                "pr",
+                "view",
+                &branch,
+                "--repo",
+                &gh_repo,
+                "--json",
+                "url,headRefName,baseRefName,isCrossRepository",
+            ],
+            GH_WAIT,
+            Some(&root),
+        )
+        .await?;
+        if !output.status.success() {
+            return Err(("PR_OUTCOME_UNKNOWN", "The PR may exist, but its origin identity could not be confirmed. A later explicit attempt will reconcile it.".into()));
+        }
+        let pr: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+            (
+                "PR_OUTCOME_UNKNOWN",
+                "GitHub CLI returned unreadable PR confirmation.".into(),
+            )
+        })?;
+        let (url, number) = checked_pr(&pr, &repo, Some(&branch), record.base_branch.as_deref())?;
+        self.save_pr(id, &url, number)
     }
 
     async fn pr_status(&self, id: &str) -> Result<Value, Failure> {
         let record = self.record_of(id)?;
         let none = json!({"url": null, "state": null, "checks": []});
-        let Some(target) = record.branch.clone().or_else(|| record.pr_url.clone()) else {
+        let Some(target) = record
+            .pr_number
+            .map(|n| n.to_string())
+            .or_else(|| record.branch.clone())
+        else {
             return Ok(none);
         };
-        let dir = [&record.worktree_path, &record.repo_root, &Some(record.cwd.clone())]
-            .into_iter()
-            .flatten()
-            .map(PathBuf::from)
-            .find(|p| p.is_dir())
-            .ok_or(("PROJECT_MISSING", "The chat's folder is not available.".to_owned()))?;
+        let dir = [
+            &record.worktree_path,
+            &record.repo_root,
+            &Some(record.cwd.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        .map(PathBuf::from)
+        .find(|p| p.is_dir())
+        .ok_or((
+            "PROJECT_MISSING",
+            "The chat's folder is not available.".to_owned(),
+        ))?;
+        let (repo, _) = origin_repo(&dir).await?;
+        let gh_repo = format!("github.com/{repo}");
         let output = gh_output(
-            &["pr", "view", &target, "--json", "url,state,statusCheckRollup"],
+            &[
+                "pr",
+                "view",
+                &target,
+                "--repo",
+                &gh_repo,
+                "--json",
+                "url,state,statusCheckRollup,headRefName,baseRefName,isCrossRepository",
+            ],
             GH_WAIT,
             Some(&dir),
         )
@@ -520,11 +798,28 @@ impl Inner {
             if line.to_ascii_lowercase().contains("no pull requests found") {
                 return Ok(none);
             }
-            return Err(("GH_UNAVAILABLE", format!("GitHub CLI could not read the pull request: {line}")));
+            return Err((
+                "GH_UNAVAILABLE",
+                format!("GitHub CLI could not read the pull request: {line}"),
+            ));
         }
-        let pr: Value = serde_json::from_slice(&output.stdout)
-            .map_err(|_| ("GH_UNAVAILABLE", "GitHub CLI returned unreadable pull request data.".to_owned()))?;
-        let lower = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_ascii_lowercase);
+        let pr: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+            (
+                "GH_UNAVAILABLE",
+                "GitHub CLI returned unreadable pull request data.".to_owned(),
+            )
+        })?;
+        let (confirmed_url, confirmed_number) = checked_pr(
+            &pr,
+            &repo,
+            record.branch.as_deref(),
+            record.base_branch.as_deref(),
+        )?;
+        let lower = |v: &Value| {
+            v.as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_ascii_lowercase)
+        };
         let checks: Vec<Value> = pr["statusCheckRollup"]
             .as_array()
             .into_iter()
@@ -540,9 +835,8 @@ impl Inner {
                 })
             })
             .collect();
-        if let Some(url) = pr["url"].as_str().filter(|u| record.pr_url.as_deref() != Some(*u)) {
-            let url = url.to_owned();
-            let _ = self.with_record(id, |r| r.pr_url = Some(url));
+        if record.pr_url.as_deref() != Some(confirmed_url.as_str()) {
+            self.save_pr(id, &confirmed_url, confirmed_number)?;
         }
         Ok(json!({"url": pr["url"], "state": lower(&pr["state"]), "checks": checks}))
     }
@@ -592,6 +886,79 @@ pub(crate) async fn session_pr_status(app: tauri::AppHandle, id: String) -> Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_owner_git_operations_are_refused_without_touching_their_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("index");
+        fs::write(&index, b"owner conflict resolution").unwrap();
+        for name in [
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "rebase-merge",
+            "rebase-apply",
+            "sequencer",
+            "BISECT_LOG",
+        ] {
+            let marker = dir.path().join(name);
+            fs::write(&marker, b"existing owner operation").unwrap();
+            assert_eq!(
+                no_pending_git_operation(dir.path()).unwrap_err().0,
+                "GIT_OPERATION_IN_PROGRESS"
+            );
+            assert_eq!(fs::read(&marker).unwrap(), b"existing owner operation");
+            assert_eq!(fs::read(&index).unwrap(), b"owner conflict resolution");
+            fs::remove_file(marker).unwrap();
+        }
+        assert!(no_pending_git_operation(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn pr_identity_is_bound_to_one_origin_repository_and_its_exact_branches() {
+        for url in [
+            "https://github.com/owner/repo.git",
+            "git@github.com:owner/repo.git",
+            "ssh://git@github.com/owner/repo",
+        ] {
+            assert_eq!(github_origin(url).unwrap(), "owner/repo");
+        }
+        for url in [
+            "https://token@github.com/owner/repo",
+            "https://elsewhere/owner/repo",
+            "https://github.com/owner/repo?x=1",
+            "git@github.com:../repo",
+            "https://github.com/owner/repo.git\nhttps://github.com/other/repo.git",
+        ] {
+            assert!(github_origin(url).is_err(), "{url}");
+        }
+        let pr = json!({"url":"https://github.com/owner/repo/pull/17", "headRefName":"codaclauda/12345678", "baseRefName":"main", "isCrossRepository":false});
+        assert_eq!(
+            checked_pr(&pr, "owner/repo", Some("codaclauda/12345678"), Some("main"))
+                .unwrap()
+                .1,
+            17
+        );
+        for (key, value) in [
+            ("url", json!("https://github.com/other/repo/pull/17")),
+            ("url", json!("https://github.com/owner/repo/pull/17?x")),
+            ("headRefName", json!("other")),
+            ("baseRefName", json!("production")),
+            ("isCrossRepository", json!(true)),
+        ] {
+            let mut wrong = pr.clone();
+            wrong[key] = value;
+            assert!(
+                checked_pr(
+                    &wrong,
+                    "owner/repo",
+                    Some("codaclauda/12345678"),
+                    Some("main")
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn untracked_files_become_new_file_patches() {

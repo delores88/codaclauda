@@ -14,7 +14,7 @@
 //! a restart answers from what was saved and never starts a teammate twice.
 
 use super::{
-    Failure, Inner, Provider, Queued, Record, TEXT_LIMIT, ensure_dirs, host,
+    Failure, Inner, Provider, Queued, Record, State, TEXT_LIMIT, ensure_dirs, host,
     limits::{Limit, parse_limit},
     lock, now_ms, reply, write_atomic,
 };
@@ -156,7 +156,7 @@ impl Book {
 /// Like the UI's normalizePath: forward slashes, no \\?\ prefix, no trailing slash, lower case.
 fn normalize_path(path: &str) -> String {
     let mut p = path.replace('\\', "/");
-    if p.len() >= 8 && p[..8].eq_ignore_ascii_case("//?/UNC/") {
+    if p.get(..8).is_some_and(|prefix| prefix.eq_ignore_ascii_case("//?/UNC/")) {
         p = format!("//{}", &p[8..]);
     } else if let Some(rest) = p.strip_prefix("//?/") {
         p = rest.to_owned();
@@ -232,13 +232,19 @@ fn project_access(
     ids: &[String],
 ) -> Result<&'static str, String> {
     let state = ui_state.as_ref().map_err(Clone::clone)?;
-    let saved = state.as_ref().map(|s| &s["projectAccess"]);
+    if state.as_ref().is_some_and(|v| !v.is_object()) {
+        return Err("its saved project settings are invalid; the owner must review them in Projects".into());
+    }
+    let saved = state.as_ref().and_then(|s| s.get("projectAccess"));
+    if saved.is_some_and(|v| !v.is_object()) {
+        return Err("its saved access settings are invalid; the owner must review them in Projects".into());
+    }
     let mut keys: Vec<&str> = ids.iter().map(String::as_str).collect();
     if !keys.contains(&project_id) {
         keys.insert(0, project_id);
     }
     for key in keys {
-        let Some(record) = saved.map(|m| &m[key]).filter(|r| r.is_object()) else {
+        let Some(record) = saved.and_then(|m| m.get(key)) else {
             continue;
         };
         return match record["level"].as_str() {
@@ -421,7 +427,7 @@ pub(super) async fn process<H: TeamHost + Sync>(host: &H, store: &Store, message
             // CodaClauda closed while starting it: answer from what exists, never start twice.
             let outcome = match host.started_for(&id) {
                 Some(mate) => Handled::started(&mate, now),
-                None => Handled::refused(&refuse("TEAM_INTERRUPTED", "CodaClauda closed while starting this teammate and nothing was started. Send a new request with a new message id.".into()), now),
+                None => Handled::refused(&refuse("TEAM_INTERRUPTED", "CodaClauda closed while starting this teammate. No matching saved session was found, so its outcome is unknown. It was not replayed. Inspect sessions and any partial work before requesting it again.".into()), now),
             };
             host.record(&id, &outcome)?;
             outcome
@@ -474,6 +480,44 @@ fn plain_reply(body: &str) -> String {
     json!({"refused": {"code": code, "message": format!("Agents cannot start teammates from this message ({code}). The full reason resembled a credential, so it was not posted.")}}).to_string()
 }
 
+fn check_admission(
+    book: &Book,
+    state: &State,
+    record: &Record,
+    ui_state: &Result<Option<Value>, String>,
+) -> Result<(), Failure> {
+    if record.started_by.is_none() {
+        return Ok(());
+    }
+    if let Some(message) = &book.failure {
+        return Err(("TEAM_STORAGE_FAILED", message.clone()));
+    }
+    let (id, project) = book.resolve(&record.project_id)
+        .ok_or(("TEAM_PROJECT_UNKNOWN", "This teammate's project settings are no longer available.".into()))?;
+    if !project.agents_can_start {
+        return Err(("TEAM_SWITCH_OFF", "The owner disabled agent-started teammates for this project. No new turn was started.".into()));
+    }
+    if normalize_path(&record.cwd) != normalize_path(&project.cwd) {
+        return Err(("TEAM_PROJECT_CHANGED", "The teammate's project folder changed. Review it before starting another turn.".into()));
+    }
+    let current = project_access(ui_state, id, &project.ids)
+        .map_err(|why| ("TEAM_ACCESS_UNAVAILABLE", why))?;
+    if record.access != "read" && (record.access != "full" || current != "full") {
+        return Err(("TEAM_ACCESS_CHANGED", "This teammate's access exceeds the project's current level. Start a new teammate at the current level.".into()));
+    }
+    let others = state.records.iter().filter(|r| {
+        r.id != record.id && r.started_by.is_some()
+            && (r.project_id == *id || project.ids.contains(&r.project_id))
+            && (state.live.contains_key(&r.id) || state.launching.contains_key(&r.id)
+                || state.turns.contains_key(&r.id)
+                || state.queues.get(&r.id).is_some_and(|q| !q.is_empty()))
+    }).count();
+    if !project.max_agent_started_live.allows(others) {
+        return Err(("TEAM_GUARD", format!("{others} other agent-started sessions already reserve this project's limit. Wait for one to become idle or change the owner's setting.")));
+    }
+    Ok(())
+}
+
 impl Inner {
     pub(super) fn load_team(&self) {
         *lock(&self.team) = read_book(&self.dir.join(TEAM_FILE)).unwrap_or_else(|message| Book {
@@ -498,6 +542,7 @@ impl Inner {
     }
 
     fn team_settings_set(&self, input: &Value) -> Result<Value, Failure> {
+        let _lifecycle = lock(&self.lifecycle);
         let invalid = |m: &str| ("INVALID_ARGUMENTS", m.to_owned());
         let text = |key: &str, limit: usize| {
             input[key]
@@ -559,6 +604,19 @@ impl Inner {
     /// The project id for the awareness note when its switch is on.
     pub(super) fn team_project(&self, record: &Record) -> Option<String> {
         lock(&self.team).switched_on(&record.project_id).cloned()
+    }
+
+    /// Called with lifecycle and state held at admission and dispatch. Queued
+    /// teammates reserve a slot too; waking an asleep session cannot evade the
+    /// owner's finite setting. Never acquire lifecycle or state here.
+    pub(super) fn check_team_admission(&self, state: &State, record: &Record) -> Result<(), Failure> {
+        if record.started_by.is_none() {
+            return Ok(());
+        }
+        let book = lock(&self.team);
+        let ui_state = super::schedule::read_json(&self.dir.join(UI_STATE), UI_STATE_LIMIT)
+            .map_err(|_| "its access level could not be read".to_owned());
+        check_admission(&book, state, record, &ui_state)
     }
 
     /// The note for a new session's first turn, when it wakes on mail.
@@ -729,6 +787,40 @@ mod tests {
     fn request(id: &str, project: &str) -> Value {
         let body = json!({"start": {"provider": "codex", "project": project, "title": "Reviewer", "prompt": "Review the diff."}});
         json!({"id": id, "from": "claude-app-0001", "to": TEAM_ADDRESS, "kind": "question", "subject": "Need a reviewer", "body": body.to_string()})
+    }
+
+    #[test]
+    fn admission_rechecks_team_slots_switch_and_access_before_an_asleep_session_wakes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut book = project(dir.path(), true, Limit::Finite(1));
+        let record = Record { id: "a".into(), project_id: "local:c:/work/app".into(),
+            cwd: dir.path().to_string_lossy().into_owned(), access: "full".into(),
+            started_by: Some(json!({"messageId":"m1"})), ..Record::default() };
+        let mut other = record.clone();
+        other.id = "b".into();
+        let mut state = State::default();
+        state.records = vec![record.clone(), other];
+        assert!(check_admission(&book, &state, &record, &Ok(None)).is_ok());
+        state.launching.insert("b".into(), "turn-b".into());
+        assert_eq!(check_admission(&book, &state, &record, &Ok(None)).unwrap_err().0, "TEAM_GUARD");
+        state.launching.clear();
+        state.launching.insert("a".into(), "turn-a".into());
+        assert!(check_admission(&book, &state, &record, &Ok(None)).is_ok(), "the session's own reservation is not counted twice");
+        let read = Ok(Some(json!({"projectAccess":{"local:c:/work/app":{"level":"read"}}})));
+        assert_eq!(check_admission(&book, &state, &record, &read).unwrap_err().0, "TEAM_ACCESS_CHANGED");
+        for invalid in [json!(null), json!("read"), json!({"level":"invalid"})] {
+            let ui = Ok(Some(json!({"projectAccess":{"local:c:/work/app":invalid}})));
+            assert_eq!(check_admission(&book, &state, &record, &ui).unwrap_err().0, "TEAM_ACCESS_UNAVAILABLE");
+        }
+        for invalid in [json!(null), json!([]), json!("read")] {
+            assert_eq!(check_admission(&book, &state, &record, &Ok(Some(invalid))).unwrap_err().0, "TEAM_ACCESS_UNAVAILABLE");
+        }
+        book.projects.get_mut("local:c:/work/app").unwrap().agents_can_start = false;
+        assert_eq!(check_admission(&book, &state, &record, &Ok(None)).unwrap_err().0, "TEAM_SWITCH_OFF");
+        let mut owner = record.clone();
+        owner.started_by = None;
+        assert!(check_admission(&book, &state, &owner, &Ok(None)).is_ok());
+        assert_eq!(normalize_path("日本語の長い名前"), "日本語の長い名前");
     }
 
     #[test]

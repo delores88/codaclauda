@@ -240,3 +240,175 @@ pub fn inline_or_file(
     );
     Ok((inline, Some(payload)))
 }
+
+
+/// Raw answer ingestion is durable during the run, not deferred until Outcome.
+/// The private raw file is never returned as agent-readable payload. Only the
+/// separately redacted output may be referenced by persisted request state.
+#[derive(Default)]
+pub(crate) struct AnswerSink {
+    file: Option<std::fs::File>,
+    path: Option<PathBuf>,
+    start: u64,
+    bytes: u64,
+    capability: String,
+}
+impl AnswerSink {
+    pub fn at(directory: &Path, capability: &str) -> Result<Self> {
+        fs::create_dir_all(directory)?;
+        let path = directory.join("answer.raw.private.txt");
+        let file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        Ok(Self {
+            file: Some(file),
+            path: Some(path),
+            start: 0,
+            bytes: 0,
+            capability: capability.into(),
+        })
+    }
+    fn file(&mut self) -> Result<&mut std::fs::File> {
+        if self.file.is_none() {
+            self.file = Some(tempfile::tempfile()?);
+        }
+        Ok(self.file.as_mut().unwrap())
+    }
+    pub fn append(&mut self, text: &str) -> Result<()> {
+        let sanitized;
+        let text = if self.capability.is_empty() {
+            text
+        } else {
+            sanitized = text.replace(&self.capability, "[REDACTED]");
+            &sanitized
+        };
+        let file = self.file()?;
+        file.seek(SeekFrom::End(0))?;
+        file.write_all(text.as_bytes())?;
+        file.sync_data()?;
+        self.bytes = self
+            .bytes
+            .checked_add(text.len() as u64)
+            .context("Answer size overflow")?;
+        Ok(())
+    }
+    pub fn replace(&mut self, text: &str) -> Result<()> {
+        // Preserve previous assistant records as private evidence even when a
+        // provider terminal result replaces the answer selected for the owner.
+        self.start = self.bytes;
+        self.append(text)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.bytes == self.start
+    }
+    pub fn evidence_path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+    pub fn finish(&mut self, clean: impl Fn(&str) -> String) -> Result<(String, Option<Payload>)> {
+        let start = self.start;
+        let path = self
+            .path
+            .as_ref()
+            .context("Durable answer output directory unavailable")?
+            .with_file_name("answer.redacted.txt");
+        let mut output = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+        crate::secrets::redact_file(
+            self.file()?,
+            start,
+            output.as_file_mut(),
+            crate::model::RECORD_FRAME_BYTES as usize,
+            clean,
+        )?;
+        output.as_file().sync_all()?;
+        let size = output.as_file().metadata()?.len();
+        output.as_file_mut().seek(SeekFrom::Start(0))?;
+        if size <= INLINE_BYTES as u64 {
+            let mut text = String::new();
+            output.as_file_mut().read_to_string(&mut text)?;
+            return Ok((text.trim().to_owned(), None));
+        }
+        let mut digest = Sha256::new();
+        let mut buffer = vec![0u8; 1 << 20];
+        let mut preview_bytes = Vec::new();
+        loop {
+            let n = output.as_file_mut().read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            digest.update(&buffer[..n]);
+            let keep = PREVIEW_BYTES.saturating_sub(preview_bytes.len()).min(n);
+            preview_bytes.extend_from_slice(&buffer[..keep]);
+        }
+        // The prefix may end in a UTF-8 character; never manufacture replacement
+        // characters or let this cosmetic boundary discard any payload bytes.
+        while std::str::from_utf8(&preview_bytes).is_err() {
+            preview_bytes.pop();
+        }
+        let preview = String::from_utf8(preview_bytes)?;
+        let payload = Payload {
+            path: path.to_string_lossy().into_owned(),
+            bytes: size,
+            sha256: format!("{:x}", digest.finalize()),
+            preview,
+            preview_only: true,
+        };
+        output.persist(&path).map_err(|e| e.error)?;
+        let inline = format!(
+            "{}\n\n[Preview only: the first {} of {} bytes. The full redacted text is saved at {} (sha256 {}).]",
+            payload.preview,
+            payload.preview.len(),
+            payload.bytes,
+            payload.path,
+            payload.sha256
+        );
+        Ok((inline, Some(payload)))
+    }
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::*;
+    #[test]
+    fn durable_answers_spill_during_ingestion_and_redact_across_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sink = AnswerSink::at(dir.path(), "fixture-capability").unwrap();
+        let block = "ordinary answer line, with a proven separator;\n".repeat(10_000);
+        for _ in 0..4 {
+            sink.append(&block).unwrap();
+        }
+        sink.append("password").unwrap();
+        sink.append("=fixture-private-value;").unwrap();
+        sink.append("fixture-capability;").unwrap();
+        let raw = fs::read_to_string(sink.evidence_path().unwrap()).unwrap();
+        assert!(raw.len() > INLINE_BYTES && !raw.contains("fixture-capability"));
+        assert!(std::mem::size_of_val(&sink) < 1024); // no aggregate answer buffer
+        let (inline, payload) = sink.finish(str::to_owned).unwrap();
+        let payload = payload.unwrap();
+        let text = fs::read_to_string(&payload.path).unwrap();
+        assert!(text.starts_with(&block.repeat(4)));
+        assert!(!text.contains("fixture-private-value"));
+        assert_eq!(payload.bytes, text.len() as u64);
+        assert_eq!(
+            payload.sha256,
+            format!("{:x}", Sha256::digest(text.as_bytes()))
+        );
+        assert!(inline.len() < PREVIEW_BYTES + 1024 && inline.contains("Preview only"));
+    }
+    #[test]
+    fn provider_terminal_replacement_preserves_earlier_private_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sink = AnswerSink::at(dir.path(), "").unwrap();
+        sink.append("Earlier assistant text;\n").unwrap();
+        sink.replace("Final answer;\n").unwrap();
+        let (answer, payload) = sink.finish(str::to_owned).unwrap();
+        assert_eq!(answer, "Final answer;");
+        assert!(payload.is_none());
+        assert!(
+            fs::read_to_string(sink.evidence_path().unwrap())
+                .unwrap()
+                .contains("Earlier assistant text")
+        );
+    }
+}

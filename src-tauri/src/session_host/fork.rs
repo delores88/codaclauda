@@ -150,6 +150,8 @@ impl Inner {
             forked_from: Some(source.id.clone()),
             ..Record::default()
         };
+        let _lifecycle = lock(&self.lifecycle);
+        lock(&self.state).check_folder_available(&record.cwd)?;
         self.copy_log(&source.id, &record.id)
             .map_err(|message| ("STORAGE_FAILED", message))?;
         let mut state = lock(&self.state);

@@ -422,6 +422,28 @@ impl Request {
             data,
         });
     }
+    /// Cancellation must remain readable by an already-running 0.4 worker.
+    /// Used only by the store's explicitly compatible transaction path.
+    pub(crate) fn compatible_event(&mut self, legacy_board: bool, kind: &str, data: Value) {
+        if !legacy_board {
+            self.event(kind, data);
+            return;
+        }
+        self.updated_at = crate::now();
+        self.events.push(Event {
+            seq: self.events.len() as u64,
+            at: self.updated_at,
+            kind: kind.into(),
+            data,
+        });
+    }
+    pub(crate) fn compatible_transition(&mut self, legacy_board: bool, state: &str, data: Value) {
+        self.state = state.into();
+        if self.terminal() {
+            self.waiting_on = None;
+        }
+        self.compatible_event(legacy_board, state, data);
+    }
     pub fn transition(&mut self, state: &str, data: Value) {
         self.state = state.into();
         if self.terminal() {

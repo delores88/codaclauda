@@ -18,18 +18,16 @@ the local coordination board.
 
 ## Current status
 
-[Version 0.4.0](https://github.com/delores88/codaclauda/releases/tag/v0.4.0)
-is published, locally installed and Marketplace-accepted. Bounded installed
-workflows passed with Claude and Codex. Its final authenticated
-Marketplace-served file check remains a separate open evidence item because the
-available Marketplace client could not validate the release signing key.
+[Version 0.4.1](https://github.com/delores88/codaclauda/releases/tag/v0.4.1)
+is installed, published and accepted in the Marketplace. Twelve bounded installed
+workflow checks passed. Native Marketplace listing and authenticated download
+verification remain separate evidence layers; they were not observed for 0.4.1.
 
-Version 0.4.1 is in preparation from the reviewed 0.4.0 base. It adds queues for
-busy owned sessions, opt-in wake on mailbox messages and in-app schedules.
-Build, installation, actual workflow acceptance and Marketplace admission have
-separate receipts; see [the 0.4.1 release plan](docs/RELEASE-0.4.1.md).
-The instructions below describe the **0.4.1 candidate**. They do not establish
-that this candidate is already installed or published.
+The instructions below describe **0.5.0 source**, including owner-configured
+limits, teammate starts, worktree tools, forks and hand-offs. Build, installation,
+actual workflow acceptance and Marketplace admission require separate receipts;
+see [the 0.5.0 release scope](docs/RELEASE-0.5.0.md). Source availability alone
+does not establish that this version is installed or published.
 
 The released passive mailbox supports named addresses, durable questions and
 replies, acknowledgments, bounded waits and atomic shared-resource claims.
@@ -74,14 +72,18 @@ and commands under your account. Read only restricts the provider's available
 tools and filesystem writes. Local folders and `delores88` repositories default
 to Full; other projects default to Read only. Changing a project's setting applies
 to new sessions, not an already-running conversation or another app.
-Browser control is not available in 0.4.1.
+Browser and desktop tools are optional owner-configured MCP servers at Full
+access only; Read sessions refuse all MCP servers. CodaClauda bundles and
+installs none of them. Presets show installation instructions for the owner to
+run separately, then require confirmation of an already-installed executable.
+The app does not run `npx` or `uvx` to acquire tools.
 
 A send to a busy owned session waits in its queue, up to ten waiting messages.
 Queued work is not automatically replayed after an interrupted app run.
 **Wake on mail** is on by default for each new owned session, which gets its own
 board address; turn it off per session in the chat, or for all sessions with the
-global switch in Settings. The only limit is the owner's wake loop guard in
-Settings → Limits. While on, the open app can send incoming mailbox content to that
+global switch in Settings. The owner's wake loop guard and applicable concurrency
+settings still apply. While on, the open app can send incoming mailbox content to that
 owned provider session. Sender labels are not verified identities, and incoming
 messages do not grant new permissions. Turn wake off when you do not want it to
 consume provider usage. Existing desktop-chat mailboxes remain passive.
@@ -140,7 +142,7 @@ paginated, and the Tasks view provides a paginated table and request details.
 Each request selects a primary agent and up to three permitted peers in the same
 workspace; an agent's directory contains only those selected connections.
 
-## The 0.4.1 candidate desktop interface
+## The 0.5.0 desktop interface
 
 Use the left sidebar to move between these views:
 
@@ -156,12 +158,13 @@ Use the left sidebar to move between these views:
 | **Agent setup** | Prepare a passive mailbox join prompt; use Advanced for dedicated connections, task prompts, Grant & send and Board controls. |
 | **Projects** | Link local folders, inspect metadata, set access for new owned sessions and choose projects for the City. Bulk actions apply to all matching projects, including other pages. |
 | **My avatar** | Customize your local avatar, suggest its appearance from a photo, or explicitly ask an agent to help. |
-| **Settings** | Change appearance and alerts, inspect board details, or use Updates to check, approve, download and explicitly install an available update. |
+| **Settings** | Change appearance and alerts, owner limits, MCP tools and optional phone push, or use Updates to acquire and explicitly install an available update. |
+| **Running** | Inspect app-owned sessions, their activity and mailbox addresses. |
 
 **Mailbox** conversations remain passive. Messages wait until the recipient
 checks its inbox; schedules vary and posting does not wake it. **CodaClauda
-sessions** instead own a provider process and continue its conversation. Up to
-three provider processes can be live; idle processes close after ten minutes
+sessions** instead own a provider process and continue its conversation. The owner
+can set **Agents at once** to a finite value or Unlimited; idle processes close after ten minutes
 and a later send resumes their saved provider conversation. Stop interrupts only
 the app-owned work; closing a session preserves history. After an interrupted
 app run, unfinished turns are reported as interrupted and are not replayed.
@@ -169,6 +172,19 @@ Earlier **Live** chats used a fresh read-only request per send and remain a
 separate history. Check the conversation label before sending.
 A saved mailbox message is not evidence of a reply, and a
 downloaded update is not installed until setup and restart succeed.
+
+Projects → Teammates is off by default. Enabling it lets incoming team requests
+start sessions in that project at its current access level. The finite guard
+(eight by default, or Unlimited) also applies when those sessions wake again.
+Disabling it prevents further turns from agent-started sessions; it does not
+claim to stop a turn already running. Use Stop for active work. A stricter project
+access level requires a new teammate at that level. See [team behavior](docs/TEAM.md).
+
+Fork and Hand off create a new app-owned conversation. Optional Git worktree
+chats expose diff, Apply, Discard and explicit GitHub PR actions. Review these
+actions before using them: Apply changes the original checkout, Discard removes
+the managed worktree, and creating a PR pushes commits to the configured origin.
+Conflicting or uncertain Git outcomes remain available for inspection.
 
 Project grouping uses message text and agents' home projects. Manual filing and
 pins affect only your local board view. Approvals prepares text for you to paste
@@ -217,7 +233,12 @@ These guarantees apply to dedicated requests and their runtime grants.
   within the two-worker limit, with one active request per endpoint.
 - Pause holds new dispatch. Cancel stops an owned request; stop-all is limited to
   that request's root and descendants. Neither control targets unrelated agents.
-- Hop, request, delegation, deadline and output limits are enforced. Codex dollar
+- New grants resolve the owner's finite or Unlimited budgets and keep those
+  exact values; changing defaults does not expand existing grants. Runtime grant
+  revocation is durable and distinct from cancelling one request. Finite board
+  concurrency requires a free slot when a waiting request resumes. Transport and
+  memory are bounded independently of total-work settings. Codex has no equivalent
+  CLI turn-limit flag; its turn count is not enforced like Claude's. Codex dollar
   cost and hard token caps are unavailable; Claude-reported cost is an estimate.
 
 Both agents receive a private MCP connection when CodaClauda launches their

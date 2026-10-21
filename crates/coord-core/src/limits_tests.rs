@@ -139,6 +139,42 @@ fn current_grant_missing_a_budget_fails_closed() {
 }
 
 #[test]
+fn persisted_policy_requires_complete_validated_values_without_rewriting() {
+    let (_temp, store, _grant) = fixture();
+    let path = store.root.join("policy.json");
+    assert_eq!(policy::read(&store.root).unwrap(), policy::Policy::default());
+    let mut full = serde_json::to_value(policy::Policy::default()).unwrap();
+    full["concurrent"] = json!(2);
+    full["grant_defaults"]["max_requests"] = json!(3);
+    let mut missing_concurrent = full.clone();
+    missing_concurrent.as_object_mut().unwrap().remove("concurrent");
+    let mut missing_budget = full.clone();
+    missing_budget["grant_defaults"].as_object_mut().unwrap().remove("max_requests");
+    let mut invalid = vec![json!({}), missing_concurrent, missing_budget];
+    for value in [Value::Null, json!(0), json!(budget::JS_SAFE_MAX + 1)] {
+        let mut bad = full.clone();
+        bad["grant_defaults"]["max_requests"] = value;
+        invalid.push(bad);
+    }
+    let mut unknown = full.clone();
+    unknown["schema_version"] = json!(999);
+    invalid.push(unknown);
+    for value in invalid {
+        let original = serde_json::to_vec(&value).unwrap();
+        fs::write(&path, &original).unwrap();
+        assert!(policy::read(&store.root).is_err(), "{value}");
+        assert!(policy::api(&store.root, "limits-set", &json!({"concurrent":1})).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+    fs::write(&path, serde_json::to_vec(&full).unwrap()).unwrap();
+    policy::api(&store.root, "policy-set", &json!({"grant_defaults":{"max_turns":40}})).unwrap();
+    let stored = policy::read(&store.root).unwrap();
+    assert_eq!(stored.concurrent, Finite(2));
+    assert_eq!(stored.grant_defaults.max_requests, Finite(3));
+    assert_eq!(stored.grant_defaults.max_turns, Finite(40));
+}
+
+#[test]
 fn legacy_grant_keeps_its_0_4_limits_exactly() {
     let original = legacy_grant_json("C:/fixture");
     let legacy: Grant = serde_json::from_value(original.clone()).unwrap();
@@ -477,8 +513,10 @@ fn cancelling_a_waiting_parent_ends_its_wait_and_its_priority() {
     let error = waiting.join().unwrap().unwrap_err().to_string();
     assert!(error.contains("no longer active") && started.elapsed() < Duration::from_secs(10));
     let state = store.read().unwrap();
-    assert_eq!(state.requests["parent"].waiting_on, None);
-    assert_eq!(scheduler::counts(&state).waiting, 0);
+    // Cancellation does not manufacture a free running slot. The worker will
+    // clear this yielded state when it records its terminal outcome.
+    assert_eq!(state.requests["parent"].waiting_on.as_deref(), Some("z-child"));
+    assert_eq!(scheduler::counts(&state).waiting, 1);
     assert_eq!(scheduler::pick(&state, Unlimited).as_deref(), Some("a-older"));
 }
 
@@ -509,9 +547,9 @@ fn a_waiting_parent_cannot_resume_past_a_finite_limit() {
     assert_eq!(state.requests["parent"].mcp_calls_used(), used);
     assert_eq!(scheduler::counts(&state), scheduler::Counts { active: 1, waiting: 1, queued: 0 });
     drop(state);
-    // When the child finishes, its slot passes to the parent, and work resumes.
+    // Completion makes a slot available; resumption must still claim it.
     store.transaction(|s| { s.requests.get_mut("child").unwrap().transition("completed", json!({})); Ok(()) }).unwrap();
-    assert_eq!(scheduler::counts(&store.read().unwrap()).active, 1);
+    assert_eq!(scheduler::counts(&store.read().unwrap()).active, 0);
     // Authorization succeeds now; the fixture's tool body itself may fail.
     let after = mcp::call(&store, "parent", "parent-capability", cli, "list_files", &json!({}));
     assert!(after.as_ref().err().is_none_or(|e| !e.to_string().starts_with("SLOT_BUSY")));
@@ -519,6 +557,40 @@ fn a_waiting_parent_cannot_resume_past_a_finite_limit() {
     assert_eq!(state.requests["parent"].waiting_on, None);
     assert_eq!(state.requests["parent"].mcp_calls_used(), used + 1);
     assert_eq!(scheduler::counts(&state), scheduler::Counts { active: 1, waiting: 0, queued: 0 });
+}
+
+#[test]
+fn shared_terminal_descendant_does_not_resume_multiple_waiters_into_one_slot() {
+    let (_temp, store, _grant) = fixture();
+    policy::api(&store.root, "limits-set", &json!({"concurrent":1})).unwrap();
+    store.transaction(|s| {
+        let mut ep = s.endpoints["codex-fixture"].clone();
+        ep.id = "third-fixture".into();
+        s.endpoints.insert(ep.id.clone(), ep);
+        s.grants.get_mut("grant-fixture").unwrap().targets.push("third-fixture".into());
+        Ok(())
+    }).unwrap();
+    ask(&store, "a", "codex-fixture", None).unwrap();
+    running(&store, "a", "cap-a");
+    ask(&store, "b", "claude-fixture", Some("a")).unwrap();
+    wait_for(&store, "a", "cap-a", "b", 0).unwrap();
+    running(&store, "b", "cap-b");
+    ask(&store, "c", "third-fixture", Some("b")).unwrap();
+    wait_for(&store, "b", "cap-b", "c", 0).unwrap();
+    running(&store, "c", "cap-c");
+    wait_for(&store, "a", "cap-a", "c", 0).unwrap();
+    assert_eq!(scheduler::counts(&store.read().unwrap()).active, 1);
+    store.transaction(|s| { s.requests.get_mut("c").unwrap().transition("completed", json!({})); Ok(()) }).unwrap();
+    assert_eq!(scheduler::counts(&store.read().unwrap()).active, 0);
+    assert_eq!(wait_for(&store, "a", "cap-a", "c", 0).unwrap()["timed_out"], false);
+    assert!(wait_for(&store, "b", "cap-b", "c", 0).unwrap_err().to_string().starts_with("SLOT_BUSY"));
+    assert!(mcp::call(&store, "b", "cap-b", Path::new(CLI), "get_context", &json!({})).unwrap_err().to_string().starts_with("SLOT_BUSY"));
+    let state = store.read().unwrap();
+    assert_eq!(scheduler::counts(&state).active, 1);
+    assert_eq!(state.requests["b"].waiting_on.as_deref(), Some("c"));
+    store.transaction(|s| { s.requests.get_mut("a").unwrap().transition("completed", json!({})); Ok(()) }).unwrap();
+    assert_eq!(wait_for(&store, "b", "cap-b", "c", 0).unwrap()["timed_out"], false);
+    assert_eq!(scheduler::counts(&store.read().unwrap()).active, 1);
 }
 
 #[test]
@@ -551,17 +623,33 @@ fn migration_waits_for_a_running_0_4_worker_and_never_relaunches_it() {
         .open(store.root.join("worker-old.lock")).unwrap();
     worker.try_lock_exclusive().unwrap();
     // 0.4-compatible writes still work, so the old worker can finish.
-    store.transaction(|s| { s.paused = true; Ok(()) }).unwrap();
+    owner_api(&store, "pause", &json!({"paused":true}), cli).unwrap();
     assert_eq!(store.read().unwrap().schema_version, 1);
+    // The installed new CLI can request cancellation without migrating beneath
+    // the old worker. Its old reader still sees the original event/record shape.
+    owner_api(&store, "cancel", &json!({"id":"old"}), cli).unwrap();
+    let cancelled = store.read().unwrap();
+    assert_eq!(cancelled.schema_version, 1);
+    assert!(cancelled.requests["old"].cancel_requested);
+    assert!(!cancelled.has_current_data());
+    assert!(cancelled.requests["old"].events.iter().any(|e| e.kind == "cancel-requested"));
     let before = fs::read(&state_file).unwrap();
     // A write that needs schema 3 is refused and changes nothing.
-    let error = store.transaction(|s| { s.grants.insert(grant.id.clone(), grant.clone()); Ok(()) }).unwrap_err().to_string();
+    let side_effect = store.root.join("must-not-be-created");
+    let error = store.transaction(|s| { fs::write(&side_effect, b"callback ran")?; s.grants.insert(grant.id.clone(), grant.clone()); Ok(()) }).unwrap_err().to_string();
     assert!(error.starts_with("MIGRATION_BUSY: request old"), "{error}");
+    assert!(!side_effect.exists());
     assert_eq!(fs::read(&state_file).unwrap(), before);
     assert!(!store.root.join("state.schema1.backup.json").exists());
     // The worker ends without a receipt; migration reconciles it in the same write.
     drop(worker);
-    store.transaction(|s| { s.grants.insert(grant.id.clone(), grant.clone()); s.paused = false; Ok(()) }).unwrap();
+    store.transaction(|s| {
+        // The migration owns the free worker lease before running its callback:
+        // an old dispatch that has claimed but not spawned cannot enter now.
+        let late_worker = fs::OpenOptions::new().read(true).write(true).open(store.root.join("worker-old.lock"))?;
+        assert!(late_worker.try_lock_exclusive().is_err());
+        s.grants.insert(grant.id.clone(), grant.clone()); s.paused = false; Ok(())
+    }).unwrap();
     assert_eq!(fs::read(store.root.join("state.schema1.backup.json")).unwrap(), before);
     let state = store.read().unwrap();
     assert_eq!(state.schema_version, 3);

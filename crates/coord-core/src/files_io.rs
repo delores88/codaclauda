@@ -5,6 +5,7 @@
 //! 8 MiB. Grants created before 0.5 keep their whole-file 256 KiB tools (C3).
 use super::*;
 use anyhow::anyhow;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read};
 
@@ -302,11 +303,45 @@ struct Upload {
     target: PathBuf,
     base: String,
     created_at: u64,
+    #[serde(default)]
+    outcome: Option<Value>,
 }
 impl Upload {
     fn base(&self) -> Identity {
-        if self.base == "absent" { Identity::Absent } else { Identity::Version(self.base.clone()) }
+        if self.base == "absent" {
+            Identity::Absent
+        } else {
+            Identity::Version(self.base.clone())
+        }
     }
+}
+
+// One cross-process lock also covers cleanup. Always acquire it before state.lock.
+fn staging_lock(root: &Path) -> Result<fs::File> {
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join("staging.lock"))?;
+    FileExt::lock_exclusive(&lock)?;
+    Ok(lock)
+}
+
+fn outcome_path(root: &Path, request: &str, upload_id: &str) -> PathBuf {
+    root.join("write-results")
+        .join(request)
+        .join(format!("{upload_id}.json"))
+}
+
+fn save_upload(path: &Path, upload: &Upload) -> Result<()> {
+    let parent = path.parent().context("Missing upload parent")?;
+    fs::create_dir_all(parent)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer(&mut tmp, upload)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 fn staging(root: &Path, request: &str) -> PathBuf {
@@ -317,7 +352,12 @@ fn load(root: &Path, r: &Request, upload_id: &str) -> Result<(Upload, PathBuf, P
     let unknown = || anyhow!("Unknown upload_id {upload_id}; start again with write_begin");
     safe_id(upload_id).map_err(|_| unknown())?;
     let directory = staging(root, &r.id);
-    let meta = directory.join(format!("{upload_id}.json"));
+    let result = outcome_path(root, &r.id, upload_id);
+    let meta = if result.exists() {
+        result
+    } else {
+        directory.join(format!("{upload_id}.json"))
+    };
     let upload: Upload = serde_json::from_slice(&fs::read(&meta).map_err(|_| unknown())?)?;
     ensure!(
         upload.request_id == r.id && upload.grant_id == r.grant_id,
@@ -326,7 +366,14 @@ fn load(root: &Path, r: &Request, upload_id: &str) -> Result<(Upload, PathBuf, P
     Ok((upload, directory.join(format!("{upload_id}.part")), meta))
 }
 
-pub(crate) fn begin(store: &Store, request: &str, g: &Grant, workspace: &Path, a: &Value) -> Result<Value> {
+pub(crate) fn begin(
+    store: &Store,
+    request: &str,
+    g: &Grant,
+    workspace: &Path,
+    a: &Value,
+) -> Result<Value> {
+    let _staging_lock = staging_lock(&store.root)?;
     ensure!(!g.is_legacy(), "write_begin {STAGED_ONLY}");
     let display = field(a, "path")?;
     let base = expect_version(a, true)?.context(
@@ -356,15 +403,21 @@ pub(crate) fn begin(store: &Store, request: &str, g: &Grant, workspace: &Path, a
         target,
         base: base.label().into(),
         created_at: now(),
+        outcome: None,
     };
     let mut meta = tempfile::NamedTempFile::new_in(&directory)?;
     serde_json::to_writer(&mut meta, &upload)?;
     meta.as_file().sync_all()?;
-    meta.persist(directory.join(format!("{upload_id}.json"))).map_err(|e| e.error)?;
+    meta.persist(directory.join(format!("{upload_id}.json")))
+        .map_err(|e| e.error)?;
     Ok(json!({"upload_id":upload_id,"path":display,"expect_version":upload.base,"staged_bytes":0}))
 }
 
-pub(crate) fn chunk(root: &Path, r: &Request, a: &Value) -> Result<Value> {
+pub(crate) fn chunk(store: &Store, r: &Request, a: &Value) -> Result<Value> {
+    let _staging_lock = staging_lock(&store.root)?;
+    store.transaction(|state| {
+    ensure_running(state, &r.id)?;
+    let root = &store.root;
     let upload_id = field(a, "upload_id")?;
     let offset = a.get("offset").and_then(Value::as_u64).context("offset must be a whole number")?;
     let content = a["content"].as_str().context("content must be text")?;
@@ -373,7 +426,8 @@ pub(crate) fn chunk(root: &Path, r: &Request, a: &Value) -> Result<Value> {
         "write_chunk content is {} bytes; each chunk is limited to 8 MiB ({FRAME} bytes)",
         content.len()
     );
-    let (_, part, _) = load(root, r, upload_id)?;
+    let (upload, part, _) = load(root, r, upload_id)?;
+    ensure!(upload.outcome.is_none(), "Upload already committed or has an unknown outcome; inspect write_commit.");
     let mut file = fs::OpenOptions::new().append(true).open(&part)?;
     let staged = file.metadata()?.len();
     ensure!(
@@ -384,7 +438,9 @@ pub(crate) fn chunk(root: &Path, r: &Request, a: &Value) -> Result<Value> {
         .checked_add(content.len() as u64)
         .ok_or_else(|| budget::too_large("offset"))?;
     file.write_all(content.as_bytes())?;
+    file.sync_all()?;
     Ok(json!({"upload_id":upload_id,"staged_bytes":total}))
+    })
 }
 
 fn scan_staged(part: &Path) -> Result<secrets::Scanned> {
@@ -405,11 +461,16 @@ fn scan_staged(part: &Path) -> Result<secrets::Scanned> {
 /// Atomic replace. The staged file normally shares the target's volume; if not,
 /// it is copied to a hidden temporary file beside the target first.
 fn replace(staged: &Path, target: &Path) -> Result<()> {
-    fs::OpenOptions::new().write(true).open(staged)?.sync_all()?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(staged)?
+        .sync_all()?;
     match fs::rename(staged, target) {
         Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
             let parent = target.parent().context("Missing parent")?;
-            let mut temporary = tempfile::Builder::new().prefix(".codaclauda-").tempfile_in(parent)?;
+            let mut temporary = tempfile::Builder::new()
+                .prefix(".codaclauda-")
+                .tempfile_in(parent)?;
             io::copy(&mut fs::File::open(staged)?, temporary.as_file_mut())?;
             temporary.as_file().sync_all()?;
             temporary.persist(target).map_err(|e| e.error)?;
@@ -419,64 +480,107 @@ fn replace(staged: &Path, target: &Path) -> Result<()> {
     }
 }
 
-/// Check the staged content, then, under the state lock, the current grant and
-/// request, the path authorization at the moment of I/O and the target's
-/// identity, and replace the file. The upload is consumed either way.
-pub(crate) fn commit(store: &Store, request: &str, r: &Request, workspace: &Path, a: &Value) -> Result<Value> {
+/// Freeze staged bytes through scan and replacement. A durable applying intent
+/// precedes the external effect; an ambiguous retry never performs it again.
+pub(crate) fn commit(
+    store: &Store,
+    request: &str,
+    r: &Request,
+    workspace: &Path,
+    a: &Value,
+) -> Result<Value> {
+    let _staging_lock = staging_lock(&store.root)?;
     let upload_id = field(a, "upload_id")?;
-    let (upload, part, meta) = load(&store.root, r, upload_id)?;
-    let result = (|| -> Result<Value> {
-        let scanned = scan_staged(&part).with_context(|| format!("{} was not written", upload.path))?;
+    let (mut upload, part, meta) = load(&store.root, r, upload_id)?;
+    let receipt = outcome_path(&store.root, request, upload_id);
+    let mut attempted = upload.outcome.is_some();
+    let result = (|| {
+        // staging.lock freezes the upload, while revocation/cancellation and
+        // heartbeat transactions remain available during an unbounded scan.
+        let scanned = if upload.outcome.is_none() {
+            Some(scan_staged(&part).with_context(|| format!("{} was not written", upload.path))?)
+        } else { None };
         store.transaction(|s| {
-            ensure_running(s, request)?;
-            let allowed = &s.grants[&r.grant_id].allowed_paths;
-            let target = paths::authorized(workspace, &upload.path, allowed, true)?;
-            ensure!(
-                target == upload.target,
-                "FILE_CHANGED: {} no longer resolves to the authorized location; start a new upload.",
-                upload.path
-            );
-            let current = identity(&target)?;
-            ensure!(
-                current == upload.base(),
-                "FILE_CHANGED: {} changed since write_begin (expected {}, now {}); read it again and start a new upload.",
-                upload.path,
-                upload.base,
-                current.label()
-            );
-            replace(&part, &target)?;
-            s.requests.get_mut(request).unwrap().event(
-                "file-written",
-                json!({"path":upload.path,"sha256":scanned.sha256,"bytes":scanned.bytes,"upload_id":upload_id}),
-            );
-            Ok(())
-        })?;
-        Ok(json!({"path":upload.path,"sha256":scanned.sha256,"bytes":scanned.bytes,"version":format!("sha256:{}",scanned.sha256),"merged":false}))
+        ensure_running(s, request)?;
+        if let Some(outcome) = &upload.outcome {
+            ensure!(outcome["status"] == "completed",
+                "WRITE_OUTCOME_UNKNOWN: upload {upload_id} may already have changed {}; inspect the file and retained write receipt before creating another upload.", upload.path);
+            // This is the retained result of an earlier effect, not another write.
+            let mut result = outcome["result"].clone();
+            result["replayed_receipt"] = json!(true);
+            return Ok(result);
+        }
+        let allowed = &s.grants[&r.grant_id].allowed_paths;
+        let target = paths::authorized(workspace, &upload.path, allowed, true)?;
+        ensure!(target == upload.target,
+            "FILE_CHANGED: {} no longer resolves to the authorized location; start a new upload.", upload.path);
+        let current = identity(&target)?;
+        ensure!(current == upload.base(),
+            "FILE_CHANGED: {} changed since write_begin (expected {}, now {}); read it again and start a new upload.",
+            upload.path, upload.base, current.label());
+        // Target identity verification can itself take time; finite grant
+        // expiry must still be checked at the actual replacement boundary.
+        ensure_running(s, request)?;
+        let scanned = scanned.as_ref().context("Missing frozen upload scan")?;
+        let reply = json!({"path":upload.path,"sha256":scanned.sha256,"bytes":scanned.bytes,
+            "version":format!("sha256:{}",scanned.sha256),"merged":false});
+        upload.outcome = Some(json!({"status":"applying","result":reply}));
+        save_upload(&receipt, &upload)?;
+        attempted = true;
+        replace(&part, &target).with_context(|| format!(
+            "WRITE_OUTCOME_UNKNOWN: upload {upload_id} has a retained intent; inspect the target before retrying"))?;
+        upload.outcome = Some(json!({"status":"completed","result":reply}));
+        save_upload(&receipt, &upload).context("WRITE_OUTCOME_UNKNOWN: file replacement returned success but its completion receipt could not be persisted")?;
+        s.requests.get_mut(request).unwrap().event("file-written",
+            json!({"path":upload.path,"sha256":scanned.sha256,"bytes":scanned.bytes,"upload_id":upload_id}));
+        Ok(reply)
+        })
     })();
-    let _ = fs::remove_file(&part);
-    let _ = fs::remove_file(&meta);
-    result
+    if result.is_ok() || !attempted {
+        let _ = fs::remove_file(&part);
+        // Never remove the durable outcome during ordinary staging cleanup.
+        if meta != receipt {
+            let _ = fs::remove_file(&meta);
+        }
+    }
+    result.map_err(|e| if attempted {
+        e.context(format!("WRITE_OUTCOME_RETAINED: inspect write-results/{request}/{upload_id}.json; do not repeat the effect blindly"))
+    } else { e })
 }
 
 pub(crate) fn abort(store: &Store, request: &str, r: &Request, a: &Value) -> Result<Value> {
+    let _staging_lock = staging_lock(&store.root)?;
     let upload_id = field(a, "upload_id")?;
-    let (_, part, meta) = load(&store.root, r, upload_id)?;
-    let _ = fs::remove_file(&part);
-    fs::remove_file(&meta)?;
     store.transaction(|s| {
-        if let Some(rr) = s.requests.get_mut(request) {
-            rr.event("write-aborted", json!({"upload_id":upload_id}));
-        }
-        Ok(())
-    })?;
-    Ok(json!({"upload_id":upload_id,"aborted":true}))
+        ensure_running(s, request)?;
+        let (upload, part, meta) = load(&store.root, r, upload_id)?;
+        ensure!(
+            upload.outcome.is_none(),
+            "Upload has a retained write outcome; abort cannot erase it."
+        );
+        let _ = fs::remove_file(&part);
+        fs::remove_file(&meta)?;
+        s.requests
+            .get_mut(request)
+            .unwrap()
+            .event("write-aborted", json!({"upload_id":upload_id}));
+        Ok(json!({"upload_id":upload_id,"aborted":true}))
+    })
 }
 
-pub(crate) fn staged_tool(store: &Store, request: &str, name: &str, r: &Request, g: &Grant, workspace: &Path, a: &Value) -> Result<Value> {
+pub(crate) fn staged_tool(
+    store: &Store,
+    request: &str,
+    name: &str,
+    r: &Request,
+    g: &Grant,
+    workspace: &Path,
+    a: &Value,
+) -> Result<Value> {
     ensure!(!g.is_legacy(), "{name} {STAGED_ONLY}");
     match name {
         "write_begin" => begin(store, request, g, workspace, a),
-        "write_chunk" => chunk(&store.root, r, a),
+        "write_chunk" => chunk(store, r, a),
         "write_commit" => commit(store, request, r, workspace, a),
         "write_abort" => abort(store, request, r, a),
         _ => bail!("Unknown CodaClauda tool"),
@@ -485,6 +589,7 @@ pub(crate) fn staged_tool(store: &Store, request: &str, name: &str, r: &Request,
 
 /// Remove a request's staged uploads (terminal state, launch failure).
 pub fn remove_staging(root: &Path, request: &str) -> Result<()> {
+    let _staging_lock = staging_lock(root)?;
     match fs::remove_dir_all(staging(root, request)) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
@@ -493,6 +598,7 @@ pub fn remove_staging(root: &Path, request: &str) -> Result<()> {
 
 /// recover(): remove staged uploads of every request that is finished or unknown.
 pub fn sweep_staging(root: &Path, state: &State) -> Result<()> {
+    let _staging_lock = staging_lock(root)?;
     let entries = match fs::read_dir(root.join("staging")) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         entries => entries?,

@@ -1,13 +1,14 @@
 //! Board scheduler (C7). The owner's `concurrent` bounds ACTIVE requests:
 //! claimed, non-terminal and not waiting. A request is waiting while it is
 //! blocked in the MCP wait tool on one of its descendants. A finite limit is
-//! never exceeded: a waiter becomes active again when the request it waits on
-//! finishes (that request's slot passes to it), or when it makes another tool
-//! call while a slot is free; otherwise that call is refused with SLOT_BUSY and
+//! never exceeded: a waiter becomes active again only after atomically taking
+//! a free slot, including when its awaited request finishes. Otherwise its
+//! resumption is refused with SLOT_BUSY and
 //! it stays waiting, including after a wait that timed out. One request runs per
 //! endpoint. Cycles in the wait-for graph are refused before they deadlock.
 use crate::budget::Budget;
 use crate::model::{Request, State};
+use anyhow::{Result, ensure};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -25,14 +26,13 @@ fn runnable(r: &Request) -> bool {
     r.state == "queued" && !r.cancel_requested && r.worker_claim.is_none()
 }
 
-/// The live request this claimed request is blocked on, if any.
+/// The request this claimed request yielded for, until explicit resumption.
 fn waited_on<'a>(s: &'a State, r: &'a Request) -> Option<&'a str> {
     if !claimed(r) {
         return None;
     }
-    r.waiting_on
-        .as_deref()
-        .filter(|id| s.requests.get(*id).is_some_and(|w| !w.terminal()))
+    let _ = s;
+    r.waiting_on.as_deref()
 }
 
 pub fn is_waiting(s: &State, r: &Request) -> bool {
@@ -55,6 +55,19 @@ pub fn counts(s: &State) -> Counts {
     counts
 }
 
+/// Must be called under the board transaction. A completed descendant can
+/// have several waiting ancestors; its one slot must not activate them all.
+pub fn resume(s: &mut State, request: &str, concurrent: Budget) -> Result<()> {
+    if s.requests.get(request).is_some_and(|r| is_waiting(s, r)) {
+        ensure!(
+            concurrent.allows(counts(s).active),
+            "SLOT_BUSY: all {concurrent} board slots are in use; this request remains waiting. Poll wait/messages or retry when a slot is free."
+        );
+        s.requests.get_mut(request).unwrap().waiting_on = None;
+    }
+    Ok(())
+}
+
 pub fn endpoint_holder<'a>(s: &'a State, endpoint: &str) -> Option<&'a Request> {
     s.requests
         .values()
@@ -73,7 +86,7 @@ pub fn pick(s: &State, concurrent: Budget) -> Option<String> {
         .filter(|r| claimed(r))
         .map(|r| r.target.as_str())
         .collect();
-    let wanted: BTreeSet<&str> = s.requests.values().filter_map(|r| waited_on(s, r)).collect();
+    let wanted: BTreeSet<&str> = s.requests.values().filter(|r| !r.cancel_requested).filter_map(|r| waited_on(s, r)).collect();
     s.requests
         .values()
         .filter(|r| runnable(r) && !busy.contains(r.target.as_str()))

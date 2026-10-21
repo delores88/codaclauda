@@ -13,7 +13,7 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct GrantDefaults {
     pub timeout_seconds: Budget,
     pub expires_seconds: Budget,
@@ -81,7 +81,7 @@ impl GrantDefaults {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct Policy {
     pub concurrent: Budget,
     pub grant_defaults: GrantDefaults,
@@ -109,8 +109,22 @@ fn load(root: &Path) -> Result<Policy> {
     if !path.exists() {
         return Ok(Policy::default());
     }
-    serde_json::from_slice(&fs::read(path)?)
-        .context("Owner policy file is invalid; preserve policy.json and correct or remove it")
+    let policy: Policy = serde_json::from_slice(&fs::read(path)?)
+        .context("Owner policy file is invalid; preserve policy.json and correct or remove it")?;
+    // Persisted policy is a complete resolved document, never a partial update.
+    // Missing fields must not silently replace owner limits with factory defaults.
+    validate_budget(policy.concurrent, "concurrent", 1)?;
+    for (field, min) in GRANT_FIELDS {
+        validate_budget(policy.grant_defaults.get(field), field, min)?;
+    }
+    Ok(policy)
+}
+
+fn validate_budget(value: Budget, field: &str, min: u64) -> Result<()> {
+    if let Finite(n) = value {
+        ensure!((min..=budget::JS_SAFE_MAX).contains(&n), budget::invalid(field, min));
+    }
+    Ok(())
 }
 
 pub fn read(root: &Path) -> Result<Policy> {

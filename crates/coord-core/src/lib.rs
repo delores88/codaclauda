@@ -292,7 +292,7 @@ pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value
                 mode: "new-session-v1".into(),
             };
             safe_id(&ep.id)?;
-            store.transaction(|s| {
+            store.compatible_transaction(|s| {
                 ensure!(
                     !s.requests
                         .values()
@@ -307,7 +307,7 @@ pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value
         "rename-agent" => {
             let endpoint_id = field(a, "id")?;
             let label = validate_endpoint_label(field(a, "label")?)?;
-            store.transaction(|s| {
+            store.compatible_transaction(|s| {
                 let endpoint = s
                     .endpoints
                     .get_mut(endpoint_id)
@@ -375,7 +375,7 @@ pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value
             let paused = a["paused"]
                 .as_bool()
                 .context("paused must be true or false")?;
-            store.transaction(|s| {
+            store.compatible_transaction(|s| {
                 s.paused = paused;
                 Ok(())
             })?;
@@ -393,7 +393,7 @@ pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value
         "spark-config" => {
             let path = Path::new(field(a, "executable")?).canonicalize()?;
             ensure!(path.is_file(), "Spark executable missing");
-            store.transaction(|s| {
+            store.compatible_transaction(|s| {
                 s.spark = Some(path.to_string_lossy().into());
                 Ok(())
             })?;
@@ -666,7 +666,8 @@ fn waiter_authorized(s: &State, waiter: &str, capability: &str) -> Result<()> {
 
 /// MCP wait by a running request (C7). Waiting on a live descendant frees the
 /// waiter's slot for the scheduler; a wait that would close a cycle in the
-/// wait-for graph is refused at once. Any return clears the mark.
+/// wait-for graph is refused at once. A yielded slot is reacquired atomically;
+/// timeout or lack of capacity keeps the request waiting.
 pub fn wait_for(
     store: &Store,
     waiter: &str,
@@ -675,7 +676,7 @@ pub fn wait_for(
     seconds: u64,
 ) -> Result<Value> {
     let end = wait_deadline(seconds)?;
-    let marked = store.transaction(|s| {
+    store.transaction(|s| {
         waiter_authorized(s, waiter, capability)?;
         let target = s.requests.get(other).context("Request not found")?;
         ensure!(
@@ -683,16 +684,16 @@ pub fn wait_for(
             "Request is outside the owner grant"
         );
         if target.terminal() {
-            return Ok(false);
+            return Ok(());
         }
         if let Some(path) = scheduler::wait_cycle(s, waiter, other) {
             bail!(scheduler::cycle_message(&path));
         }
         if !scheduler::is_descendant(s, other, waiter) {
-            return Ok(false);
+            return Ok(());
         }
         s.requests.get_mut(waiter).unwrap().waiting_on = Some(other.into());
-        Ok(true)
+        Ok(())
     })?;
     let result = loop {
         let s = store.read()?;
@@ -708,13 +709,13 @@ pub fn wait_for(
     };
     // A wait that times out while the awaited request still runs keeps the
     // waiter counted as waiting, so resuming cannot exceed a finite limit (C7).
-    if marked {
+    if result.is_ok() {
         store.transaction(|s| {
             let live = s.requests.get(other).is_some_and(|r| !r.terminal());
-            if let Some(w) = s.requests.get_mut(waiter) {
-                if w.waiting_on.as_deref() == Some(other) && (result.is_err() || !live) {
-                    w.waiting_on = None;
-                }
+            waiter_authorized(s, waiter, capability)?;
+            if !live && s.requests.get(waiter).is_some_and(|w| w.waiting_on.as_deref() == Some(other)) {
+                let concurrent = policy::read(&store.root)?.concurrent;
+                scheduler::resume(s, waiter, concurrent)?;
             }
             Ok(())
         })?;
@@ -722,7 +723,8 @@ pub fn wait_for(
     result
 }
 fn cancel(store: &Store, request: &str, all: bool) -> Result<Value> {
-    let result = store.transaction(|s| {
+    let result = store.compatible_transaction(|s| {
+        let legacy_board = s.schema_version < 3;
         let root = s
             .requests
             .get(request)
@@ -737,12 +739,13 @@ fn cancel(store: &Store, request: &str, all: bool) -> Result<Value> {
         {
             if !r.terminal() || !r.spark_jobs.is_empty() {
                 r.cancel_requested = true;
-                r.event(
+                r.compatible_event(
+                    legacy_board,
                     "cancel-requested",
                     json!({"scope":if all{"root"}else{"request"}}),
                 );
                 if r.worker_claim.is_none() && !r.terminal() {
-                    r.transition("cancelled", json!({"launched":false}));
+                    r.compatible_transition(legacy_board, "cancelled", json!({"launched":false}));
                 }
                 changed.push(r.id.clone());
             }
@@ -817,7 +820,8 @@ fn cancel_owned_spark_with(
         } else {
             json!({"cancel_pending":true,"reason":"Submission outcome unknown. Reconcile the preserved provider request ID before cancelling; no new job launched during cancellation.","provider_request_id":job["provider_request_id"]})
         };
-        store.transaction(|s| {
+        store.compatible_transaction(|s| {
+            let legacy_board = s.schema_version < 3;
             let r = s.requests.get_mut(request).unwrap();
             if let Some(row) = r
                 .spark_jobs
@@ -826,7 +830,7 @@ fn cancel_owned_spark_with(
             {
                 row["cancellation"] = response.clone();
             }
-            r.event("spark-cancellation", response.clone());
+            r.compatible_event(legacy_board, "spark-cancellation", response.clone());
             Ok(())
         })?;
     }
@@ -915,7 +919,7 @@ fn recover(store: &Store) -> Result<()> {
             .write(true)
             .open(store.root.join(format!("worker-{}.lock", r.id)))?;
         if file.try_lock_exclusive().is_ok() {
-            store.transaction(|s|{let r=s.requests.get_mut(&r.id).unwrap();if !r.terminal(){r.blocker=Some("Worker ended without a final receipt; inspect retained worktree before a new request. No duplicate launch.".into());r.transition("needs-owner",json!({"reason":"interrupted-worker"}));}Ok(())})?;
+            store.compatible_transaction(|s|{let legacy_board=s.schema_version<3;let r=s.requests.get_mut(&r.id).unwrap();if !r.terminal(){r.blocker=Some("Worker ended without a final receipt; inspect retained worktree before a new request. No duplicate launch.".into());r.compatible_transition(legacy_board,"needs-owner",json!({"reason":"interrupted-worker"}));}Ok(())})?;
         }
     }
     // Pending errors and unknown outcomes are durable, not completed cancels.
@@ -1076,9 +1080,17 @@ pub fn worker(
             payloads.extend(payload.map(|p| (name.to_owned(), p)));
             Ok(inline)
         };
-        let answer = keep("answer", redact(&outcome.answer))?;
+        let answer = if outcome.answer_payload.is_some() {
+            outcome.answer.clone()
+        } else {
+            keep("answer", redact(&outcome.answer))?
+        };
         let changed = changed.map(|text| keep("changed_files", text)).transpose()?;
         let diff = diff.map(|text| keep("diff", redact(&text))).transpose()?;
+        drop(keep);
+        if let Some(payload) = outcome.answer_payload.clone() {
+            payloads.push(("answer".into(), payload));
+        }
         store.transaction(|s|{let expired=s.grants.get(&g.id).is_none_or(|x|!x.is_active(now()));let r=s.requests.get_mut(request_id).unwrap();r.answer=Some(answer.clone());r.payloads.extend(payloads.clone());if outcome.session_id.is_some(){r.session_id=outcome.session_id.clone();}
             let scoped_context_read=r.has_context_read();
             let limit=if r.cancel_requested{None}else{limit_message(outcome.stop_reason.as_deref(),&limits,spec.timeout,expired).or_else(||outcome.stop_message.clone())};

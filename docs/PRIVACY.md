@@ -1,7 +1,7 @@
 # CodaClauda privacy and local data
 
 CodaClauda is a DeloresAI desktop utility for owner-authorized coordination between
-Claude Code and Codex. This document describes the 0.4.1 candidate source,
+Claude Code and Codex. This document describes the 0.5.0 source,
 including the preserved scoped-request and mailbox tools. Source review does not
 establish native acceptance, publication or Marketplace admission; those require
 separate release evidence.
@@ -50,7 +50,7 @@ open, its watcher can send message subjects, bodies and sender labels to that
 provider, consuming provider usage, then acknowledge messages retained for
 delivery. The per-session switch and the global switch in Settings control future
 admission; sender labels never grant authority. There is no cap on how many
-sessions wake or how often. The only limit is the owner's loop guard (Settings →
+sessions wake or how often apart from owner concurrency settings and the loop guard (Settings →
 Limits, on by default, 20 per hour): two CodaClauda sessions that have woken each
 other that often in the last hour stop waking each other, their mail stays unread,
 and the owner gets one notice per pair and hour in that chat and, when ntfy is
@@ -68,6 +68,11 @@ usage. The app replies to the sender on the board with the new session's ID,
 address, provider and project, or with a named refusal. A new wake-on session's
 first turn is also preceded by a short framed note giving its board address, the
 CLI and board paths, and how to wake teammates and post claims.
+
+The project guard applies again when an agent-started session wakes or starts
+another turn. Disabling teammates prevents further turns from those sessions;
+an already running turn still needs Stop. Lowering project access prevents a
+Full teammate from starting another turn at its previous level.
 
 Schedules store a prompt, project, provider, timing and optional catch-up setting.
 Enabled schedules can consume provider plan usage without another click while
@@ -97,8 +102,23 @@ account. Read only uses restricted provider tools and filesystem policy.
 Scheduled runs also revalidate the current project access before dispatch.
 These settings do not control terminal or desktop sessions started elsewhere,
 and a spending prohibition is an owner instruction, not a payment-system block.
-Browser control is not available in 0.4.1. This release does not launch a browser
-MCP server or acquire its executable packages. No Windows MCP is included.
+Owner-configured MCP servers are available only to Full sessions; Read sessions
+refuse them. The app stores the selected command, arguments and environment
+names and values in plaintext per project in `mcp-servers.json`. Per-session
+Claude configuration refers to those variables by name, and their values travel
+in the provider process environment. Do not enter credentials in these saved
+settings; CodaClauda does not provide an encrypted secret store for them.
+Browser and Windows-MCP tools are not bundled or installed by CodaClauda. Presets
+show owner-run installation instructions and require confirmation of an existing
+executable. Third-party tools run under the owner's account and may access the
+filesystem, desktop or network according to their own implementation.
+
+Optional phone notifications send a short activity notice to the configured
+ntfy endpoint/topic. A topic identifies the destination and may be visible to
+other subscribers depending on the server's access rules. The app does not
+include full chat message text in these notices; it can include a shortened chat
+title or the two mailbox addresses held by the wake loop guard. The service receives normal
+network information and follows its own data policy.
 
 Earlier Live chat records remain readable. That separate workflow started a
 fresh dedicated read-only request for each send, with up to 12 recent messages
@@ -139,7 +159,10 @@ owner removes it. Grant expiry stops authorized work; it does not delete history
 There is no automatic retention period or purge for this legacy request history.
 Since 0.5, older request events move to `requests/<id>.events.jsonl` and answers
 or diffs over 256 KiB to `requests/<id>/` beside the board, with the same
-retention. Staged file writes live under `staging/` until they commit, abort or
+retention. Running answer ingestion also retains private raw output for recovery;
+it can contain sensitive provider text and is not a public or agent-readable
+payload. Only the separately checked/redacted answer is returned. Staged file
+writes live under `staging/` until they commit, abort or
 the request ends. A provider record over 64 MiB is saved raw (not redacted) as
 `oversized-<n>.jsonl` in that run's private directory.
 The separate passive mailbox retains messages and read receipts for 30 days,
@@ -308,8 +331,11 @@ Codex routing requires the exact chat loaded on a reachable supported server.
 Inbox-only mode waits for the recipient to check messages and cannot wake it.
 Transport acceptance, recipient acknowledgment and a reply are distinct states.
 
-The first existing-conversation write backs up the prior schema-1 board and
-atomically moves to schema 2. Older CodaClauda binaries refuse that schema.
+The first compatible 0.5 board migration saves an exact backup and atomically
+moves the board to schema 3. Migration waits while legacy workers may still need
+to write their receipts. Existing grants keep their original resolved limits;
+unfinished legacy claims are reconciled without relaunching them. Older binaries
+refuse the new schema, so rollback cannot assume the current board is readable.
 The backup also contains private coordination history and is retained locally;
 it must not be committed or attached as public release evidence.
 

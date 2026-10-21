@@ -1,5 +1,5 @@
 use crate::model::State;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
 use std::{
     fs::{self, File, OpenOptions},
@@ -17,9 +17,10 @@ pub struct Store {
 /// unchanged. A claim whose worker lock is free (the worker ended, or never
 /// started) is reconciled to needs-owner in the same atomic write, under that
 /// lock, keeping its request ID and never relaunching it.
-fn quiesce_legacy_workers(root: &Path, legacy: &State, state: &mut State) -> Result<Vec<File>> {
+fn quiesce_legacy_workers(root: &Path, legacy: &State) -> Result<Vec<File>> {
     let mut held = Vec::new();
     for r in legacy.requests.values().filter(|r| r.worker_claim.is_some() && !r.terminal()) {
+        crate::safe_id(&r.id)?;
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -33,12 +34,6 @@ fn quiesce_legacy_workers(root: &Path, legacy: &State, state: &mut State) -> Res
             );
         }
         held.push(lock);
-        if let Some(current) = state.requests.get_mut(&r.id) {
-            if !current.terminal() {
-                current.blocker = Some("A CodaClauda 0.4 worker ended without a final receipt before the board moved to the 0.5 format. Inspect its retained worktree before a new request. Not relaunched.".into());
-                current.transition("needs-owner", serde_json::json!({"reason":"interrupted-worker-at-migration"}));
-            }
-        }
     }
     Ok(held)
 }
@@ -89,7 +84,17 @@ impl Store {
         })
     }
     pub fn transaction<T>(&self, operation: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
-        self.transaction_inner(false, operation)
+        self.transaction_inner(false, false, operation)
+    }
+
+    /// Only mutations whose entire representation is understood by old workers.
+    /// In particular, owner cancellation must persist before schema migration.
+    /// Such callbacks may not introduce 0.5 fields and do not spill old history.
+    pub(crate) fn compatible_transaction<T>(
+        &self,
+        operation: impl FnOnce(&mut State) -> Result<T>,
+    ) -> Result<T> {
+        self.transaction_inner(false, true, operation)
     }
 
     /// Upgrade only when a successful registered-session mutation is committed.
@@ -98,12 +103,13 @@ impl Store {
         &self,
         operation: impl FnOnce(&mut State) -> Result<T>,
     ) -> Result<T> {
-        self.transaction_inner(true, operation)
+        self.transaction_inner(true, true, operation)
     }
 
     fn transaction_inner<T>(
         &self,
         session: bool,
+        compatible: bool,
         operation: impl FnOnce(&mut State) -> Result<T>,
     ) -> Result<T> {
         let lock = OpenOptions::new()
@@ -126,9 +132,25 @@ impl Store {
             State::default()
         };
         check_schema(&state)?;
+        let legacy_board = state.schema_version < 3;
+        let legacy_claims: Vec<String> = state.requests.values()
+            .filter(|r| r.worker_claim.is_some() && !r.terminal())
+            .map(|r| r.id.clone()).collect();
+        // Check BEFORE the callback or history spill can perform an effect.
+        // Holding these leases through commit also covers claimed-before-spawn.
+        let _legacy_worker_locks = if legacy_board && !compatible {
+            quiesce_legacy_workers(&self.root, &state)?
+        } else {
+            Vec::new()
+        };
         let result = operation(&mut state)?;
+        if legacy_board && compatible {
+            ensure!(!state.has_current_data(), "Compatible transaction introduced 0.5 data; preserve the legacy board");
+        }
         // Bound each changed request's retained history before persisting it (C6).
-        crate::spool::spill_events(&self.root, &mut state)?;
+        if !(legacy_board && compatible) {
+            crate::spool::spill_events(&self.root, &mut state)?;
+        }
         // Upgrade only when a successful mutation persists data the old schema
         // cannot hold: registered sessions (2) or 0.5-only data (3), which 0.4
         // clients refuse. Backup bytes are the exact previous file.
@@ -139,12 +161,16 @@ impl Store {
         } else {
             1
         };
-        // Held until the migrating write is persisted (see quiesce_legacy_workers).
-        let mut _legacy_worker_locks = Vec::new();
         if target > state.schema_version {
-            if let (3, Some(original)) = (target, original.as_ref()) {
-                let legacy: State = serde_json::from_slice(original)?;
-                _legacy_worker_locks = quiesce_legacy_workers(&self.root, &legacy, &mut state)?;
+            if target == 3 {
+                for id in legacy_claims {
+                    if let Some(current) = state.requests.get_mut(&id) {
+                        if !current.terminal() {
+                            current.blocker = Some("A CodaClauda 0.4 worker ended without a final receipt before the board moved to the 0.5 format. Inspect its retained worktree before a new request. Not relaunched.".into());
+                            current.transition("needs-owner", serde_json::json!({"reason":"interrupted-worker-at-migration"}));
+                        }
+                    }
+                }
             }
             if let Some(original) = original {
                 // Never overwrite a previous backup. A failed/ambiguous prior

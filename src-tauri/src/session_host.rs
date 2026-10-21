@@ -602,6 +602,9 @@ struct State {
     ledger: BTreeMap<String, DurableTurn>,
     /// Owner setting (Settings → Limits → Agents at once), see `limits.rs`.
     max_live: limits::Limit,
+    limit_failure: Option<String>,
+    /// Canonical folders reserved by an owner Git operation. Never persisted/replayed.
+    folder_operations: HashMap<String, Vec<PathBuf>>,
 }
 
 impl Default for State {
@@ -614,11 +617,93 @@ impl Default for State {
             queues: HashMap::new(),
             ledger: BTreeMap::new(),
             max_live: limits::Limit::Unlimited,
+            limit_failure: None,
+            folder_operations: HashMap::new(),
         }
     }
 }
 
+/// Canonicalize aliases before comparing operation scope (including subfolders).
+fn canonical_folder(path: &Path) -> Result<PathBuf, Failure> {
+    let canonical = fs::canonicalize(path).map_err(|e| {
+        (
+            "PROJECT_MISSING",
+            format!("The project folder is unavailable: {e}"),
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err((
+            "PROJECT_MISSING",
+            "The project path is not a folder.".into(),
+        ));
+    }
+    #[cfg(windows)]
+    let canonical = PathBuf::from(canonical.to_string_lossy().to_lowercase());
+    Ok(canonical)
+}
+
+fn folders_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
 impl State {
+    fn check_folder_available(&self, cwd: &str) -> Result<(), Failure> {
+        if self.folder_operations.is_empty() {
+            return Ok(());
+        }
+        let cwd = canonical_folder(Path::new(cwd))?;
+        if self
+            .folder_operations
+            .values()
+            .flatten()
+            .any(|path| folders_overlap(path, &cwd))
+        {
+            return Err(("WORKTREE_BUSY", "An owner Git operation is using this folder. Wait for its outcome before sending or starting another chat.".into()));
+        }
+        Ok(())
+    }
+
+    fn reserve_folders(
+        &mut self,
+        token: &str,
+        paths: Vec<PathBuf>,
+    ) -> Result<Vec<String>, Failure> {
+        if self
+            .folder_operations
+            .values()
+            .flatten()
+            .any(|held| paths.iter().any(|path| folders_overlap(held, path)))
+        {
+            return Err((
+                "WORKTREE_BUSY",
+                "Another owner Git operation is using this checkout.".into(),
+            ));
+        }
+        let mut sharing = Vec::new();
+        for record in &self.records {
+            // Missing folders cannot contain a live worker; an existing alias must resolve.
+            let cwd = match canonical_folder(Path::new(&record.cwd)) {
+                Ok(cwd) => cwd,
+                Err(failure)
+                    if self.session_busy(&record.id) || self.live.contains_key(&record.id) =>
+                {
+                    return Err(failure);
+                }
+                Err(_) => continue,
+            };
+            if paths.iter().any(|path| folders_overlap(path, &cwd)) {
+                if self.session_busy(&record.id)
+                    || self.queues.get(&record.id).is_some_and(|q| !q.is_empty())
+                {
+                    return Err(("SESSION_BUSY", "A chat sharing the worktree or original checkout is working or queued. Stop it or wait before this Git operation.".into()));
+                }
+                sharing.push(record.id.clone());
+            }
+        }
+        self.folder_operations.insert(token.to_owned(), paths);
+        Ok(sharing)
+    }
+
     fn duplicate(&self, session: &str, item: &Queued) -> Result<Option<Value>, Failure> {
         let Some(previous) = self.ledger.get(&item.turn_id) else {
             return Ok(None);
@@ -692,6 +777,9 @@ impl State {
         id: &str,
         turn_id: &str,
     ) -> Result<Option<(String, Live)>, String> {
+        if let Some(message) = &self.limit_failure {
+            return Err(format!("LIMITS_STORAGE_FAILED: {message}"));
+        }
         if !self
             .turns
             .get(id)
@@ -741,6 +829,21 @@ impl State {
                 .live
                 .get(id)
                 .is_some_and(|live| live.proc.expected_exit.load(Ordering::SeqCst))
+    }
+}
+
+/// Keeps admission closed across asynchronous Git commands, plus the updater lease.
+struct FolderReservation {
+    inner: Weak<Inner>,
+    token: String,
+    _lease: Arc<File>,
+}
+
+impl Drop for FolderReservation {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            lock(&inner.state).folder_operations.remove(&self.token);
+        }
     }
 }
 
@@ -1203,6 +1306,38 @@ impl Inner {
         }
     }
 
+    /// Reserve under lifecycle -> state, then confirm every idle sharing process exits.
+    fn reserve_folder_operation(&self, paths: &[PathBuf]) -> Result<FolderReservation, Failure> {
+        let paths = paths
+            .iter()
+            .map(|p| canonical_folder(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        let lease = runtime_lease(&self.board).map_err(|m| ("SESSION_UNAVAILABLE", m))?;
+        let _lifecycle = lock(&self.lifecycle);
+        let mut state = lock(&self.state);
+        let token = random_hex(16);
+        let sharing = state.reserve_folders(&token, paths)?;
+        for id in sharing {
+            if let Some(live) = state.live.get(&id) {
+                if !retire(&live.proc) {
+                    state.folder_operations.remove(&token);
+                    return Err(("SESSION_BUSY", "A sharing agent has not confirmed it stopped. No Git operation was started.".into()));
+                }
+            }
+            state.live.remove(&id);
+        }
+        Ok(FolderReservation {
+            inner: self.me.clone(),
+            token,
+            _lease: lease,
+        })
+    }
+
+    fn check_admission(&self, state: &State, record: &Record) -> Result<(), Failure> {
+        state.check_folder_available(&record.cwd)?;
+        self.check_team_admission(state, record)
+    }
+
     fn validate_turn_origin(&self, state: &State, id: &str, turn_id: &str) -> Result<(), String> {
         let record = state
             .records
@@ -1214,6 +1349,8 @@ impl Inner {
             .get(id)
             .filter(|t| t.id == turn_id)
             .ok_or("The turn no longer exists.")?;
+        self.check_admission(state, record)
+            .map_err(|(_, message)| message)?;
         self.validate_origin(record, &turn.origin)
             .map_err(|(_, message)| message)
     }
@@ -1626,7 +1763,12 @@ impl Inner {
             usage
         };
         self.publish(
-            event(id, None, "usage", json!({"usage": usage, "rateLimits": kept})),
+            event(
+                id,
+                None,
+                "usage",
+                json!({"usage": usage, "rateLimits": kept}),
+            ),
             false,
         );
     }
@@ -2124,9 +2266,9 @@ impl Inner {
                         result
                     }
                     outcome => {
-                        let problem = outcome.err().unwrap_or_else(|| {
-                            "it returned the original thread".to_owned()
-                        });
+                        let problem = outcome
+                            .err()
+                            .unwrap_or_else(|| "it returned the original thread".to_owned());
                         self.publish(
                             event(
                                 &record.id,
@@ -2243,6 +2385,8 @@ impl Inner {
             .find(|r| r.id == id)
             .ok_or("The session no longer exists.")?;
         let turn = state.turns.get(id).ok_or("The turn no longer exists.")?;
+        self.check_admission(&state, record)
+            .map_err(|(_, message)| message)?;
         self.validate_origin(record, &turn.origin)
             .map_err(|(_, message)| message)?;
         Ok(())
@@ -2330,6 +2474,12 @@ impl Inner {
         }
         let now = now_ms();
         let id = format!("s_{}", random_hex(8));
+        // Keep an existing checkout idle while Git registers a new worktree.
+        let _creation = if args["worktree"].as_bool() == Some(true) {
+            Some(self.reserve_folder_operation(&[folder.to_path_buf()])?)
+        } else {
+            None
+        };
         // 0.5: an optional git worktree of its own on branch codaclauda/<short>.
         let tree = if args["worktree"].as_bool() == Some(true) {
             Some(worktree::create(&self.dir, &id, folder).await?)
@@ -2368,19 +2518,27 @@ impl Inner {
             ..Record::default()
         };
         let saved = {
+            let _lifecycle = lock(&self.lifecycle);
             let mut state = lock(&self.state);
-            state.records.push(record.clone());
-            let saved = self.save(&state);
-            if saved.is_err() {
-                state.records.pop();
+            match self.check_admission(&state, &record) {
+                Err(failure) => Err(failure),
+                Ok(()) => {
+                    state.records.push(record.clone());
+                    let saved = self
+                        .save(&state)
+                        .map_err(|message| ("STORAGE_FAILED", message));
+                    if saved.is_err() {
+                        state.records.pop();
+                    }
+                    saved
+                }
             }
-            saved
         };
-        if let Err(message) = saved {
+        if let Err(failure) = saved {
             if let Some(tree) = &tree {
                 worktree::remove(tree).await;
             }
-            return Err(("STORAGE_FAILED", message));
+            return Err(failure);
         }
         Ok(json!({"session": record}))
     }
@@ -2457,6 +2615,7 @@ impl Inner {
                     ),
                 ));
             }
+            self.check_admission(&state, record)?;
             self.validate_origin(record, &item.origin)?;
             state
                 .accept_queued(id, item.clone(), |state| self.save(state))
@@ -2522,12 +2681,20 @@ impl Inner {
             Ok(lease) => lease,
             Err(message) => return Some(Err((item, ("SESSION_UNAVAILABLE", message)))),
         };
-        let Some(record) = state.records.iter_mut().find(|r| r.id == id) else {
+        let Some(record) = state.records.iter().find(|r| r.id == id) else {
             return Some(Err((
                 item,
                 ("SESSION_NOT_FOUND", "That chat no longer exists.".into()),
             )));
         };
+        if let Err(failure) = self.check_admission(state, record) {
+            return Some(Err((item, failure)));
+        }
+        let record = state
+            .records
+            .iter_mut()
+            .find(|r| r.id == id)
+            .expect("checked above");
         if let Err(message) = require_browser_disabled(record.playwright) {
             return Some(Err((item, ("BROWSER_UNAVAILABLE", message))));
         }
@@ -3356,7 +3523,10 @@ impl Inner {
             .iter()
             .find(|r| r.id == id)
             .map(|r| (r.provider.clone(), r.thread_id.clone()))
-            .ok_or(("SESSION_NOT_FOUND", "That chat no longer exists.".to_owned()))?;
+            .ok_or((
+                "SESSION_NOT_FOUND",
+                "That chat no longer exists.".to_owned(),
+            ))?;
         if provider != "codex" {
             return Err((
                 "COMPACT_UNSUPPORTED",
@@ -3400,6 +3570,94 @@ mod tests {
             status: "idle".into(),
             ..Record::default()
         }
+    }
+
+    #[test]
+    fn git_operation_reservation_blocks_shared_folders_and_source_queues() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("worktree");
+        let nested = worktree.join("nested");
+        let original = dir.path().join("original");
+        let unrelated = dir.path().join("unrelated");
+        for path in [&nested, &original, &unrelated] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let mut own = record("codex", "full");
+        own.cwd = worktree.to_string_lossy().into_owned();
+        let mut fork = own.clone();
+        fork.id = "fork".into();
+        fork.cwd = nested.to_string_lossy().into_owned();
+        let mut source = own.clone();
+        source.id = "source".into();
+        source.cwd = original.to_string_lossy().into_owned();
+        let mut state = State {
+            records: vec![own.clone(), fork.clone(), source.clone()],
+            ..State::default()
+        };
+        let paths = vec![
+            canonical_folder(&worktree).unwrap(),
+            canonical_folder(&original).unwrap(),
+        ];
+        state
+            .launching
+            .insert(fork.id.clone(), "pending-launch".into());
+        assert_eq!(
+            state.reserve_folders("op", paths.clone()).unwrap_err().0,
+            "SESSION_BUSY"
+        );
+        assert!(state.folder_operations.is_empty());
+        state.launching.clear();
+        state.queues.insert(
+            source.id.clone(),
+            VecDeque::from([Queued::new("queued".into(), vec![], Value::Null)]),
+        );
+        assert_eq!(
+            state.reserve_folders("op", paths.clone()).unwrap_err().0,
+            "SESSION_BUSY"
+        );
+        state.queues.clear();
+        assert_eq!(state.reserve_folders("op", paths.clone()).unwrap().len(), 3);
+        for path in [&worktree, &nested, &original] {
+            assert_eq!(
+                state
+                    .check_folder_available(&path.to_string_lossy())
+                    .unwrap_err()
+                    .0,
+                "WORKTREE_BUSY"
+            );
+        }
+        assert!(
+            state
+                .check_folder_available(&unrelated.to_string_lossy())
+                .is_ok()
+        );
+        assert_eq!(
+            state.reserve_folders("second-op", paths).unwrap_err().0,
+            "WORKTREE_BUSY"
+        );
+        state.folder_operations.remove("op");
+        assert!(
+            state
+                .check_folder_available(&nested.to_string_lossy())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn unreadable_owner_limits_block_launch_before_a_process_slot_is_reserved() {
+        let mut state = State {
+            limit_failure: Some("invalid saved policy".into()),
+            ..State::default()
+        };
+        assert!(
+            state
+                .reserve_launch("chat", "turn")
+                .err()
+                .unwrap()
+                .starts_with("LIMITS_STORAGE_FAILED:")
+        );
+        assert!(state.launching.is_empty());
+        assert!(state.live.is_empty());
     }
 
     #[test]
@@ -3772,7 +4030,10 @@ mod tests {
         let Err(refused) = state.reserve_launch("s9", "t") else {
             panic!("a launch past the owner's limit was admitted");
         };
-        assert!(refused.contains("Settings → Limits → Agents at once"), "{refused}");
+        assert!(
+            refused.contains("Settings → Limits → Agents at once"),
+            "{refused}"
+        );
     }
 
     #[test]

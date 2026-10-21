@@ -49,7 +49,7 @@ export function limitsSettings({ ui, bridge, store }) {
     },
     {
       key: 'concurrent', label: 'Board requests at once',
-      hint: `Dedicated board requests (questions, reviews, delegations) that run together; the rest wait in order. A request blocked waiting on a teammate it asked does not count, so nested handoffs keep moving; if it resumes while that teammate still runs, both count and the total can briefly pass this number. ${MEMORY_HINT}`,
+      hint: `Dedicated board requests (questions, reviews, delegations) that run together; the rest wait in order. A request waiting on a teammate releases its slot and must acquire a free slot before doing more work. Waiting and checking messages remain available while all slots are busy. ${MEMORY_HINT}`,
       supported: () => true,
       read: async () => {
         try { return (await bridge.rpc('policy'))?.concurrent; }
@@ -88,9 +88,9 @@ export function limitsSettings({ ui, bridge, store }) {
     const extra = row.spec.extra?.() || '';
     row.status.textContent = row.state === 'error' ? `Couldn't read the setting: ${row.error}`
       : !loaded ? 'Reading…'
-        : v == null ? `Enter a whole number from ${LIMIT_MIN[row.spec.key]} to ${Number.MAX_SAFE_INTEGER}, or tick Unlimited.`
+        : v == null ? `${row.saved == null ? 'Saved settings are invalid; new launches are blocked until you save an explicit value. ' : ''}Enter a whole number from ${LIMIT_MIN[row.spec.key]} to ${Number.MAX_SAFE_INTEGER}, or tick Unlimited.`
           : row.busy ? 'Saving…'
-            : dirty ? 'Not saved yet.' : `Now ${shown(row.saved)}.${extra ? ` ${extra}` : ''}`;
+            : dirty ? (row.saved == null ? 'New launches remain blocked until you save this explicit value.' : 'Not saved yet.') : `Now ${shown(row.saved)}.${extra ? ` ${extra}` : ''}`;
   }
   function show(row, saved) {
     row.saved = isUnlimited(saved) ? UNLIMITED : saved;
@@ -106,7 +106,11 @@ export function limitsSettings({ ui, bridge, store }) {
       Object.assign(row, { state: 'loaded', error: '' });
       show(row, isUnlimited(saved) ? UNLIMITED : Number(saved));
     } catch (error) {
-      if (row.spec.key === 'maxLive' && unsupported(error)) row.state = 'hidden';
+      if (row.spec.key === 'maxLive' && error?.code === 'LIMITS_STORAGE_FAILED') {
+        Object.assign(row, { state: 'loaded', saved: null, error: error.message });
+        row.box.checked = false; row.input.value = '';
+      }
+      else if (row.spec.key === 'maxLive' && unsupported(error)) row.state = 'hidden';
       else Object.assign(row, { state: 'error', error: error?.message || String(error) });
     }
     render(row);
@@ -193,7 +197,7 @@ export function limitsSettings({ ui, bridge, store }) {
   const guardStatus = h('span.field-hint.ntfy-status', { role: 'status', style: { marginTop: '0' } });
   const guardNode = h('div.setting-row',
     h('div.setting-text', h('strong', 'Wake loop guard'),
-      h('span.field-hint', 'Two CodaClauda sessions that wake each other this many times in an hour pause waking each other until older wakes age out; their messages wait unread and you get a notice in that chat (and on your phone if push is set up). Your own messages never count. There is no other limit on how many sessions wake or how often.'),
+      h('span.field-hint', 'Two CodaClauda sessions that wake each other this many times in an hour pause waking each other until older wakes age out; their messages wait unread and you get a notice in that chat (and on your phone if push is set up). Your own messages never count. Owner concurrency, teammate and access settings still apply when a session wakes.'),
       guardStatus),
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flex: 'none', flexWrap: 'wrap' } },
       h('label.switch', guardOn, h('span')), guardCount, h('span.muted', 'per hour'), guardSave));

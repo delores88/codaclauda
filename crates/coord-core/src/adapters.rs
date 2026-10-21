@@ -65,6 +65,8 @@ pub struct Outcome {
     pub success: bool,
     pub session_id: Option<String>,
     pub answer: String,
+    #[serde(default)]
+    pub answer_payload: Option<crate::model::Payload>,
     pub usage: Value,
     pub estimated_cost_usd: Option<f64>,
     pub exit_code: Option<i32>,
@@ -648,7 +650,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 #[derive(Default)]
 struct Parsed {
     session: Option<String>,
-    answer: String,
+    answer: crate::spool::AnswerSink,
     usage: Value,
     cost: Option<f64>,
     completed: bool,
@@ -731,8 +733,8 @@ impl Parsed {
                     .or_else(|| value.get("message"))
                     .and_then(Value::as_str)
                 {
-                    self.answer.push_str(message);
-                    self.answer.push('\n');
+                    self.answer.append(message)?;
+                    self.answer.append("\n")?;
                 }
             }
             if let Some(item) = value.get("item") {
@@ -753,8 +755,8 @@ impl Parsed {
                 }
                 if kind == "item.completed" && item_type == "agent_message" {
                     if let Some(text) = item.get("text").and_then(Value::as_str) {
-                        self.answer.push_str(text);
-                        self.answer.push('\n');
+                        self.answer.append(text)?;
+                        self.answer.append("\n")?;
                     }
                 }
                 if item_type.contains("tool")
@@ -779,11 +781,11 @@ impl Parsed {
                         .and_then(Value::as_str)
                         .is_some_and(|x| x != "success");
                 if let Some(result) = value.get("result").and_then(Value::as_str) {
-                    self.answer = result.to_owned();
+                    self.answer.replace(result)?;
                 }
                 if self.answer.is_empty() {
                     if let Some(errors) = value.get("errors") {
-                        self.answer = errors.to_string();
+                        self.answer.replace(&errors.to_string())?;
                     }
                 }
                 self.usage = json!({"tokens":value.get("usage"),"models":value.get("modelUsage"),"num_turns":value.get("num_turns")});
@@ -794,8 +796,8 @@ impl Parsed {
                     let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
                     if kind == "assistant" && item_type == "text" {
                         if let Some(text) = item.get("text").and_then(Value::as_str) {
-                            self.answer.push_str(text);
-                            self.answer.push('\n');
+                            self.answer.append(text)?;
+                            self.answer.append("\n")?;
                         }
                     }
                     if matches!(item_type, "tool_use" | "tool_result") {
@@ -894,7 +896,7 @@ pub fn run(
         None => None,
     };
     let mut heartbeat = Instant::now();
-    let mut parsed = Parsed::default();
+    let mut parsed = Parsed { answer: crate::spool::AnswerSink::at(&spec.work_dir, &spec.capability)?, ..Parsed::default() };
     // Legacy runs keep 0.4's 1 MiB line and 8 MiB output caps. Current runs have
     // no total-output cap and save an oversized record instead of buffering it.
     let mut records = if spec.legacy_limits {
@@ -1029,13 +1031,39 @@ pub fn run(
     if stop_reason.is_none() && (parsed.failed || code != Some(0)) {
         stop_reason = Some("provider_failed".to_owned());
     }
-    if parsed.answer.trim().is_empty() && !stderr.is_empty() {
-        parsed.answer = clean_text(&String::from_utf8_lossy(&stderr), &spec.capability);
+    if parsed.answer.is_empty() && !stderr.is_empty() {
+        parsed.answer.append(&clean_text(
+            &String::from_utf8_lossy(&stderr),
+            &spec.capability,
+        ))?;
     }
+    let (answer, answer_payload) = match parsed
+        .answer
+        .finish(|text| clean_text(text, &spec.capability))
+    {
+        Ok(answer) => answer,
+        Err(error) => {
+            stop_reason = Some("answer_redaction_unverifiable".into());
+            let evidence = parsed
+                .answer
+                .evidence_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let message = clean_text(
+                &format!(
+                    "Answer could not be safely finalized: {error:#}. Complete private answer evidence is retained at {evidence}; owner inspection is required, no automatic retry."
+                ),
+                &spec.capability,
+            );
+            stop_message = Some(message.clone());
+            (message, None)
+        }
+    };
     Ok(Outcome {
         success: stop_reason.is_none(),
         session_id: parsed.session,
-        answer: clean_text(parsed.answer.trim(), &spec.capability),
+        answer,
+        answer_payload,
         usage: parsed.usage,
         estimated_cost_usd: parsed.cost,
         exit_code: code,
@@ -1049,6 +1077,7 @@ fn stopped(reason: &str) -> Outcome {
         success: false,
         session_id: None,
         answer: String::new(),
+        answer_payload: None,
         usage: Value::Null,
         estimated_cost_usd: None,
         exit_code: None,
@@ -1721,6 +1750,20 @@ mod tests {
         assert!(parsed.completed);
         assert_eq!(parsed.usage["input_tokens"], 10);
         assert!(events.iter().any(|v| v["type"] == "session"));
+    }
+    #[test]
+    fn many_valid_answer_records_do_not_accumulate_in_parser_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut parsed = Parsed { answer: crate::spool::AnswerSink::at(dir.path(), "").unwrap(), ..Parsed::default() };
+        let text = "bounded provider record, retained on disk;".repeat(4096);
+        for _ in 0..12 {
+            parsed.event("codex", json!({"type":"item.completed","item":{"type":"agent_message","text":text}}), &mut |_| Ok(())).unwrap();
+        }
+        let expected = (text.len() + 1) * 12;
+        assert_eq!(fs::metadata(parsed.answer.evidence_path().unwrap()).unwrap().len(), expected as u64);
+        let (preview, payload) = parsed.answer.finish(str::to_owned).unwrap();
+        assert_eq!(payload.unwrap().bytes, expected as u64);
+        assert!(preview.len() < crate::spool::PREVIEW_BYTES + 1024);
     }
     #[test]
     fn claude_budget_error_is_not_success() {

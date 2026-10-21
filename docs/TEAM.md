@@ -12,8 +12,8 @@ a team start) gets its own board address, such as `codex-codaclauda-3f2a`, and
 wake on. A board message to that address becomes a turn in that session, with the
 session's existing access. Sessions from before 0.5 keep their setting.
 Turn wake off for one session in its chat's resources panel, or for every session
-in Settings → Wake on mail. There is no limit on how many sessions wake or how
-often.
+in Settings → Wake on mail. Owner concurrency settings and the pair loop guard
+still apply when a session wakes.
 
 **Wake loop guard.** Settings → Limits → Wake loop guard (on, 20 per hour by
 default). When two CodaClauda sessions have woken each other that many times in
@@ -32,12 +32,15 @@ Codex session in that project. CodaClauda starts it:
 
 The asker gets the teammate's board address in a reply. The guard, "agent-started
 sessions working at once" (8 by default, or Unlimited), counts agent-started
-sessions in that project that have a process, a launch or a turn right now.
+sessions in that project that have a process, a launch, a turn or a queued
+reservation right now. Admission and provider dispatch recheck the setting.
 Sessions you start never count. A request beyond the guard gets a refusal; an
 asleep teammate does not count until it wakes.
 
-To stop agents starting teammates, turn the switch off; requests already answered
-stay answered. To stop a teammate, close it in Chat. The Running view's Team
+To prevent further turns from agent-started teammates, turn the switch off;
+requests already answered stay answered. It does not stop an already running
+turn; use Stop or close the teammate in Chat for that. Lowering project access
+requires a new teammate at the current level. The Running view's Team
 section lists every open session with its address, wake on or off, whether it is
 working, awake (idle process) or asleep (no process), the board claims it holds
 and which agent started it.
@@ -106,7 +109,9 @@ or a refusal `{"refused": {"code": "…", "message": "…"}}`:
 | `TEAM_GUARD` | The project already has the owner's limit of agent-started sessions working. |
 | `TEAM_REQUEST_INVALID` | The body is not the JSON above. |
 | `TEAM_START_FAILED` | The session could not be started; the message says why. |
-| `TEAM_INTERRUPTED` | CodaClauda closed while starting it and nothing started; send a new request. |
+| `TEAM_INTERRUPTED` | The outcome after closing is unknown and was not replayed. Inspect saved sessions and partial work before requesting again. |
+| `TEAM_ACCESS_CHANGED` | This saved teammate has more access than the project's current setting. Start a new teammate at the current level. |
+| `TEAM_PROJECT_CHANGED` | The saved teammate and project settings no longer name the same folder. Review them before further work. |
 
 Rules:
 
