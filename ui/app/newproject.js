@@ -45,13 +45,13 @@ function nameProblem(name) {
 
 let pending = null; // one dialog at a time; a second call shares the first one's result
 
-export async function openNewProjectDialog(ctx, { lot = null } = {}) {
+export async function openNewProjectDialog(ctx, { lot = null, tab = 'create', repo = '' } = {}) {
   if (pending) return pending;
-  pending = new Promise(resolve => build(ctx, lot, resolve)).finally(() => { pending = null; });
+  pending = new Promise(resolve => build(ctx, lot, resolve, { tab, repo })).finally(() => { pending = null; });
   return pending;
 }
 
-function build({ store, ui, bridge }, lot, resolve) {
+function build({ store, ui, bridge }, lot, resolve, initial) {
   const { h, icon, iconButton, toast, timeAgo, copyText } = ui;
   ui.registerIcons(ICONS);
   const opener = document.activeElement;
@@ -67,7 +67,7 @@ function build({ store, ui, bridge }, lot, resolve) {
     repos: null,             // fetched directly when GitHub isn't linked in the store yet
     loadingRepos: false,
     reposLoadedAt: 0,
-    selected: '',
+    selected: initial.repo,
     query: '',
     result: null,
   };
@@ -481,7 +481,7 @@ function build({ store, ui, bridge }, lot, resolve) {
     const local = new Set(store.projects.filter(p => p.path).flatMap(p => p.ids.filter(id => id.startsWith('gh:'))));
     return (state.repos || gh().repos || []).filter(r => r?.full_name && !local.has(`gh:${String(r.full_name).toLowerCase()}`));
   }
-  function selectedRepo() { return state.selected ? cloneable().find(r => r.full_name === state.selected) || null : null; }
+  function selectedRepo() { return state.selected ? cloneable().find(r => String(r.full_name).toLowerCase() === state.selected.toLowerCase()) || null : null; }
 
   async function loadRepos() {
     if (state.loadingRepos) return;
@@ -532,7 +532,7 @@ function build({ store, ui, bridge }, lot, resolve) {
 
   function repoRow(repo) {
     const radio = h('input', {
-      type: 'radio', name: 'np-repo', value: repo.full_name, checked: repo.full_name === state.selected,
+      type: 'radio', name: 'np-repo', value: repo.full_name, checked: String(repo.full_name).toLowerCase() === state.selected.toLowerCase(),
       onchange: () => { state.selected = repo.full_name; clearError('clone'); syncLocations(); refresh(); },
       onkeydown: event => { if (event.key === 'Enter') { event.preventDefault(); state.selected = repo.full_name; if (!primary.disabled) submit(); } },
     });
@@ -626,9 +626,9 @@ function build({ store, ui, bridge }, lot, resolve) {
   /* ---------- open ---------- */
   document.body.append(dialog);
   dialog.showModal();
-  selectTab('create');
+  selectTab(TABS.some(tab => tab.id === initial.tab) ? initial.tab : 'create');
   refreshCreate();
   renderAccount();
-  nameInput.focus();
+  if (state.tab === 'create') nameInput.focus();
   checkAccount();
 }

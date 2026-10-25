@@ -9,6 +9,7 @@ import { mergeParts, placed, plaqueTexture, githubFlagTexture, lockTexture, disp
 import { cellCenter, cellKey } from './layout.js';
 import { GROUND_Y, seeded, lotSeats } from './scenery.js';
 import { Ticker, TICKER } from './ticker.js';
+import { districtOf, isUnbuilt } from './districts.js';
 
 export const GF = 2.6;           // ground floor height
 export const FH = 1.3;           // upper floor height
@@ -38,8 +39,16 @@ function toHex(color, fallback = '#8b8fa3') {
   const m = /^hsla?\(\s*([\d.]+)(?:deg)?[\s,]+([\d.]+)%[\s,]+([\d.]+)%/i.exec(value);
   return m ? `#${new THREE.Color().setHSL(Number(m[1]) / 360 % 1, Number(m[2]) / 100, Number(m[3]) / 100).getHexString()}` : fallback;
 }
-function styleFor(project) {
+export function styleFor(project, district = null) {
   const lang = project.primaryLanguage || 'Other';
+  if (district === 'downtown') return {
+    key: 'downtown', body: '#92bbd4', trim: '#d6e6ef', plinth: '#526a7b', door: '#314b61', roof: '#b9ccd9',
+    window: { w: 0.94, h: 0.98, spacing: 1.08 }, glass: true,
+  };
+  if (district === 'oldtown') {
+    const warm = seeded(project.id)() > 0.5;
+    return { key: 'oldtown', body: warm ? '#c58161' : '#d7b087', trim: '#744d39', plinth: '#8c6650', door: '#66452e', roof: warm ? '#a65340' : '#795443', window: { w: 0.58, h: 0.76, spacing: 1.32 } };
+  }
   const key = LANG_STYLE[lang] || 'generic';
   const base = { key, window: { w: 0.55, h: 0.72, spacing: 1.2 }, door: '#6b4a8f', trim: null };
   switch (key) {
@@ -70,6 +79,9 @@ function sharedMat(material) { material.userData.shared = true; return material;
 export const MATERIALS = {
   windowLit: sharedMat(toonMaterial('#ffe7a8', { emissive: '#ffbf5a', emissiveIntensity: 0.2, cache: false })),
   windowDark: sharedMat(toonMaterial('#5d6f9c', { emissive: '#1b2240', emissiveIntensity: 0.2, cache: false })),
+  glassLit: sharedMat(toonMaterial('#c4ebfa', { emissive: '#91d5f5', emissiveIntensity: 0.2, cache: false })),
+  glassDark: sharedMat(toonMaterial('#4c7c9a', { emissive: '#1e455e', emissiveIntensity: 0.08, cache: false })),
+  lantern: sharedMat(toonMaterial('#ffe1a4', { emissive: '#ffc168', emissiveIntensity: 0.1, cache: false })),
   shop: sharedMat(toonMaterial('#fff2c9', { emissive: '#ffcf7a', emissiveIntensity: 0.4, cache: false })),
   pad: sharedMat(toonMaterial('#e9dfcb', { cache: false })),
   scaffold: sharedMat(toonMaterial('#ffc94d', { cache: false })),
@@ -81,6 +93,9 @@ export function setBuildingNight(night) {
   MATERIALS.windowLit.emissiveIntensity = 0.18 + night * 1.25;
   MATERIALS.windowDark.emissiveIntensity = 0.05 + night * 0.25;
   MATERIALS.shop.emissiveIntensity = 0.35 + night * 1.1;
+  MATERIALS.glassLit.emissiveIntensity = 0.18 + night * 1.1;
+  MATERIALS.glassDark.emissiveIntensity = 0.05 + night * 0.2;
+  MATERIALS.lantern.emissiveIntensity = 0.08 + night * 1.9;
 }
 
 /* ---------- Spark side palette ----------
@@ -232,6 +247,23 @@ class Batch {
 const easeOutBack = t => { const c = 1.6; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); };
 const easeIn = t => t * t * t;
 
+/** A quiet two-line ground sign: texture belongs to this repository's sign. */
+function unbuiltSignTexture(name) {
+  const canvas = document.createElement('canvas'); canvas.width = 768; canvas.height = 192;
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#e7edf0'; context.fillRect(0, 0, 768, 192);
+  context.strokeStyle = '#91a7b3'; context.lineWidth = 6; context.strokeRect(3, 3, 762, 186);
+  context.textAlign = 'center'; context.textBaseline = 'middle';
+  const label = String(name || 'Repository').replace(/\s+/g, ' ').trim();
+  let fontSize = 48;
+  do { context.font = `600 ${fontSize}px "Segoe UI", system-ui, sans-serif`; fontSize -= 2; } while (context.measureText(label).width > 704 && fontSize > 22);
+  context.fillStyle = '#425967'; context.fillText(label, 384, 66, 704);
+  context.font = '30px "Segoe UI", system-ui, sans-serif'; context.fillStyle = '#586d79';
+  context.fillText('Not on this PC · click to clone', 384, 132, 704);
+  const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
 /* ---------- one building ---------- */
 export class Building {
   /** env: { particles, reducedMotion(), animateIn, stagger(), mirror?, deckY? }. With mirror the
@@ -261,19 +293,21 @@ export class Building {
   /** Re-apply a project; returns true if the lot footprint changed. */
   apply(project, { animate = false } = {}) {
     this.project = project;
+    const district = !this.mirror && this.env.districts ? districtOf(project) : null;
+    const unbuilt = Boolean(district && isUnbuilt(project));
     const size = buildingSize(project);
-    const style = this.mirror ? sparkStyle(styleFor(project)) : styleFor(project);
+    const style = this.mirror ? sparkStyle(styleFor(project)) : styleFor(project, district);
     const m = project.metrics || {};
     const litFrac = Math.max(0.08, Math.min(0.92, 0.12 + (m.glow || 0) * 0.55 + Math.min(m.commits7d || 0, 30) / 60));
-    const sig = JSON.stringify([size.floors, size.footprint, style.key, style.body, project.name, Math.round(litFrac * 20), (m.commits7d || 0) > 0, project.source, !!project.private]);
+    const sig = JSON.stringify([size.floors, size.footprint, style.key, style.body, project.name, Math.round(litFrac * 20), (m.commits7d || 0) > 0, project.source, !!project.private, unbuilt]);
     if (sig === this.sig) return false;
     const previous = this.size;
-    const footprintChanged = !previous || previous.footprint !== size.footprint;
-    this.sig = sig; this.size = size; this.style = style; this.litFrac = litFrac;
+    const footprintChanged = !previous || previous.footprint !== size.footprint || this.district !== district || this.unbuilt !== unbuilt;
+    this.sig = sig; this.size = size; this.style = style; this.litFrac = litFrac; this.district = district; this.unbuilt = unbuilt;
     this.clearTower();
     this.buildTower();
     if (footprintChanged) this.buildPad();
-    if (this.active) this.buildScaffold();
+    if (this.active && !this.unbuilt) this.buildScaffold();
     const reduced = this.env.reducedMotion();
     if (!previous && animate && !reduced) {
       this.anim = { kind: 'rise', t: 0, delay: this.env.stagger?.() || 0 };
@@ -288,9 +322,10 @@ export class Building {
 
   clearTower() {
     this.dropTicker();
+    if (this.unbuiltSign) { this.unbuiltSign.removeFromParent(); disposeObject(this.unbuiltSign); this.unbuiltSign = null; }
     for (const child of [...this.tower.children]) { this.tower.remove(child); disposeObject(child); }
     this.pickables = []; this.gear = null; this.flag = null; this.beaconLight = null; this.jib = null; this.chimneyTop = null; this.scaffold = null;
-    this.paintMeshes = []; this.litWindows = null; this.litPanes = []; this.rigTip = null; this.plaque = null;
+    this.paintMeshes = []; this.litWindows = null; this.litPanes = []; this.rigTip = null; this.plaque = null; this.roofSurface = null; this.scaffoldFront = null;
     for (const m of this.signs || []) SPARK_SIGNS.delete(m);
     this.signs = [];
   }
@@ -302,6 +337,7 @@ export class Building {
   }
 
   buildTower() {
+    if (this.unbuilt) { this.buildUnbuilt(); return; }
     const { W, D, H, floors } = this.size, s = this.style, mirror = this.mirror;
     const tag = mirror ? { sparkBuildingId: this.id } : { buildingId: this.id };
     const top = PAD_TOP + H;
@@ -327,7 +363,33 @@ export class Building {
 
     let roofTop = top + 0.1;
     const r = seeded(this.id);
-    if (s.key === 'foundry') {
+    if (s.key === 'downtown') {
+      // Flat roof, steel corner mullions and a compact connected antenna.
+      batch.add(s.roof, placed(new THREE.BoxGeometry(W + 0.22, 0.2, D + 0.22), { y: top + 0.1 }));
+      for (const x of [-W / 2 + 0.08, W / 2 - 0.08]) for (const z of [-D / 2 + 0.08, D / 2 - 0.08]) batch.add(s.trim, placed(new THREE.BoxGeometry(0.14, H, 0.14), { x, y: PAD_TOP + H / 2, z }));
+      batch.add('#6f8799', placed(new THREE.BoxGeometry(W * 0.3, 0.42, D * 0.26), { x: -W * 0.2, y: top + 0.41, z: -D * 0.18 }));
+      batch.add('#6f8799', placed(new THREE.CylinderGeometry(0.07, 0.1, 1.35, 6), { x: W * 0.23, y: top + 0.85, z: -D * 0.2 }));
+      batch.add('#b9ccd9', placed(new THREE.BoxGeometry(0.65, 0.1, 0.1), { x: W * 0.23, y: top + 1.1, z: -D * 0.2 }));
+      roofTop = top + 1.55;
+      this.roofSurface = top + 0.2;
+    } else if (s.key === 'oldtown') {
+      const rise = Math.min(2.2, 0.9 + D * 0.18);
+      const shape = new THREE.Shape([new THREE.Vector2(-D / 2 - 0.25, 0), new THREE.Vector2(D / 2 + 0.25, 0), new THREE.Vector2(0, rise)]);
+      const roof = new THREE.ExtrudeGeometry(shape, { depth: W + 0.4, bevelEnabled: false });
+      roof.translate(0, 0, -(W + 0.4) / 2); roof.rotateY(Math.PI / 2); roof.translate(0, top, 0);
+      batch.add(s.roof, roof);
+      // Timber posts and shallow brick courses read at both street and island scale.
+      for (const x of [-W / 2 + 0.12, W / 2 - 0.12]) for (const z of [-D / 2 - 0.035, D / 2 + 0.035]) batch.add(s.trim, placed(new THREE.BoxGeometry(0.18, H, 0.12), { x, y: PAD_TOP + H / 2, z }));
+      for (let y = PAD_TOP + 0.65; y < top - 0.5; y += 0.65) batch.add(shade(s.body, -0.05), placed(new THREE.BoxGeometry(W - 0.3, 0.045, D + 0.05), { y }));
+      const lx = -W / 2 + 0.65, lz = D / 2 + 0.22;
+      batch.add('#553f31', placed(new THREE.BoxGeometry(0.1, 0.45, 0.1), { x: lx, y: PAD_TOP + 1.95, z: lz - 0.12 }));
+      batch.add('#553f31', placed(new THREE.BoxGeometry(0.32, 0.1, 0.32), { x: lx, y: PAD_TOP + 1.75, z: lz }));
+      batch.add('#553f31', placed(new THREE.ConeGeometry(0.25, 0.2, 4), { x: lx, y: PAD_TOP + 2.2, z: lz, ry: Math.PI / 4 }));
+      const lantern = new THREE.Mesh(placed(new THREE.BoxGeometry(0.25, 0.34, 0.25), { x: lx, y: PAD_TOP + 1.97, z: lz }), MATERIALS.lantern);
+      lantern.userData = { ...tag }; this.tower.add(lantern);
+      roofTop = top + rise;
+      this.roofSurface = roofTop;
+    } else if (s.key === 'foundry') {
       const cx = W / 2 - 0.85, cz = -D / 2 + 0.85;
       batch.add(s.plinth, placed(new THREE.CylinderGeometry(0.42, 0.5, 2.9, 12), { x: cx, y: top + 1.45, z: cz }));
       batch.add('#5a3428', placed(new THREE.CylinderGeometry(0.52, 0.52, 0.22, 12), { x: cx, y: top + 2.8, z: cz }));
@@ -393,13 +455,13 @@ export class Building {
     }
     // Generic roof props (the Spark twin carries the same props in its own palette).
     const m = this.project.metrics || {};
-    if ((m.commits7d || 0) > 0 && s.key !== 'glass') {
+    if (!this.district && (m.commits7d || 0) > 0 && s.key !== 'glass') {
       const ax = -W / 2 + 0.6, az = D / 2 - 0.6;
       batch.add('#8d96b0', placed(new THREE.CylinderGeometry(0.05, 0.07, 1.7, 6), { x: ax, y: top + 0.85, z: az }));
       this.addBeacon(new THREE.Vector3(ax, top + 1.8, az), true);
       roofTop = Math.max(roofTop, top + 1.9);
     }
-    if (this.project.source === 'github' || this.project.source === 'both') {
+    if (!this.district && (this.project.source === 'github' || this.project.source === 'both')) {
       const fx = -W / 2 + 0.55, fz = -D / 2 + 0.55;
       batch.add('#d8dbe6', placed(new THREE.CylinderGeometry(0.04, 0.05, 2.2, 6), { x: fx, y: top + 1.1, z: fz }));
       const flag = new THREE.Group();
@@ -434,16 +496,44 @@ export class Building {
     this.mountTicker();
   }
 
+  /** Remote-only repositories are clickable plans, with no working construction rig. */
+  buildUnbuilt() {
+    const { W, D, H } = this.size, tag = { buildingId: this.id };
+    const ghostHeight = H * 0.83;
+    const geometry = placed(new THREE.BoxGeometry(W, ghostHeight, D), { y: PAD_TOP + ghostHeight / 2 });
+    this.bodyMaterial = toonMaterial('#b9d4e4', { transparent: true, opacity: 0.23, cache: false });
+    this.bodyMaterial.depthWrite = false;
+    const body = new THREE.Mesh(geometry, this.bodyMaterial);
+    body.userData = { ...tag, noOutline: true };
+    const frame = new THREE.LineSegments(new THREE.EdgesGeometry(geometry), new THREE.LineBasicMaterial({ color: '#a6bdcb', transparent: true, opacity: 0.18, depthWrite: false }));
+    frame.raycast = () => {};
+    this.tower.add(body, frame); this.body = body; this.pickables.push(body);
+    const sign = new THREE.Group(); sign.name = `unbuilt-sign:${this.id}`;
+    sign.position.set(0, PAD_TOP, D / 2 + 0.33);
+    const plaqueW = Math.min(W * 0.8, 4.6), plaqueH = plaqueW / 4;
+    for (const x of [-plaqueW * 0.35, plaqueW * 0.35]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1, 0.12), toonMaterial('#788d99'));
+      post.position.set(x, 0.5, 0); sign.add(post);
+    }
+    const backing = new THREE.Mesh(new THREE.BoxGeometry(plaqueW + 0.1, plaqueH + 0.1, 0.1), toonMaterial('#91a7b3'));
+    backing.position.y = 1.1; backing.userData = { ...tag }; sign.add(backing);
+    const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueH), new THREE.MeshBasicMaterial({ map: unbuiltSignTexture(this.project.name) }));
+    plaque.position.set(0, 1.1, 0.056); plaque.userData = { ...tag };
+    sign.add(plaque); this.group.add(sign); this.unbuiltSign = sign;
+    this.pickables.push(backing, plaque); this.plaque = plaque;
+    this.roofTop = this.roofSurface = PAD_TOP + ghostHeight;
+  }
+
   /* Access ticker: segments from ticker.js tickerSegments (null: none); paused: grey and still. */
   setTicker(segments, paused = false) {
     const had = Boolean(this.tickerInfo);
     this.tickerInfo = segments ? { segments, paused: Boolean(paused) } : null;
-    if (!segments) { this.dropTicker(); return; }
+    if (!segments || this.unbuilt) { this.dropTicker(); return; }
     if (this.ticker) this.ticker.set(segments, { grey: Boolean(paused) }); else this.mountTicker();
     if (!had && this.size?.floors === 1 && this.plaque) this.plaque.position.z = this.size.D / 2 + TICKER.off + 0.05;
   }
   mountTicker() {
-    if (!this.tickerInfo || this.ticker || !this.size) return;
+    if (this.unbuilt || !this.tickerInfo || this.ticker || !this.size) return;
     const { W, D, H } = this.size;
     // Picking the band picks the building (same tag as its walls).
     this.ticker = new Ticker({ W, D, top: PAD_TOP + H, tag: this.mirror ? { sparkBuildingId: this.id } : { buildingId: this.id } });
@@ -471,14 +561,13 @@ export class Building {
     if (this.scaffold) { this.tower.remove(this.scaffold); disposeObject(this.scaffold); }
     const { W, D, H } = this.size, M = SPARK_MATERIALS;
     const group = new THREE.Group();
-    const crane = new THREE.Group(); crane.position.set(W / 2 - 0.7, PAD_TOP + H, D / 2 - 0.9);
+    const crane = new THREE.Group(); crane.position.set(0, this.roofSurface || PAD_TOP + H, 0);
     const mast = new THREE.Mesh(placed(new THREE.BoxGeometry(0.24, 2.8, 0.24), { y: 1.4 }), M.panel);
     const collar = new THREE.Mesh(placed(new THREE.BoxGeometry(0.42, 0.16, 0.42), { y: 1.9 }), M.glowActive);
     const jib = new THREE.Group(); jib.position.y = 2.8;
-    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(3.6, 0.2, 0.2), { x: -1.2 }), M.glowActive));
-    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(0.55, 0.42, 0.42), { x: 0.85, y: -0.08 }), M.dark));
-    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(0.03, 1.3, 0.03), { x: -2.7, y: -0.65 }), M.dark));
-    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(0.3, 0.24, 0.3), { x: -2.7, y: -1.42 }), M.limeActive));
+    const reach = Math.min(W, D) * 0.34;
+    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(reach * 1.5, 0.2, 0.2), { x: -reach * 0.25 }), M.glowActive));
+    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(0.45, 0.35, 0.38), { x: reach * 0.38, y: -0.08 }), M.dark));
     crane.add(mast, collar, jib); addOutline(crane, { thickness: 0.025 });
     group.add(crane);
     this.jib = jib;
@@ -528,7 +617,7 @@ export class Building {
       });
     }
     const S = SPARK_MATERIALS;
-    const sets = this.mirror ? [[lit, this.active ? S.winLitActive : S.winLit, true], [dark, S.winDark]] : [[lit, MATERIALS.windowLit], [dark, MATERIALS.windowDark]];
+    const sets = this.mirror ? [[lit, this.active ? S.winLitActive : S.winLit, true], [dark, S.winDark]] : this.district === 'downtown' ? [[lit, MATERIALS.glassLit], [dark, MATERIALS.glassDark]] : [[lit, MATERIALS.windowLit], [dark, MATERIALS.windowDark]];
     for (const [list, material, isLit] of sets) {
       if (!list.length) continue;
       const inst = new THREE.InstancedMesh(geo, material, list.length);
@@ -542,14 +631,30 @@ export class Building {
   buildPad() {
     for (const child of [...this.padGroup.children]) { this.padGroup.remove(child); disposeObject(child); }
     const { W, D } = this.size;
-    const pad = new THREE.Mesh(placed(new RoundedBoxGeometry(W + 1.2, 0.14, D + 1.2, 1, 0.12), { y: GROUND_Y + 0.05 }), this.mirror ? SPARK_MATERIALS.pad : MATERIALS.pad);
+    const padMaterial = this.mirror ? SPARK_MATERIALS.pad : this.district === 'downtown' ? toonMaterial('#9daeb9') : this.district === 'oldtown' ? toonMaterial('#c6b98b') : MATERIALS.pad;
+    const pad = new THREE.Mesh(placed(new RoundedBoxGeometry(W + 1.2, 0.14, D + 1.2, 1, 0.12), { y: GROUND_Y + 0.05 }), padMaterial);
     pad.receiveShadow = true; pad.userData = this.mirror ? { sparkBuildingId: this.id } : { buildingId: this.id };
     addOutline(pad, { thickness: 0.03 });
     this.padGroup.add(pad);
     this.pad = pad;
+    if (this.district === 'oldtown') {
+      const garden = new Batch();
+      const z = D / 2 + 0.28;
+      // Low garden beds and two small trees stay within the reserved lot footprint.
+      for (const side of [-1, 1]) {
+        const x = side * (W / 2 - 0.75);
+        garden.add('#846344', placed(new THREE.BoxGeometry(1.25, 0.22, 0.46), { x, y: PAD_TOP + 0.11, z }));
+        garden.add('#5c964f', placed(new THREE.BoxGeometry(1.1, 0.16, 0.35), { x, y: PAD_TOP + 0.3, z }));
+        garden.add('#765138', placed(new THREE.CylinderGeometry(0.07, 0.1, 0.85, 5), { x, y: PAD_TOP + 0.68, z }));
+        garden.add(side < 0 ? '#78a45c' : '#508354', placed(new THREE.IcosahedronGeometry(0.52, 0), { x, y: PAD_TOP + 1.23, z, sy: 1.2 }));
+        garden.add('#e8ae79', placed(new THREE.IcosahedronGeometry(0.12, 0), { x: x + side * 0.42, y: PAD_TOP + 0.42, z }));
+      }
+      garden.build(this.padGroup, { outline: 0.02 });
+    }
   }
 
   setActive(on) {
+    on = Boolean(on && !this.unbuilt);
     if (on === this.active) return;
     this.active = on;
     if (this.mirror) this.paintSpark();
@@ -568,18 +673,18 @@ export class Building {
     for (let y = y0 + 0.9; y <= top + 0.4; y += FH * 1.5) {
       poles.push(placed(new THREE.BoxGeometry(width, 0.07, 0.07), { y: y + 0.55, z: z + 0.22 }));
       planks.push(placed(new THREE.BoxGeometry(width, 0.07, 0.55), { y, z: z - 0.05 }));
+      for (const x of [-W * 0.35, W * 0.35]) poles.push(placed(new THREE.BoxGeometry(0.1, 0.1, 0.65), { x, y, z: D / 2 + 0.25 }));
     }
     for (const [list, material] of [[poles, MATERIALS.scaffold], [planks, MATERIALS.plank]]) {
       const m = new THREE.Mesh(mergeParts(list), material); m.castShadow = true; addOutline(m, { thickness: 0.02 }); group.add(m);
     }
     // Little roof crane with a rotating jib.
-    const crane = new THREE.Group(); crane.position.set(W / 2 - 0.7, top, D / 2 - 0.9);
+    const crane = new THREE.Group(); crane.position.set(0, this.roofSurface || top, 0);
     const mast = new THREE.Mesh(placed(new THREE.BoxGeometry(0.26, 3.4, 0.26), { y: 1.7 }), MATERIALS.crane);
     const jib = new THREE.Group(); jib.position.y = 3.4;
-    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(4.2, 0.22, 0.22), { x: -1.4 }), MATERIALS.crane));
-    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(0.6, 0.45, 0.45), { x: 0.95, y: -0.1 }), toonMaterial('#6b6f80')));
-    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(0.03, 1.6, 0.03), { x: -3.2, y: -0.8 }), toonMaterial('#3f4560')));
-    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(0.3, 0.22, 0.3), { x: -3.2, y: -1.65 }), toonMaterial('#ffd36b')));
+    const reach = Math.min(W, D) * 0.34;
+    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(reach * 1.5, 0.22, 0.22), { x: -reach * 0.25 }), MATERIALS.crane));
+    jib.add(new THREE.Mesh(placed(new THREE.BoxGeometry(0.48, 0.38, 0.4), { x: reach * 0.38, y: -0.1 }), toonMaterial('#6b6f80')));
     crane.add(mast, jib); addOutline(crane, { thickness: 0.025 });
     group.add(crane);
     this.jib = jib;
@@ -592,6 +697,7 @@ export class Building {
     if (this.hover === on) return;
     this.hover = on;
     if (this.mirror) { this.paintSpark(); return; }
+    if (this.unbuilt) { this.bodyMaterial.color.set(on ? '#cce2ee' : '#b9d4e4'); return; }
     this.bodyMaterial.emissive.set(on ? '#5b4bd6' : '#000000');
     this.bodyMaterial.emissiveIntensity = on ? 0.22 : 1;
   }
@@ -611,6 +717,11 @@ export class Building {
   localPoint(x, y, z) { return new THREE.Vector3(this.origin.x + x, y, this.origin.z + z); }
   worldPoint(x, y, z) { return this.mirror ? new THREE.Vector3(this.origin.x + x, (this.env.deckY || 0) - y, -(this.origin.z + z)) : this.localPoint(x, y, z); }
   topPoint() { return this.worldPoint(0, (this.roofTop || PAD_TOP + this.size.H) * this.tower.scale.y + 0.6, 0); }
+  /** Local roof contact for attached indicators. It scales with the tower during rise/grow/sink. */
+  rooftopPoint() {
+    // Stay clear of the central crane. Old Town's roof ridge runs along x.
+    return new THREE.Vector3(-this.size.W * 0.25, this.roofSurface || PAD_TOP + this.size.H + 0.12, this.district === 'oldtown' ? 0 : this.size.D * 0.2);
+  }
   get center() { return { x: this.origin.x, z: this.origin.z }; }
   get door() { return { x: this.origin.x, z: this.origin.z + this.size.D / 2 + 0.3 }; }
   /** Work spot k in front of the facade, facing the building. */
@@ -644,6 +755,7 @@ export class Building {
         const k = easeIn(a.t);
         this.tower.scale.set(1 - k * 0.15, Math.max(0.001, 1 - k), 1 - k * 0.15);
         this.padGroup.scale.setScalar(Math.max(0.001, 1 - k));
+        if (this.unbuiltSign) this.unbuiltSign.scale.copy(this.padGroup.scale);
         if (a.t >= 1) return false;
       }
     }
@@ -663,7 +775,7 @@ export class Building {
         this.elapsedEmit = 0;
         const f = this.scaffoldFront;
         const y = f.y0 + 0.9 + Math.floor(Math.random() * Math.max(1, (f.top - f.y0) / (FH * 1.5))) * FH * 1.5;
-        env.particles.emit('spark', this.localPoint((Math.random() - 0.5) * f.width * 0.8, y + 0.15, f.z), 6, { spread: 0.2 });
+        env.particles.emit('spark', this.localPoint((Math.random() - 0.5) * f.width * 0.8, (y + 0.15) * this.tower.scale.y, f.z), 6, { spread: 0.2 });
       }
     }
     return true;
@@ -693,7 +805,7 @@ export class BuildingManager {
   /** projects + their cells (Map id → cell) + Set of project ids with active agents.
    * tickers: Map project id → access ticker segments (omitted: leave tickers as they are); paused:
    * tickers grey and still. Returns true when lot footprints changed (decor needs rebuilding). */
-  sync(projects, cells, activeIds, { animate = true, tickers = null, paused = false } = {}) {
+  sync(projects, cells, activeIds, { animate = true, tickers = null, paused = false, districts = false } = {}) {
     let lotsChanged = false, staggerIndex = 0;
     const seen = new Set();
     for (const project of projects) {
@@ -707,11 +819,11 @@ export class BuildingManager {
       }
       if (!building) {
         const index = staggerIndex++;
-        building = new Building(project, cell, { ...this.env, animateIn: animate, stagger: () => (animate ? index * 0.08 : 0) });
+        building = new Building(project, cell, { ...this.env, districts, animateIn: animate, stagger: () => (animate ? index * 0.08 : 0) });
         this.items.set(project.id, building);
         this.parent.add(building.group);
         lotsChanged = true;
-      } else if (building.apply(project, { animate })) lotsChanged = true;
+      } else { building.env.districts = districts; if (building.apply(project, { animate })) lotsChanged = true; }
       building.setActive(activeIds.has(project.id));
       if (tickers) building.setTicker(tickers.get(project.id) || null, paused);
     }

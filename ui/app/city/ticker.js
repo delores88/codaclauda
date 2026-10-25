@@ -13,7 +13,7 @@ import { levelInfo } from '../access.js';
 export const PAUSED_COLOR = '#8a8f9c';
 
 /** Segments for one building: name • Full access / Read only (in the level colour) • who works there. */
-export function tickerSegments(project, level, working = 0) {
+export function tickerSegments(project, level, working = 0, ci = null) {
   const info = levelInfo(level);
   const name = String(project?.name || '').replace(/\s+/g, ' ').trim();
   const n = Math.max(0, Math.floor(Number(working) || 0));
@@ -21,6 +21,7 @@ export function tickerSegments(project, level, working = 0) {
     { text: name.length > 40 ? `${name.slice(0, 39).trimEnd()}…` : name || 'Project', tone: 'name' },
     { text: info.long, tone: 'level', color: info.color },
     { text: n ? `${n} agent${n === 1 ? '' : 's'} working` : 'No agents working', tone: 'info' },
+    ...(ci?.failing === true ? [{ text: 'CI failing', tone: 'alert', color: '#ff6875' }] : []),
   ];
 }
 
@@ -75,7 +76,7 @@ function drawTile(segments, grey, anisotropy) {
   g.fillStyle = 'rgba(255, 255, 255, .22)'; g.fillRect(0, y0 + STRIP, w, 1);
   // Text: crisp, with a soft drop shadow; the level label glows in its colour.
   g.textBaseline = 'middle'; g.textAlign = 'left';
-  const color = s => (s.tone === 'level' ? accent : pal[s.tone] || pal.info);
+  const color = s => (s.tone === 'level' ? accent : !grey && s.color ? s.color : pal[s.tone] || pal.info);
   let x = GAP / 2;
   for (const s of items) {
     g.save();

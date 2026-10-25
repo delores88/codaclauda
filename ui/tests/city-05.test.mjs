@@ -26,7 +26,7 @@ test('zero-config agents: sessions keep an explicit status, desktop sessions are
   assert.deepEqual(ext.map(a => [a.name, a.currentProjectId, a.count]), [['Codex (desktop)', 'local:coda', 2]]);
 });
 
-test('ambient CI: rain on a failed latest run, fireworks only for a new green default-branch run', () => {
+test('ambient CI: failed latest run status, fireworks only for a new green default-branch run', () => {
   assert.equal(repoOf(projects[0]), 'Delores88/CodaClauda');
   assert.equal(repoOf({ stats: { git: { remote: 'git@github.com:owner/thing.git' } } }), 'owner/thing');
   const failing = ciSummary([{ status: 'completed', conclusion: 'failure', branch: 'feature', at: '2026-10-20T10:00:00Z' }, { status: 'completed', conclusion: 'success', branch: 'main', at: '2026-10-20T09:00:00Z', url: 'u1' }], 'main');

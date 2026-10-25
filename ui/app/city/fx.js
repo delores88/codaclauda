@@ -37,9 +37,13 @@ inkMaterial.userData.shared = true; inkMaterial.userData.outline = true;
 /** Ink outline for an InstancedMesh: a slightly inflated back-face copy sharing its instance matrices. */
 export function instancedOutline(mesh, thickness = 0.05) {
   const geometry = mesh.geometry.clone();
+  delete geometry.userData.shared;   // the outline owns this clone, even when the source is shared
   geometry.computeBoundingBox();
-  const size = new THREE.Vector3(); geometry.boundingBox.getSize(size);
+  const size = new THREE.Vector3(), center = new THREE.Vector3();
+  geometry.boundingBox.getSize(size); geometry.boundingBox.getCenter(center);
+  geometry.translate(-center.x, -center.y, -center.z);
   geometry.scale(1 + thickness * 2 / Math.max(size.x, 1e-3), 1 + thickness * 2 / Math.max(size.y, 1e-3), 1 + thickness * 2 / Math.max(size.z, 1e-3));
+  geometry.translate(center.x, center.y, center.z);
   const hull = new THREE.InstancedMesh(geometry, inkMaterial, mesh.count);
   hull.instanceMatrix = mesh.instanceMatrix;
   hull.userData.outline = true; hull.raycast = () => {};

@@ -7,7 +7,9 @@ import { THREE } from '../city/toon.js';
 import { World, webglAvailable, wheelZoomLog } from '../city/world.js';
 import { BuildingManager } from '../city/buildings.js';
 import { NpcManager, loadPeople, setPeopleReducedMotion, streetMove, groundY } from '../city/npc.js';
-import { SlotMap, cellCenter, cellOf, cellKey, LOT_HALF } from '../city/layout.js';
+import { SlotMap, cellCenter, cellOf, cellKey, LOT_HALF, PITCH } from '../city/layout.js';
+import { districtOf, districtForCell, isUnbuilt, TRACK_Z } from '../city/districts.js';
+import { Railway } from '../city/railway.js';
 import { buildPlotMarker, GROUND_Y } from '../city/scenery.js';
 import { SparkCity, FOUNDRY, jobLabel } from '../city/spark.js';
 import { TalkPanel, talkSpot, talkShot, sayLine, STAGE } from '../city/talk.js';
@@ -233,7 +235,7 @@ class CityView {
     for (const p of projects) {
       let level = 'read';
       try { level = this.store.projectAccess(p).level; } catch { /* default */ }
-      map.set(p.id, tickerSegments(p, level, working.get(p.id) || 0));
+      map.set(p.id, tickerSegments(p, level, working.get(p.id) || 0, this.ci?.status(p.id)?.summary));
     }
     return map;
   }
@@ -272,7 +274,12 @@ class CityView {
       h('div.city-legend-sep'),
       h('div.city-legend-note', 'Taller = more code & commits'),
       h('div.city-legend-note', 'Drag an agent onto a building to give it a task'),
-      this.legendCi = h('div.city-legend-note', { hidden: true }, 'Rain cloud = latest CI run failed'),
+      this.legendDistricts = h('div.city-legend-extra',
+        h('div.city-legend-note', 'Downtown: glass towers and GitHub repos'),
+        h('div.city-legend-note', 'Old Town: local folders, brick and gardens'),
+        h('div.city-legend-note', 'Pale ghost = repo waiting to be cloned'),
+        h('div.city-legend-note', 'Train labels = projects with recent commits')),
+      this.legendCi = h('div.city-legend-note', { hidden: true }, 'Red rooftop beacon = CI failing'),
       h('div.city-legend-note', 'Scaffolding = an agent is working there'),
       this.legendGear, this.legendSpark);
 
@@ -305,6 +312,8 @@ class CityView {
       h('dl.city-help-list',
         ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Drag an agent', 'Drop it on a building to give it a task there'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
           .flatMap(([k, v]) => [h('dt', h('kbd', k)), h('dd', v)])),
+      h('p.city-note', 'Railroad tracks separate Downtown (GitHub projects) from Old Town (local folders without a repo). Pale Downtown ghosts have a ground sign and open a panel where you can clone the repo. Tickers sit on real buildings only. Both districts keep at least three empty plots and grow without moving placed buildings.'),
+      h('p.city-note', 'A train carries recent project names every 90–180 seconds; crossing lights blink before it arrives. Reduced motion parks it at the station. A red rooftop beacon and “CI failing” ticker mark failed builds; weather is independent.'),
       h('button.btn.small.primary', { type: 'button', onclick: () => this.toggleHelp(false) }, 'Got it'));
 
     this.machinesCard = h('section.city-machines', { hidden: true, 'aria-label': 'Machine load' });
@@ -353,6 +362,7 @@ class CityView {
     this.world.onKeyPan = () => { if (this.following) this.toggleFollow(false); };
     this.world.collide = p => this.solidAt(p);
     this.buildings = new BuildingManager(this.world.city, { particles: this.world.particles, reducedMotion: () => this.reduced() });
+    this.railway = new Railway(this.world);
     this.npcs = new NpcManager(this.world.city, { buildings: this.buildings, particles: this.world.particles, reducedMotion: () => this.reduced() });
     this.spark = new SparkCity(this.world, { makePerson: (spec, options) => this.npcs.makePerson(spec, options), reducedMotion: () => this.reduced(), topBuildings: this.buildings });
     this.plotMarker = buildPlotMarker();
@@ -361,7 +371,7 @@ class CityView {
     // Weather (This PC side only): effects, HUD chip + quick picker, live feed while the City is shown.
     this.weather = new CityWeather(this.world, { store: this.store, bridge: this.ctx.bridge, reducedMotion: () => this.reduced(), navigate: (view, params) => this.ctx.navigate(view, params) });
     this.weatherSlot.append(this.weather.node);
-    // Ambient CI (city/ci.js): rain over failing buildings, fireworks when the default branch goes green.
+    // CI is a rooftop beacon, independent of weather; new green runs keep their celebration.
     this.ci = new CityCi({
       world: this.world, buildings: this.buildings, caller: () => this.ciCall(), reducedMotion: () => this.reduced(),
       projects: () => (this.islands?.current ? [] : this.store.visibleProjects('city')), home: () => !this.islands?.current,
@@ -380,12 +390,16 @@ class CityView {
   /** Pin projects that just got their first lot, so the layout survives other machines and reinstalls. */
   persistLots(fresh) {
     if (!fresh.length || typeof this.store.setCityLot !== 'function') return;
-    const lots = fresh.map(f => ({ id: f.id, i: f.i, j: f.j }));
+    const store = this.store;
+    const lots = fresh.flatMap(f => {
+      const project = store.project(f.id);
+      return [...new Set([f.id, ...(project?.ids || [])])].map(id => ({ ...f, id }));
+    });
     setTimeout(() => {   // never re-enter sync() from inside sync()
-      const pins = this.store.cityLots || {};
-      const todo = lots.filter(f => !pins[f.id]);
-      if (todo.length > 1 && typeof this.store.updateDesktop === 'function') this.store.updateDesktop(d => { d.cityLots = { ...(d.cityLots || {}) }; for (const f of todo) d.cityLots[f.id] = { i: f.i, j: f.j }; });
-      else for (const f of todo) this.store.setCityLot(f.id, { i: f.i, j: f.j });
+      const pins = store.cityLots || {};
+      const todo = lots.filter(f => !pins[f.id] || (f.migrated && (pins[f.id].i !== f.i || pins[f.id].j !== f.j)));
+      if (todo.length > 1 && typeof store.updateDesktop === 'function') store.updateDesktop(d => { d.cityLots = { ...(d.cityLots || {}) }; for (const f of todo) d.cityLots[f.id] = { i: f.i, j: f.j }; });
+      else for (const f of todo) store.setCityLot(f.id, { i: f.i, j: f.j });
     }, 0);
   }
 
@@ -395,21 +409,30 @@ class CityView {
     this.root.classList.toggle('reduce-motion', this.reduced());
     const store = this.store;
     const projects = store.visibleProjects('city');
+    const districts = !this.islands?.current;
     const hold = Boolean(this.plotDialog && performance.now() - this.plotDialog.at < PLOT_HOLD_MS);
-    const { cells, rings, fresh = [], reserved = new Map() } = this.slots.assign(projects, { pins: store.cityLots || {}, reserve: store.projects.filter(p => !p.visible.city), hold });
+    const { cells, rings, fresh = [], reserved = new Map(), emptyPlots } = this.slots.assign(projects, { pins: store.cityLots || {}, reserve: store.projects.filter(p => !p.visible.city), hold, districts });
+    this.emptyPlots = emptyPlots;
     this.cells = cells; this.rings = rings; this.reserved = reserved;
     this.occupied = new Set([...cells.values()].map(c => cellKey(c.i, c.j)));
     this.persistLots(fresh);
-    const ringsChanged = this.world.setRings(rings, { animate: Boolean(this.firstSyncDone) });
+    const ringsChanged = this.world.setRings(rings, { animate: Boolean(this.firstSyncDone), districts });
     // Until the owner moves the camera, keep the whole (growing) island framed.
     if (ringsChanged && !this.world.userMoved && !this.pendingFocus && !this.talk) this.world.resetView({ instant: !this.firstSyncDone, auto: true });
     const agents = this.allAgents();   // the board's agents + CodaClauda sessions + desktop sessions (zero-config)
     const active = new Set(agents.filter(a => a.status === 'active' && a.currentProjectId).map(a => store.project(a.currentProjectId)?.id || a.currentProjectId));
-    const lotsChanged = this.buildings.sync(projects, cells, active, { animate: true, tickers: this.tickerMap(projects, agents) });
+    const lotsChanged = this.buildings.sync(projects, cells, active, { animate: true, tickers: this.tickerMap(projects, agents), districts });
     if (lotsChanged || ringsChanged) this.world.setLots(this.buildings.lots());
     this.ci?.sync();
     const quality = store.prefs.cityQuality === 'low' ? 'low' : 'high';
     if (this.world.quality !== quality) this.world.setQuality(quality);
+    this.railway.group.visible = districts;
+    this.legendDistricts.hidden = !districts;
+    if (districts) {
+      this.railway.setQuality(quality);
+      this.railway.setBounds({ half: this.world.half, trackZ: TRACK_Z, crossings: Array.from({ length: rings * 2 + 2 }, (_, i) => (i - rings - 0.5) * PITCH) });
+      this.railway.setProjects(projects);
+    }
     const timeMode = TIME_MODES.includes(store.prefs.cityTime) ? store.prefs.cityTime : 'auto';
     if (this.world.timeMode !== timeMode) { this.world.setTimeMode(timeMode); }
     if (this.peopleReady) {
@@ -453,6 +476,7 @@ class CityView {
     this.buildings.update(dt, elapsed, env);
     tickerBank.update(dt, env.reducedMotion);
     this.ci?.update(dt, elapsed);
+    if (!this.islands?.current) this.railway?.update(dt, elapsed, env);
     try { this.npcs.update(dt, elapsed, env); }
     catch (error) { if (!this.npcError) { this.npcError = true; console.error('City: agent animation failed', error); } }
     try { this.spark.update(dt, elapsed, env); }
@@ -1339,6 +1363,8 @@ class CityView {
     if (project.source === 'github' || project.source === 'both') sources.push(h('span.pill.neutral', icon('github'), 'GitHub'));
     if (project.private) sources.push(pill('Private', 'warning'));
     if (m.commits7d) sources.push(pill('Active this week', 'success'));
+    sources.push(pill(districtOf(project) === 'downtown' ? 'Downtown' : 'Old Town', 'neutral'));
+    if (isUnbuilt(project)) sources.push(pill('Unbuilt · not on this PC', 'neutral'));
     const total = (project.languages || []).reduce((n, l) => n + (l.bytes || 0), 0);
     const langs = total ? [...project.languages].sort((a, b) => b.bytes - a.bytes) : [];
     const langBar = langs.length ? h('div.city-langbar', { role: 'img', 'aria-label': langs.slice(0, 5).map(l => `${l.name} ${Math.round(l.bytes / total * 100)}%`).join(', ') },
@@ -1349,6 +1375,7 @@ class CityView {
     const here = this.agentsAt(project.id);
     const actions = [h('button.btn.small.primary', { type: 'button', onclick: () => this.ctx.navigate('tasks', { project: project.id }) }, icon('tasks'), 'Open tasks')];
     if (project.path) actions.push(h('button.btn.small', { type: 'button', onclick: () => this.open(project.path) }, icon('folder'), 'Open folder'));
+    if (isUnbuilt(project)) actions.unshift(h('button.btn.small.primary', { type: 'button', onclick: () => this.cloneOutline(project) }, icon('folder'), 'Clone to this PC'));
     if (project.url) actions.push(h('button.btn.small', { type: 'button', onclick: () => this.open(project.url) }, icon('github'), 'Open on GitHub'));
     if (project.path) actions.push(h('button.btn.small', { type: 'button', onclick: event => this.rescan(project, event.currentTarget) }, icon('refresh'), 'Rescan'));
     actions.push(h('button.btn.small.ghost', { type: 'button', onclick: () => this.hideProject(project) }, icon('eyeOff'), 'Hide from city'));
@@ -2085,6 +2112,14 @@ class CityView {
   }
 
   /* ---------------- empty plot → new project ---------------- */
+  async cloneOutline(project) {
+    try {
+      const { openNewProjectDialog } = await import('../newproject.js');
+      const repo = project.repo?.full_name || project.ids?.find(id => id.startsWith('gh:'))?.slice(3) || project.id.slice(3);
+      const result = await openNewProjectDialog(this.ctx, { lot: this.cells.get(project.id), tab: 'clone', repo });
+      if (result?.projectId) { this.pendingFocus = { kind: 'building', id: result.projectId, at: performance.now(), ttl: 90000 }; this.dirty = true; }
+    } catch (error) { toast(`Could not open cloning: ${error?.message || error}`, { kind: 'error' }); }
+  }
   async startProjectOnPlot(target) {
     if (target.reservedBy) {
       const owner = this.store.project(target.reservedBy);
@@ -2099,7 +2134,7 @@ class CityView {
     let result = null;
     try {
       const { openNewProjectDialog } = await import('../newproject.js');
-      result = await openNewProjectDialog(this.ctx, { lot });
+      result = await openNewProjectDialog(this.ctx, { lot, tab: districtForCell(lot) === 'oldtown' ? 'link' : 'create' });
     } catch (error) {
       console.error('City: New Project dialog failed', error);
       toast(`Could not start a project here: ${error?.message || error}`, { kind: 'error' });
@@ -2158,6 +2193,7 @@ class CityView {
     clearTimeout(this.checkTimer);
     this.offSessions?.();
     this.ci?.dispose();
+    this.railway?.dispose();
     this.islands?.dispose();
     this.weather?.dispose();
     this.spark?.dispose(); this.npcs?.dispose(); this.buildings?.dispose(); this.world?.dispose();

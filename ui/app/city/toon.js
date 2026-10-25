@@ -47,11 +47,15 @@ export function addOutline(root, { color = INK, thickness = 0.04 } = {}) {
   for (const mesh of meshes) {
     const hull = new THREE.Mesh(mesh.geometry, outlineMaterial(color));
     hull.userData.outline = true; hull.raycast = () => {};
-    const size = new THREE.Vector3();
+    const size = new THREE.Vector3(), center = new THREE.Vector3();
     if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
     mesh.geometry.boundingBox.getSize(size);
+    mesh.geometry.boundingBox.getCenter(center);
     // Scale so the hull grows by ~thickness world units regardless of mesh size.
     hull.scale.set(1 + thickness / Math.max(size.x, 1e-3) * 2, 1 + thickness / Math.max(size.y, 1e-3) * 2, 1 + thickness / Math.max(size.z, 1e-3) * 2);
+    // Geometry may already contain a rooftop/world offset. Inflate about its own
+    // centre so a thin lamp at y=40 never sends its outline into the sky.
+    hull.position.set(center.x * (1 - hull.scale.x), center.y * (1 - hull.scale.y), center.z * (1 - hull.scale.z));
     hull.castShadow = false; hull.receiveShadow = false;
     mesh.add(hull);
   }
