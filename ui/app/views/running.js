@@ -17,7 +17,7 @@ import { sessions, UNAVAILABLE_TEXT } from '../sessions.js';
 import { schedules, SCHEDULES_UNAVAILABLE_TEXT } from '../schedules.js';
 import { providerLabel, toMs } from '../session-model.js';
 import { cadenceText, untilText, runStatus } from '../schedule-model.js';
-import { has as hasFeature, call as callFeature, normalizeUsage, tokens, wakeAddressChoices, normalizeBindings, deliveryText } from '../features.js';
+import { has as hasFeature, call as callFeature, normalizeUsage, tokens, wakeAddressChoices, normalizeBindings, deliveryText, bindingState, MANAGED_WAKE_HINT } from '../features.js';
 import { agentAvatar } from '../avatar/spec.js';
 
 const baseName = path => String(path || '').split(/[\\/]/).filter(Boolean).pop() || '';
@@ -219,7 +219,7 @@ export function mount(root, ctx) {
         h('div.run-meta',
           e.cwd ? h('span.mono', { title: shownPath(e.cwd) }, shownPath(e.cwd)) : null,
           e.modifiedAt ? h('span', { title: fullTime(e.modifiedAt) }, `changed ${timeAgo(e.modifiedAt)}`) : null),
-        binding ? wakeLine(binding) : null),
+        provider === 'codex' ? wakeLine(binding) : null),
       h('div.run-actions', wide, actions));
   }
 
@@ -231,11 +231,14 @@ export function mount(root, ctx) {
   const TONE_COLOR = { ok: 'var(--success)', warn: 'var(--warning)', bad: 'var(--danger)' };
 
   function wakeLine(b) {
-    const r = deliveryText(b.last);
+    const current = bindingState(b, b?.endpoint || state.bindings.endpoint, state.bindings.state === 'loaded');
+    const r = deliveryText(b?.last);
     return h('div.run-meta',
-      h('span', { title: "Notification route bound through Codex's queue command; see the delivery receipt below" }, icon('bell'), 'Mail notifications bound to ', h('code', b.address)),
+      b ? h('span', icon('bell'), 'Mail address ', h('code', b.address)) : null,
+      h('span', { style: TONE_COLOR[current.tone] ? { color: TONE_COLOR[current.tone] } : null }, current.text, ': ', current.detail),
+      h('span.field-hint', MANAGED_WAKE_HINT),
       state.bindings.wakeEnabled ? null : h('span', { style: { color: TONE_COLOR.warn } }, 'Paused: wake on mail is off in Settings'),
-      h('span', { title: r.title || null, style: TONE_COLOR[r.tone] ? { color: TONE_COLOR[r.tone] } : null }, r.text, b.last?.at ? ` · ${timeAgo(b.last.at)}` : ''));
+      b?.last ? h('span', { title: r.title || null, style: TONE_COLOR[r.tone] ? { color: TONE_COLOR[r.tone] } : null }, r.text, b.last.at ? ` · ${timeAgo(b.last.at)}` : '') : null);
   }
   function unbindButton(b) {
     const busy = state.binding.has(b.threadId);
@@ -261,6 +264,8 @@ export function mount(root, ctx) {
     }
     const select = h('select.select', { 'aria-label': 'Board address' }, choices.map(c => h('option', { value: c.name }, c.label ? `${c.name}  ·  ${c.label}` : c.name)));
     const body = h('div',
+      h('p.field-hint', bindingState(null, state.bindings.endpoint, state.bindings.state === 'loaded').detail),
+      h('p.field-hint', MANAGED_WAKE_HINT),
       h('p', `CodaClauda will try to notify this existing Codex chat in ${shownPath(e.cwd)} about new mail through Codex's queue command. Delivery requires a reachable supported endpoint and a Full-access linked project. Read projects are refused because the existing chat's access cannot be enforced here; binding alone does not establish that the chat can receive a notice.`),
       h('p', "The notice gives the message count, address and senders, never the message text, and asks the chat to read its inbox. CodaClauda marks nothing read and attempts each batch once. Command acceptance does not prove a turn ran or mail was read. If Codex can't reach the chat, this row shows the failure. A message is information, not your approval."),
       h('label.field', h('span', 'Board address this chat reads'), select),
@@ -272,8 +277,9 @@ export function mount(root, ctx) {
     const id = e.providerSessionId;
     state.binding.add(id); render(true);
     try {
-      await callFeature('desktopBind', { address, threadId: id });
-      toast(`Notification route bound for ${address}; delivery receipts will appear here`, { kind: 'success', timeout: 3600 });
+      const data = await callFeature('desktopBind', { address, threadId: id });
+      const current = bindingState(data?.binding, data?.endpoint);
+      toast(`Binding saved for ${address}. ${current.text}: ${current.detail}`, { kind: current.tone === 'ok' ? 'success' : 'warning', timeout: 9000 });
       await loadBindings();
     } catch (error) {
       toast(`Couldn't turn on Wake by mail: ${error?.message || error}`, { kind: 'error', timeout: 9000 });
@@ -294,7 +300,7 @@ export function mount(root, ctx) {
     if (!hasFeature('desktopBindings')) return;
     try {
       const data = await callFeature('desktopBindings', undefined);
-      state.bindings = { state: 'loaded', list: normalizeBindings(data?.bindings), wakeEnabled: data?.wakeEnabled !== false, error: '' };
+      state.bindings = { state: 'loaded', list: normalizeBindings(data?.bindings), endpoint: data?.endpoint, wakeEnabled: data?.wakeEnabled !== false, error: '' };
     } catch (error) { state.bindings = { ...state.bindings, state: 'error', error: error?.message || String(error) }; }
     render(true);
   }

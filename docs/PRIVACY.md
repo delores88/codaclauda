@@ -145,12 +145,15 @@ show owner-run installation instructions and require confirmation of an existing
 executable. Third-party tools run under the owner's account and may access the
 filesystem, desktop or network according to their own implementation.
 
-Optional phone notifications send a short activity notice to the configured
-ntfy endpoint/topic. A topic identifies the destination and may be visible to
-other subscribers depending on the server's access rules. The app does not
-include full chat message text in these notices; it can include a shortened chat
-title or the two mailbox addresses held by the wake loop guard. The service receives normal
-network information and follows its own data policy.
+Optional phone notifications send the agent's session name and up to the first
+300 characters of its final reply to the configured ntfy endpoint/topic.
+The complete reply and name pass the mailbox credential scanner before clipping.
+Successful turns started by another agent's board mail stay quiet; explicit
+posts to `owner-phone` are still forwarded. Error notices contain a fixed
+explanation, and wake loop warnings can include the two mailbox addresses.
+A topic identifies the destination and may be visible to other subscribers
+depending on the server's access rules. The service receives message content
+and normal network information and follows its own data policy.
 
 **Message your agents from your phone** is an owner setting, on by default.
 Nothing is sent or polled without the owner's saved notification topic URL in

@@ -190,9 +190,9 @@ export function wakeAddressChoices(addresses, { taken = [], folder = '' } = {}) 
   return rows.map(({ score, ...row }) => row);
 }
 
-const RECEIPT_TONE = { queued: 'ok', sending: 'warn', timeout: 'warn', unknown: 'warn', unreachable: 'warn', cancelled: 'neutral' };
+const RECEIPT_TONE = { queued: 'warn', sending: 'warn', timeout: 'warn', unknown: 'warn', unreachable: 'warn', cancelled: 'neutral' };
 const RECEIPT_LABEL = {
-  queued: 'Queued in that chat', sending: 'Outcome unknown', unreachable: "Codex couldn't reach that chat", failed: 'Codex failed',
+  queued: 'Command accepted', sending: 'Outcome unknown', unreachable: "Codex couldn't reach that chat", failed: 'Codex failed',
   timeout: 'No answer from Codex', cancelled: 'Stopped', 'not-started': "Codex didn't start", refused: 'Not sent', unknown: 'Outcome unknown',
 };
 
@@ -203,11 +203,27 @@ export function normalizeBindings(list) {
     const r = b.last && typeof b.last === 'object' ? b.last : null;
     return {
       address: b.address, threadId: b.threadId, cwd: text(b.cwd), projectId: text(b.projectId), boundAt: Number(b.boundAt) || 0,
+      endpoint: b.endpoint && typeof b.endpoint === 'object' ? { state: text(b.endpoint.state), detail: text(b.endpoint.detail), path: text(b.endpoint.path) } : null,
+      reachability: b.reachability && typeof b.reachability === 'object' ? { state: text(b.reachability.state), detail: text(b.reachability.detail), recipientAcknowledged: b.reachability.recipientAcknowledged === true } : null,
       last: r ? { at: Number(r.at) || 0, status: text(r.status) || 'unknown', exitCode: Number.isInteger(r.exitCode) ? r.exitCode : null,
         messages: Number(r.messages) || 0, more: r.more === true, senders: Array.isArray(r.senders) ? r.senders.filter(s => typeof s === 'string') : [],
         detail: text(r.detail), stdout: text(r.stdout), stderr: text(r.stderr) } : null,
     };
   });
+}
+
+export const MANAGED_WAKE_HINT = 'CodaClauda-managed sessions are recommended for agents to wake each other.';
+export const NO_CODEX_ENDPOINT = 'not reachable on this PC right now: the Codex app exposes no local endpoint';
+
+/** Current route evidence is separate from the historical command receipt. */
+export function bindingState(binding, endpoint = binding?.endpoint, loaded = true) {
+  if (!loaded) return { state: 'unknown', tone: 'warn', text: 'Binding status unavailable', detail: 'Refresh to check the current binding and endpoint.' };
+  if (!binding) return { state: 'unbound', tone: 'neutral', text: 'Unbound', detail: endpoint?.state === 'unavailable' ? NO_CODEX_ENDPOINT : 'No board address is bound to this desktop chat.' };
+  if (endpoint?.state === 'unavailable') return { state: 'endpoint-unavailable', tone: 'warn', text: 'Endpoint unavailable', detail: NO_CODEX_ENDPOINT };
+  const reach = binding.reachability;
+  if (reach?.state === 'recipient-acknowledged') return { state: reach.state, tone: 'ok', text: 'Recipient acknowledged', detail: reach.detail };
+  if (reach?.state === 'command-accepted' || binding.last?.status === 'queued') return { state: 'command-accepted', tone: 'warn', text: 'Command accepted', detail: 'Recipient acknowledgment and server/thread ownership remain unverified.' };
+  return { state: 'ownership-unverified', tone: 'warn', text: 'Server/thread ownership unverified', detail: endpoint?.detail || 'A binding or conversation file does not establish that a server owns this chat.' };
 }
 
 /** A binding's last delivery receipt → { tone: 'ok'|'warn'|'bad'|'neutral', text, title } for one line under its row. */

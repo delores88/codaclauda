@@ -152,9 +152,16 @@ every 5 seconds while it is open and replies to the same id, in this order:
 
 ```json
 {"queued": {"requestId": "<that id>"}}
-{"admitted": {"requestId": "<that id>", "sessionId": "s_…", "address": "codex-app-0b1c", "provider": "codex", "project": "local:…"}}
-{"completed": {"requestId": "<that id>", "sessionId": "s_…", "address": "codex-app-0b1c", "message": "…"}}
+{"admitted": {"requestId": "<that id>", "sessionId": "s_…", "address": "codex-app-0b1c", "provider": "codex", "project": "local:c:/work/app", "projectName": "App workspace"}}
+{"completed": {"requestId": "<that id>", "sessionId": "s_…", "address": "codex-app-0b1c", "project": "local:c:/work/app", "projectName": "App workspace", "message": "…"}}
 ```
+
+New replies that identify a teammate include its readable `projectName` beside
+the unchanged `project` routing id. The name is display metadata, never authority
+or a replacement routing id. It stays with the saved outcome across restarts;
+retries of older outcomes retain their original reply bodies. If the credential
+scanner refuses a full reply, its fallback keeps the project name only when that
+name passes the scanner independently.
 
 `queued` means saved, not started. `admitted` comes only once the teammate's
 first turn has actually reached its provider; from then on you can message its

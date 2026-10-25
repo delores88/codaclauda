@@ -219,13 +219,17 @@ fn fields(args: &Value, allowed: &[&str], required: &[&str]) -> Result<()> {
     ensure!(values.keys().all(|key| allowed.contains(&key.as_str())) && required.iter().all(|key| values.contains_key(*key)), "Mailbox arguments contain missing or unsupported fields");
     Ok(())
 }
-fn number(args: &Value, key: &str, default: u64, low: u64, high: u64) -> Result<u64> {
-    let value = match args.get(key) {
+fn number(args: &Value, field: &str, default: u64, low: u64, high: u64, units: &str) -> Result<u64> {
+    let range = || format!("{field} must be from {low} to {high}{units}");
+    let value = match args.get(field) {
         None => default,
-        Some(value) => value.as_u64().ok_or_else(|| anyhow::anyhow!("Mailbox numeric argument must be an unsigned integer"))?,
+        Some(value) => value.as_u64().ok_or_else(|| anyhow::anyhow!("{} (whole numbers only)", range()))?,
     };
-    ensure!((low..=high).contains(&value), "Mailbox numeric argument is outside its supported range");
+    ensure!((low..=high).contains(&value), "{}", range());
     Ok(value)
+}
+pub(crate) fn wait_timeout(args: &Value) -> Result<u64> {
+    number(args, "timeout", 20, 0, 3600, " seconds")
 }
 fn resource(args: &Value) -> Result<String> {
     let value = text(args, "resource", 1024, false)?;
@@ -255,7 +259,7 @@ fn post(args: &Value) -> Result<(String, Post)> {
     ensure!(kind == "reply" || reply_to.is_none(), "Only replies can set reply_to");
     let resource = args.get("resource").map(|_| resource(args)).transpose()?;
     ensure!(!matches!(kind.as_str(), "claim" | "release") || resource.is_some(), "Claim and release messages require a resource");
-    let ttl = if kind == "claim" { Some(number(args, "ttl", 30, 1, 120)?) } else {
+    let ttl = if kind == "claim" { Some(number(args, "ttl", 30, 1, 120, " minutes")?) } else {
         ensure!(args.get("ttl").is_none(), "Only claim messages accept ttl");
         None
     };
@@ -421,8 +425,8 @@ fn api_with_clock(store: &Store, op: &str, args: &Value, clock: &dyn Fn() -> u64
         "inbox" => {
             fields(args, &["addr", "since", "limit", "unread"], &["addr"])?;
             let addr = name(args, "addr")?;
-            let since = number(args, "since", 0, 0, u64::MAX)?;
-            let limit = number(args, "limit", 20, 1, 100)? as usize;
+            let since = number(args, "since", 0, 0, u64::MAX, "")?;
+            let limit = number(args, "limit", 20, 1, 100, " messages")? as usize;
             let unread = match args.get("unread") { None => false, Some(v) => v.as_bool().ok_or_else(|| anyhow::anyhow!("unread must be boolean"))? };
             transaction(store, clock(), |state| {
                 state.address(&addr)?;
@@ -452,7 +456,7 @@ fn api_with_clock(store: &Store, op: &str, args: &Value, clock: &dyn Fn() -> u64
             // reply that is not an acknowledgement, plus the latest acknowledgement.
             fields(args, &["id", "timeout", "terminal"], &["id"])?;
             let id = identifier(args, "id")?;
-            let timeout = number(args, "timeout", 20, 0, 60)?;
+            let timeout = wait_timeout(args)?;
             let terminal = match args.get("terminal") {
                 None => false,
                 Some(v) => v.as_bool().ok_or_else(|| anyhow::anyhow!("terminal must be boolean"))?,
@@ -554,9 +558,33 @@ mod tests {
         assert!(at(&store, "post", reply.clone(), 102).is_err());
         reply["from"] = json!("codex-claudacoda");
         at(&store, "post", reply, 103).unwrap();
-        let waited = at(&store, "wait-reply", json!({"id":"question","timeout":0}), 104).unwrap();
-        assert_eq!(waited["timed_out"], false);
-        assert_eq!(waited["reply"]["id"], "answer");
+        // A saved reply makes every supported timeout return immediately.
+        for timeout in [0, 60, 900, 3600] {
+            let waited = at(&store, "wait-reply", json!({"id":"question","timeout":timeout}), 104).unwrap();
+            assert_eq!(waited["timed_out"], false);
+            assert_eq!(waited["reply"]["id"], "answer");
+        }
+    }
+    #[test]
+    fn numeric_errors_name_the_field_range_and_units() {
+        let (_dir, store) = fixture();
+        for (op, args, expected) in [
+            ("wait-reply", json!({"id":"question","timeout":3601}), "timeout must be from 0 to 3600 seconds"),
+            ("wait-reply", json!({"id":"question","timeout":-1}), "timeout must be from 0 to 3600 seconds (whole numbers only)"),
+            ("wait-reply", json!({"id":"question","timeout":1.5}), "timeout must be from 0 to 3600 seconds (whole numbers only)"),
+            ("inbox", json!({"addr":"owner","limit":0}), "limit must be from 1 to 100 messages"),
+            ("inbox", json!({"addr":"owner","limit":101}), "limit must be from 1 to 100 messages"),
+            ("inbox", json!({"addr":"owner","since":-1}), "since must be from 0 to 18446744073709551615 (whole numbers only)"),
+        ] {
+            assert_eq!(at(&store, op, args, 100).unwrap_err().to_string(), expected);
+        }
+        for ttl in [0, 121] {
+            let mut args = claim("claim", "codex-claudacoda");
+            args["ttl"] = json!(ttl);
+            assert_eq!(at(&store, "post", args, 100).unwrap_err().to_string(), "ttl must be from 1 to 120 minutes");
+        }
+        // A maximum cursor is valid and yields an empty page, not a range error.
+        assert!(at(&store, "inbox", json!({"addr":"owner","since":u64::MAX,"limit":100}), 100).unwrap()["messages"].as_array().unwrap().is_empty());
     }
     #[test]
     fn a_bare_reply_needs_exactly_one_open_thread_and_retries_are_idempotent() {

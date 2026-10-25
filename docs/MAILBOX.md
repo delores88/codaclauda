@@ -80,14 +80,18 @@ error; exit 3 is a conflicting resource claim with the current holder. Preserve
 the same ID and complete payload on retries. Reusing an ID with changed contents
 is refused. Do not treat an unknown outcome as permission to post with a new ID.
 
-`inbox` returns oldest first, up to 20 by default (100 maximum), with
+`inbox` returns oldest first, up to 20 by default (`--limit` accepts 1–100), with
 `next_cursor` and `has_more`. Pass `--since` with that cursor for the next page.
+The cursor accepts whole numbers from 0 to 18446744073709551615 (default 0).
 Use `--unread` to filter, and explicitly `ack` each message after reading it.
-`wait-reply` accepts 0–60 seconds and returns the first matching reply or a
+`wait-reply --timeout` accepts 0–3600 seconds (default 20; 0 checks once without
+waiting) and returns the first matching reply or a
 timeout, with `reply_kind`: `acknowledgement` for an app progress reply
 (`{"queued"}` or `{"admitted"}`), `terminal` for anything else. Add `--terminal`
 to skip acknowledgements and wait for the terminal reply; the result then also
 carries the latest `acknowledgement` (or null).
+Numeric arguments must be whole numbers. Range errors name the field and its
+accepted bounds; each command's `--help` also lists these ranges.
 
 ## Who picks a message up
 
@@ -168,6 +172,7 @@ displayed as plain text.
 Sessions started by CodaClauda receive `mailbox_post`, `mailbox_inbox`,
 `mailbox_ack`, `mailbox_wait_reply` and `mailbox_claims` through their existing
 request-bound MCP server. Existing capability, lifetime and tool-budget checks
-still apply; these tools do not create grants or run a provider. Agent MCP calls
+still apply, including rechecking authorization while `mailbox_wait_reply` waits
+up to 3600 seconds; these tools do not create grants or run a provider. Agent MCP calls
 cannot send or acknowledge as `owner`. Existing external chats use the CLI under
 Ben's authorization, with their own address.

@@ -33,9 +33,28 @@ test('receipts read as Codex reported them', () => {
   assert.equal(shown.tone, 'warn');
   assert.equal(shown.text, '2 messages: Codex could not reach that chat: thread not loaded: t1');
   assert.match(shown.title, /exit 1\nstderr: Error: thread not loaded/);
-  assert.equal(deliveryText({ ...binding.last, status: 'queued', messages: 1, senders: ['owner'] }).text, 'Queued in that chat: 1 message from owner');
+  assert.equal(deliveryText({ ...binding.last, status: 'queued', messages: 1, senders: ['owner'] }).text, 'Command accepted: 1 message from owner');
   assert.equal(deliveryText(null).text, 'No new mail since it was bound.');
   assert.equal(deliveryText({ ...binding.last, status: 'sending' }).tone, 'warn');
+});
+
+test('desktop wake states keep endpoint evidence, command acceptance and board acknowledgment distinct', () => {
+  const { bindingState, NO_CODEX_ENDPOINT, MANAGED_WAKE_HINT } = features;
+  const missing = { state: 'unavailable' };
+  const present = { state: 'present' };
+  assert.equal(bindingState(null).state, 'unbound');
+  assert.equal(bindingState(null, null, false).state, 'unknown', 'unreadable or loading bindings are not unbound');
+  assert.equal(bindingState({ last: { status: 'queued' } }, present, false).state, 'unknown', 'old cached bindings are not current evidence');
+  assert.equal(bindingState(null, missing).detail, NO_CODEX_ENDPOINT);
+  assert.equal(bindingState({}, missing).state, 'endpoint-unavailable');
+  assert.equal(bindingState({}, present).state, 'ownership-unverified');
+  assert.equal(bindingState({ last: { status: 'queued' } }, present).state, 'command-accepted');
+  assert.match(bindingState({ last: { status: 'queued' } }, present).detail, /acknowledgment.*unverified/);
+  const [b] = normalizeBindings([{ address: 'codex-desk', threadId: 't1', endpoint: present,
+    reachability: { state: 'recipient-acknowledged', detail: 'Board receipt only', recipientAcknowledged: true } }]);
+  assert.equal(bindingState(b).state, 'recipient-acknowledged');
+  assert.equal(bindingState(b, missing).state, 'endpoint-unavailable', 'old receipts do not imply current reachability');
+  assert.match(MANAGED_WAKE_HINT, /recommended.*wake each other/);
 });
 
 test('Continue makes a separate copy, and continuing in place without known ownership is refused', () => {

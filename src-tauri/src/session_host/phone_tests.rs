@@ -539,3 +539,60 @@ fn manual_test_http_failure_and_uncertainty_return_receipts_without_replaying_at
     assert_eq!(refused["attempted"], false);
     assert!(refused["httpStatus"].is_null());
 }
+
+#[test]
+fn finished_turn_push_uses_readable_name_scanned_final_reply_and_three_hundred_characters() {
+    let (_dir, _store, mut book) = fixture();
+    let record = Record { id: "session".into(), provider: "codex".into(), title: "Release reviewer".into(),
+        mailbox_address: Some("codex-reviewer".into()), ..Record::default() };
+    let answer = "\u{e9}\u{1f642}".repeat(200);
+    let notice = notify::turn_publication(&record, "finished", "completed", &Value::Null, Some(&answer)).unwrap();
+    let (title, preview, refused) = begin_push(&mut book, &notice).unwrap().unwrap();
+    assert_eq!(title, "Release reviewer");
+    assert_eq!(preview, "\u{e9}\u{1f642}".repeat(150));
+    assert_eq!(preview.chars().count(), 300);
+    assert!(!preview.contains("finished a reply") && !preview.contains(&record.title));
+    assert!(!refused);
+    assert_eq!(notice.recipient.as_deref(), Some("codex-reviewer"));
+    let suspicious = format!("{}{}", "sk-", "a".repeat(24));
+    let unsafe_answer = format!("{} {suspicious}", "x".repeat(350));
+    let notice = notify::turn_publication(&record, "unsafe", "completed", &Value::Null, Some(&unsafe_answer)).unwrap();
+    let (title, preview, refused) = begin_push(&mut book, &notice).unwrap().unwrap();
+    assert_eq!(title, "CodaClauda");
+    assert_eq!(preview, SCAN_REFUSAL);
+    assert!(refused, "the full reply is scanned before taking its preview");
+    assert!(!serde_json::to_string(&book).unwrap().contains(&suspicious));
+}
+
+#[test]
+fn peer_turns_can_explicitly_post_to_phone_and_turn_attempts_never_replay_after_restart() {
+    let (dir, store, mut book) = fixture();
+    let path = dir.path().join(FILE);
+    let record = Record { id: "session".into(), title: "Release reviewer".into(),
+        mailbox_address: Some("codex-claudacoda".into()), ..Record::default() };
+    let origin = json!({"kind": "wake", "from": "claude-codaclauda"});
+    assert!(notify::turn_publication(&record, "peer", "completed", &origin, Some("Internal reply")).is_none());
+    mailbox::api(&store, "post", &json!({"id": "explicit-phone", "from": "codex-claudacoda", "to": ADDRESS,
+        "kind": "notice", "subject": "For Ben", "body": "The result is ready for your review."})).unwrap();
+    let item = mailbox::api(&store, "inbox", &json!({"addr": ADDRESS, "unread": true})).unwrap()["messages"][0].clone();
+    let explicit = board_publication(item["id"].as_str().unwrap(), &item);
+    assert_eq!(begin_push(&mut book, &explicit).unwrap().unwrap().1, "The result is ready for your review.");
+    for (turn_id, status, origin, answer) in [
+        ("owner", "completed", Value::Null, Some("Finished owner reply")),
+        ("peer-error", "failed", origin, None),
+    ] {
+        let notice = notify::turn_publication(&record, turn_id, status, &origin, answer).unwrap();
+        assert!(begin_push(&mut book, &notice).unwrap().is_some());
+        persist(&path, &book).unwrap();
+        book = read_book(&path).unwrap();
+        assert_eq!(book.outbound[&notice.id].state, "sending");
+        assert!(begin_push(&mut book, &notice).unwrap().is_none());
+        let unknown = failure("PHONE_PUSH_UNKNOWN", UNKNOWN_PUSH);
+        book.complete_push(&notice.id, Err(&unknown), false, notice.recipient.as_deref());
+        persist(&path, &book).unwrap();
+        book = read_book(&path).unwrap();
+        assert_eq!(book.outbound[&notice.id].state, "unknown");
+        assert!(begin_push(&mut book, &notice).unwrap().is_none());
+    }
+    assert!(begin_push(&mut book, &explicit).unwrap().is_none());
+}
