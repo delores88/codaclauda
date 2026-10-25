@@ -247,8 +247,8 @@ export function mount(root, ctx) {
   const mailEmpty = h('div.side-empty', { hidden: true }, 'No desktop chats on the board yet. They appear here once an agent registers a mailbox.');
   const searchEmpty = h('div.side-empty.search-empty', { hidden: true });
   const sessionSection = h('section.side-section',
-    h('header.side-section-head', h('span', 'CodaClauda sessions'), sessionCount, groupBtn, iconButton('plus', 'Start a session', () => openNewChat(), 'side-add')),
-    h('p.side-hint', 'Claude Code and Codex · replies stream here'),
+    h('header.side-section-head', h('span', 'Agents CodaClauda runs'), sessionCount, groupBtn, iconButton('plus', 'Start a session', () => openNewChat(), 'side-add')),
+    h('p.side-hint', 'Claude Code and Codex across your projects · replies stream here'),
     sessionList, sessionEmpty);
   const mailSection = h('section.side-section',
     h('header.side-section-head', h('span', 'Desktop chats'), mailCount),

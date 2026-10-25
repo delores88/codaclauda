@@ -117,7 +117,7 @@ export function mount(root, ctx) {
     h('p.muted', 'Install the free ntfy app on your phone, subscribe to a long random topic, and save its https URL here once. Use that same topic to message your agents and read their replies. No SMS, phone number, or paid service is needed.'),
     h('div.ntfy-row', ntfyInput, saveBtn, testBtn),
     notifyStatus, testStatus,
-    h('div.setting-row', h('div.setting-text', h('strong', 'When a turn finishes'), h('span.field-hint', 'A reply is ready, including wakes and scheduled runs.')), h('label.switch', finishInput, h('span'))),
+    h('div.setting-row', h('div.setting-text', h('strong', 'When a turn finishes'), h('span.field-hint', 'The agent\'s name and first 300 characters of its reply. Agent-to-agent mail stays quiet; your messages and scheduled runs can notify you.')), h('label.switch', finishInput, h('span'))),
     h('div.setting-row', h('div.setting-text', h('strong', 'When a turn ends with an error')), h('label.switch', errorInput, h('span'))),
     h('p.field-hint', 'These two switches control turn notifications; they do not turn agent replies off. Anyone who knows the topic can read and send messages. Keep the URL private.'),
     phoneCard.node);

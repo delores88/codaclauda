@@ -161,7 +161,7 @@ pub(super) struct Handled {
     from: Option<String>,
     #[serde(default)]
     subject: Option<String>,
-    /// { sessionId, address, provider, project } once a session exists.
+    /// { sessionId, address, provider, project, projectName } once a session exists.
     #[serde(default)]
     teammate: Option<Value>,
     /// The first turn was seen handed to its provider.
@@ -608,12 +608,33 @@ pub(super) struct Teammate {
     address: Option<String>,
     provider: String,
     project: String,
+    project_name: String,
 }
 
 impl Teammate {
     fn view(&self) -> Value {
-        json!({"sessionId": self.session_id, "address": self.address, "provider": self.provider, "project": self.project})
+        json!({"sessionId": self.session_id, "address": self.address, "provider": self.provider,
+            "project": self.project, "projectName": self.project_name})
     }
+}
+
+/// Display metadata only: names never replace the project's routing id or authorize work.
+/// New sessions keep their original name through recovery; older ones use saved project
+/// metadata or their folder name. Existing handled reply bodies remain byte-identical.
+fn teammate_project_name(record: &Record, book: &Book, ui: Option<&Value>) -> String {
+    let named = |value: &str| !value.trim().is_empty();
+    if let Some(name) = record.started_by.as_ref().and_then(|by| by["projectName"].as_str()).filter(|name| named(name)) {
+        return name.to_owned();
+    }
+    if let Some((_, project)) = book.projects.iter().find(|(id, p)| {
+        **id == record.project_id || p.ids.contains(&record.project_id)
+            || normalize_path(&p.cwd) == normalize_path(&record.cwd)
+    }).filter(|(_, p)| named(&p.name)) {
+        return project.name.clone();
+    }
+    linked(ui).into_iter().find(|p| {
+        p.ids.contains(&record.project_id) || normalize_path(&p.cwd) == normalize_path(&record.cwd)
+    }).map(|p| p.name).unwrap_or_else(|| folder_name(&record.cwd))
 }
 
 /// Where a teammate's first turn is, from the durable turn ledger.
@@ -1201,8 +1222,8 @@ async fn read_team_messages(store: &Store) -> Result<Vec<Value>, String> {
     }
 }
 
-/// The reply without free text: request, session and address ids, the code
-/// and the fix stay; the message and project do not. Deterministic, so
+/// The reply without unsafe free text: request, session and address ids, a safe
+/// project name, the code and the fix stay; the message and project id do not. Deterministic, so
 /// retries post the same bytes.
 fn plain_reply(body: &str) -> String {
     let value: Value = serde_json::from_str(body).unwrap_or(Value::Null);
@@ -1212,7 +1233,7 @@ fn plain_reply(body: &str) -> String {
         .map(|(k, v)| (k.clone(), v.clone()))
         .unwrap_or_else(|| ("refused".into(), Value::Null));
     let mut plain = Map::new();
-    for key in ["requestId", "sessionId", "address", "provider", "code", "fix", "by"] {
+    for key in ["requestId", "sessionId", "address", "provider", "projectName", "code", "fix", "by"] {
         if let Some(text) = fields[key].as_str().filter(|t| !coord_core::secrets::mailbox_credential(t)) {
             plain.insert(key.into(), json!(text));
         }
@@ -1581,16 +1602,20 @@ impl TeamHost for Arc<Inner> {
     }
 
     fn started_for(&self, message_id: &str) -> Option<Teammate> {
-        lock(&self.state)
+        let record = lock(&self.state)
             .records
             .iter()
             .find(|r| r.started_by.as_ref().is_some_and(|by| by["messageId"] == message_id))
-            .map(|r| Teammate {
-                session_id: r.id.clone(),
-                address: r.mailbox_address.clone(),
-                provider: r.provider.clone(),
-                project: r.project_id.clone(),
-            })
+            .cloned()?;
+        let book = lock(&self.team).clone();
+        let ui = self.ui_state().ok().flatten();
+        Some(Teammate {
+            session_id: record.id.clone(),
+            address: record.mailbox_address.clone(),
+            provider: record.provider.clone(),
+            project: record.project_id.clone(),
+            project_name: teammate_project_name(&record, &book, ui.as_ref()),
+        })
     }
 
     async fn start_teammate(&self, plan: &Plan) -> Result<Teammate, String> {
@@ -1603,7 +1628,7 @@ impl TeamHost for Arc<Inner> {
             json!({
                 "provider": plan.provider.name(), "projectId": plan.project_id, "cwd": plan.cwd,
                 "access": plan.access, "title": plan.title,
-                "startedBy": {"address": plan.sender, "messageId": plan.message_id, "at": now_ms()},
+                "startedBy": {"address": plan.sender, "messageId": plan.message_id, "projectName": plan.name, "at": now_ms()},
             }),
         )
         .await
@@ -1614,6 +1639,7 @@ impl TeamHost for Arc<Inner> {
             address: session["mailboxAddress"].as_str().map(str::to_owned),
             provider: plan.provider.name().to_owned(),
             project: plan.project_id.clone(),
+            project_name: plan.name.clone(),
         };
         self.submit(&mate.session_id, first_turn(plan)).map_err(|(_, m)| {
             format!("Session {} was created, but its first turn could not be queued: {m}", mate.session_id)
@@ -1914,12 +1940,54 @@ mod tests {
     }
 
     #[test]
+    fn project_names_follow_new_outcomes_without_rewriting_saved_replies_or_routing_ids() {
+        let mate = Teammate { session_id: "s_00000000000000aa".into(), address: Some("codex-app-0002".into()),
+            provider: "codex".into(), project: "local:c:/work/app".into(), project_name: "App workspace".into() };
+        let admitted = Handled::queued(&request("m1", "app"), 1).launching(&mate, 1).admitted(2);
+        let completed = admitted.completed("m1", 3);
+        let restored: Handled = serde_json::from_str(&serde_json::to_string(&completed).unwrap()).unwrap();
+        for (stage, state, kind) in [(ADMITTED, &admitted, "admitted"), ("terminal", &restored, "completed")] {
+            let (body, _) = stage_body(stage, "m1", state).unwrap();
+            let body: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(body[kind]["project"], "local:c:/work/app");
+            assert_eq!(body[kind]["projectName"], "App workspace");
+        }
+        assert_eq!(restored.reply, completed.reply, "recovery preserves the exact terminal reply");
+        let legacy = r#"{"at":1,"status":"completed","from":"claude-app-0001","reply":"{\"completed\":{\"project\":\"local:c:/work/app\"}}","teammate":{"project":"local:c:/work/app"},"launched":true}"#;
+        let legacy: Handled = serde_json::from_str(legacy).unwrap();
+        assert_eq!(stage_body("terminal", "old", &legacy).unwrap().0, legacy.reply.as_deref().unwrap());
+        assert!(!stage_body(ADMITTED, "old", &legacy).unwrap().0.contains("projectName"), "a pending legacy retry stays identical");
+    }
+
+    #[test]
+    fn recovered_teammates_use_the_original_project_name_or_legacy_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = Record { project_id: "local:c:/work/app".into(), cwd: dir.path().to_string_lossy().into_owned(), ..Record::default() };
+        let book = project(dir.path(), true, Limit::Unlimited);
+        let ui = ui(&[dir.path()], json!({})).unwrap();
+        assert_eq!(teammate_project_name(&record, &book, ui.as_ref()), "App");
+        record.project_id = "gh:ben/app".into();
+        assert_eq!(teammate_project_name(&record, &book, ui.as_ref()), "App", "a project alias resolves the same display name");
+        record.started_by = Some(json!({"projectName": "Original project name"}));
+        assert_eq!(teammate_project_name(&record, &book, ui.as_ref()), "Original project name");
+        record.started_by = None;
+        let ui = json!({"projects": {"local": [{"path": record.cwd, "name": "Linked display name"}]}});
+        assert_eq!(teammate_project_name(&record, &Book::default(), Some(&ui)), "Linked display name");
+        assert_eq!(teammate_project_name(&record, &Book::default(), None), folder_name(&record.cwd));
+    }
+
+    #[test]
     fn replies_the_board_would_refuse_as_credentials_fall_back_to_plain_codes() {
-        let mate = Teammate { session_id: "s_00000000000000aa".into(), address: Some("codex-app-0002".into()), provider: "codex".into(), project: "local:c:/work/sk-automation-tools".into() };
+        let mate = Teammate { session_id: "s_00000000000000aa".into(), address: Some("codex-app-0002".into()), provider: "codex".into(), project: "local:c:/work/sk-automation-tools".into(), project_name: "Automation tools".into() };
         let admitted = Handled::queued(&request("m1", "app"), 1).launching(&mate, 1).admitted(2);
         let (full, plain) = stage_body(ADMITTED, "m1", &admitted).unwrap();
         assert!(mailbox_credential(&full), "the full reply trips the board's filter");
         assert!(!mailbox_credential(&plain) && plain.contains("codex-app-0002") && !plain.contains("sk-automation"));
+        assert!(plain.contains("Automation tools"), "a safe project name survives the credential fallback");
+        let mut unsafe_name = mate.view();
+        unsafe_name["projectName"] = json!("sk-automation-tools");
+        let redacted = plain_reply(&json!({"admitted": unsafe_name}).to_string());
+        assert!(!redacted.contains("projectName") && !mailbox_credential(&redacted));
         let refused = Handled::default().refuse("m1", &refuse("TEAM_SWITCH_OFF", "Agents cannot start teammates in sk-automation-tools: off.".into(), FIX_OWNER_SWITCH), 1).reply.unwrap();
         let plain = plain_reply(&refused);
         assert!(!mailbox_credential(&plain));
@@ -1959,11 +2027,11 @@ mod tests {
             plan(&project(self.dir.path(), self.switch_on, Limit::Unlimited), message, &ui(&[self.dir.path()], json!({})), &Folders::default(), &NONE)
         }
         fn started_for(&self, _: &str) -> Option<Teammate> {
-            self.existing.clone().map(|id| Teammate { session_id: id, address: Some("codex-app-9999".into()), provider: "codex".into(), project: "local:c:/work/app".into() })
+            self.existing.clone().map(|id| Teammate { session_id: id, address: Some("codex-app-9999".into()), provider: "codex".into(), project: "local:c:/work/app".into(), project_name: "App".into() })
         }
         async fn start_teammate(&self, plan: &Plan) -> Result<Teammate, String> {
             *self.starts.lock().unwrap() += 1;
-            Ok(Teammate { session_id: "s_00000000000000aa".into(), address: Some("codex-app-0002".into()), provider: plan.provider.name().into(), project: plan.project_id.clone() })
+            Ok(Teammate { session_id: "s_00000000000000aa".into(), address: Some("codex-app-0002".into()), provider: plan.provider.name().into(), project: plan.project_id.clone(), project_name: plan.name.clone() })
         }
         fn first_turn(&self, _: &str, _: &str) -> Probe {
             self.probe.lock().unwrap().clone()

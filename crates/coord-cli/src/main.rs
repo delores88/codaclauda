@@ -11,7 +11,8 @@ use std::{
 #[derive(Parser)]
 #[command(
     version,
-    about = "CodaClauda: owner-scoped Claude Code and Codex coordination"
+    about = "CodaClauda: owner-scoped Claude Code and Codex coordination",
+    after_help = "Mailbox numeric ranges (whole numbers):\n  wait-reply --timeout: 0 to 3600 seconds (default 20)\n  post --ttl: 1 to 120 minutes (claims only, default 30)\n  inbox --limit: 1 to 100 messages (default 20)\n  inbox --since: 0 to 18446744073709551615 (default 0)"
 )]
 struct Cli {
     #[arg(long, global = true)]
@@ -51,23 +52,26 @@ enum Action {
         #[arg(long)]
         resource: Option<String>,
         /// Advisory claim lifetime in minutes, from 1 to 120.
-        #[arg(long)]
+        #[arg(long, allow_negative_numbers = true, value_parser = |value: &str| mailbox_number(value, "ttl", 1, 120, " minutes"))]
         ttl: Option<u64>,
     },
     Inbox {
         addr: String,
-        #[arg(long, default_value_t = 0)]
+        /// Sequence cursor, from 0 to 18446744073709551615.
+        #[arg(long, default_value_t = 0, allow_negative_numbers = true, value_parser = |value: &str| mailbox_number(value, "since", 0, u64::MAX, ""))]
         since: u64,
         #[arg(long)]
         unread: bool,
-        #[arg(long, default_value_t = 20)]
+        /// Page size, from 1 to 100 messages.
+        #[arg(long, default_value_t = 20, allow_negative_numbers = true, value_parser = |value: &str| mailbox_number(value, "limit", 1, 100, " messages"))]
         limit: u64,
     },
     Ack { addr: String, id: String },
     /// Waits for the first reply ("reply_kind" says acknowledgement or terminal).
     WaitReply {
         id: String,
-        #[arg(long, default_value_t = 20)]
+        /// Maximum wait, from 0 to 3600 seconds; 0 checks once without waiting.
+        #[arg(long, default_value_t = 20, allow_negative_numbers = true, value_parser = |value: &str| mailbox_number(value, "timeout", 0, 3600, " seconds"))]
         timeout: u64,
         /// Skip acknowledgements (queued, admitted) and wait for the terminal outcome.
         #[arg(long)]
@@ -138,6 +142,12 @@ enum MailboxAction {
         label: String,
     },
     Directory,
+}
+
+fn mailbox_number(value: &str, field: &str, low: u64, high: u64, units: &str) -> Result<u64, String> {
+    let range = || format!("{field} must be from {low} to {high}{units}");
+    let parsed = value.parse::<u64>().map_err(|_| format!("{} (whole numbers only)", range()))?;
+    if (low..=high).contains(&parsed) { Ok(parsed) } else { Err(range()) }
 }
 
 fn read_mailbox_body(path: &Path) -> Result<String> {
@@ -311,6 +321,39 @@ fn error_envelope(error: &anyhow::Error) -> (Value, i32) {
 #[cfg(test)]
 mod boundary_tests {
     use super::*;
+
+    #[test]
+    fn mailbox_help_lists_numeric_ranges() {
+        let root = Cli::try_parse_from(["claudacoda-cli", "--help"]).err().unwrap().to_string();
+        for range in ["0 to 3600 seconds", "1 to 120 minutes", "1 to 100 messages", "0 to 18446744073709551615"] {
+            assert!(root.contains(range), "{root}");
+        }
+        for (command, ranges) in [
+            ("post", &["from 1 to 120"][..]),
+            ("inbox", &["from 0 to 18446744073709551615", "from 1 to 100 messages"][..]),
+            ("wait-reply", &["from 0 to 3600 seconds"][..]),
+        ] {
+            let help = Cli::try_parse_from(["claudacoda-cli", command, "--help"])
+                .err().expect("help exits before parsing required arguments");
+            assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+            let text = help.to_string().split_whitespace().collect::<Vec<_>>().join(" ");
+            for range in ranges { assert!(text.contains(range), "{text}"); }
+        }
+    }
+
+    #[test]
+    fn mailbox_cli_numeric_parse_errors_include_field_and_range() {
+        for (args, expected) in [
+            (vec!["wait-reply", "question", "--timeout", "-1"], "timeout must be from 0 to 3600 seconds"),
+            (vec!["wait-reply", "question", "--timeout", "3601"], "timeout must be from 0 to 3600 seconds"),
+            (vec!["inbox", "owner", "--since", "18446744073709551616"], "since must be from 0 to 18446744073709551615"),
+            (vec!["inbox", "owner", "--limit", "0"], "limit must be from 1 to 100 messages"),
+            (vec!["post", "--ttl", "121"], "ttl must be from 1 to 120 minutes"),
+        ] {
+            let error = Cli::try_parse_from(std::iter::once("claudacoda-cli").chain(args)).err().unwrap();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
 
     #[test]
     fn either_capability_presence_denies_owner_and_worker_commands() {

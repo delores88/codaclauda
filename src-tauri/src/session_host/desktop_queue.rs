@@ -6,7 +6,7 @@
 //! and the global wake switch is on, new unread mail for a bound address makes
 //! CodaClauda run Codex's own supported command once per batch:
 //!
-//!   codex queue --thread <uuid> --message "<short notice>"
+//!   codex queue --remote unix:// --thread <uuid> --message "<short notice>"
 //!
 //! ("Queue a message for an existing session",
 //! https://learn.chatgpt.com/docs/developer-commands). The notice says how many
@@ -120,6 +120,84 @@ struct Receipt {
     stdout: String,
     #[serde(default)]
     stderr: String,
+    /// Latest actual message in this batch, for an explicit board read receipt.
+    /// Missing in old receipts: never infer acknowledgment from a cursor alone.
+    #[serde(default)]
+    ack_message: Option<String>,
+    #[serde(default)]
+    ack_sequence: u64,
+}
+
+const NO_ENDPOINT: &str = "not reachable on this PC right now: the Codex app exposes no local endpoint";
+
+/// The bundled Windows CLI resolves `--remote unix://` under CODEX_HOME.
+/// Verified with its read-only `app-server daemon version` command (0.163).
+/// This is a metadata check, never a launch, connect, or ownership assertion.
+fn endpoint_at(home: Option<&Path>) -> Value {
+    let Some(home) = home.filter(|p| p.is_absolute()) else {
+        return json!({"state": "unknown", "detail": "The local Codex endpoint path could not be resolved."});
+    };
+    let path = home.join("app-server-control").join("app-server-control.sock");
+    match fs::metadata(&path) {
+        Ok(meta) if !meta.is_dir() => json!({"state": "present", "path": path, "detail": "A local endpoint exists; server/thread ownership is unverified."}),
+        Ok(_) => json!({"state": "unknown", "path": path, "detail": "The local endpoint path is a directory; server/thread ownership is unverified."}),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({"state": "unavailable", "path": path, "detail": NO_ENDPOINT}),
+        Err(_) => json!({"state": "unknown", "path": path, "detail": "The local endpoint could not be inspected; server/thread ownership is unverified."}),
+    }
+}
+
+fn local_endpoint() -> Value {
+    if cfg!(windows) {
+        endpoint_at(external::normal_home(Provider::Codex).as_deref())
+    } else {
+        // Other builds may resolve sockets in a platform runtime directory.
+        json!({"state": "unknown", "detail": "Local endpoint discovery is not verified on this platform."})
+    }
+}
+
+fn recipient_acknowledged(store: &Store, binding: &Binding) -> bool {
+    let Some(last) = &binding.last else { return false; };
+    let Some(id) = &last.ack_message else { return false; };
+    if last.ack_sequence == 0 { return false; }
+    // Read only the exact message's receipt, never infer acknowledgment when
+    // the message was pruned or when the mailbox cannot be read.
+    let Ok(page) = mailbox::api(store, "inbox", &json!({"addr": binding.address, "since": last.ack_sequence - 1, "limit": 1})) else { return false; };
+    page["messages"].as_array().into_iter().flatten()
+        .any(|m| m["id"].as_str() == Some(id.as_str()) && m["read_at"].as_u64().is_some())
+}
+
+fn binding_view(binding: &Binding, endpoint: &Value, acknowledged: bool) -> Value {
+    let status = binding.last.as_ref().map(|r| r.status.as_str());
+    let (state, detail) = if endpoint["state"] == "unavailable" {
+        ("endpoint-unavailable", NO_ENDPOINT)
+    } else if acknowledged {
+        ("recipient-acknowledged", "Recipient acknowledged the latest board message. Board addresses are self-asserted; this does not verify provider identity.")
+    } else if status == Some("queued") {
+        ("command-accepted", "Codex accepted the queue command; recipient acknowledgment and server/thread ownership remain unverified.")
+    } else {
+        ("ownership-unverified", "Server/thread ownership is unverified. A saved binding or conversation file does not establish reachability.")
+    };
+    let mut value = json!(binding);
+    value["reachability"] = json!({"state": state, "detail": detail, "recipientAcknowledged": acknowledged});
+    value["endpoint"] = endpoint.clone();
+    value
+}
+
+fn add_live_state(value: &mut Value, store: &Store, endpoint: &Value) {
+    for name in ["binding", "bindings"] {
+        if name == "binding" {
+            if let Ok(binding) = serde_json::from_value::<Binding>(value[name].clone()) {
+                value[name] = binding_view(&binding, endpoint, recipient_acknowledged(store, &binding));
+            }
+        } else if let Some(bindings) = value[name].as_array_mut() {
+            for item in bindings {
+                if let Ok(binding) = serde_json::from_value::<Binding>(item.clone()) {
+                    *item = binding_view(&binding, endpoint, recipient_acknowledged(store, &binding));
+                }
+            }
+        }
+    }
+    value["endpoint"] = endpoint.clone();
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -411,6 +489,8 @@ struct Batch {
     more: bool,
     through: u64,
     senders: Vec<String>,
+    ack_message: Option<String>,
+    ack_sequence: u64,
 }
 
 fn batch(store: &Store, address: &str, cursor: u64) -> Result<Batch, String> {
@@ -425,6 +505,8 @@ fn batch(store: &Store, address: &str, cursor: u64) -> Result<Batch, String> {
                 continue; // a chat's note to itself never wakes it
             }
             found.count += 1;
+            found.ack_message = message["id"].as_str().map(str::to_owned);
+            found.ack_sequence = message["sequence"].as_u64().unwrap_or(0);
             if let Some(name) = valid_address(from).filter(|n| !found.senders.contains(n)) {
                 found.senders.push(name);
             }
@@ -626,6 +708,8 @@ fn blank(batch: &Batch, at: u64, status: &str, detail: String) -> Receipt {
         at, status: status.into(), exit_code: None, messages: batch.count, more: batch.more,
         through: batch.through, senders: batch.senders.clone(), detail,
         stdout: String::new(), stderr: String::new(),
+        ack_message: batch.ack_message.clone(),
+        ack_sequence: batch.ack_sequence,
     }
 }
 
@@ -635,7 +719,7 @@ fn receipt(batch: &Batch, outcome: &Outcome, at: u64) -> Receipt {
     let line = telling_line(&stdout, &stderr);
     let said = |prefix: String| line.as_ref().map_or_else(|| format!("{prefix}."), |l| format!("{prefix}: {l}"));
     let (status, exit_code, detail) = match &outcome.ended {
-        Ended::Exited(0) => ("queued", Some(0), "Codex queued the notice for that chat (exit 0). That is Codex accepting it, not proof the chat has read its inbox.".to_owned()),
+        Ended::Exited(0) => ("queued", Some(0), "Codex accepted the queue command (exit 0); server/thread ownership and recipient acknowledgment remain unverified.".to_owned()),
         Ended::Exited(code) if line.as_deref().is_some_and(says_unreachable) => ("unreachable", Some(*code), said("Codex could not reach that chat".into())),
         Ended::Exited(code) => ("failed", Some(*code), said(format!("Codex exited with code {code}"))),
         Ended::TimedOut => ("timeout", None, "Codex did not finish in time and was stopped. Whether the notice reached the chat is unknown; it is not sent again.".to_owned()),
@@ -782,11 +866,14 @@ pub(crate) async fn desktop_bindings_get(app: tauri::AppHandle) -> Value {
         let _guard = lock(&FILE);
         load(&inner.dir.join(BINDINGS_FILE))
     };
-    reply(
-        loaded
-            .map(|book| json!({"bindings": book.bindings, "wakeEnabled": inner.wake_enabled(), "pollSeconds": super::wake::WAKE_POLL_SECONDS}))
-            .map_err(|message| ("BINDINGS_UNREADABLE", message)),
-    )
+    reply(loaded.map(|book| {
+        let endpoint = local_endpoint();
+        let mut value = json!({"bindings": book.bindings, "wakeEnabled": inner.wake_enabled(), "pollSeconds": super::wake::WAKE_POLL_SECONDS, "endpoint": endpoint});
+        if let Ok(store) = inner.board_store() {
+            add_live_state(&mut value, &store, &endpoint);
+        }
+        value
+    }).map_err(|message| ("BINDINGS_UNREADABLE", message)))
 }
 
 /// { address, threadId } → { binding, bindings }: owner-only; verified as above.
@@ -798,7 +885,11 @@ pub(crate) async fn desktop_bind(app: tauri::AppHandle, address: String, thread_
         Ok(store) => {
             let ctx = context(&inner);
             let path = inner.dir.join(BINDINGS_FILE);
-            tauri::async_runtime::spawn_blocking(move || bind(&path, &store, &ctx, &address, &thread_id, now_ms()))
+            tauri::async_runtime::spawn_blocking(move || {
+                let mut value = bind(&path, &store, &ctx, &address, &thread_id, now_ms())?;
+                add_live_state(&mut value, &store, &local_endpoint());
+                Ok(value)
+            })
                 .await
                 .unwrap_or_else(|_| Err(("SCAN_FAILED", "Checking that conversation stopped unexpectedly.".into())))
         }
@@ -891,6 +982,50 @@ mod tests {
         let mut book = load(&f.path).unwrap();
         assert_eq!(book.bindings.len(), 1);
         book.bindings.remove(0)
+    }
+
+    #[test]
+    fn endpoint_metadata_never_claims_a_server_owns_a_thread() {
+        let f = fixture();
+        let home = f.root.join("endpoint-check");
+        assert_eq!(endpoint_at(None)["state"], "unknown");
+        assert_eq!(endpoint_at(Some(Path::new("relative")))["state"], "unknown");
+        let absent = endpoint_at(Some(&home));
+        assert_eq!(absent["state"], "unavailable");
+        assert_eq!(absent["detail"], NO_ENDPOINT);
+        let socket = home.join("app-server-control/app-server-control.sock");
+        fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        fs::write(&socket, b"fixture, not a real endpoint").unwrap();
+        let present = endpoint_at(Some(&home));
+        assert_eq!(present["state"], "present");
+        assert!(present["detail"].as_str().unwrap().contains("ownership is unverified"));
+        bind(&f.path, &f.store, &ctx(&f, true), "codex-desk", THREAD, 1).unwrap();
+        assert_eq!(binding_view(&only(&f), &present, false)["reachability"]["state"], "ownership-unverified");
+        assert_eq!(binding_view(&only(&f), &absent, false)["reachability"]["state"], "endpoint-unavailable");
+    }
+
+    #[test]
+    fn only_an_exact_board_read_receipt_is_recipient_acknowledgment() {
+        let f = fixture();
+        bind(&f.path, &f.store, &ctx(&f, true), "codex-desk", THREAD, 1).unwrap();
+        post(&f, "first", "owner");
+        post(&f, "latest", "owner");
+        let found = batch(&f.store, "codex-desk", 0).unwrap();
+        let mut binding = only(&f);
+        binding.last = Some(receipt(&found, &not_run(Ended::Exited(0)), 2));
+        let endpoint = json!({"state": "present"});
+        assert!(!recipient_acknowledged(&f.store, &binding));
+        assert_eq!(binding_view(&binding, &endpoint, false)["reachability"]["state"], "command-accepted");
+        mailbox::api(&f.store, "ack", &json!({"addr": "codex-desk", "id": "first"})).unwrap();
+        assert!(!recipient_acknowledged(&f.store, &binding), "an earlier message is not the latest batch receipt");
+        mailbox::api(&f.store, "ack", &json!({"addr": "codex-desk", "id": "latest"})).unwrap();
+        assert!(recipient_acknowledged(&f.store, &binding));
+        assert_eq!(binding_view(&binding, &endpoint, true)["reachability"]["state"], "recipient-acknowledged");
+        assert_eq!(binding_view(&binding, &json!({"state": "unavailable"}), true)["reachability"]["state"], "endpoint-unavailable");
+        binding.last.as_mut().unwrap().ack_message = None;
+        assert!(!recipient_acknowledged(&f.store, &binding), "old receipts have no exact acknowledgment evidence");
+        // Reading/displaying receipts does not mutate a saved binding or retry a command.
+        assert!(only(&f).last.is_none());
     }
 
     #[test]
@@ -999,7 +1134,7 @@ mod tests {
         post(&f, "m2", "owner");
         post(&f, "m3", "codex-desk"); // its own note
         let found = batch(&f.store, "codex-desk", 0).unwrap();
-        assert_eq!(found, Batch { count: 2, more: false, through: 3, senders: vec!["claude-phaseforge".into(), "owner".into()] });
+        assert_eq!(found, Batch { count: 2, more: false, through: 3, senders: vec!["claude-phaseforge".into(), "owner".into()], ack_message: Some("m2".into()), ack_sequence: 2 });
         bind(&f.path, &f.store, &ctx(&f, true), "codex-desk", THREAD, 1).unwrap();
         let exe = f.root.join("codex.exe");
         let command = queue_command(&exe, &only(&f), &notice("codex-desk", &found));

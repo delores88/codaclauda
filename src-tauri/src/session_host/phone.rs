@@ -389,6 +389,12 @@ pub(super) struct Publication {
     pub tag: &'static str,
     pub recipient: Option<String>,
 }
+fn board_publication(id: &str, item: &Value) -> Publication {
+    let from = item["from"].as_str().unwrap_or("CodaClauda");
+    let recipient = (from != ADDRESS && from != "owner" && from != "codaclauda-team").then(|| from.to_owned());
+    Publication { id: format!("board:{id}"), title: from.into(), subject: item["subject"].as_str().unwrap_or("").into(),
+        body: item["body"].as_str().unwrap_or("").into(), limit: 1000, tag: "", recipient }
+}
 fn outbound_text(title: &str, subject: &str, body: &str, limit: usize) -> (String, String, bool) {
     if [title, subject, body].iter().any(|text| mailbox_credential(text)) { return ("CodaClauda".into(), SCAN_REFUSAL.into(), true); }
     let title = title.chars().filter(|c| c.is_ascii() && !c.is_control()).take(80).collect();
@@ -604,9 +610,7 @@ impl Inner {
             if !self.phone_current(revision) { break; }
             let Some(url) = self.phone_reply_url() else { break; };
             let Some(id) = item["id"].as_str() else { continue; };
-            let from = item["from"].as_str().unwrap_or("CodaClauda");
-            let recipient = (from != ADDRESS && from != "owner" && from != "codaclauda-team").then(|| from.to_owned());
-            self.phone_publish_locked(&url, Publication { id: format!("board:{id}"), title: from.into(), subject: item["subject"].as_str().unwrap_or("").into(), body: item["body"].as_str().unwrap_or("").into(), limit: 1000, tag: "", recipient }).await?;
+            self.phone_publish_locked(&url, board_publication(id, item)).await?;
             // Acknowledged means processed by this bridge, not read on the phone.
             mailbox::api(store, "ack", &json!({"addr": ADDRESS, "id": id})).map_err(|_| failure("PHONE_BOARD_FAILED", "A phone reply was processed but could not be acknowledged on the board."))?;
         }

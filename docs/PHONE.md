@@ -1,6 +1,6 @@
 # Phone conversation through ntfy
 
-CodaClauda 0.6.1 uses one ntfy topic for phone messages, agent replies, and
+CodaClauda uses one ntfy topic for phone messages, agent replies, and
 turn notifications. Save the URL once in **Settings > Phone**. **Message your
 agents from your phone** is on by default when a URL is saved; an explicit Off
 is preserved. Without a saved URL, nothing is sent to or read from ntfy. No
@@ -42,9 +42,17 @@ official ntfy guides cover [phone subscriptions and publishing](https://docs.ntf
 and [the web app](https://docs.ntfy.sh/subscribe/web/). Publishing button
 placement varies by phone platform. No live topic URL belongs in this document.
 
-Agent replies show the sender and the first 1,000 characters. The turn-finished
-and turn-error switches control those notices; they do not disable agent
-replies. Turning **Message your agents from your phone** off stops incoming
+Board replies addressed to `owner-phone` show the sender and the first 1,000
+characters. A finished-turn notification shows the agent's session name and
+the first 300 characters of its final reply. Turns started by another agent's
+board message stay quiet on success; the agent can still send Ben an explicit
+reply to `owner-phone`. Turns started by `owner` or `owner-phone`, and scheduled
+runs, can send finished-turn notifications. Error notifications remain enabled
+for any sender when the turn-error switch is on. A turn without a saved final
+reply does not send a success preview.
+
+The turn-finished and turn-error switches control those notifications; they do
+not disable explicit board replies. Turning **Message your agents from your phone** off stops incoming
 messages and agent replies while keeping the URL. Only the owner changes these
 settings; no separate inbound topic or recipient picker is needed.
 
@@ -90,7 +98,8 @@ its cache. See [ntfy publishing and topic guidance](https://docs.ntfy.sh/publish
 The existing mailbox credential scanner checks incoming text and outgoing
 replies before forwarding. A recognized credential causes a refusal with a
 fixed explanation that does not echo the text. Outgoing text is scanned before
-the 1,000-character preview is taken. The filter cannot recognize every secret:
+the 300-character notification or 1,000-character board-reply preview is taken.
+The filter cannot recognize every secret:
 never send credentials, pairing codes, or private transcripts.
 
 The URL remains in the existing native notification settings. Phone routing,
@@ -111,7 +120,7 @@ enter the recipient's provider conversation, with those systems' retention.
 
 This document describes source behavior. Deterministic tests exercise routing,
 the one-topic transport, restart deduplication, ordinary Ben (phone) messages,
-credential refusal, and settings persistence. UI tests cover the single switch,
+credential refusal, final-reply previews, quiet peer turns, and settings persistence. UI tests cover the single switch,
 saved URL state, last-sender hints, bounded name hints, confirmed settings,
 failure recovery, concurrent refresh, and the two owner command wrappers.
 

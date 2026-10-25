@@ -66,10 +66,15 @@ fn process_round_trip_preserves_utf8_idempotence_cursor_ack_and_reply() {
     assert_eq!(timeout.0, 0);
     assert_eq!(timeout.1["data"]["timed_out"], true);
     assert_eq!(f.post("reply-one", "beta-agent", "alpha-agent", "reply", b"Reviewed.", &["--reply-to", "question-one"]).0, 0);
-    let result = f.run(&["wait-reply", "question-one", "--timeout", "0"]);
-    assert_eq!(result.0, 0);
-    assert_eq!(result.1["data"]["reply"]["id"], "reply-one");
-    assert_eq!(result.1["data"]["timed_out"], false);
+    for timeout in ["0", "900", "3600"] {
+        let result = f.run(&["wait-reply", "question-one", "--timeout", timeout]);
+        assert_eq!(result.0, 0);
+        assert_eq!(result.1["data"]["reply"]["id"], "reply-one");
+        assert_eq!(result.1["data"]["timed_out"], false);
+    }
+    let (code, error) = f.run(&["wait-reply", "question-one", "--timeout", "3601"]);
+    assert_eq!(code, 2);
+    assert!(error["error"]["message"].as_str().unwrap().contains("timeout must be from 0 to 3600 seconds"));
     assert!(!f.root.join("board/state.json").exists(), "Mailbox must not change coordination schema");
 }
 
@@ -137,7 +142,7 @@ fn invalid_utf8_oversize_and_malformed_commands_return_json_exit_two() {
         assert_eq!(code, 2);
         assert_eq!(error["error"]["code"], "REQUEST_REJECTED");
     }
-    for args in [&["not-a-command"][..], &["post", "--kind", "unknown"][..], &["inbox", "owner", "--since", "negative"][..], &["wait-reply", "missing", "--timeout", "61"][..]] {
+    for args in [&["not-a-command"][..], &["post", "--kind", "unknown"][..], &["inbox", "owner", "--since", "negative"][..], &["wait-reply", "missing", "--timeout", "3601"][..]] {
         let (code, error) = f.run(args);
         assert_eq!(code, 2);
         assert_eq!(error["ok"], false);

@@ -175,10 +175,17 @@ pub(crate) fn parse_claude(line: &Value) -> Vec<Out> {
                 }
             }
             if let Some(blocks) = line["message"]["content"].as_array() {
+                // Text blocks belong to one assistant message. Keep them
+                // together so the transcript and final-reply preview begin
+                // with its first block rather than treating its last block
+                // as a separate final answer.
+                let parts: Vec<_> = blocks.iter().filter(|block| block["type"] == "text")
+                    .filter_map(|block| block["text"].as_str().filter(|value| !value.is_empty())).collect();
+                let mut message = (!parts.is_empty()).then(|| parts.join("\n\n"));
                 for block in blocks {
                     match block["type"].as_str() {
                         Some("text") => {
-                            if let Some(t) = text(&block["text"]) {
+                            if let Some(t) = message.take() {
                                 out.push(Out::Message(t));
                             }
                         }
