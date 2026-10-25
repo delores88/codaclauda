@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { THREE, addOutline } from '../app/city/toon.js';
-import { Building, styleFor } from '../app/city/buildings.js';
+import { Building, BuildingManager, styleFor } from '../app/city/buildings.js';
 import { ciMarker, CiBeacon, CityCi } from '../app/city/ci.js';
 import { tickerSegments } from '../app/city/ticker.js';
 import { instancedOutline, disposeAll } from '../app/city/fx.js';
@@ -10,9 +10,11 @@ const near = (a, b, epsilon = 1e-5) => assert.ok(Math.abs(a - b) < epsilon, `${a
 function fakeCanvas(t) {
   const original = globalThis.document;
   const gradient = { addColorStop() {} };
-  const context = new Proxy({ measureText: text => ({ width: String(text).length * 20 }), createLinearGradient: () => gradient }, { get: (object, property) => property in object ? object[property] : () => {} });
+  const drawnText = [];
+  const context = new Proxy({ measureText: text => ({ width: String(text).length * 20 }), createLinearGradient: () => gradient, fillText: text => drawnText.push(text) }, { get: (object, property) => property in object ? object[property] : () => {} });
   globalThis.document = { createElement: () => ({ getContext: () => context }) };
   t.after(() => { if (original) globalThis.document = original; else delete globalThis.document; });
+  return drawnText;
 }
 function fixture(project, { mirror = false, animateIn = false } = {}) {
   const particles = { emit() {}, enabled: false };
@@ -104,15 +106,111 @@ test('instanced outlines preserve translated geometry centres and dispose their 
 });
 
 test('unbuilt repositories stay pickable without a crane; local linking builds the tower', t => {
-  fakeCanvas(t);
+  const drawnText = fakeCanvas(t);
   const project = { id: 'gh:owner/demo', name: 'Demo', metrics: { floors: 4, footprint: 1 } };
   const building = fixture(project);
-  assert.equal(building.unbuilt, true); assert.equal(building.bodyMaterial.opacity, 0.1);
+  assert.equal(building.unbuilt, true);
+  assert.ok(building.bodyMaterial.opacity >= 0.2 && building.bodyMaterial.opacity <= 0.25);
+  building.body.geometry.computeBoundingBox();
+  const height = building.body.geometry.boundingBox.getSize(new THREE.Vector3()).y;
+  assert.ok(height >= building.size.H * 0.8 && height <= building.size.H * 0.85);
   assert.ok(building.pickables.includes(building.body));
+  assert.ok(building.pickables.includes(building.plaque));
+  assert.equal(building.plaque.userData.buildingId, project.id);
+  assert.ok(drawnText.includes(project.name));
+  assert.ok(drawnText.includes('Not on this PC · click to clone'));
+  const sign = building.unbuiltSign;
+  assert.equal(sign.parent, building.group);
   building.setActive(true); assert.equal(building.active, false); assert.equal(building.scaffold, null);
   assert.equal(building.apply({ ...project, path: 'C:/demo' }), true);
   assert.equal(building.unbuilt, false); assert.equal(building.bodyMaterial.opacity, 1);
+  assert.equal(sign.parent, null); assert.equal(building.unbuiltSign, null);
   building.dispose(); assert.equal(building.group.parent, null);
+});
+
+test('unbuilt construction, rebuilds and manager sync never mount a roof ticker; local buildings retain theirs', t => {
+  fakeCanvas(t);
+  const parent = new THREE.Group(), particles = { emit() {}, enabled: false };
+  const manager = new BuildingManager(parent, { particles, reducedMotion: () => false });
+  const project = { id: 'gh:owner/ticker', name: 'Remote ticker', metrics: { floors: 4 } };
+  const cells = new Map([[project.id, { i: 1, j: -1 }]]), active = new Set();
+  const tickers = new Map([[project.id, tickerSegments(project, 'full', 1)]]);
+  const sync = (p, options = {}) => manager.sync([p], cells, active, { animate: false, districts: true, tickers, ...options });
+  sync(project);
+  const building = manager.get(project.id);
+  assert.equal(building.ticker, null);
+  building.mountTicker(); assert.equal(building.ticker, null);
+  sync({ ...project, name: 'Renamed', metrics: { floors: 8 } });
+  assert.equal(building.ticker, null); assert.ok(building.tickerInfo);
+  const sign = building.unbuiltSign, at = new THREE.Box3().setFromObject(sign).getCenter(new THREE.Vector3());
+  building.update(0.2, 0.2, { reducedMotion: false, particles });
+  near(new THREE.Box3().setFromObject(sign).getCenter(new THREE.Vector3()).y, at.y);
+  sync({ ...project, path: 'C:/ticker' });
+  assert.ok(building.ticker); assert.equal(building.unbuiltSign, null);
+  const oldTicker = building.ticker.mesh;
+  sync(project);
+  assert.equal(building.ticker, null); assert.equal(oldTicker.parent, null);
+  sync(project, { tickers: null }); assert.equal(building.ticker, null);
+  // The contributor path and Spark mirror keep their established real-building tickers.
+  sync(project, { districts: false }); assert.ok(building.ticker);
+  const mirror = fixture(project, { mirror: true }); mirror.setTicker(tickers.get(project.id));
+  assert.ok(mirror.ticker); assert.equal(mirror.unbuilt, false); mirror.dispose();
+  manager.dispose();
+});
+
+test('unbuilt signs and ghost resources are released on rebuild and animated removal', t => {
+  fakeCanvas(t);
+  const parent = new THREE.Group(), particles = { emit() {}, enabled: false };
+  const manager = new BuildingManager(parent, { particles, reducedMotion: () => false });
+  const project = { id: 'gh:owner/disposal', name: 'Disposable', metrics: { floors: 2 } };
+  const cells = new Map([[project.id, { i: 1, j: -1 }]]);
+  manager.sync([project], cells, new Set(), { animate: false, districts: true });
+  const building = manager.get(project.id);
+  const watch = roots => {
+    const resources = new Set();
+    for (const root of roots) root.traverse(node => {
+      if (node.geometry && !node.geometry.userData.shared) resources.add(node.geometry);
+      if (node.material && !node.material.userData.shared) { resources.add(node.material); if (node.material.map) resources.add(node.material.map); }
+    });
+    const disposed = new Set(); for (const resource of resources) resource.addEventListener('dispose', () => disposed.add(resource));
+    return () => assert.equal(disposed.size, resources.size);
+  };
+  const oldSign = building.unbuiltSign, rebuilt = watch([building.tower, oldSign]);
+  building.apply({ ...project, name: 'Rebuilt' }); rebuilt(); assert.equal(oldSign.parent, null);
+  const sign = building.unbuiltSign, removed = watch([building.tower, sign, building.padGroup]);
+  manager.sync([], cells, new Set(), { districts: true });
+  assert.equal(manager.get(project.id), null);
+  manager.update(0.45, 0.45, { reducedMotion: false, particles });
+  assert.ok(sign.scale.y < 1);
+  manager.update(0.5, 0.95, { reducedMotion: false, particles });
+  removed(); assert.equal(building.group.parent, null); assert.equal(sign.parent, null);
+  assert.equal(manager.removing.size, 0); manager.dispose();
+});
+
+test('CI remains in the panel for unbuilt repositories without a rooftop beacon', () => {
+  const building = { id: 'ghost', unbuilt: true, tower: new THREE.Group(), rooftopPoint: () => new THREE.Vector3(0, 20, 0) };
+  const ci = new CityCi({ buildings: new Map([['ghost', building]]), home: () => true, reducedMotion: () => true, caller: () => null });
+  ci.results.set('ghost', { summary: { failing: true } }); ci.sync();
+  assert.equal(ci.beacons.size, 0); assert.equal(ci.status('ghost').summary.failing, true);
+  building.unbuilt = false; ci.sync(); assert.equal(ci.beacons.size, 1);
+  const beacon = ci.beacons.get('ghost').group;
+  building.unbuilt = true; ci.sync();
+  assert.equal(ci.beacons.size, 0); assert.equal(beacon.parent, null);
+  ci.dispose();
+});
+
+test('delayed CI celebrations stop if a linked building becomes unbuilt before the burst', t => {
+  const building = { id: 'changing', unbuilt: false, topPoint: () => new THREE.Vector3(0, 20, 0) };
+  const callbacks = [], emissions = [];
+  t.mock.method(globalThis, 'setTimeout', callback => { callbacks.push(callback); return callbacks.length; });
+  const ci = new CityCi({ buildings: new Map([[building.id, building]]), home: () => true, reducedMotion: () => false, caller: () => null, world: { particles: { enabled: true, emit: (...args) => emissions.push(args) } } });
+  ci.fireworks(building.id);
+  assert.equal(callbacks.length, 3);
+  building.unbuilt = true;
+  for (const callback of callbacks) callback();
+  assert.equal(emissions.length, 0);
+  ci.fireworks(building.id); assert.equal(callbacks.length, 3);
+  ci.dispose();
 });
 
 test('crane meshes and outlines stay inside the roof footprint during rotation and growth', t => {

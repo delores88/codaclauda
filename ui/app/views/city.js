@@ -277,7 +277,7 @@ class CityView {
       this.legendDistricts = h('div.city-legend-extra',
         h('div.city-legend-note', 'Downtown: glass towers and GitHub repos'),
         h('div.city-legend-note', 'Old Town: local folders, brick and gardens'),
-        h('div.city-legend-note', 'Faded outline = repo waiting to be cloned'),
+        h('div.city-legend-note', 'Pale ghost = repo waiting to be cloned'),
         h('div.city-legend-note', 'Train labels = projects with recent commits')),
       this.legendCi = h('div.city-legend-note', { hidden: true }, 'Red rooftop beacon = CI failing'),
       h('div.city-legend-note', 'Scaffolding = an agent is working there'),
@@ -312,7 +312,7 @@ class CityView {
       h('dl.city-help-list',
         ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Drag an agent', 'Drop it on a building to give it a task there'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
           .flatMap(([k, v]) => [h('dt', h('kbd', k)), h('dd', v)])),
-      h('p.city-note', 'Railroad tracks separate Downtown (GitHub projects) from Old Town (local folders without a repo). Faded Downtown outlines open a panel where you can clone the repo. Both districts keep at least three empty plots and grow without moving placed buildings.'),
+      h('p.city-note', 'Railroad tracks separate Downtown (GitHub projects) from Old Town (local folders without a repo). Pale Downtown ghosts have a ground sign and open a panel where you can clone the repo. Tickers sit on real buildings only. Both districts keep at least three empty plots and grow without moving placed buildings.'),
       h('p.city-note', 'A train carries recent project names every 90–180 seconds; crossing lights blink before it arrives. Reduced motion parks it at the station. A red rooftop beacon and “CI failing” ticker mark failed builds; weather is independent.'),
       h('button.btn.small.primary', { type: 'button', onclick: () => this.toggleHelp(false) }, 'Got it'));
 

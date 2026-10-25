@@ -247,6 +247,23 @@ class Batch {
 const easeOutBack = t => { const c = 1.6; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); };
 const easeIn = t => t * t * t;
 
+/** A quiet two-line ground sign: texture belongs to this repository's sign. */
+function unbuiltSignTexture(name) {
+  const canvas = document.createElement('canvas'); canvas.width = 768; canvas.height = 192;
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#e7edf0'; context.fillRect(0, 0, 768, 192);
+  context.strokeStyle = '#91a7b3'; context.lineWidth = 6; context.strokeRect(3, 3, 762, 186);
+  context.textAlign = 'center'; context.textBaseline = 'middle';
+  const label = String(name || 'Repository').replace(/\s+/g, ' ').trim();
+  let fontSize = 48;
+  do { context.font = `600 ${fontSize}px "Segoe UI", system-ui, sans-serif`; fontSize -= 2; } while (context.measureText(label).width > 704 && fontSize > 22);
+  context.fillStyle = '#425967'; context.fillText(label, 384, 66, 704);
+  context.font = '30px "Segoe UI", system-ui, sans-serif'; context.fillStyle = '#586d79';
+  context.fillText('Not on this PC · click to clone', 384, 132, 704);
+  const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
 /* ---------- one building ---------- */
 export class Building {
   /** env: { particles, reducedMotion(), animateIn, stagger(), mirror?, deckY? }. With mirror the
@@ -305,6 +322,7 @@ export class Building {
 
   clearTower() {
     this.dropTicker();
+    if (this.unbuiltSign) { this.unbuiltSign.removeFromParent(); disposeObject(this.unbuiltSign); this.unbuiltSign = null; }
     for (const child of [...this.tower.children]) { this.tower.remove(child); disposeObject(child); }
     this.pickables = []; this.gear = null; this.flag = null; this.beaconLight = null; this.jib = null; this.chimneyTop = null; this.scaffold = null;
     this.paintMeshes = []; this.litWindows = null; this.litPanes = []; this.rigTip = null; this.plaque = null; this.roofSurface = null; this.scaffoldFront = null;
@@ -481,32 +499,41 @@ export class Building {
   /** Remote-only repositories are clickable plans, with no working construction rig. */
   buildUnbuilt() {
     const { W, D, H } = this.size, tag = { buildingId: this.id };
-    const geometry = placed(new THREE.BoxGeometry(W, H, D), { y: PAD_TOP + H / 2 });
-    this.bodyMaterial = toonMaterial('#9dc6df', { transparent: true, opacity: 0.1, cache: false });
+    const ghostHeight = H * 0.83;
+    const geometry = placed(new THREE.BoxGeometry(W, ghostHeight, D), { y: PAD_TOP + ghostHeight / 2 });
+    this.bodyMaterial = toonMaterial('#b9d4e4', { transparent: true, opacity: 0.23, cache: false });
     this.bodyMaterial.depthWrite = false;
     const body = new THREE.Mesh(geometry, this.bodyMaterial);
     body.userData = { ...tag, noOutline: true };
-    const frame = new THREE.LineSegments(new THREE.EdgesGeometry(geometry), new THREE.LineBasicMaterial({ color: '#91b6ce', transparent: true, opacity: 0.65, depthWrite: false }));
+    const frame = new THREE.LineSegments(new THREE.EdgesGeometry(geometry), new THREE.LineBasicMaterial({ color: '#a6bdcb', transparent: true, opacity: 0.18, depthWrite: false }));
     frame.raycast = () => {};
     this.tower.add(body, frame); this.body = body; this.pickables.push(body);
-    const plaqueW = Math.min(W * 0.84, 3.4);
-    const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueW / 4), new THREE.MeshBasicMaterial({ map: plaqueTexture(this.project.name, { accent: '#91b6ce' }), transparent: true, opacity: 0.72 }));
-    plaque.position.set(0, PAD_TOP + 1.5, D / 2 + 0.08); plaque.userData = tag;
-    this.tower.add(plaque); this.pickables.push(plaque); this.plaque = plaque;
-    this.roofTop = this.roofSurface = PAD_TOP + H;
-    this.mountTicker();
+    const sign = new THREE.Group(); sign.name = `unbuilt-sign:${this.id}`;
+    sign.position.set(0, PAD_TOP, D / 2 + 0.33);
+    const plaqueW = Math.min(W * 0.8, 4.6), plaqueH = plaqueW / 4;
+    for (const x of [-plaqueW * 0.35, plaqueW * 0.35]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1, 0.12), toonMaterial('#788d99'));
+      post.position.set(x, 0.5, 0); sign.add(post);
+    }
+    const backing = new THREE.Mesh(new THREE.BoxGeometry(plaqueW + 0.1, plaqueH + 0.1, 0.1), toonMaterial('#91a7b3'));
+    backing.position.y = 1.1; backing.userData = { ...tag }; sign.add(backing);
+    const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueH), new THREE.MeshBasicMaterial({ map: unbuiltSignTexture(this.project.name) }));
+    plaque.position.set(0, 1.1, 0.056); plaque.userData = { ...tag };
+    sign.add(plaque); this.group.add(sign); this.unbuiltSign = sign;
+    this.pickables.push(backing, plaque); this.plaque = plaque;
+    this.roofTop = this.roofSurface = PAD_TOP + ghostHeight;
   }
 
   /* Access ticker: segments from ticker.js tickerSegments (null: none); paused: grey and still. */
   setTicker(segments, paused = false) {
     const had = Boolean(this.tickerInfo);
     this.tickerInfo = segments ? { segments, paused: Boolean(paused) } : null;
-    if (!segments) { this.dropTicker(); return; }
+    if (!segments || this.unbuilt) { this.dropTicker(); return; }
     if (this.ticker) this.ticker.set(segments, { grey: Boolean(paused) }); else this.mountTicker();
     if (!had && this.size?.floors === 1 && this.plaque) this.plaque.position.z = this.size.D / 2 + TICKER.off + 0.05;
   }
   mountTicker() {
-    if (!this.tickerInfo || this.ticker || !this.size) return;
+    if (this.unbuilt || !this.tickerInfo || this.ticker || !this.size) return;
     const { W, D, H } = this.size;
     // Picking the band picks the building (same tag as its walls).
     this.ticker = new Ticker({ W, D, top: PAD_TOP + H, tag: this.mirror ? { sparkBuildingId: this.id } : { buildingId: this.id } });
@@ -670,6 +697,7 @@ export class Building {
     if (this.hover === on) return;
     this.hover = on;
     if (this.mirror) { this.paintSpark(); return; }
+    if (this.unbuilt) { this.bodyMaterial.color.set(on ? '#cce2ee' : '#b9d4e4'); return; }
     this.bodyMaterial.emissive.set(on ? '#5b4bd6' : '#000000');
     this.bodyMaterial.emissiveIntensity = on ? 0.22 : 1;
   }
@@ -727,6 +755,7 @@ export class Building {
         const k = easeIn(a.t);
         this.tower.scale.set(1 - k * 0.15, Math.max(0.001, 1 - k), 1 - k * 0.15);
         this.padGroup.scale.setScalar(Math.max(0.001, 1 - k));
+        if (this.unbuiltSign) this.unbuiltSign.scale.copy(this.padGroup.scale);
         if (a.t >= 1) return false;
       }
     }

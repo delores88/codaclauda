@@ -82,7 +82,7 @@ export class CityCi {
   sync() {
     const { buildings } = this.env, home = this.env.home();
     const want = new Set();
-    if (home) for (const [id, r] of this.results) if (ciMarker(r.summary) && buildings.get(id)) want.add(id);
+    if (home) for (const [id, r] of this.results) if (ciMarker(r.summary) && buildings.get(id) && !buildings.get(id).unbuilt) want.add(id);
     for (const [id, beacon] of this.beacons) if (!want.has(id) || beacon.building !== buildings.get(id) || beacon.group.parent !== buildings.get(id)?.tower) { beacon.dispose(); this.beacons.delete(id); }
     for (const id of want) if (!this.beacons.has(id)) this.beacons.set(id, new CiBeacon(buildings.get(id)));
   }
@@ -94,11 +94,12 @@ export class CityCi {
   /** A short burst of three shells over the building (skipped with reduced motion). */
   fireworks(projectId) {
     const b = this.env.buildings.get(projectId), particles = this.env.world.particles;
-    if (!b || this.env.reducedMotion() || !this.env.home() || !particles?.enabled) return;
+    if (!b || b.unbuilt || this.env.reducedMotion() || !this.env.home() || !particles?.enabled) return;
     const top = b.topPoint();
     for (let k = 0; k < 3; k++) {
       setTimeout(() => {
-        if (!this.env.buildings.get(projectId)) return;
+        const current = this.env.buildings.get(projectId);
+        if (current !== b || current.unbuilt || this.env.reducedMotion() || !this.env.home()) return;
         const at = { x: top.x + (Math.random() - 0.5) * 2, y: top.y + 3 + Math.random() * 2.2, z: top.z + (Math.random() - 0.5) * 2 };
         particles.emit('spark', { x: top.x, y: top.y + 0.5, z: top.z }, 10, { spread: 0.2 });
         particles.emit('sparkle', at, 70, { spread: 0.35, speed: 2.1, scale: 1.25, colors: FIREWORK_COLORS[(k + Math.floor(Math.random() * 4)) % 4] });
