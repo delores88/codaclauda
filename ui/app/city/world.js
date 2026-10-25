@@ -218,12 +218,13 @@ export class World {
   }
 
   /* ---------- island lifecycle ---------- */
-  setRings(rings, { animate = true } = {}) {
-    if (rings === this.rings) return false;
+  setRings(rings, { animate = true, districts = false } = {}) {
+    if (rings === this.rings && districts === this.districts) return false;
     const before = this.half;
+    const grew = rings > this.rings;
     for (const key of ['island', 'roads', 'clouds']) if (this[key]) { this[key].group.removeFromParent(); disposeAll(this[key].group); }
-    this.rings = rings; this.half = islandHalf(rings);
-    this.island = buildIsland(rings); this.roads = buildRoads(rings);
+    this.rings = rings; this.half = islandHalf(rings); this.districts = districts;
+    this.island = buildIsland(rings); this.roads = buildRoads(rings, { districts });
     // Clouds stay in world space, outside the sphere the island sweeps when it turns over.
     this.clouds = buildClouds(this.half, this.quality, { center: PIVOT_Y, clear: this.sweepRadius() + CLOUD_MARGIN, island: this.half * 1.3 });
     this.land.add(this.island.group, this.roads.group);
@@ -231,13 +232,16 @@ export class World {
     this.applyTaper();
     if (this.controls) this.limits();
     this.fitShadow();
-    if (animate && !this.reducedMotion() && before) this.islandAnim = { t: 0, from: Math.max(0.86, before / this.half) };
+    if (animate && !this.reducedMotion() && before && grew) {
+      this.islandAnim = { t: 0, from: Math.max(0.86, before / this.half) };
+      for (const x of [-before, 0, before]) for (const z of [-before, before]) this.particles.emit('dust', new THREE.Vector3(x, GROUND_Y + 0.2, z), 12, { spread: 7 });
+    }
     if (this.current) this.applyLighting(this.current);
     return true;
   }
   setLots(lots) {
     if (this.decor) { this.decor.removeFromParent(); disposeAll(this.decor); }
-    this.decor = buildDecor(this.rings, lots, this.half);
+    this.decor = buildDecor(this.rings, lots, this.half, { districts: this.districts });
     this.land.add(this.decor);
   }
   /* ---------- Spark side ---------- */

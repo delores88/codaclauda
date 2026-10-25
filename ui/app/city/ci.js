@@ -1,72 +1,39 @@
-/* Ambient CI in the City (0.5), from ci_status (gh run list for each project's GitHub repo):
- *   - light rain from a small dark cloud over a building whose latest finished run failed;
+/* CI in the City, from ci_status (gh run list for each project's GitHub repo):
+ *   - a red rooftop beacon on a building whose latest finished run failed;
  *   - a brief fireworks burst over a building when a run newly succeeds on its default branch.
  * Polled every 5 minutes while the City is on screen (and once when it opens, if older than that).
- * Layered per building on top of the city-wide weather (city/weather.js), never replacing it.
- * Reduced motion: the cloud and rain stand still, and there are no fireworks. Home city only. */
-import { THREE, toonMaterial } from './toon.js';
+ * Weather belongs only to city/weather.js. Reduced motion: the beacon stays lit
+ * and there are no fireworks. Home city only. */
+import { THREE, toonMaterial, disposeObject } from './toon.js';
 import { ciSummary, newlyPassed, repoOf } from './agents-extra.js';
 
 export const CI_POLL_MS = 5 * 60e3;
 const MAX_REPOS = 24;          // per poll
-const DROPS = 46;              // rain streaks per cloud
 const FIREWORK_COLORS = [['#ff6b3d', '#ffd36b', '#fff4c2'], ['#3ccf8e', '#bfffe0', '#ffffff'], ['#8b7bff', '#ff6fae', '#ffffff'], ['#5aa9ff', '#bfefff', '#fff2a8']];
 
-let shared = null;
-function parts() {
-  if (shared) return shared;
-  const puff = new THREE.IcosahedronGeometry(1, 1);
-  const cloud = toonMaterial('#5b6273', { cache: false });
-  cloud.userData.shared = true;
-  const rain = new THREE.LineBasicMaterial({ color: '#a9c8ff', transparent: true, opacity: 0.62, depthWrite: false });
-  rain.userData.shared = true;
-  shared = { puff, cloud, rain };
-  return shared;
-}
+/** Pure selection, shared with the ticker and deterministic tests. */
+export function ciMarker(summary) { return summary?.failing === true ? 'beacon' : null; }
 
-class RainCloud {
+export class CiBeacon {
   constructor(building) {
-    const { puff, cloud, rain } = parts();
     this.building = building;
-    this.group = new THREE.Group(); this.group.name = `ci-rain:${building.id}`;
-    const W = Math.max(1.6, building.size?.W || 2.4), D = Math.max(1.6, building.size?.D || 2.4);
-    this.w = W; this.d = D;
-    this.cloud = new THREE.Group();
-    for (const [x, y, z, r] of [[-0.42, 0, 0, 0.62], [0.12, 0.16, 0.1, 0.78], [0.62, -0.02, -0.06, 0.56], [-0.05, -0.08, -0.38, 0.5], [0.05, -0.1, 0.4, 0.52]]) {
-      const m = new THREE.Mesh(puff, cloud);
-      m.position.set(x * W * 0.62, y, z * D * 0.62); m.scale.setScalar(r * Math.min(1.5, 0.55 + W * 0.18));
-      m.raycast = () => {};
-      this.cloud.add(m);
-    }
-    this.group.add(this.cloud);
-    this.span = 2.4;   // fall height below the cloud
-    this.drops = Array.from({ length: DROPS }, () => ({ x: (Math.random() - 0.5) * W * 0.95, z: (Math.random() - 0.5) * D * 0.95, y: -Math.random() * this.span, v: 7 + Math.random() * 3 }));
-    this.positions = new Float32Array(DROPS * 6);
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(this.positions, 3).setUsage(THREE.DynamicDrawUsage));
-    this.lines = new THREE.LineSegments(geometry, rain);
-    this.lines.frustumCulled = false; this.lines.raycast = () => {};
-    this.group.add(this.lines);
-    this.writeDrops();
-    this.place();
-  }
-  place() {
-    const top = this.building.topPoint();
-    this.group.position.set(top.x, top.y + 2.6, top.z);
-  }
-  writeDrops() {
-    const p = this.positions;
-    this.drops.forEach((d, i) => { p.set([d.x, d.y, d.z, d.x - 0.04, d.y - 0.36, d.z], i * 6); });
-    this.lines.geometry.attributes.position.needsUpdate = true;
+    this.group = new THREE.Group(); this.group.name = `ci-beacon:${building.id}`;
+    this.group.position.copy(building.rooftopPoint());
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.3, 0.18, 8), toonMaterial('#4c5665'));
+    base.position.y = 0.09;
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 0.44, 6), toonMaterial('#697687'));
+    stem.position.y = 0.36;
+    this.material = toonMaterial('#ff4a56', { emissive: '#ff263c', emissiveIntensity: 0.9, cache: false });
+    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.26, 10, 8), this.material);
+    lamp.position.y = 0.72;
+    this.group.add(base, stem, lamp);
+    this.group.traverse(node => { node.raycast = () => {}; });
+    building.tower.add(this.group);
   }
   update(dt, elapsed, reduced) {
-    this.place();
-    if (reduced) return;
-    this.cloud.position.y = Math.sin(elapsed * 0.8 + this.w) * 0.06;
-    for (const d of this.drops) { d.y -= d.v * dt; if (d.y < -this.span) d.y += this.span; }
-    this.writeDrops();
+    this.material.emissiveIntensity = reduced ? 0.9 : 0.65 + 0.45 * (0.5 + 0.5 * Math.sin(elapsed * 3));
   }
-  dispose() { this.group.removeFromParent(); this.lines.geometry.dispose(); }
+  dispose() { this.group.removeFromParent(); disposeObject(this.group); }
 }
 
 export class CityCi {
@@ -76,7 +43,7 @@ export class CityCi {
     this.env = env;
     this.results = new Map();   // projectId → { repo, summary, at, error }
     this.seen = new Map();      // projectId → key of the newest finished default-branch run already seen
-    this.clouds = new Map();    // projectId → RainCloud
+    this.beacons = new Map();   // projectId → CiBeacon
     this.timer = 0; this.polling = null; this.lastPoll = 0;
   }
   get available() { return typeof this.env.caller() === 'function'; }
@@ -111,18 +78,18 @@ export class CityCi {
     return this.polling;
   }
 
-  /** Rain clouds follow the results and the buildings standing now. */
+  /** Beacons stay attached to the current roof, including rebuilds and grow/sink animation. */
   sync() {
-    const { buildings, world } = this.env, home = this.env.home();
+    const { buildings } = this.env, home = this.env.home();
     const want = new Set();
-    if (home) for (const [id, r] of this.results) if (r.summary?.failing && buildings.get(id)) want.add(id);
-    for (const [id, cloud] of this.clouds) if (!want.has(id) || cloud.building !== buildings.get(id)) { cloud.dispose(); this.clouds.delete(id); }
-    for (const id of want) if (!this.clouds.has(id)) { const cloud = new RainCloud(buildings.get(id)); world.city.add(cloud.group); this.clouds.set(id, cloud); }
+    if (home) for (const [id, r] of this.results) if (ciMarker(r.summary) && buildings.get(id)) want.add(id);
+    for (const [id, beacon] of this.beacons) if (!want.has(id) || beacon.building !== buildings.get(id) || beacon.group.parent !== buildings.get(id)?.tower) { beacon.dispose(); this.beacons.delete(id); }
+    for (const id of want) if (!this.beacons.has(id)) this.beacons.set(id, new CiBeacon(buildings.get(id)));
   }
   update(dt, elapsed) {
-    if (!this.clouds.size) return;
+    if (!this.beacons.size) return;
     const reduced = this.env.reducedMotion();
-    for (const cloud of this.clouds.values()) cloud.update(dt, elapsed, reduced);
+    for (const beacon of this.beacons.values()) beacon.update(dt, elapsed, reduced);
   }
   /** A short burst of three shells over the building (skipped with reduced motion). */
   fireworks(projectId) {
@@ -138,5 +105,5 @@ export class CityCi {
       }, k * 420);
     }
   }
-  dispose() { this.stop(); for (const cloud of this.clouds.values()) cloud.dispose(); this.clouds.clear(); }
+  dispose() { this.stop(); for (const beacon of this.beacons.values()) beacon.dispose(); this.beacons.clear(); }
 }

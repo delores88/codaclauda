@@ -85,12 +85,12 @@ export function buildSideSign(texture, { board = '#fff1de', post = '#8a6a4a', wi
 }
 
 /* ---------- roads, sidewalks, lawns, lamps ---------- */
-export function buildRoads(rings) {
+export function buildRoads(rings, { districts = false } = {}) {
   const group = new THREE.Group(); group.name = 'roads';
   const extent = (rings + 0.5) * PITCH;
   const asphalt = mesh(placed(rbox(extent * 2 + ASPHALT, 0.12, extent * 2 + ASPHALT, 1.2, 2), { y: ROAD_TOP - 0.06 }), toonMaterial(PALETTE.road), { cast: false, outline: 0.05 });
   group.add(asphalt);
-  const walks = [], lawns = [];
+  const walks = [], lawns = [], paved = [];
   const outer = PITCH / 2 - ASPHALT / 2, inner = LOT_HALF, band = outer - inner;
   for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
     const { x, z } = cellCenter(i, j);
@@ -99,10 +99,11 @@ export function buildRoads(rings) {
     walks.push(placed(new THREE.BoxGeometry(outer * 2, SIDEWALK_TOP, band), { x, y: SIDEWALK_TOP / 2, z: z - mid }));
     walks.push(placed(new THREE.BoxGeometry(band, SIDEWALK_TOP, inner * 2), { x: x + mid, y: SIDEWALK_TOP / 2, z }));
     walks.push(placed(new THREE.BoxGeometry(band, SIDEWALK_TOP, inner * 2), { x: x - mid, y: SIDEWALK_TOP / 2, z }));
-    lawns.push(placed(new THREE.BoxGeometry(inner * 2, LAWN_TOP, inner * 2), { x, y: LAWN_TOP / 2, z }));
+    (districts && j < 0 ? paved : lawns).push(placed(new THREE.BoxGeometry(inner * 2, LAWN_TOP, inner * 2), { x, y: LAWN_TOP / 2, z }));
   }
   group.add(mesh(mergeParts(walks), toonMaterial(PALETTE.sidewalk), { cast: false, outline: 0 }));
   group.add(mesh(mergeParts(lawns), toonMaterial(PALETTE.lawn), { cast: false, outline: 0 }));
+  if (paved.length) group.add(mesh(mergeParts(paved), toonMaterial('#a6b9c7'), { cast: false, outline: 0 }));
 
   // Dashed centre lines between intersections.
   const dashes = [];
@@ -112,7 +113,8 @@ export function buildRoads(rings) {
       const centre = seg * PITCH;
       for (let d = -3; d <= 3; d++) {
         const along = centre + d * 1.6;
-        dashes.push([line, along, true], [along, line, false]);
+        dashes.push([line, along, true]);
+        if (!districts || k !== -1) dashes.push([along, line, false]);
       }
     }
   }
@@ -195,7 +197,7 @@ export function benchGeometry() {
 }
 
 /** lots: Map(cellKey → { i, j, padW, padD, cz }) for occupied lots. */
-export function buildDecor(rings, lots, half) {
+export function buildDecor(rings, lots, half, { districts = false } = {}) {
   const group = new THREE.Group(); group.name = 'decor';
   const trees = [], flowers = [], benches = [], ponds = [];
   const rnd = seeded(`decor:${rings}`);
@@ -203,6 +205,12 @@ export function buildDecor(rings, lots, half) {
   for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
     if (i === 0 && j === 0) continue;
     const c = cellCenter(i, j), r = seeded(`lot:${i},${j}`);
+    // Downtown keeps its paved grid open. Small planted corners soften occupied lots;
+    // vacant paved squares remain clear for the next tower.
+    if (districts && j < 0) {
+      if (occupied.has(`${i},${j}`)) benches.push([c.x + BENCH_OFFSET.x, c.z + BENCH_OFFSET.z, 0]);
+      continue;
+    }
     if (!occupied.has(`${i},${j}`)) {
       // Park: a pond sometimes, trees, flowers.
       const spots = [];
@@ -231,6 +239,7 @@ export function buildDecor(rings, lots, half) {
       if (rnd() < 0.3) continue;
       const [x, z] = side === 0 ? [t, ring] : side === 1 ? [ring, -t] : side === 2 ? [-t, -ring] : [-ring, t];
       if (Math.abs(x) > half - 1.2 || Math.abs(z) > half - 1.2) continue;
+      if (districts && (z < -8 || Math.abs(z + 8) < 3.5)) continue;
       if (side === 0 && Math.abs(t) < 5.6) continue;
       trees.push({ x: x + (rnd() - 0.5), y: 0, z: z + (rnd() - 0.5), kind: rnd() < 0.7 ? 'cone' : 'ball', scale: 0.8 + rnd() * 0.5, color: CANOPY[Math.floor(rnd() * 4)] });
     }

@@ -183,7 +183,7 @@
 .city-job-time { flex: none; color: var(--muted); font-size: 11.5px; }
 
 /* Help card */
-.city-help { position: absolute; top: 112px; left: 14px; z-index: 4; display: grid; gap: 12px; width: min(310px, calc(100% - 28px)); padding: 14px 16px 16px; box-shadow: var(--shadow-lg); animation: city-pop var(--med) var(--ease); }
+.city-help { position: absolute; top: 112px; left: 14px; z-index: 4; display: grid; gap: 12px; width: min(360px, calc(100% - 28px)); max-height: calc(100% - 128px); overflow-y: auto; padding: 14px 16px 16px; box-shadow: var(--shadow-lg); animation: city-pop var(--med) var(--ease); }
 .city-help-head { display: flex; align-items: center; justify-content: space-between; margin: -4px -8px -4px 0; }
 .city-help-list { display: grid; grid-template-columns: auto 1fr; gap: 7px 12px; margin: 0; font-size: 12.5px; align-items: center; }
 .city-help-list dt { margin: 0; }
