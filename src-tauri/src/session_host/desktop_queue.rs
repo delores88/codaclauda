@@ -163,7 +163,9 @@ fn recipient_acknowledged(store: &Store, binding: &Binding) -> bool {
     // the message was pruned or when the mailbox cannot be read.
     let Ok(page) = mailbox::api(store, "inbox", &json!({"addr": binding.address, "since": last.ack_sequence - 1, "limit": 1})) else { return false; };
     page["messages"].as_array().into_iter().flatten()
-        .any(|m| m["id"].as_str() == Some(id.as_str()) && m["read_at"].as_u64().is_some())
+        .any(|m| m["id"].as_str() == Some(id.as_str())
+            && m["sequence"].as_u64() == Some(last.ack_sequence)
+            && m["read_at"].as_u64().is_some())
 }
 
 fn binding_view(binding: &Binding, endpoint: &Value, acknowledged: bool) -> Value {
@@ -1026,6 +1028,37 @@ mod tests {
         assert!(!recipient_acknowledged(&f.store, &binding), "old receipts have no exact acknowledgment evidence");
         // Reading/displaying receipts does not mutate a saved binding or retry a command.
         assert!(only(&f).last.is_none());
+    }
+
+    #[test]
+    fn a_reused_message_id_after_retention_cannot_acknowledge_an_old_batch() {
+        let f = fixture();
+        bind(&f.path, &f.store, &ctx(&f, true), "codex-desk", THREAD, 1).unwrap();
+        let original_sequence = post(&f, "reused", "owner");
+        let original_batch = batch(&f.store, "codex-desk", 0).unwrap();
+        let mut binding = only(&f);
+        binding.last = Some(receipt(&original_batch, &not_run(Ended::Exited(0)), 2));
+        mailbox::api(&f.store, "ack", &json!({"addr": "codex-desk", "id": "reused"})).unwrap();
+        assert!(recipient_acknowledged(&f.store, &binding));
+
+        // Age only this test fixture, then let the real mailbox retention path
+        // prune the original message while preserving its sequence counter.
+        let mailbox_path = f.store.root.join("mailbox.json");
+        let mut saved: Value = serde_json::from_slice(&fs::read(&mailbox_path).unwrap()).unwrap();
+        saved["messages"]["reused"]["message"]["created_at"] = json!(0);
+        fs::write(&mailbox_path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        let expired = mailbox::api(&f.store, "inbox", &json!({"addr": "codex-desk"})).unwrap();
+        assert!(expired["messages"].as_array().unwrap().is_empty());
+        assert!(!recipient_acknowledged(&f.store, &binding));
+
+        let replacement_sequence = post(&f, "reused", "owner");
+        assert!(replacement_sequence > original_sequence);
+        let replacement_batch = batch(&f.store, "codex-desk", original_sequence).unwrap();
+        mailbox::api(&f.store, "ack", &json!({"addr": "codex-desk", "id": "reused"})).unwrap();
+        assert!(!recipient_acknowledged(&f.store, &binding), "a new message with the same ID is not evidence for the old batch");
+
+        binding.last = Some(receipt(&replacement_batch, &not_run(Ended::Exited(0)), 3));
+        assert!(recipient_acknowledged(&f.store, &binding), "the new batch can use its own exact acknowledgment");
     }
 
     #[test]

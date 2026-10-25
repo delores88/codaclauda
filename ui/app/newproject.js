@@ -8,6 +8,7 @@
  * given, the new project is pinned to that City plot before resolving.
  * CSP: classes and CSSOM only, never inline style attributes. */
 import { languageColor } from './store.js';
+import { cloneableRepos } from './newproject-repos.js';
 
 const NAME_LIMIT = 100;
 const DESCRIPTION_LIMIT = 350;
@@ -478,8 +479,7 @@ function build({ store, ui, bridge }, lot, resolve, initial) {
 
   /* ---------- clone tab ---------- */
   function cloneable() {
-    const local = new Set(store.projects.filter(p => p.path).flatMap(p => p.ids.filter(id => id.startsWith('gh:'))));
-    return (state.repos || gh().repos || []).filter(r => r?.full_name && !local.has(`gh:${String(r.full_name).toLowerCase()}`));
+    return cloneableRepos(state.repos || gh().repos || [], store.projects, initial.repo);
   }
   function selectedRepo() { return state.selected ? cloneable().find(r => String(r.full_name).toLowerCase() === state.selected.toLowerCase()) || null : null; }
 

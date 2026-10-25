@@ -387,17 +387,18 @@ class CityView {
     try { const m = this.store.machines; return m && typeof m === 'object' ? { ...EMPTY_MACHINES, ...m } : EMPTY_MACHINES; }
     catch (error) { console.error('City: machine status unavailable', error); return EMPTY_MACHINES; }
   }
-  /** Pin projects that just got their first lot, so the layout survives other machines and reinstalls. */
-  persistLots(fresh) {
-    if (!fresh.length || typeof this.store.setCityLot !== 'function') return;
+  /** Save new lots and repair aliases, so a canonical-id change also survives reopening. */
+  persistLots(fresh, pinRepairs = null) {
+    if (typeof this.store.setCityLot !== 'function') return;
     const store = this.store;
-    const lots = fresh.flatMap(f => {
+    const lots = pinRepairs ?? fresh.flatMap(f => {
       const project = store.project(f.id);
       return [...new Set([f.id, ...(project?.ids || [])])].map(id => ({ ...f, id }));
     });
+    if (!lots.length) return;
     setTimeout(() => {   // never re-enter sync() from inside sync()
       const pins = store.cityLots || {};
-      const todo = lots.filter(f => !pins[f.id] || (f.migrated && (pins[f.id].i !== f.i || pins[f.id].j !== f.j)));
+      const todo = lots.filter(f => !pins[f.id] || ((f.migrated || f.repair) && (pins[f.id].i !== f.i || pins[f.id].j !== f.j)));
       if (todo.length > 1 && typeof store.updateDesktop === 'function') store.updateDesktop(d => { d.cityLots = { ...(d.cityLots || {}) }; for (const f of todo) d.cityLots[f.id] = { i: f.i, j: f.j }; });
       else for (const f of todo) store.setCityLot(f.id, { i: f.i, j: f.j });
     }, 0);
@@ -411,11 +412,11 @@ class CityView {
     const projects = store.visibleProjects('city');
     const districts = !this.islands?.current;
     const hold = Boolean(this.plotDialog && performance.now() - this.plotDialog.at < PLOT_HOLD_MS);
-    const { cells, rings, fresh = [], reserved = new Map(), emptyPlots } = this.slots.assign(projects, { pins: store.cityLots || {}, reserve: store.projects.filter(p => !p.visible.city), hold, districts });
+    const { cells, rings, fresh = [], reserved = new Map(), emptyPlots, pinRepairs } = this.slots.assign(projects, { pins: store.cityLots || {}, reserve: store.projects.filter(p => !p.visible.city), hold, districts });
     this.emptyPlots = emptyPlots;
     this.cells = cells; this.rings = rings; this.reserved = reserved;
     this.occupied = new Set([...cells.values()].map(c => cellKey(c.i, c.j)));
-    this.persistLots(fresh);
+    this.persistLots(fresh, pinRepairs);
     const ringsChanged = this.world.setRings(rings, { animate: Boolean(this.firstSyncDone), districts });
     // Until the owner moves the camera, keep the whole (growing) island framed.
     if (ringsChanged && !this.world.userMoved && !this.pendingFocus && !this.talk) this.world.resetView({ instant: !this.firstSyncDone, auto: true });

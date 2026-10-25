@@ -136,6 +136,55 @@ test('aliases preserve saved plots, including a canonical ID missing from the al
   assert.deepEqual(slots.assign([renamed]).cells.get(renamed.id), first.cells.get(project.id));
 });
 
+test('canonical-only 0.6.2 pins acquire aliases without migration and survive reopening', () => {
+  const project = both('existing'), pin = { i: 3, j: -2 };
+  const pins = { [project.id]: pin };
+  const initial = new SlotMap().assign([project], { pins });
+  assert.deepEqual(initial.fresh, []);
+  assert.deepEqual(initial.migrated, []);
+  assert.deepEqual(initial.pinRepairs, [{ id: 'gh:owner/existing', ...pin, repair: true }]);
+  for (const { id, i, j } of initial.pinRepairs) pins[id] = { i, j };
+
+  const aliasOnly = repo('existing');
+  const reopened = new SlotMap().assign([aliasOnly], { pins });
+  assert.deepEqual(coordinates(reopened.cells.get(aliasOnly.id)), pin);
+  assert.deepEqual(reopened.pinRepairs, []);
+  const relocated = local('new-path', { ids: ['gh:owner/existing'] });
+  const switched = new SlotMap().assign([relocated], { pins });
+  assert.deepEqual(coordinates(switched.cells.get(relocated.id)), pin);
+  assert.deepEqual(switched.pinRepairs, [{ id: relocated.id, ...pin, repair: true }]);
+});
+
+test('late and conflicting aliases are repaired for standing and hidden buildings', () => {
+  const slots = new SlotMap(), project = both('aliases'), pin = { i: -3, j: -2 };
+  const pins = { [project.id]: pin, 'gh:owner/aliases': { i: 1, j: -1 } };
+  slots.assign([project], { pins });
+  project.ids.push('gh:owner/renamed');
+  const hidden = slots.assign([], { pins, reserve: [project] });
+  assert.deepEqual(hidden.fresh, []);
+  assert.deepEqual(hidden.migrated, []);
+  assert.deepEqual(hidden.pinRepairs, [
+    { id: 'gh:owner/aliases', ...pin, repair: true },
+    { id: 'gh:owner/renamed', ...pin, repair: true },
+  ]);
+  for (const { id, i, j } of hidden.pinRepairs) pins[id] = { i, j };
+  const reopened = new SlotMap().assign([repo('renamed')], { pins });
+  assert.deepEqual(coordinates(reopened.cells.get('gh:owner/renamed')), pin);
+  assert.deepEqual(reopened.pinRepairs, []);
+});
+
+test('shared repository aliases converge without moving either local clone', () => {
+  const projects = ['a-clone', 'b-clone'].map(name => local(name, { ids: ['gh:owner/shared'] }));
+  const pins = { [projects[0].id]: { i: -2, j: -2 }, [projects[1].id]: { i: 2, j: -2 } };
+  const slots = new SlotMap(), initial = slots.assign(projects, { pins });
+  assert.deepEqual(initial.pinRepairs, [{ id: 'gh:owner/shared', i: -2, j: -2, repair: true }]);
+  for (const { id, i, j } of initial.pinRepairs) pins[id] = { i, j };
+  const next = slots.assign([...projects].reverse(), { pins });
+  assert.deepEqual(next.cells, initial.cells);
+  assert.deepEqual(next.pinRepairs, []);
+  assert.deepEqual(new SlotMap().assign(projects, { pins }).pinRepairs, []);
+});
+
 test('plot-dialog hold postpones only genuinely new unpinned projects', () => {
   const slots = new SlotMap(), projects = [both('existing'), local('new')];
   const initial = slots.assign([projects[0]]);

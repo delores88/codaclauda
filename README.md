@@ -18,19 +18,18 @@ the local coordination board.
 
 ## Current status
 
-[Version 0.6.1](https://github.com/delores88/codaclauda/releases/tag/v0.6.1)
-is installed, published and accepted in the Marketplace. Five bounded native
-observations include one test notification accepted by ntfy and reported by
-the owner as received on his iPhone. Incoming phone messages and agent replies
-were not established by that acceptance. A later owner test exposed a parser
-blocker when ntfy sends notification-clear events.
+[Version 0.6.2](https://github.com/delores88/codaclauda/releases/tag/v0.6.2)
+is installed, published and accepted in the Marketplace. Its phone poll correction
+preserves ordered durable cursors across ntfy control events. One owner-driven
+phone turn completed and outbound transport receipts advanced; physical iPhone
+reply display and actual provider cost were not established by that acceptance.
 
-This **0.6.2 source** corrects that poll blocker while preserving ordered durable
-cursors and message deduplication. Build, installation, live phone delivery and
-Marketplace admission require separate receipts; see the
-[0.6.2 hotfix scope](docs/RELEASE-0.6.2.md). Source availability is not installed
-acceptance. Native Marketplace UI and authenticated served bytes remain separate
-evidence limits.
+This **0.7.0 source** adds City districts, a railway, grounded clone signs and
+rooftop CI markers, plus clearer team and desktop delivery status, longer mailbox
+waits, and scanned phone reply previews. See the [0.7.0 release scope](docs/RELEASE-0.7.0.md).
+Source review and synthetic previews remain separate from installed acceptance,
+phone delivery and Marketplace admission. Native Marketplace UI and authenticated
+served bytes remain separate evidence limits.
 
 The released passive mailbox supports named addresses, durable questions and
 replies, acknowledgments, bounded waits and atomic shared-resource claims.

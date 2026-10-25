@@ -72,7 +72,8 @@ export class SlotMap {
   }
   /** Home city: preserve correct-side pins and standing buildings, migrate other lots once.
    * `fresh` includes replacement pins with migrated:true; persist these even if a pin already
-   * exists. `emptyPlots` excludes hidden reservations, and always has at least three per side.
+   * exists. `pinRepairs` also fills missing aliases of unchanged buildings. `emptyPlots`
+   * excludes hidden reservations, and always has at least three per side.
    * Contributor islands use districts:false to retain their established compact layout. */
   assignDistricts(projects, { pins = {}, reserve = [], hold = false } = {}) {
     const cells = new Map(), taken = new Set(), fresh = [], reserved = new Map(), migrated = [], districts = new Map();
@@ -92,7 +93,7 @@ export class SlotMap {
       if (x.hidden) reserved.set(key, x.p);
       else { cells.set(x.p.id, cell); districts.set(x.p.id, x.district); }
       for (const id of projectIds(x.p)) this.memo.set(id, cell);
-      x.done = true;
+      x.done = true; x.cell = cell;
       const previous = x.oldPin || x.oldMem;
       const moved = previous && !same(previous, cell);
       if (!x.oldPin || !same(x.oldPin, cell)) fresh.push({ id: x.p.id, i: c.i, j: c.j, ...(moved ? { migrated: true } : {}) });
@@ -119,12 +120,23 @@ export class SlotMap {
     }
     let rings = this.rings;
     for (const c of cells.values()) rings = Math.max(rings, c.ring);
-    for (const x of info) if (x.done) { const c = this.memo.get(x.p.id); rings = Math.max(rings, c.ring); }
+    for (const x of info) if (x.done) rings = Math.max(rings, x.cell.ring);
     const free = district => districtCells(rings, district).filter(c => !taken.has(cellKey(c.i, c.j)));
     while (DISTRICTS.some(district => free(district).length < MIN_EMPTY_PLOTS)) rings++;
     this.rings = rings;
     const emptyPlots = Object.fromEntries(DISTRICTS.map(district => [district, free(district)]));
-    return { cells, rings, fresh, reserved, districts, emptyPlots, migrated };
+    // Old layouts saved only the canonical id. Persist every alias even when the lot
+    // did not move, so a reopen with a different canonical id keeps the same building.
+    // Multiple local clones can share a GitHub alias: a canonical owner wins, otherwise
+    // the first project in the stable id order owns that alias. Never alternate saves.
+    const pinTargets = new Map();
+    for (const x of info) if (x.done) {
+      const cell = x.cell;
+      for (const id of projectIds(x.p)) if (!pinTargets.has(id) || id === x.p.id) pinTargets.set(id, cell);
+    }
+    const pinRepairs = [...pinTargets].filter(([id, cell]) => !same(cleanCell(pins[id]), cell))
+      .map(([id, cell]) => ({ id, i: cell.i, j: cell.j, repair: true }));
+    return { cells, rings, fresh, reserved, districts, emptyPlots, migrated, pinRepairs };
   }
   assignLegacy(projects, { pins = {}, reserve = [], hold = false } = {}) {
     const cells = new Map(), taken = new Set(), fresh = [], reserved = new Map();
