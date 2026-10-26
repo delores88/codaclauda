@@ -104,6 +104,37 @@ test('another explicit launch remains available after admission while existing p
   assert.ok(sessions.list.every(session => session.status === 'running'));
 });
 
+test('a refused start cannot display its error or change drafts after selecting another building', async () => {
+  const other = { id: 'local:c:/sample/other', name: 'Other', path: 'C:/sample/other' };
+  const refusal = new Error('Sample admission refused'), failures = [];
+  let rejectStart, starts = 0;
+  const sessions = {
+    available: true,
+    start: () => { starts++; return new Promise((_, reject) => { rejectStart = reject; }); },
+    send: () => assert.fail('A refused session cannot receive a prompt'),
+  };
+  const actions = actionState(project, sessions);
+  actions.launch.onStartFailed = error => failures.push(error);
+  actions.drafts.set(project.id, 'Keep Sample task');
+  actions.drafts.set(other.id, 'Keep Other task');
+  const operation = actions.start('codex');
+  actions.setProject(other, { side: 'pc', remote: false });
+  assert.equal(actions.input.value, 'Keep Other task');
+  rejectStart(refusal);
+  await operation;
+  assert.equal(starts, 1);
+  assert.deepEqual(failures, [refusal], 'the original launch still receives its actual refusal');
+  assert.equal(actions.project.id, other.id);
+  assert.equal(actions.error, '');
+  assert.equal(actions.errorNode.hidden, true);
+  assert.equal(actions.errorNode.textContent, '');
+  assert.equal(actions.input.value, 'Keep Other task');
+  assert.equal(actions.drafts.get(other.id), 'Keep Other task');
+  assert.equal(actions.drafts.get(project.id), 'Keep Sample task');
+  assert.equal(actions.launch.pending, null);
+  assert.equal(actions.launch.recovery.size, 0);
+});
+
 test('shared start helper preserves exact project and current saved access through existing start path', async () => {
   const calls = [], sessions = { start: async options => { calls.push(options); return { id: 'new', ...options }; } };
   let level = 'read';
@@ -145,14 +176,21 @@ test('repeated clicks while start is pending reuse the same launch', async () =>
 
 test('a failed first send preserves session identity and draft, and retry sends without a second start', async () => {
   let fail = true, starts = 0;
-  const sends = [], opens = [];
+  const sends = [], opens = [], contexts = [];
   const sessions = { start: async () => { starts++; return { id: 'a' }; }, send: async (...args) => { sends.push(args); if (fail) throw new Error('Unavailable'); } };
-  const launch = new BuildingSessionLaunch({ store, sessions, onStarted: (session, meta) => opens.push([session.id, { ...meta }]) });
+  const launch = new BuildingSessionLaunch({ store, sessions, onStarting: ({ context }) => contexts.push(context), onStarted: (session, meta) => opens.push([session.id, { ...meta }]) });
   const record = await launch.start('codex', project, 'Keep this prompt');
   assert.equal(record.session.id, 'a'); assert.equal(record.prompt, 'Keep this prompt'); assert.match(record.error, /Unavailable/);
   assert.equal(opens.length, 2); assert.match(opens[1][1].sendError, /Unavailable/);
+  assert.deepEqual(opens.map(([, meta]) => meta.origin), ['started', 'send-error']);
+  assert.equal(contexts.length, 1);
+  assert.ok(opens.every(([, meta]) => meta.context === contexts[0]));
   await launch.start('codex', project, 'A duplicate click');
   assert.equal(starts, 1);
+  assert.equal(opens[2][1].origin, 'recovery');
+  await launch.open(record); // explicit Open session uses the same recovery contract
+  assert.equal(opens[3][1].origin, 'recovery');
+  assert.equal(opens[3][1].context, contexts[0]);
   fail = false; await launch.retry(project.id);
   assert.equal(starts, 1); assert.deepEqual(sends, [['a', 'Keep this prompt'], ['a', 'Keep this prompt']]);
   assert.equal(launch.recovery.size, 0); assert.equal(record.prompt, ''); assert.equal(record.error, '');
@@ -187,7 +225,10 @@ test('starting callback receives project and provider immediately before native 
   });
   const first = launch.start('codex', project);
   assert.equal(nested, first);
-  assert.deepEqual(events, [{ provider: 'codex', project }, 'native']);
+  assert.equal(events.length, 2);
+  assert.deepEqual({ ...events[0], context: undefined }, { provider: 'codex', project, context: undefined });
+  assert.ok(events[0].context && typeof events[0].context === 'object');
+  assert.equal(events[1], 'native');
   finish({ id: 'a' }); await first;
 });
 
@@ -235,4 +276,43 @@ test('late conversation failure recovers the created session without repeating n
   await launch.start('codex', project);
   assert.equal(starts, 1); assert.deepEqual(failures, []);
   assert.equal(launch.recovery.get(project.id).session.id, 'a');
+});
+
+test('creation failure carries its own launch context, distinct from a later attempt', async () => {
+  const refusal = new Error('Creation refused'), starting = [], failed = [], admitted = [];
+  let attempts = 0;
+  const launch = new BuildingSessionLaunch({
+    store, sessions: { start: async () => { if (++attempts === 1) throw refusal; return { id: 'a' }; } },
+    onStarting: ({ context }) => starting.push(context),
+    onStartFailed: (error, { context }) => failed.push({ error, context }),
+    onStarted: (session, meta) => admitted.push({ session, ...meta }),
+  });
+  await assert.rejects(launch.start('codex', project), error => error === refusal);
+  await launch.start('codex', project);
+  assert.equal(starting.length, 2); assert.notEqual(starting[0], starting[1]);
+  assert.deepEqual(failed, [{ error: refusal, context: starting[0] }]);
+  assert.equal(admitted.length, 1); assert.equal(admitted[0].context, starting[1]);
+  assert.equal(admitted[0].origin, 'started');
+});
+
+test('a presentation callback settling late retains its original launch context', async () => {
+  const notifications = [], starting = [];
+  let nextId = 0, settleFirst;
+  const launch = new BuildingSessionLaunch({
+    store, sessions: { start: async () => ({ id: `s${++nextId}` }) },
+    onStarting: ({ context }) => starting.push(context),
+    onStarted: async (session, meta) => {
+      if (session.id === 's1') await new Promise(resolve => { settleFirst = resolve; });
+      notifications.push({ id: session.id, ...meta });
+    },
+  });
+  await launch.start('claude', project);
+  await launch.start('codex', { ...project, id: 'local:c:/sample/second', path: 'C:/sample/second' });
+  assert.deepEqual(notifications.map(item => item.id), ['s2']);
+  settleFirst(); await Promise.resolve(); await Promise.resolve();
+  assert.deepEqual(notifications.map(item => item.id), ['s2', 's1']);
+  assert.equal(notifications[0].context, starting[1]);
+  assert.equal(notifications[1].context, starting[0]);
+  assert.notEqual(starting[0], starting[1]);
+  assert.ok(notifications.every(item => item.origin === 'started'));
 });

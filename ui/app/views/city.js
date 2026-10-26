@@ -26,7 +26,8 @@ import { buildingStreetBoxes, buildingSolidAt } from '../city/street-collision.j
 import { JumpToPicker } from '../city/jumpto.js';
 import { largestFreeRect, buildingFocusDistance, boxFitDistance } from '../city/camera.js';
 import { AGENT_PROJECT_PREF, AGENT_PROJECT_TIME_PREF, locateAgents } from '../city/agent-location.js';
-import { BuildingSessionActions } from '../city/building-actions.js';
+import { BuildingSessionActions, offersBuildingSession } from '../city/building-actions.js';
+import { buildingTalkCallbacks } from '../city/building-talk.js';
 
 registerIcons({
   'city-pan': '<path d="M12 3v18M3 12h18M8 7l4-4 4 4M8 17l4 4 4-4M7 8l-4 4 4 4M17 8l4 4-4 4"/>',
@@ -398,17 +399,13 @@ export class CityView {
       canNewSessionHere: project => !this.islands?.current && (!this.world?.underside || this.world.restSide === 'pc')
         && typeof project?.path === 'string' && Boolean(project.path.trim()),
     });
+    this.newSessionHere = projectId => this.openBuildingSessionControls(projectId);
     // Drag to assign: the agent you're carrying, under the pointer (pointer-events: none).
     this.dragGhost = h('div.city-drag-ghost', { hidden: true, 'aria-hidden': 'true' });
     this.cityRoot = h('div.city-root', this.stage, ...this.bars, this.overlay, this.hud, this.legend, this.machinesCard, this.streetHint, this.zoomHint, this.toolbar, this.help, this.panel, this.empty, this.leaveBtn, this.talkPanel.node, this.fallback, this.dragGhost);
     this.root.append(this.cityRoot);
     this.buildingSessions = new BuildingSessionActions({ store: this.store, sessions,
-      onStarted: (session, { sendError } = {}) => {
-        // An owner-started arrival walks to its project even in a previously empty city.
-        if (this.npcs) this.npcs.first = false;
-        this.openBuildingSession(session.id);
-        if (sendError) toast(sendError, { kind: 'error', timeout: 9000 });
-      },
+      ...buildingTalkCallbacks(this, { notice: message => toast(message, { kind: 'error', timeout: 9000 }) }),
     });
     if (!storage.get(HELP_KEY)) this.help.hidden = false;
   }
@@ -680,6 +677,7 @@ export class CityView {
     }
     if (this.street && !this.npcs.owner) this.exitStreet({ fly: true });
     this.updateTalk();
+    this.refreshBuildingTalkAction();
     if (this.zoomHintAt && performance.now() - (this.zoomOverAt || 0) > 2500) this.hideZoomHint();
     this.renderFlip();
     // While the island turns: no hover, no tags (labels hide in updateOverlays); following stops on the Spark side.
@@ -1450,9 +1448,24 @@ export class CityView {
   }
 
   /* ---------------- panels ---------------- */
-  openBuildingSession(id) {
-    // Pending the 0.7.1 managed-session enterTalk hook; see the acceptance note.
-    this.pendingBuildingSession = id;
+  refreshBuildingTalkAction() {
+    if (!this.talkPanel?.isOpen) return;
+    const project = this.talkPanel.info()?.project;
+    const action = offersBuildingSession(project, { side: this.world?.restSide, remote: Boolean(this.islands?.current) })
+      ? this.newSessionHere : undefined;
+    if (this.talkPanel.onNewSessionHere === action) return;
+    // Bind the documented public hook only for the currently eligible project.
+    // Eligibility can change as the island flips or project metadata refreshes.
+    this.talkPanel.onNewSessionHere = action;
+    this.talkPanel.refresh();
+  }
+  openBuildingSessionControls(projectId) {
+    const project = this.store.project(projectId);
+    if (!this.visible || !offersBuildingSession(project, { side: this.world?.restSide, remote: Boolean(this.islands?.current) })) return;
+    this.exitTalk();
+    this.select({ kind: 'building', id: project.id });
+    this.focusSelection();
+    this.buildingSessions.input.focus({ preventScroll: true });
   }
   refreshPanel() {
     const s = this.selection;

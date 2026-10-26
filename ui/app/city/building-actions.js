@@ -26,7 +26,8 @@ export function buildingProviders(found, phase = 'ready', available = true) {
 }
 
 /** Serialize one launch and retain its identity if opening the conversation or first send fails.
- * A retry is an explicit send to the existing session; it never repeats session_start. */
+ * A retry is an explicit send to the existing session; it never repeats session_start.
+ * Callback context is an opaque per-launch identity, suitable for a view-owned WeakMap. */
 export class BuildingSessionLaunch {
   constructor({ store, sessions, onStarting = () => {}, onStarted = () => {}, onStartFailed = () => {}, onChange = () => {} }) {
     Object.assign(this, { store, sessions, onStarting, onStarted, onStartFailed, onChange });
@@ -39,7 +40,7 @@ export class BuildingSessionLaunch {
     if (existing) { this.open(existing); return Promise.resolve(existing); }
     const record = { projectId: project.id, session: null, prompt: String(prompt).trim(), error: '', openError: '' };
     return this.begin(record, () => {
-      this.present(this.onStarting, { provider, project });
+      this.present(this.onStarting, { provider, project, context: record });
       return startProjectSession(this.store, this.sessions, provider, project);
     });
   }
@@ -56,11 +57,11 @@ export class BuildingSessionLaunch {
     this.onChange();
     return pending;
   }
-  async open(record) {
+  async open(record, origin = 'recovery') {
     const version = record.openVersion = (record.openVersion || 0) + 1;
     record.opening = true;
     try {
-      await this.onStarted(record.session, { prompt: record.prompt, sendError: record.error });
+      await this.onStarted(record.session, { prompt: record.prompt, sendError: record.error, origin, context: record });
       if (version === record.openVersion) record.openError = '';
     } catch (error) {
       if (version === record.openVersion) {
@@ -79,15 +80,15 @@ export class BuildingSessionLaunch {
     try {
       if (create) {
         try { record.session = await create(); }
-        catch (error) { this.present(this.onStartFailed, error); throw error; }
+        catch (error) { this.present(this.onStartFailed, error, { context: record }); throw error; }
         this.recovery.set(record.projectId, record);
-        this.open(record);
+        this.open(record, 'started');
       }
       if (record.prompt) {
         try { await this.sessions.send(record.session.id, record.prompt); record.prompt = ''; record.error = ''; }
         catch (error) {
           record.error = `Session started. The prompt was not sent: ${error?.message || error}`;
-          this.open(record); // the conversation also receives the failure and unsent draft
+          this.open(record, 'send-error'); // the conversation also receives the failure and unsent draft
         }
       }
       if (!record.error && !record.openError && !record.opening) this.recovery.delete(record.projectId);
@@ -188,7 +189,9 @@ export class BuildingSessionActions {
     try {
       const record = await this.launch.start(provider, project, prompt);
       if (!record.error) { this.drafts.delete(project.id); if (this.project?.id === project.id) this.input.value = ''; }
-    } catch (error) { this.error = `Could not start: ${error?.message || error}`; }
+    } catch (error) {
+      if (this.project?.id === project.id) this.error = `Could not start: ${error?.message || error}`;
+    }
     finally { this.refresh(); }
   }
   async retryPrompt() {
