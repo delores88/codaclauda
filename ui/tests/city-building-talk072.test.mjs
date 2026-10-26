@@ -22,11 +22,15 @@ const agent = id => ({ id: `sess:${id}`, sessionId: id, kind: 'session', provide
 function fixture() {
   const events = [], starts = [], sends = [], notices = [], failures = [], resolved = [];
   const native = deferred(), agents = [agent('already-running')];
+  const npcIds = new Set(agents.map(a => a.id));
   const store = { project: id => project.ids.includes(id) ? project : null, projectAccess: () => ({ level: 'read' }) };
   let view;
   view = Object.assign(Object.create(CityView.prototype), {
     visible: true, failed: false, store, world: { restSide: 'pc', setShot: value => events.push(['shot', value]) },
-    islands: { current: null }, npcs: { hold() {}, releaseTalkSpot() {} },
+    islands: { current: null }, npcs: {
+      owner: null, hold() {}, releaseTalkSpot() {},
+      position: target => npcIds.has(target.id) ? { x: 2, y: 0, z: 3 } : null,
+    },
     talkPanel: {
       open: (who, options) => events.push(['open', who, options]), focus() {},
       close: () => events.push(['close']),
@@ -47,7 +51,11 @@ function fixture() {
   const launch = new BuildingSessionLaunch({ store, sessions: client,
     ...buildingTalkCallbacks(view, { notice: message => notices.push(message) }) });
   return { view, store, client, launch, native, agents, events, starts, sends, notices, failures, resolved,
-    add: id => { const next = agent(id); agents.push(next); return next; } };
+    add: (id, { npc = true } = {}) => { const next = agent(id); agents.push(next); if (npc) npcIds.add(next.id); return next; },
+    spawn: id => npcIds.add(`sess:${id}`),
+    // The frame stages the owner independently of session admission/registry updates.
+    stageOwner: () => { view.npcs.owner = { path: [] }; view.talk.spot = { x: 1, y: 0, z: 3 }; },
+  };
 }
 
 test('building start enters pending talk before native start and resolves only the admitted session', async () => {
@@ -62,12 +70,19 @@ test('building start enters pending talk before native start and resolves only t
   assert.deepEqual(f.starts[0], { projectId: project.id, cwd: project.path, access: 'read', playwright: false, provider: 'codex', title: 'Codex · Alpha' });
   f.add('unrelated');
   assert.equal(f.view.resolvePendingTalk(), false);
-  const expectedAgent = f.add('admitted');
+  const expectedAgent = f.add('admitted', { npc: false });
   const actual = { id: 'admitted', provider: 'codex', projectId: project.id };
   f.native.resolve(actual);
   const record = await operation;
   assert.equal(record.session, actual);
   assert.equal(f.view.talk, pending, 'pending presentation stays the same conversation');
+  assert.ok(f.view.talk.pending, 'admission before owner staging stays pending');
+  assert.equal(f.view.talk.expectedId, expectedAgent.id);
+  assert.deepEqual(f.sends, [['admitted', 'Work here']], 'presentation staging does not delay the first prompt');
+  f.stageOwner();
+  assert.equal(f.view.resolvePendingTalk(), false, 'a registry row without its NPC cannot become live');
+  f.spawn('admitted');
+  assert.equal(f.view.resolvePendingTalk(), true);
   assert.equal(f.view.talk.id, expectedAgent.id);
   assert.equal(f.view.talk.pending, null);
   assert.deepEqual(f.resolved, [expectedAgent]);
@@ -82,6 +97,7 @@ test('the exact admitted id remains pending until its own registry row arrives',
   await operation;
   assert.equal(f.view.talk.expectedId, 'sess:expected');
   assert.ok(f.view.talk.pending);
+  f.stageOwner();
   f.add('different');
   assert.equal(f.view.resolvePendingTalk(), false);
   const expected = f.add('expected');
@@ -139,6 +155,7 @@ test('first-send failure preserves the live session; explicit recovery and retry
   const f = fixture(), delivery = deferred(), sendReached = deferred();
   f.client.send = (id, text) => { f.sends.push([id, text]); sendReached.resolve(); return delivery.promise; };
   const operation = f.launch.start('codex', project, 'Keep this prompt');
+  f.stageOwner();
   f.add('admitted'); f.native.resolve({ id: 'admitted' });
   await sendReached.promise;
   assert.equal(f.view.talk.id, 'sess:admitted');

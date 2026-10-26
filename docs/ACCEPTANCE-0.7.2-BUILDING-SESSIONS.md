@@ -1,8 +1,10 @@
 # Building sessions in City talk mode
 
 Date: 2026-10-26. Prepared for 0.7.2 in `local/worktrees/072-session`, branch
-`codex/codaclauda-0.7.2-session`, based on the reviewed City talk candidate
-`540afb3` and its desktop-metadata clarification `132e434`.
+`codex/codaclauda-0.7.2-session`, rebased onto final City talk review commit
+`b8be0db` (source checkpoint `b6ac1ac`, extending `132e434`). The caller flow
+approved at `ce2db56` is unchanged. The new base supplies the wider shoulder
+shot, head/bubble separation and final pending-session lifecycle.
 
 ## Behavior
 
@@ -45,11 +47,16 @@ Open session is an explicit reopen, distinct from an automatic error update.
 
 ## Validation
 
-`cd ui; node --test` passes **444/444**, including **36** building-control and
+`cd ui; node --test` passes **463/463**, including **36** building-control and
 caller-integration tests. These cover provider/project/access eligibility,
 duplicate-start protection, exact pending identity, late admission/refusal,
 same-session recovery, cross-project error isolation and header availability.
 `git diff --check` passes.
+
+The final hook waits for owner staging and the exact session NPC. Three older
+caller fixtures initially lacked that staging model; they now verify admission
+before staging, a registry row without its NPC, and final exact-NPC resolution.
+Only tests and this acceptance record changed after rebasing the approved flow.
 
 Independent source review checked owner-path reuse, project/access freshness,
 provider availability, duplicate-start protection, pending identity, stale
@@ -68,7 +75,7 @@ visible conversation area in the pending, desktop and mobile cases.
 
 Evidence lives in the primary checkout's untracked
 `local/072-session-evidence/`, including `browser-talk.json`,
-`ui-tests-talk-final.log`, the preview harness and these review images:
+`ui-tests-final-base-pass.log`, the preview harness and these review images:
 
 - `building-panel-new-session.png`
 - `talk-new-session-starting.png`
@@ -76,7 +83,8 @@ Evidence lives in the primary checkout's untracked
 - `talk-new-session-mobile.png`
 
 Earlier `chat-popup-*` screenshots and sheet-test results are superseded and are
-not acceptance evidence for this implementation.
+not acceptance evidence for this implementation. Captures from before the final
+talk-base rebase are retained under `pre-final-talk-base/`.
 
 ## Acceptance boundary
 
