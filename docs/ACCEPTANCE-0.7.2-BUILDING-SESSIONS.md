@@ -16,6 +16,17 @@ Its final handoff will define pending identity, cancellation and staging behavio
 before this branch wires the new-session callback to it.
 The designer also assigned new-agent drop-in at the project building and Ben's
 staging there to 0513; the caller must stay minimal and use that documented hook.
+The follow-up requires the building's New session block to remain visible even
+when agents are already there or the project is busy. Unavailable providers stay
+visible with disabled buttons and reasons. Existing building controls already
+have this behavior; their eligibility does not depend on agent counts/activity.
+The requested **New session here** talk-header action also awaits a public
+callback from 0513. It must use the same project, provider controls and pending
+hook for both board agents and managed sessions, with the same visual treatment.
+The added occupied/busy regressions pass with **17/17 focused start-control
+tests**: controls remain visible, unavailable provider reasons remain visible,
+and a second explicit launch succeeds while earlier project sessions run.
+No source behavior change was needed for those cases.
 Do not integrate this intermediate state or reuse its earlier screenshots as
 evidence for the corrected design. The earlier evidence below is historical.
 

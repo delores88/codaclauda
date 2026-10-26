@@ -1,11 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BuildingSessionLaunch, buildingProviders, offersBuildingSession } from '../app/city/building-actions.js';
+import { BuildingSessionActions, BuildingSessionLaunch, buildingProviders, offersBuildingSession } from '../app/city/building-actions.js';
 import { startProjectSession } from '../app/session-start.js';
 
 const project = { id: 'local:c:/sample/project', name: 'Sample', path: 'C:/sample/project' };
 const found = ['claude', 'codex'].map(agent => ({ agent, executable: `${agent}.exe`, supported: true, authenticated: true }));
 const store = { projectAccess: () => ({ level: 'read', playwright: true }) };
+
+// Exercise the component's real refresh/start methods with only their DOM property surface.
+function actionState(candidate, sessions) {
+  const actions = Object.assign(Object.create(BuildingSessionActions.prototype), {
+    project: candidate, context: { side: 'pc', remote: false }, sessions,
+    store: { ...store, project: id => id === candidate.id ? candidate : null, agents: [{ id: 'busy-agent', status: 'active', currentProjectId: candidate.id }] },
+    phase: 'ready', found, selectedProvider: 'claude', error: '', destroyed: false, drafts: new Map(),
+    node: { hidden: true }, buttons: ['claude', 'codex'].map(provider => ({ hidden: false, dataset: { provider } })),
+    access: {}, input: {}, hint: {}, check: {}, errorNode: {}, recoveryNode: {}, retry: {}, onStateChange: () => {},
+  });
+  actions.launch = new BuildingSessionLaunch({ store: actions.store, sessions, onChange: () => actions.refresh() });
+  return actions;
+}
 
 test('new sessions are offered only for real local buildings on This PC', () => {
   assert.equal(offersBuildingSession(project), true);
@@ -38,6 +51,57 @@ test('unknown, checking, failed discovery and missing session support fail close
     assert.ok(buildingProviders(found, phase).every(p => p.reason));
   }
   for (const availability of [false, null]) assert.equal(buildingProviders(found, 'ready', availability).some(p => p.available), false);
+});
+
+test('occupied and busy local projects retain the visible New session block and both ready providers', () => {
+  const running = { id: 'already-running', projectId: project.id, provider: 'claude', status: 'running' };
+  for (const status of ['idle', 'active', 'busy']) {
+    const candidate = { ...project, status, agents: ['busy-agent'], metrics: { running: 2 } };
+    const actions = actionState(candidate, { available: true, list: [running], running: () => true });
+    assert.equal(offersBuildingSession(candidate, actions.context), true);
+    actions.refresh();
+    assert.equal(actions.node.hidden, false);
+    assert.deepEqual(actions.buttons.map(button => [button.dataset.provider, button.hidden, button.disabled]), [
+      ['claude', false, false], ['codex', false, false],
+    ]);
+  }
+});
+
+test('busy project keeps both unavailable providers visible, disabled with an explanatory hover reason', () => {
+  const actions = actionState({ ...project, status: 'busy' }, { available: true, list: [{ id: 'working', status: 'running', projectId: project.id }], running: () => true });
+  actions.found = [{ ...found[0], authenticated: false }]; // Claude needs login; Codex is absent.
+  actions.refresh();
+  assert.equal(actions.node.hidden, false);
+  assert.deepEqual(actions.buttons.map(button => [button.dataset.provider, button.hidden, button.disabled]), [
+    ['claude', false, true], ['codex', false, true],
+  ]);
+  assert.match(actions.buttons[0].title, /Sign in to Claude/);
+  assert.match(actions.buttons[1].title, /Codex is not installed/);
+  assert.deepEqual(buildingProviders([], 'ready').map(provider => provider.id), ['claude', 'codex']);
+});
+
+test('another explicit launch remains available after admission while existing project sessions are still running', async () => {
+  const starts = [], sends = [];
+  const sessions = {
+    available: true, list: [{ id: 'existing', projectId: project.id, provider: 'claude', status: 'running' }],
+    running: () => true,
+    start: async options => { const session = { ...options, id: `new-${starts.length + 1}`, status: 'running' }; starts.push(options); sessions.list.push(session); return session; },
+    send: async (id, text) => { sends.push([id, text]); },
+  };
+  const actions = actionState({ ...project, status: 'busy' }, sessions);
+  actions.drafts.set(project.id, 'First task');
+  await actions.start('claude');
+  actions.refresh();
+  assert.equal(actions.launch.pending, null);
+  assert.equal(actions.node.hidden, false);
+  assert.ok(actions.buttons.every(button => !button.hidden && !button.disabled));
+  assert.ok(sessions.list.every(session => session.status === 'running'));
+  actions.drafts.set(project.id, 'Second task');
+  await actions.start('codex');
+  assert.deepEqual(starts.map(options => [options.provider, options.projectId]), [['claude', project.id], ['codex', project.id]]);
+  assert.deepEqual(sends, [['new-1', 'First task'], ['new-2', 'Second task']]);
+  assert.equal(sessions.list.length, 3);
+  assert.ok(sessions.list.every(session => session.status === 'running'));
 });
 
 test('shared start helper preserves exact project and current saved access through existing start path', async () => {
