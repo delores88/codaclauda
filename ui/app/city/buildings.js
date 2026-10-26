@@ -806,10 +806,18 @@ export class Building {
   get lot() { return { i: this.cell.i, j: this.cell.j, padW: this.suburbs ? HOME_LOT_SIZE : this.size.W + 1.2, padD: this.suburbs ? HOME_LOT_SIZE : this.size.D + 1.2, cz: this.suburbs ? 0 : CZ, district: this.district, ...(this.suburbs ? { driveway: { ...this.suburbs.driveway } } : {}) }; }
   /** Surface height in island coordinates, including the animated yard scale. */
   groundAt(x, z) {
-    if (!this.suburbs || !this.padGroup) return null;
+    if ((!this.suburbs && !this.downtownBase) || !this.padGroup) return null;
     const scale = this.padGroup.scale;
     if (scale.x <= 0 || scale.z <= 0) return null;
     const localX = (x - this.origin.x) / scale.x, localZ = (z - this.origin.z) / scale.z;
+    if (this.downtownBase) {
+      let top = null;
+      for (const surface of [this.downtownBase.lawn, this.downtownBase.paving, this.downtownBase.entry]) {
+        if (!surface || Math.abs(localX) > surface.w / 2 || Math.abs(localZ - surface.z) > surface.d / 2) continue;
+        top = top === null ? surface.top : Math.max(top, surface.top);
+      }
+      return top === null ? null : top * scale.y;
+    }
     if (Math.abs(localX) > HOME_LOT_SIZE / 2 || Math.abs(localZ + CZ) > HOME_LOT_SIZE / 2) return null;
     const { driveway: drive, door } = this.suburbs;
     let top = PAD_TOP;

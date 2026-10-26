@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { THREE } from '../app/city/toon.js';
-import { Building } from '../app/city/buildings.js';
-import { LOT_HALF } from '../app/city/layout.js';
-import { riverSceneryClear } from '../app/city/scenery.js';
+import { Building, BuildingManager } from '../app/city/buildings.js';
+import { NpcManager, groundY } from '../app/city/npc.js';
+import { LOT_HALF, PITCH, islandHalf } from '../app/city/layout.js';
+import { buildDecor } from '../app/city/scenery.js';
+import { districtForCell, DOWNTOWN } from '../app/city/districts.js';
+import { PARK_TYPES } from '../app/city/parks.js';
+import { riverFootprintClear, bridgeCrossings } from '../app/city/river-path.js';
+import { disposeAll } from '../app/city/fx.js';
 
 function canvas(t) {
   const original = globalThis.document, text = [], gradient = { addColorStop() {} };
@@ -15,6 +20,58 @@ function canvas(t) {
 const project = (footprint = 1, local = false) => ({ id: 'gh:owner/lot', name: 'Lot', ...(local ? { path: 'C:/lot' } : {}), metrics: { footprint, floors: 4 } });
 const make = (p, cell = { i: 0, j: -2 }, options = {}) => new Building(p, cell, { particles: { emit() {} }, reducedMotion: () => true, districts: true, ...options });
 const bounds = mesh => new THREE.Box3().setFromObject(mesh);
+
+/** Each newly added column contributes its closest eligible Downtown lot to the
+ * river. Eligibility, rather than an obsolete fixed row, follows the shared path. */
+function boundaryLots() {
+  const seen = new Set(), groups = [];
+  for (const rings of [2, 4, 8, 12]) {
+    const cells = [];
+    for (let i = -rings; i <= rings; i++) for (let j = rings; j >= -rings; j--) {
+      if (districtForCell({ i, j }) !== DOWNTOWN) continue;
+      const id = `${i},${j}`;
+      if (!seen.has(id)) { seen.add(id); cells.push({ i, j }); }
+      break;
+    }
+    assert.ok(cells.length > 0, `expansion to ring ${rings} contributes eligible river-side lots`);
+    groups.push({ rings, cells });
+  }
+  return groups;
+}
+
+/** Check actual merged triangles, including every outline, against independent
+ * water/bank footprints and the rendered bridge approaches. */
+function auditTriangles(root, crossings, visit) {
+  root.updateWorldMatrix(true, true);
+  const point = new THREE.Vector3(), center = new THREE.Vector3(), size = new THREE.Vector3();
+  let triangles = 0, outlineTriangles = 0;
+  root.traverse(node => {
+    if (!node.isMesh) return;
+    assert.equal(Boolean(node.isInstancedMesh), false, 'these bases and parks use merged geometry');
+    const attr = node.geometry.attributes.position, index = node.geometry.index;
+    for (let i = 0; i < (index?.count || attr.count); i += 3) {
+      const box = new THREE.Box3();
+      for (let n = 0; n < 3; n++) box.expandByPoint(point.fromBufferAttribute(attr, index ? index.getX(i + n) : i + n).applyMatrix4(node.matrixWorld));
+      box.getCenter(center); box.getSize(size);
+      const halfX = Math.max(0, size.x / 2 - 1e-5), halfZ = Math.max(0, size.z / 2 - 1e-5);
+      assert.ok(riverFootprintClear(center.x, center.z, halfX, halfZ), `${node.name || node.type}: water/bank intrusion at ${center.x},${center.z}`);
+      for (const bridge of crossings) {
+        const separate = center.x + halfX < bridge.x0 - .35 || center.x - halfX > bridge.x1 + .35 || center.z + halfZ < bridge.z0 - .35 || center.z - halfZ > bridge.z1 + .35;
+        assert.ok(separate, `${node.name || node.type}: intrusion into ${bridge.id} or its rail clearance`);
+      }
+      visit(box, node);
+      triangles++;
+      if (node.userData.outline || node.name === 'park-outlines') outlineTriangles++;
+    }
+  });
+  assert.ok(triangles > 0);
+  return { triangles, outlineTriangles };
+}
+
+function insideLot(box, cell) {
+  assert.ok(box.min.x >= cell.i * PITCH - LOT_HALF - 1e-5 && box.max.x <= cell.i * PITCH + LOT_HALF + 1e-5, 'x remains in the usable lot');
+  assert.ok(box.min.z >= cell.j * PITCH - LOT_HALF - 1e-5 && box.max.z <= cell.j * PITCH + LOT_HALF + 1e-5, 'z remains in the usable lot');
+}
 
 test('ghost lots have lawn and a street path instead of a solid pad; clone sign stays pickable', t => {
   const drawn = canvas(t), b = make(project());
@@ -56,22 +113,45 @@ test('tower paving stays close to its footprint while lawn survives outside it',
 
 test('landscape geometry clears the lot and bridge approaches for all tower footprints', t => {
   canvas(t);
-  for (const cell of [{ i: -4, j: -1 }, { i: -3, j: -1 }, { i: 0, j: -2 }, { i: 3, j: -1 }]) for (const footprint of [1, 2, 3]) for (const local of [false, true]) {
-    const b = make(project(footprint, local), cell); b.group.updateMatrixWorld(true);
-    b.padGroup.traverse(node => {
-      if (!node.isMesh) return;
-      const attr = node.geometry.attributes.position, index = node.geometry.index, p = new THREE.Vector3();
-      for (let i = 0; i < (index?.count || attr.count); i += 3) {
-        const box = new THREE.Box3();
-        for (let n = 0; n < 3; n++) box.expandByPoint(p.fromBufferAttribute(attr, index ? index.getX(i + n) : i + n).applyMatrix4(node.matrixWorld));
-        const center = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3());
-        assert.ok(riverSceneryClear(center.x, center.z, Math.max(0, size.x / 2 - 1e-5), Math.max(0, size.z / 2 - 1e-5)), `${node.name}: river/bridge intrusion at ${cell.i},${cell.j}, footprint ${footprint}`);
-        assert.ok(box.min.x >= cell.i * 16 - LOT_HALF && box.max.x <= cell.i * 16 + LOT_HALF, 'x remains in lot');
-        assert.ok(box.min.z >= cell.j * 16 - LOT_HALF && box.max.z <= cell.j * 16 + LOT_HALF, 'z remains in lot');
-      }
-    });
-    b.dispose();
+  let bases = 0, triangles = 0, outlines = 0;
+  for (const { rings, cells } of boundaryLots()) {
+    const crossings = bridgeCrossings(islandHalf(rings));
+    for (const cell of cells) for (const footprint of [1, 2, 3]) for (const local of [false, true]) {
+      const b = make(project(footprint, local), cell);
+      const audit = auditTriangles(b.padGroup, crossings, box => insideLot(box, cell));
+      bases++; triangles += audit.triangles; outlines += audit.outlineTriangles;
+      b.dispose();
+    }
   }
+  assert.ok(outlines > 0, 'real base outlines participate in the clearance audit');
+  t.diagnostic(`${bases} ghost/tower bases; ${triangles} triangles, including ${outlines} outline triangles`);
+});
+
+test('all six parks produced by merged scenery clear the river and bridge approaches as the island expands', t => {
+  const types = new Set(); let parks = 0, triangles = 0, outlines = 0;
+  for (const { rings, cells } of boundaryLots()) {
+    const chosen = new Map(cells.map(cell => [`${cell.i},${cell.j}`, cell])), occupied = new Map();
+    for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
+      if ((!i && !j) || !districtForCell({ i, j }) || chosen.has(`${i},${j}`)) continue;
+      occupied.set(`${i},${j}`, { i, j, padW: 5.8, padD: 5.4, cz: -.3 });
+    }
+    const decor = buildDecor(rings, occupied, islandHalf(rings), { districts: true });
+    const parkGroup = decor.getObjectByName('downtown-parks'); assert.ok(parkGroup);
+    assert.equal(parkGroup.userData.parks.length, chosen.size, 'only the eligible vacant boundary lots become parks');
+    for (const park of parkGroup.userData.parks) {
+      assert.ok(chosen.has(`${park.i},${park.j}`)); types.add(park.type); parks++;
+    }
+    const audit = auditTriangles(parkGroup, bridgeCrossings(islandHalf(rings)), box => {
+      const center = box.getCenter(new THREE.Vector3()), cell = { i: Math.round(center.x / PITCH), j: Math.round(center.z / PITCH) };
+      assert.ok(chosen.has(`${cell.i},${cell.j}`), 'every merged park triangle belongs to a selected valid lot');
+      insideLot(box, cell);
+    });
+    triangles += audit.triangles; outlines += audit.outlineTriangles;
+    disposeAll(decor);
+  }
+  assert.deepEqual([...types].sort(), [...PARK_TYPES].sort());
+  assert.ok(outlines > 0, 'merged park ink hulls participate in the clearance audit');
+  t.diagnostic(`${parks} parks across all six types; ${triangles} triangles, including ${outlines} outline triangles`);
 });
 
 test('linking and unlinking a ghost rebuilds the base without moving its pin or leaking geometry', t => {
@@ -96,6 +176,7 @@ test('Spark and contributor buildings retain their established base renderer', t
     const b = make(project(1, true), undefined, options);
     assert.equal(b.padGroup.getObjectByName('downtown-lawn'), undefined);
     assert.ok(b.pad.isMesh);
+    assert.equal(b.groundAt(b.origin.x, b.origin.z), null, 'other island renderers retain their existing height lookup');
     b.dispose();
   }
 });
@@ -117,5 +198,40 @@ test('initial metrics and reduced motion finish Downtown lawn arrival scale', t 
     assert.deepEqual(b.tower.scale.toArray(), [1, 1, 1]);
     assert.deepEqual(b.padGroup.scale.toArray(), [1, 1, 1]);
     b.dispose();
+  }
+});
+
+test('Downtown walking heights match rendered ghost lawns, tower paving and entry paths during base scaling', t => {
+  canvas(t);
+  const particles = { emit() {}, enabled: false }, cell = { i: 0, j: -2 };
+  for (const local of [false, true]) {
+    const p = project(1, local), manager = new BuildingManager(new THREE.Group(), { particles, reducedMotion: () => false });
+    manager.sync([p], new Map([[p.id, cell]]), new Set(), { districts: true, animate: false });
+    const building = manager.get(p.id), plan = building.downtownBase;
+    const npcs = new NpcManager(new THREE.Group(), { buildings: manager, particles, reducedMotion: () => true });
+    const points = [
+      { name: 'lawn', x: 4.8, z: plan.lawn.z },
+      // The end of the path extends beyond the lawn and must remain walkable.
+      { name: 'entry', x: 0, z: plan.entry.z + plan.entry.d * .49 },
+    ];
+    if (local) points.push({ name: 'paving', x: building.size.W / 2 + .5, z: 0 });
+    for (const scale of [[1, 1, 1], [.6, .6, .6], [.82, .75, .74]]) {
+      building.padGroup.scale.set(...scale); building.group.updateWorldMatrix(true, true);
+      for (const point of points) {
+        const x = building.origin.x + point.x * scale[0], z = building.origin.z + point.z * scale[2];
+        const ray = new THREE.Raycaster(new THREE.Vector3(x, 10, z), new THREE.Vector3(0, -1, 0)), hits = [];
+        building.padGroup.traverse(mesh => {
+          if (mesh.isMesh && !mesh.userData.outline) THREE.Mesh.prototype.raycast.call(mesh, ray, hits);
+        });
+        hits.sort((a, b) => a.distance - b.distance); assert.ok(hits.length, `${point.name} has a rendered supporting surface`);
+        const actual = hits[0].point.y;
+        assert.ok(Math.abs(manager.groundAt(x, z) - actual) < 1e-6, `${local ? 'tower' : 'ghost'} ${point.name} height matches geometry at scale ${scale}`);
+        assert.ok(Math.abs(npcs.surfaceY(x, z) - actual) < 1e-6, 'NPC integration uses the building surface');
+      }
+      const x = building.origin.x + 7 * scale[0], z = building.origin.z;
+      assert.equal(manager.groundAt(x, z), null, 'outside the scaled base returns to the normal street surface');
+      assert.equal(npcs.surfaceY(x, z), groundY(x, z));
+    }
+    npcs.dispose(); manager.dispose();
   }
 });

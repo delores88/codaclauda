@@ -1,12 +1,12 @@
 # City 0.7 UI acceptance
 
 Prepared 2026-10-25 on `codex/codaclauda-0.7-city`, in the isolated
-`local/worktrees/07-city` worktree. This river correction builds on `e60a36f`
-and retains modern Suburbs, the continuous river circuit and camera refinement.
-The separate parks and camera/picker ports still require combined integration.
+`local/worktrees/07-city` worktree. The combined update includes the gentle river
+correction, modern Suburbs, six Downtown parks, planted building bases, visible
+viewport camera fitting and the grouped searchable Jump-to picker.
 
 Implementation and independent source review are complete. The stable-source UI
-suite passed **249 tests, 0 failures**. Final headless workflows, visual inspection
+suite passed **294 tests, 0 failures**. Final headless workflows, visual inspection
 and performance checks passed. Earlier checkpoint previews remain historical
 evidence, separate from the final combined results recorded here.
 
@@ -96,7 +96,8 @@ acceptance is claimed. No Rust or external-project changes are included.
 - Home walking heights match the rendered lawn, path and driveway. Collision
   follows individual offset wings and the active van while leaving courtyards
   accessible. Roof tickers and CI markers use an actual supporting roof block.
-- Downtown retains glass towers and planted plazas. GitHub-only repositories
+- Downtown retains glass towers, planted building borders and six vacant-lot
+  park types. GitHub-only repositories
   use pale ghost volumes at 83% nominal height and 23% opacity, supported ground
   signs, and no rooftop ticker or CI effects. Their panels retain Clone/Link
   actions; this update does not itself clone any repository.
@@ -131,7 +132,7 @@ Final full-suite command, run from the worktree `ui` directory:
 
 ```text
 node --test
-249 passed, 0 failed
+294 passed, 0 failed
 ```
 
 Coverage includes fixed curve extrema, normal-width sections, full-footprint
@@ -155,7 +156,43 @@ Spark deck present. Spark deck world-coordinate checks found no water intrusion
 among 20,082 sampled vertices. These are source/geometry checks, not browser or
 installed acceptance.
 
-## Gentle-path correction acceptance
+## Combined parks and navigation acceptance
+
+Integrated the reviewed parks commits `f7c8d87` and `175a8b4`, and the camera/picker
+port `be477c8`, after river correction `dbf52f0`. The scenery conflict retained
+river-aware district classification. Actual geometry checks cover 150 ghost and
+tower bases at all three footprints, and 25 generated parks covering all six
+types near the river and bridge approaches. Downtown walking heights now match
+the rendered lawn, paving and entry path through growth scaling; actual surface
+rays and the NPC height hook agree. Suburbs and legacy bases retain their behavior.
+
+The camera fits the complete island into the unobstructed viewport on both faces,
+including expansion and an open legend, and centers selected objects beside their
+panels. The compact Legend remembers its state. Jump-to groups working agents
+first, then projects by district/clone status, awake agents and collapsed powered
+down agents, with counts, filtering and keyboard navigation. Project panels show
+their associated agents; You and HQ shortcuts remain available. Mobile uses a
+full-width sheet.
+
+The final combined UI suite passes 294 tests. Independent integration review
+passed 77 focused checks. Combined headless checks passed all 8 camera viewport
+scenarios, 12 focus/interaction scenarios and 10 picker scenarios, with no browser
+errors. Actual moving boat clicks, exact street/conversation camera return,
+project-agent panels, keyboard search/selection, Escape, and mobile width were
+checked. The parks preview also passed actual park Create and ghost Clone dialog
+clicks, night lamps, settled base scales, reduced motion and Low quality.
+
+Final combined scripts, receipts and images are under `local/city-combined-evidence/`:
+`ui-tests.txt`, `viewport-review.json`, `interactions-focus-api.json`,
+`jumpto-check.json`, `browser.json`, `preview.json` and `billboard-click.json`.
+The adjacent `.cjs` files reproduce these synthetic headless checks. Review images
+are copied to `local/city-07-evidence/`, including `jumpto-open.png`,
+`jumpto-mobile.png`, the four `camera-fit-*` / `camera-focus-corner.png` captures,
+`legend-collapsed.png`, `legend-open.png`, and the updated river/day/night/Spark,
+overview, parks and ghost/tower captures. Earlier checkpoint receipts below remain
+historical; the combined evidence supersedes their scene captures.
+
+## Gentle-path correction acceptance (before integration)
 
 Independent review covered the periodic path and bounded street cuts, HQ and
 Spark Foundry footprints, bridge clearance, minimum initial size and gradual
