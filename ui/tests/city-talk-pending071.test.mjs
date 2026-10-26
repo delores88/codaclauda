@@ -5,6 +5,8 @@ import { NpcManager } from '../app/city/npc.js';
 import { Building } from '../app/city/buildings.js';
 
 globalThis.window ||= {};
+globalThis.window.removeEventListener ||= () => {};
+globalThis.document ||= { compatMode: 'CSS1Compat', removeEventListener() {} };
 globalThis.localStorage ||= { getItem: () => null, setItem() {} };
 const { CityView } = await import('../app/views/city.js');
 const { sessions } = await import('../app/sessions.js');
@@ -16,6 +18,7 @@ function fixture(t, { existing = [], reduced = true } = {}) {
   const building = { ...project, cell: { i: 2, j: 1 }, origin: { x: 32, z: 15.7 }, size: { W: 2.6, D: 3 },
     door: { x: 30, z: 18 }, seats: [], workSpot: Building.prototype.workSpot };
   const buildings = new Map([[project.id, building]]), calls = { open: [], live: [], failed: [], drops: [], shots: [], returns: [] };
+  buildings.dispose = () => {};
   const npcs = new NpcManager(new THREE.Group(), { buildings, reducedMotion: () => reduced });
   npcs.setCreate(() => ({ object: new THREE.Group(), pickable: [], setSpec() {}, setStatus() {}, setAction() {}, lookAt() {}, update() {}, dispose() {} }));
   npcs.sync(existing);
@@ -26,7 +29,7 @@ function fixture(t, { existing = [], reduced = true } = {}) {
   const world = { camera: { fov: 40, position: pose.position.clone() }, controls: { target: pose.target.clone() },
     size: { w: 1500, h: 900 }, half: 90, side: 'pc', restSide: 'pc', settled: true, underside: false,
     centerTarget: pose.center, overview: pose.overview, toWorld: vector => vector.clone(),
-    setShot: (...args) => calls.shots.push(args), flyAfterTurn: (...args) => calls.returns.push(args), flipTo() {} };
+    setShot: (...args) => calls.shots.push(args), flyAfterTurn: (...args) => calls.returns.push(args), flipTo() {}, stop() {}, dispose() {} };
   const panel = { open: (...args) => calls.open.push(args), focus() {}, close() { calls.closed = true; }, messages: () => [], info: () => ({}),
     resolvePending: agent => calls.live.push(agent), failPending: error => calls.failed.push(error) };
   let agents = [...existing];
@@ -38,10 +41,102 @@ function fixture(t, { existing = [], reduced = true } = {}) {
     agentsAt: id => agents.filter(a => a.cityProjectId === id), streetBoxes: () => [], cameraLocal: () => ({ x: 0, z: 50 }),
     talkFraming: () => ({ vis: { x0: 20, x1: 1000, y0: 30, y1: 860 } }), talkFrameSig: () => 'fixture',
     bubbleText: () => 'Hello', talkSay() {}, syncCameraFramingMode() {}, closeCluster() {}, hideZoomHint() {},
-    setHover() {}, select() {}, updateCameraFrame() {}, renderToolbarState() {},
+    setHover() {}, select() {}, updateCameraFrame() {}, renderToolbarState() {}, cancelAgentDrag() {}, exitStreet() {},
+    runnerLabels: new Map(), root: { replaceChildren() {} },
   });
-  return { view, calls, pose, add(agent) { agents.push(agent); npcs.sync(agents); } };
+  return { view, calls, pose, add(agent, { sync = true } = {}) { agents.push(agent); if (sync) npcs.sync(agents); }, syncAgents() { npcs.sync(agents); } };
 }
+
+test('null-id pending hook returns a synchronous handle and waits for the first staged frame', t => {
+  const f = fixture(t);
+  const handle = f.view.enterTalk(null, { pending: { provider: 'codex', projectId: project.id, label: 'Starting helper' } });
+  assert.equal(typeof handle.resolve, 'function'); assert.equal(typeof handle.fail, 'function');
+  assert.equal(handle.then, undefined, 'caller receives the handle immediately, before starting its provider request');
+  assert.equal(f.calls.open.length, 1); assert.ok(f.view.talk.pending);
+  f.add(session('fast'));
+  assert.equal(handle.resolve('fast'), false, 'a fast session cannot settle before the owner is staged');
+  assert.ok(f.view.talk.pending); assert.equal(f.view.talk.spot, undefined);
+  assert.equal(f.calls.live.length, 0); assert.equal(f.calls.drops.length, 0);
+  f.view.updateTalk();
+  assert.ok(f.view.talk.spot); assert.equal(f.calls.drops.length, 1);
+  f.view.updateTalk();
+  assert.equal(f.view.talk.pending, null); assert.equal(f.view.talk.id, 'sess:fast');
+  assert.equal(f.calls.live.length, 1); assert.equal(f.calls.drops.length, 1);
+});
+
+test('a resolved record waits for NPC sync, and repeated successful resolve or fail calls are harmless', t => {
+  const f = fixture(t);
+  const handle = f.view.enterTalk(null, { pending: { provider: 'codex', projectId: project.id } });
+  f.view.updateTalk();
+  const stagedPosition = { ...f.view.talk.pendingSpot };
+  f.add(session('fast'), { sync: false });
+  assert.equal(handle.resolve({ id: 'fast' }), false);
+  assert.equal(handle.resolve({ id: 'fast' }), false);
+  assert.equal(handle.resolve({ id: 'someone-else' }), false, 'admission cannot switch while its NPC is still absent');
+  assert.equal(handle.fail(new Error('first prompt failed')), false, 'an admitted session is no longer a creation failure');
+  assert.equal(f.view.talk.expectedId, 'sess:fast');
+  assert.equal(f.calls.failed.length, 0);
+  assert.ok(f.view.talk.pending); assert.equal(f.calls.live.length, 0);
+  assert.equal(f.view.npcs.npcs.has('sess:fast'), false);
+  f.syncAgents();
+  assert.equal(handle.resolve({ id: 'fast' }), true);
+  const npc = f.view.npcs.npcs.get('sess:fast');
+  assert.equal(npc.pos.x, stagedPosition.x); assert.equal(npc.pos.z, stagedPosition.z);
+  assert.equal(handle.resolve({ id: 'fast' }), false);
+  assert.equal(handle.resolve({ id: 'someone-else' }), false);
+  assert.equal(handle.fail(new Error('late rejection')), false);
+  assert.equal(f.calls.live.length, 1); assert.equal(f.calls.failed.length, 0);
+  assert.equal(f.view.talk.id, 'sess:fast');
+});
+
+test('successive null-id starts use separate pending identities and reject the older handle', t => {
+  const f = fixture(t), options = { pending: { provider: 'codex', projectId: project.id } };
+  const first = f.view.enterTalk(null, options);
+  const firstId = f.view.talk.id;
+  f.view.updateTalk();
+  const second = f.view.enterTalk(null, options);
+  const secondId = f.view.talk.id;
+  assert.ok(firstId); assert.ok(secondId); assert.notEqual(secondId, firstId);
+  assert.notEqual(second, first);
+  assert.deepEqual(f.calls.open.map(([agent]) => agent.id), [firstId, secondId], 'panel drafts receive distinct identities');
+  assert.equal(first.resolve('old-session'), false);
+  assert.equal(first.fail(new Error('old rejection')), false);
+  assert.equal(f.view.talk.expectedId, null); assert.equal(f.calls.failed.length, 0);
+  f.view.updateTalk(); f.add(session('second-session'));
+  assert.equal(second.resolve('second-session'), true);
+  assert.equal(f.view.talk.id, 'sess:second-session');
+  assert.equal(f.calls.live.length, 1);
+});
+
+test('pending failure settles once and repeated failure or success cannot replace it', t => {
+  const f = fixture(t);
+  const handle = f.view.enterTalk(null, { pending: { provider: 'codex', projectId: project.id } });
+  f.view.updateTalk();
+  assert.ok(f.view.npcs.talkReservation);
+  assert.equal(handle.fail(new Error('first rejection')), true);
+  assert.equal(f.view.npcs.talkReservation, null);
+  assert.equal(handle.fail(new Error('second rejection')), false);
+  f.add(session('too-late'));
+  assert.equal(handle.resolve('too-late'), false);
+  assert.equal(f.calls.failed.length, 1); assert.equal(f.calls.failed[0].message, 'first rejection');
+  assert.equal(f.calls.live.length, 0); assert.equal(f.view.talk.failed, true);
+});
+
+for (const lifecycle of ['hide', 'destroy']) test(`${lifecycle} leaves late pending resolve and failure callbacks as no-ops`, t => {
+  const f = fixture(t);
+  const handle = f.view.enterTalk(null, { pending: { provider: 'codex', projectId: project.id } });
+  f.view.updateTalk();
+  assert.ok(f.view.npcs.talkReservation);
+  f.view[lifecycle]();
+  assert.equal(f.view.talk, null); assert.equal(f.view.npcs.talkReservation, null);
+  assert.equal(f.calls.closed, true);
+  const counts = { shots: f.calls.shots.length, returns: f.calls.returns.length, opens: f.calls.open.length };
+  f.add(session('late'), { sync: false });
+  assert.equal(handle.resolve('late'), false);
+  assert.equal(handle.fail(new Error('late rejection')), false);
+  assert.equal(f.calls.live.length, 0); assert.equal(f.calls.failed.length, 0);
+  assert.deepEqual({ shots: f.calls.shots.length, returns: f.calls.returns.length, opens: f.calls.open.length }, counts);
+});
 
 test('pending starts at its canonical building and goes live only for the exact named session', t => {
   const f = fixture(t, { existing: [session('already-here')] });

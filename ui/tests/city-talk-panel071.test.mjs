@@ -110,11 +110,38 @@ test('pending starts keep a draft, transition explicitly to the exact live sessi
 });
 
 test('optional New session here calls the canonical observed City project and otherwise stays hidden', t => {
-  const chosen = [], { panel, managed } = fixture(t, { onNewSessionHere: id => chosen.push(id) });
+  const chosen = [], details = [], { panel, managed } = fixture(t, { onNewSessionHere: (id, context) => { chosen.push(id); details.push(context); } });
   panel.open({ ...managed, currentProjectId: null, cityProjectId: 'gh:owner/demo' });
   find(panel.head, 'city-talk-new').events.click(); assert.deepEqual(chosen, [project.id]);
+  assert.deepEqual(details, [{ projectId: project.id, provider: 'codex', agentId: managed.id }]);
   assert.equal(talkProject({ cityProjectId: 'gh:owner/demo' }, panel.store), project);
   panel.onNewSessionHere = null; panel.refresh(); assert.equal(find(panel.head, 'city-talk-new'), undefined);
+});
+
+test('New session here eligibility is shared across board and session agents and updates with scene context', t => {
+  let allowed = true;
+  const checked = [], selected = [], { panel, managed, store } = fixture(t, {
+    onNewSessionHere: (id, details) => selected.push([id, details]),
+    canNewSessionHere: (project, agent) => { checked.push([project.id, agent.id]); return Boolean(project.path) && allowed; },
+  });
+  for (const agent of [managed, { id: 'board', kind: 'mailbox', address: 'claude-board', provider: 'claude', name: 'Board agent', currentProjectId: project.id }]) {
+    panel.open(agent);
+    assert.ok(find(panel.head, 'city-talk-new'));
+    find(panel.head, 'city-talk-new').events.click();
+    assert.deepEqual(selected.at(-1), [project.id, { projectId: project.id, provider: agent.provider, agentId: agent.id }]);
+    allowed = false; panel.refresh(); assert.equal(find(panel.head, 'city-talk-new'), undefined);
+    allowed = true; panel.refresh(); assert.ok(find(panel.head, 'city-talk-new'));
+    assert.ok(checked.some(([id, who]) => id === project.id && who === agent.id));
+  }
+  store.project = () => ({ id: 'gh:owner/uncloned', name: 'Uncloned', path: '' });
+  panel.refresh(); assert.equal(find(panel.head, 'city-talk-new'), undefined);
+});
+
+test('New session here defaults to projects with a local folder without restricting the agent kind or status', t => {
+  const { panel, managed, store } = fixture(t, { onNewSessionHere() {} });
+  panel.open({ ...managed, status: 'active' }); assert.ok(find(panel.head, 'city-talk-new'));
+  store.project = () => ({ ...project, path: '' }); panel.refresh();
+  assert.equal(find(panel.head, 'city-talk-new'), undefined);
 });
 
 test('desktop continuation is explicit and uses a labelled fork with context before sending to the copy', async t => {

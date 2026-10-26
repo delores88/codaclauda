@@ -17,20 +17,41 @@ export const normPath = path => String(path || '').trim().replaceAll('\\', '/').
 const squash = text => String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 const ms = value => { const n = typeof value === 'number' ? value : Date.parse(value); return Number.isFinite(n) ? (n < 1e12 ? n * 1000 : n) : 0; };
 
-/** The linked project for a working folder: the same folder or one inside it (the deepest project
- *  root wins), else a project whose name or folder name matches the hint / the folder's last part. */
-export function projectForCwd(projects, cwd, hint = '') {
+/** Match only a linked checkout or its descendants, preserving path boundaries. */
+function projectForFolder(projects, cwd) {
   const list = Array.isArray(projects) ? projects : [];
   const want = normPath(cwd);
   let best = null, depth = -1;
   if (want) for (const p of list) {
-    const root = normPath(p?.path);
-    if (root && (want === root || want.startsWith(`${root}/`)) && root.length > depth) { best = p; depth = root.length; }
+    // A canonical project may retain several local checkout aliases after its
+    // local/GitHub identities merge. A nested worktree belongs to that checkout.
+    const roots = [p?.path, ...(Array.isArray(p?.ids) ? p.ids : [])
+      .filter(id => typeof id === 'string' && /^local:(?:[a-z]:[\\/]|\/\/)/i.test(id)).map(id => id.slice(6))];
+    for (const path of roots) {
+      const root = normPath(path);
+      if (root && (want === root || want.startsWith(`${root}/`)) && root.length > depth) { best = p; depth = root.length; }
+    }
   }
+  return best;
+}
+
+/** The linked project for a working folder: the same folder or one inside it (the deepest project
+ *  root wins), else a project whose name or folder name matches the hint / the folder's last part. */
+export function projectForCwd(projects, cwd, hint = '') {
+  const list = Array.isArray(projects) ? projects : [];
+  const best = projectForFolder(list, cwd);
   if (best) return best;
+  const want = normPath(cwd);
   const names = [hint, want.split('/').pop()].map(squash).filter(Boolean);
   if (!names.length) return null;
   return list.find(p => names.includes(squash(p?.name)) || (p?.path && names.includes(squash(normPath(p.path).split('/').pop())))) || null;
+}
+
+/** Exact folder evidence from any supplied path outranks a basename guess from another. */
+export function projectForPaths(projects, paths) {
+  const list = Array.isArray(paths) ? paths : [];
+  return list.map(path => projectForFolder(projects, path)).find(Boolean)
+    || list.map(path => projectForCwd(projects, path)).find(Boolean) || null;
 }
 
 /** 'active' | 'idle' | 'error' for a session record; null when it is not shown (stopped / closed). */
@@ -50,7 +71,7 @@ export function sessionAgents(list, projects, { projectOf = () => null, running 
     const status = running(s.id) ? 'active' : sessionCityStatus(s.status);
     if (!status) continue;
     const provider = s.provider === 'codex' ? 'codex' : s.provider === 'claude' ? 'claude' : 'other';
-    const project = projectOf(s.projectId) || projectForCwd(projects, s.cwd);
+    const project = projectOf(s.projectId) || projectForPaths(projects, [s.cwd, s.worktreePath]);
     const who = PROVIDER_NAME[provider] || 'Agent';
     const title = String(s.title || '').replace(/\s+/g, ' ').trim().slice(0, 80) || `${who} session`;
     const at = ms(s.lastActivityAt) || ms(s.createdAt);
@@ -59,7 +80,7 @@ export function sessionAgents(list, projects, { projectOf = () => null, running 
       id, kind: 'session', sessionId: s.id, provider, name: title, label: `${who} session in CodaClauda`,
       status, sessionStatus: s.status || '', access: s.access || '', worktree: Boolean(s.worktreePath),
       activity: status === 'active' ? 'Working on a turn' : status === 'error' ? 'The last turn ended with an error' : 'Idle, waiting for you',
-      currentProjectId: project?.id || null, homeProjectId: project?.id || null, cwd: s.cwd || '', visiting: false,
+      currentProjectId: project?.id || null, homeProjectId: project?.id || null, cwd: s.cwd || s.worktreePath || '', visiting: false,
       lastSeenAt: at, unreadForOwner: 0, look: agentAvatar(id, provider, title),
     });
   }

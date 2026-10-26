@@ -75,9 +75,10 @@ export function sayLine(text, limit = 80) {
  * lands while it is open, onThinking(on) while a live reply is being written. */
 export class TalkPanel {
   constructor({ store, navigate, onLeave, onSent, onAgentLine, onThinking, onAgentChanged, onNewSessionHere,
+    canNewSessionHere = project => Boolean(project?.id && typeof project.path === 'string' && project.path.trim()),
     sessionClient = sessions, featureCall = callFeature }) {
     Object.assign(this, { store, navigate, onLeave, onSent, onAgentLine, onThinking, onAgentChanged, onNewSessionHere,
-      sessions: sessionClient, featureCall });
+      canNewSessionHere, sessions: sessionClient, featureCall });
     this.agent = null;
     this.drafts = new Map(); this.cache = new Map(); this.heard = new Map();
     this.head = h('header.city-talk-head');
@@ -170,7 +171,8 @@ export class TalkPanel {
       : info.kind === 'external' ? info.project?.name || 'Project unknown'
       : status + (info.project ? ' - ' + info.project.name : '');
     const activity = info.kind === 'external' ? 'Last activity: ' + (info.agent.lastSeenAt ? timeAgo(info.agent.lastSeenAt) : 'unknown') : '';
-    const sig = JSON.stringify([info.name, info.provider, status, sub, activity, info.agent.lastSeenAt, info.look, info.id, info.kind, info.project?.id, Boolean(this.onNewSessionHere)]);
+    const newSessionHere = Boolean(this.onNewSessionHere && info.project && this.canNewSessionHere(info.project, info.agent));
+    const sig = JSON.stringify([info.name, info.provider, status, sub, activity, info.agent.lastSeenAt, info.look, info.id, info.kind, info.project?.id, newSessionHere]);
     if (sig === this.sigs.head) return;
     this.sigs.head = sig;
     const chatParams = info.kind === 'session' ? { thread: info.session?.sharedId ? 'pair:' + info.session.sharedId : info.id }
@@ -181,8 +183,11 @@ export class TalkPanel {
       : info.kind === 'pending' ? 'The session is starting.'
       : 'Continue as a labelled copy to send messages in a new CodaClauda session.';
     const detail = h('span.city-talk-routing', { tabindex: '0', title: routeNote, 'aria-label': routeNote }, 'i');
-    const newHere = this.onNewSessionHere && info.project ? h('button.btn.small.city-talk-new', {
-      type: 'button', onclick: () => this.onNewSessionHere(info.project.id),
+    const newHere = newSessionHere ? h('button.btn.small.city-talk-new', {
+      // Keep the original scalar first argument; newer callers may use the second details argument.
+      type: 'button', onclick: () => this.onNewSessionHere(info.project.id, {
+        projectId: info.project.id, provider: info.provider, agentId: info.agent.id,
+      }),
     }, icon('plus'), 'New session here') : null;
     this.head.replaceChildren(portrait(info.look, { size: 46, provider: info.provider, status: info.status }),
       h('div.city-talk-title', h('h2', { title: info.agent.label || info.name }, info.name), h('p', sub),

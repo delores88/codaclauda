@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { locateAgents, AGENT_PROJECT_PREF, AGENT_PROJECT_TIME_PREF } from '../app/city/agent-location.js';
+import { projectForCwd, sessionAgents } from '../app/city/agents-extra.js';
 
 const projects = [
   { id: 'local:alpha', ids: ['local:alpha', 'gh:team/alpha'], path: 'C:/work/alpha', name: 'Alpha' },
@@ -85,6 +86,66 @@ test('session cwd resolves the deepest project and persists by its mailbox addre
   assert.equal(result.agents[0].cityProjectId, 'local:beta');
   assert.equal(result.remembered['session-worker'], 'local:beta');
   assert.equal(result.agents[0].address, 'session-worker');
+});
+
+test('subfolders and nested worktrees resolve the canonical parent with path boundaries', () => {
+  const aliases = [{ ...projects[0], ids: [...projects[0].ids, 'local:D:/checkouts/alpha'] }, projects[1]];
+  for (const cwd of ['C:/work/alpha/src', 'C:/work/alpha/local/worktrees/071-talk/ui',
+    '\\\\?\\C:\\WORK\\ALPHA\\local\\worktrees\\review\\ui', 'd:/checkouts/alpha/local/worktrees/review']) {
+    assert.equal(projectForCwd(aliases, cwd)?.id, 'local:alpha', cwd);
+  }
+  assert.equal(projectForCwd(aliases, 'C:/work/alphabet/src'), null, 'a shared path prefix is not a parent');
+  const nested = { id: 'nested', name: 'Nested', path: 'C:/work/alpha/vendor/nested' };
+  assert.equal(projectForCwd([...aliases, nested], `${nested.path}/src`)?.id, nested.id, 'a separately linked deeper project still owns its folder');
+});
+
+test('worktree-only session and turn or assignment folders recover known projects', () => {
+  const session = { id: 'tree-session', status: 'idle', provider: 'codex', worktreePath: 'C:/work/alpha/local/worktrees/review',
+    mailboxAddress: 'tree-worker', lastActivityAt: 2000000000000 };
+  const [managed] = sessionAgents([session], projects);
+  assert.equal(managed.currentProjectId, 'local:alpha');
+  assert.equal(managed.cwd, session.worktreePath);
+  const result = locateAgents([managed], { projects, sessions: [session] });
+  assert.equal(result.agents[0].cityProjectId, 'local:alpha');
+  assert.equal(result.remembered['tree-worker'], 'local:alpha');
+  for (const fields of [
+    { worktreePath: session.worktreePath },
+    { lastTurn: { cwd: 'C:/work/alpha/src', at: 2000000000000 } },
+    { lastAssignment: { workspace: 'C:/work/alpha/local/worktrees/assigned', at: 2000000000000 } },
+    { lastTurn: { cwd: 'C:/unlinked-folder', worktreePath: session.worktreePath, at: 2000000000000 } },
+  ]) assert.equal(locate(a(fields)).agents[0].cityProjectId, 'local:alpha');
+});
+
+test('exact workspace or worktree folders outrank another path basename guess', () => {
+  const cwd = 'C:/unlinked/beta', worktreePath = 'C:/work/alpha/local/worktrees/review';
+  assert.equal(projectForCwd(projects, cwd)?.id, 'local:beta', 'single-path legacy name hints still work');
+  const session = { id: 'exact-tree', status: 'idle', provider: 'codex', cwd, worktreePath };
+  assert.equal(sessionAgents([session], projects)[0].currentProjectId, 'local:alpha');
+  assert.equal(locate(a({ cwd, worktreePath })).agents[0].cityProjectId, 'local:alpha');
+  assert.equal(locate(a({ cwd, workspace: worktreePath })).agents[0].cityProjectId, 'local:alpha');
+  assert.equal(locate(a({ lastAssignment: { cwd, worktreePath } })).agents[0].cityProjectId, 'local:alpha');
+  assert.equal(locate({ id: 'sess:exact-tree', sessionId: session.id }, { sessions: [session] }).agents[0].cityProjectId, 'local:alpha');
+  assert.equal(sessionAgents([{ ...session, cwd: 'C:/work/beta/src' }], projects)[0].currentProjectId, 'local:beta', 'exact cwd retains precedence over exact worktree');
+});
+
+test('production dedicated endpoints retain nested workspace metadata for City placement', async () => {
+  globalThis.window ||= {};
+  globalThis.localStorage ||= { getItem: () => null, setItem() {} };
+  const { store } = await import('../app/store.js');
+  const known = projects.map(p => ({ ...p, aliases: [p.name], homeAgents: [] }));
+  const now = Math.floor(Date.now() / 1000);
+  const host = { mailboxMessages: [], addresses: [], desktop: { agents: {} }, claims: [],
+    board: { endpoints: [{ id: 'nested-endpoint', agent: 'codex', workspace: 'C:/work/alpha/local/worktrees/review/ui' }],
+      requests: [{ target: 'nested-endpoint', state: 'running', updated_at: now }] },
+    agentRecord: store.agentRecord, matchProject: () => null };
+  const records = store.computeAgents.call(host, known);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].cwd, host.board.endpoints[0].workspace);
+  assert.equal(records[0].currentProjectId, null, 'the legacy exact-project field is unchanged');
+  const result = locateAgents(records, { projects: known });
+  assert.equal(result.agents[0].cityProjectId, 'local:alpha');
+  assert.deepEqual(result.remembered, { 'endpoint:nested-endpoint': 'local:alpha' });
+  assert.ok(!JSON.stringify(result.remembered).includes('/worktrees/'), 'preferences retain only canonical ids');
 });
 
 test('newest dated turn, assignment or board signal wins and retained old history cannot undo it', () => {

@@ -17,12 +17,31 @@ export function talkSceneMeshes(root, ignored = []) {
   return meshes;
 }
 
+/** Rays cover the face silhouette, not only its centre: a narrow lamp can hide
+ * an eye while missing a centre ray. Samples share a plane facing the camera. */
+export function talkFigureTargets(eye, position, faceHeight) {
+  const centre = new THREE.Vector3(position.x, (position.y || 0) + faceHeight, position.z);
+  const normal = new THREE.Vector3(eye.x, eye.y, eye.z).sub(centre).normalize();
+  const right = new THREE.Vector3(normal.z, 0, -normal.x);
+  if (right.lengthSq() < 1e-8) right.set(1, 0, 0); else right.normalize();
+  const up = new THREE.Vector3().crossVectors(normal, right).normalize();
+  const targets = [];
+  for (const x of [-.5, -.25, 0, .25, .5]) for (const y of [-.35, 0, .35]) {
+    targets.push(centre.clone().addScaledVector(right, x).addScaledVector(up, y));
+  }
+  for (const x of [-.45, 0, .45]) {
+    targets.push(new THREE.Vector3(position.x, (position.y || 0) + Math.max(.35, faceHeight - .65), position.z).addScaledVector(right, x));
+  }
+  return targets;
+}
+
 export function talkSceneHits(meshes, eye, targets) {
   const found = new Set(), ray = new THREE.Raycaster(), origin = new THREE.Vector3(eye.x, eye.y, eye.z);
   for (const target of targets) {
     const direction = new THREE.Vector3(target.x, target.y, target.z).sub(origin);
     ray.near = .05; ray.far = Math.max(.05, direction.length() - .15); ray.set(origin, direction.normalize());
     for (const mesh of meshes) {
+      if (found.has(mesh)) continue;
       const hits = [];
       // Call geometry intersection directly: decorative meshes deliberately opt out of pointer rays.
       (mesh.isInstancedMesh ? THREE.InstancedMesh.prototype.raycast : THREE.Mesh.prototype.raycast).call(mesh, ray, hits);
@@ -83,22 +102,34 @@ export function talkVisibleRect({ width, height, visibleWidth = width, visibleHe
 }
 
 export function fitTalkShot(spot, face, { width, height, vis, ownerHeight = 1.8, agentHeight = 1.8,
-  ownerY = 0, agentY = 0, eyeY = ownerY + ownerHeight * .86, vfov = 40 } = {}) {
-  const nx = 2 * (vis.x0 + (vis.x1 - vis.x0) * .59) / width - 1;
-  const ny = 1 - 2 * (vis.y0 + (vis.y1 - vis.y0) * .40) / height;
+  ownerY = 0, agentY = 0, eyeY = ownerY + ownerHeight * 1.5, vfov = 40 } = {}) {
+  const roomW = vis.x1 - vis.x0, roomH = vis.y1 - vis.y0;
+  const mobile = roomW < 450;
+  const nx = 2 * (vis.x0 + roomW * .68) / width - 1;
+  const ny = 1 - 2 * (vis.y0 + roomH * (mobile ? .50 : .46)) / height;
   const camera = new THREE.PerspectiveCamera(vfov, width / height, .05, 10000);
-  const points = [];
+  const figures = [];
   for (const [p, y, top] of [[spot, ownerY, ownerHeight], [face, agentY, agentHeight]]) {
-    for (const dx of [-.5, .5]) for (const dz of [-.4, .4]) for (const dy of [0, top]) points.push(new THREE.Vector3(p.x + dx, y + dy, p.z + dz));
+    const points = [];
+    for (const dx of [-.5, .5]) for (const dz of [-.5, .5]) for (const dy of [0, top]) points.push(new THREE.Vector3(p.x + dx, y + dy, p.z + dz));
+    figures.push(points);
   }
+  // Keeping a fixed shoulder offset while backing up puts Ben directly over the NPC.
+  // Widen the shoulder angle as well as the distance; the two silhouettes then stay
+  // separate, with Ben lower-left and the agent's face unobstructed on the right.
+  const gap = Math.hypot(spot.x - face.x, spot.z - face.z);
+  const back = Math.max(spot.back, gap * 1.1), side = Math.max(Math.abs(spot.side || 0), gap * 1.8) * (spot.side < 0 ? -1 : 1);
+  const bounds = { x0: vis.x0 + roomW * .045, x1: vis.x1 - roomW * .045,
+    y0: vis.y0 + Math.min(mobile ? 90 : 80, roomH * (mobile ? .4 : .30)), y1: vis.y1 - roomH * .055 };
   let shot;
-  for (let step = 0; step < 36; step++) {
-    shot = talkShot({ ...spot, back: spot.back * 1.13 ** step }, face, { eyeY, nx, ny, vfov, aspect: width / height });
+  for (let step = 0; step < 48; step++) {
+    const scale = 1.08 ** step;
+    shot = talkShot({ ...spot, back: back * scale, side: side * scale }, face, { eyeY, nx, ny, vfov, aspect: width / height });
     camera.position.set(shot.eye.x, shot.eye.y, shot.eye.z);
     camera.lookAt(shot.look.x, shot.look.y, shot.look.z); camera.updateMatrixWorld(true);
-    const inside = points.every(point => {
+    const inside = figures.flat().every(point => {
       const p = point.clone().project(camera), x = (p.x + 1) * width / 2, y = (1 - p.y) * height / 2;
-      return p.z > -1 && p.z < 1 && x >= vis.x0 && x <= vis.x1 && y >= vis.y0 && y <= vis.y1;
+      return p.z > -1 && p.z < 1 && x >= bounds.x0 && x <= bounds.x1 && y >= bounds.y0 && y <= bounds.y1;
     });
     if (inside) break;
   }

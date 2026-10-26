@@ -13,6 +13,10 @@ the ancestry. No Rust, installation, publication or release changes are included
   by address. Message bodies are not copied into preferences. Hidden/deleted
   buildings fall back to HQ; aliases resolve to the same building. Idle and
   powered-down people remain at their project, with separated lot positions.
+  Nested worktree/subfolder paths and merged local checkout aliases resolve to
+  their canonical parent. Exact folder evidence across cwd/workspace/worktree
+  outranks a folder-name guess. Dedicated endpoints retain their workspace hint;
+  managed sessions can use `worktreePath` when cwd is unavailable.
 - A managed session replaces its duplicate board-address figure. Its board
   address still resolves to that session. Contributor islands keep their own
   mapped agents and do not read/write home-city location memory.
@@ -24,6 +28,9 @@ the ancestry. No Rust, installation, publication or release changes are included
   unavoidable foreground obstructions receive temporary cloned transparent
   materials, restored on leaving/reframing. Camera return preserves the saved
   pose. Latest messages appear as short bubbles; sends nod, replies gesture.
+  The wider, elevated shoulder shot separates the two heads. Bubbles clear both
+  head silhouettes, keep a horizontal gutter, and show up to three lines on
+  narrow screens. They briefly wait if an avatar's drop occupies the speech area.
 - Board agents carry an original toon clipboard and glance at it on send.
   Managed sessions carry no clipboard. Routing details appear in an info tooltip.
   The compact Legend adds `Clipboard: board agent`.
@@ -54,7 +61,7 @@ is deferred to a later item; this follow-up remains UI-only.
 
 ```js
 // Call before the existing owner start path. This hook itself starts nothing.
-const talk = city.enterTalk(requestId, {
+const talk = city.enterTalk(null, {
   pending: { provider: 'codex', projectId: project.id, label: 'Project helper' },
 });
 try {
@@ -67,25 +74,40 @@ try {
 
 The pending panel shows `Starting <provider> in <project>...` and stages the owner
 at the canonical building. Resolution attaches only to the exact returned session
-ID. If it has not appeared yet, the ID is retained and a later registry update
-completes the transition. If the initial `id` already names the future session
+ID. The handle is returned synchronously and owns just this pending conversation.
+`null` creates a separate internal pending identity; an explicit request ID also
+works. Resolution waits for both the owner's staging and the matching City NPC,
+including when the session record arrives before its figure. If the initial `id` already names the future session
 (`sess:<id>`), its appearance resolves automatically. No provider/project guess
 can select an unrelated concurrent start. `city.failTalk(id, error)` is an
-alternate error setter. Leave or switching conversations makes the old handle
-inert. The hook does not start providers, change access, or send board mail.
+alternate error setter. Repeated resolution/failure is harmless; the first
+admitted session cannot be replaced and a later send failure cannot turn it into
+a creation rejection. Leave, switching conversations, leaving City or destroying
+the view makes the old handle inert. An admitted session keeps running after
+dismissal without reopening talk. The hook does not start/stop providers, change
+access, or send messages. Call `fail` only for creation rejection. A failed first
+prompt belongs to the caller's same-session draft/retry controls.
+`resolve()` returns whether talk has become live now: `false` while waiting for
+staging does not mean that session admission failed.
 
 New NPCs appear directly at their project with a short drop/puff. A pending talk
 reserves a clear spot at that building and uses it when the exact session appears,
 so the owner does not move across the lot during the transition.
 
-`TalkPanel` accepts an optional `onNewSessionHere(projectId)` constructor callback.
-Its header action is shown only when that callback and a known project exist;
-the argument is the canonical project ID for board and session agents alike.
+`TalkPanel` accepts an optional
+`onNewSessionHere(projectId, { projectId, provider, agentId })` callback. The first
+argument preserves the published scalar contract; the second supplies the
+provider hint and current agent identity. The same header action appears for
+board and session agents, including busy agents. It requires a known canonical
+project with a local folder. City's `canNewSessionHere(project, agent)` predicate
+also omits the action on remote contributor islands and the Spark side.
 For the already-created City panel, the caller can set:
 
 ```js
 city.talkPanel.onNewSessionHere = projectId => openExistingStartControls(projectId);
 city.talkPanel.refresh(); // if already open
+// For a caller that expects one details object:
+city.talkPanel.onNewSessionHere = (_, details) => openExistingStartControls(details);
 ```
 
 Panel-level lifecycle methods are `open(agent, { pending })`,
@@ -94,7 +116,7 @@ the staging/registry transition; callers need not edit `talk.js`.
 
 ## Evidence and remaining acceptance
 
-Final `cd ui; node --test`: **408 passed, 0 failed** (2026-10-26).
+Initial `cd ui; node --test`: **408 passed, 0 failed** (2026-10-26).
 Focused tests cover location
 precedence/persistence/aliases/hidden projects, production Store home fallback,
 shared lots, clipboard disposal, default avatar, drop/nod behavior, same-session
@@ -125,3 +147,17 @@ screenshots and fixture data remain untracked.
 The subsequent desktop metadata/text clarification was independently reviewed
 and reran the complete UI suite: **408 passed, 0 failed**. The browser artifacts
 above cover the main talk candidate; this text follow-up adds no native acceptance.
+
+The later framing/placement review uses `local/talk-071-review-evidence` so the
+original captures remain available for comparison. The four pale labels named
+`acceptance-0.5.0`, `040-native-fixture` (twice), and `acceptance-0.4.1` are river
+boat cargo project labels, verified against `river.boats[].projectLabels`; they
+are not agent identities. This follow-up preserves those cargo labels. The idle
+fixture explicitly exercises known nested/worktree/assignment/saved locations
+and truly unknown agents. Unknowns keep separate HQ perimeter positions; their
+colliding labels use the existing count chip and exact-member picker. Added
+tests cover both label decluttering and the recovered workspace metadata paths.
+
+Review milestone `cd ui; node --test`: **427 passed, 0 failed**. The pending hook,
+header contract, placement paths, head separation, off-center scenery obstruction
+and bubble layout have independent source review and focused regression coverage.

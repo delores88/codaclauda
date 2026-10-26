@@ -463,12 +463,12 @@ class Store extends EventTarget {
       if (!running.length && now - lastAt > AWAKE_WINDOW) continue;
       const status = running.length ? 'active' : now - lastAt < AWAKE_WINDOW ? 'idle' : 'offline';
       const workspaceProject = projects.find(p => p.path && normalizePath(p.path) === normalizePath(endpoint.workspace));
-      agents.push(this.agentRecord({ id: `endpoint:${endpoint.id}`, endpointId: endpoint.id, provider: endpoint.agent, kind: 'dedicated', name: endpoint.label || endpoint.id, status, lastAt, claims: [], involved: [], sent: [], projects, agentPrefs, requests, running, workspaceProject }));
+      agents.push(this.agentRecord({ id: `endpoint:${endpoint.id}`, endpointId: endpoint.id, provider: endpoint.agent, kind: 'dedicated', name: endpoint.label || endpoint.id, status, lastAt, claims: [], involved: [], sent: [], projects, agentPrefs, requests, running, workspaceProject, cwd: endpoint.workspace }));
     }
     return agents.sort((a, b) => ({ active: 0, idle: 1, offline: 2 }[a.status] - { active: 0, idle: 1, offline: 2 }[b.status]) || a.name.localeCompare(b.name));
   }
 
-  agentRecord({ id, address, endpointId, provider, kind, name, status, lastAt, claims, involved, sent, projects, agentPrefs, requests = [], running = [], workspaceProject }) {
+  agentRecord({ id, address, endpointId, provider, kind, name, status, lastAt, claims, involved, sent, projects, agentPrefs, requests = [], running = [], workspaceProject, cwd }) {
     const pref = agentPrefs[id] || {};
     const now = Date.now();
     const manifestHome = projects.find(p => p.homeAgents.includes(id));
@@ -487,7 +487,7 @@ class Store extends EventTarget {
     if (!activity) activity = signals[0]?.label || (sent.at(-1)?.subject ?? '');
     const look = pref.look ? normalizeAvatar(pref.look) : agentAvatar(id, provider, pref.nickname || name);
     return {
-      id, address, endpointId, provider, kind,
+      id, address, endpointId, provider, kind, cwd: typeof cwd === 'string' ? cwd : '',
       name: pref.nickname || name, label: name,
       status, lastSeenAt: lastAt || 0,
       homeProjectId: home?.id || null,

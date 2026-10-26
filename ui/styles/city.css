@@ -323,7 +323,8 @@ button.city-label:focus-visible { outline: 2px solid var(--accent); outline-offs
 .city-talk-leave kbd { padding: 1px 6px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 6px; background: var(--surface-2); color: var(--muted); font: 600 10.5px/1.5 var(--font-mono); }
 
 /* What you and the agent say (in the 3D view) */
-.city-talk-say { max-width: 280px; }
+.city-talk-say { max-width: 280px; margin-top: 0; }
+.city-talk-line { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .city-talk-say.is-owner { border-color: transparent; background: var(--owner-bubble); color: var(--owner-text); }
 .city-talk-say.is-owner::after { border-color: transparent; background: #7b5cf0; }
 .city-talk-say.is-typing { --dot: var(--accent-2); padding: 11px 15px; }

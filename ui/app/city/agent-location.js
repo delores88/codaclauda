@@ -1,6 +1,6 @@
 /* City placement memory. Only project identifiers are persisted, never message text.
  * These are visual hints; a mailbox address and its history grant no authority. */
-import { projectForCwd } from './agents-extra.js';
+import { projectForPaths } from './agents-extra.js';
 
 export const AGENT_PROJECT_PREF = 'cityAgentProjectsV1';
 export const AGENT_PROJECT_TIME_PREF = 'cityAgentProjectsObservedV1';
@@ -37,11 +37,13 @@ export function locateAgents(agents, {
     const add = (record, time = 0) => {
       if (!record) return;
       const project = resolve(record.projectId || record.project_id || record.project?.id)
-        || projectForCwd(projects, record.cwd || record.workspace || record.worktreePath)
+        || projectForPaths(projects, [record.cwd, record.workspace, record.worktreePath])
         || matchProject(`${record.subject || ''}\n${record.body || record.prompt || record.text || ''}`, projects);
       if (project) signals.push({ project, at: recordTime(record) || time });
     };
-    add({ cwd: agent.cwd || session?.cwd, projectId: session?.projectId }, stamp(agent.lastSeenAt) || recordTime(session));
+    add({ cwd: agent.cwd || session?.cwd, workspace: agent.workspace,
+      worktreePath: agent.worktreePath || session?.worktreePath, projectId: session?.projectId },
+    stamp(agent.lastSeenAt) || stamp(session?.lastActivityAt) || recordTime(session));
     for (const record of [agent.lastTurn, session?.lastTurn, agent.lastAssignment, session?.lastAssignment, ...list(agent.requests)]) add(record);
     for (const record of list(assignments)) if ([record.agentId, record.address, record.assignee, record.to].includes(address) || record.agentId === agent.id) add(record);
     for (const record of list(messages)) if (record.from === address || record.to === address) add(record);
