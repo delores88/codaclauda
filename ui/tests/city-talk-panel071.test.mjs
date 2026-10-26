@@ -210,3 +210,92 @@ test('failure sending into an adopted copy retries that same copy rather than st
   assert.equal(calls.filter(c => c[0] === 'feature').length, 1);
   assert.deepEqual(calls.filter(c => c[0] === 'send').map(c => c[1]), ['copy', 'copy']);
 });
+
+for (const transition of ['leave', 'switch']) test(`desktop copy first-send failure after ${transition} retries its admitted copy`, async t => {
+  let finishAdopt;
+  const { panel, client, calls, registry, managed } = fixture(t, { featureCall: (name, args) => {
+    calls.push(['feature', name, args]); return new Promise(resolve => { finishAdopt = resolve; });
+  } });
+  const external = { id: 'desktop', kind: 'external', name: 'Desktop', provider: 'codex',
+    providerSessionId: 'provider-conversation', cwd: project.path };
+  let attempts = 0, offers = 0;
+  client.send = async (id, text) => {
+    calls.push(['send', id, text]);
+    if (++attempts === 1) throw new Error('First send failed');
+  };
+  panel.offerContinue = () => { offers++; };
+  panel.open(external); panel.input.value = 'Carry on'; panel.onInput();
+  const continuing = panel.continueConversation(panel.info(), 'Carry on');
+  if (transition === 'leave') panel.close();
+  else { panel.open(managed); panel.input.value = 'Other draft'; panel.onInput(); }
+  finishAdopt({ session: { id: 'copy-A', provider: 'codex', title: 'Conversation (copy)', status: 'idle' } });
+  await continuing;
+  assert.equal(registry.filter(s => s.id === 'copy-A').length, 1);
+  if (transition === 'leave') assert.equal(panel.isOpen, false);
+  else { assert.equal(panel.agent.id, managed.id); assert.equal(panel.input.value, 'Other draft'); }
+  panel.open(external);
+  assert.equal(panel.draft().text, 'Carry on'); assert.match(panel.draft().error.message, /First send failed/);
+  await panel.send();
+  assert.equal(offers, 0, 'retry does not offer another fork');
+  assert.equal(calls.filter(c => c[0] === 'feature').length, 1);
+  assert.deepEqual(calls.filter(c => c[0] === 'send'), [['send', 'copy-A', 'Carry on'], ['send', 'copy-A', 'Carry on']]);
+  assert.equal(panel.thread.sessionId, 'copy-A'); assert.equal(panel.draft().text, '');
+  assert.equal(panel.draft().continuedCopy, null);
+  if (transition === 'switch') {
+    panel.open(managed); assert.equal(panel.input.value, 'Other draft');
+  }
+});
+
+test('reopening an external source while its copy sends keeps the lock until the outcome', async t => {
+  let finishAdopt, finishSend, signalSending;
+  const sendingStarted = new Promise(resolve => { signalSending = resolve; });
+  const { panel, client, calls } = fixture(t, { featureCall: (name, args) => {
+    calls.push(['feature', name, args]); return new Promise(resolve => { finishAdopt = resolve; });
+  } });
+  const external = { id: 'desktop', kind: 'external', name: 'Desktop', provider: 'codex',
+    providerSessionId: 'provider-conversation', cwd: project.path };
+  let offers = 0;
+  panel.offerContinue = () => { offers++; };
+  client.send = (id, text) => {
+    calls.push(['send', id, text]); signalSending();
+    return new Promise(resolve => { finishSend = resolve; });
+  };
+  panel.open(external); panel.input.value = 'Carry on'; panel.onInput();
+  const continuing = panel.continueConversation(panel.info(), 'Carry on');
+  panel.close();
+  finishAdopt({ session: { id: 'copy-A', provider: 'codex', title: 'Conversation (copy)', status: 'idle' } });
+  await sendingStarted;
+  try {
+    panel.open(external);
+    assert.equal(panel.draft().sending, true); assert.equal(panel.input.readOnly, true); assert.equal(panel.sendBtn.disabled, true);
+    await panel.send();
+    assert.equal(offers, 0); assert.equal(calls.filter(c => c[0] === 'feature').length, 1);
+    assert.deepEqual(calls.filter(c => c[0] === 'send'), [['send', 'copy-A', 'Carry on']]);
+  } finally { finishSend(); await continuing; }
+  assert.equal(panel.agent.id, external.id, 'completion does not reopen the copy');
+  assert.equal(panel.draft().sending, false); assert.equal(panel.draft().continuedCopy, null);
+  assert.equal(panel.draft().text, ''); assert.equal(panel.input.value, ''); assert.equal(panel.input.readOnly, false);
+});
+
+for (const [field, value] of [['providerSessionId', 'other-conversation'], ['cwd', 'C:/other-project'], ['provider', 'claude'], ['id', 'other-desktop']]) {
+  test(`copy recovery does not reuse an admitted route after ${field} changes`, async t => {
+    const { panel, client, calls } = fixture(t, { featureCall: async (name, args) => {
+      calls.push(['feature', name, args]);
+      return { session: { id: 'copy-A', provider: 'codex', title: 'Conversation (copy)', status: 'idle' } };
+    } });
+    const external = { id: 'desktop', kind: 'external', name: 'Desktop', provider: 'codex',
+      providerSessionId: 'provider-conversation', cwd: project.path };
+    client.send = async (id, text) => { calls.push(['send', id, text]); throw new Error('First send failed'); };
+    panel.open(external); panel.input.value = 'Carry on'; panel.onInput();
+    await panel.continueConversation(panel.info(), 'Carry on');
+    assert.equal(panel.draft().continuedCopy.session.id, 'copy-A');
+    let offers = 0;
+    panel.offerContinue = () => { offers++; };
+    panel.open({ ...external, [field]: value });
+    panel.input.value = 'Confirm a different source'; panel.onInput();
+    await panel.send();
+    assert.equal(offers, 1, 'a changed source needs explicit continuation confirmation');
+    assert.equal(calls.filter(c => c[0] === 'feature').length, 1, 'no automatic new copy');
+    assert.deepEqual(calls.filter(c => c[0] === 'send'), [['send', 'copy-A', 'Carry on']], 'no send to the old copy');
+  });
+}

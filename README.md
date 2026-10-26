@@ -18,19 +18,21 @@ the local coordination board.
 
 ## Current status
 
-[Version 0.6.2](https://github.com/delores88/codaclauda/releases/tag/v0.6.2)
-is installed, published and accepted in the Marketplace. Its phone poll correction
-preserves ordered durable cursors across ntfy control events. One owner-driven
-phone turn completed and outbound transport receipts advanced; physical iPhone
-reply display and actual provider cost were not established by that acceptance.
+[Version 0.7.0](https://github.com/delores88/codaclauda/releases/tag/v0.7.0)
+is installed, published and accepted in the Marketplace.
 
-This **0.7.0 source** adds a river City with Downtown towers, Suburbs homes, parks,
-commit boats, camera controls and searchable project navigation. It also adds
-clearer team and desktop delivery status, longer mailbox waits, and scanned phone
-reply previews. See the [0.7.0 release scope](docs/RELEASE-0.7.0.md).
-Source review and synthetic previews remain separate from installed acceptance,
-phone delivery and Marketplace admission. Native Marketplace UI and authenticated
-served bytes remain separate evidence limits.
+This **0.7.1 source** fixes City loading, local-project rendering, agent placement
+and panning. Clicking an agent opens its conversation beside the City, and local
+buildings offer **New session**. A desktop conversation continues only as an
+explicitly confirmed, labelled copy. Failed first-message recovery retains the
+admitted copy instead of creating another conversation.
+See the [0.7.1 release scope](docs/RELEASE-0.7.1.md).
+
+Source tests and previews remain separate from installed acceptance. The release
+requires local installation and six actual City workflow checks before source
+push, GitHub publication and Marketplace submission. Native Marketplace UI,
+authenticated served bytes, phone display and unrelated GPU workflows remain
+separate evidence limits.
 
 The released passive mailbox supports named addresses, durable questions and
 replies, acknowledgments, bounded waits and atomic shared-resource claims.

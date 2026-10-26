@@ -56,6 +56,7 @@ const SHOWN = 60;               // most recent messages in the panel; Chat has t
 const PROVIDER_NAME = { claude: 'Claude', codex: 'Codex' };
 const MAIL_STARTERS = ['What are you working on right now?', 'Is anything blocked that I can help with?', "Give me a short summary of today's progress."];
 const providerName = provider => PROVIDER_NAME[provider] || 'Agent';
+const copySourceKey = agent => JSON.stringify([agent.id, agent.provider, agent.providerSessionId, agent.cwd]);
 const providerOfName = name => (/^claude/i.test(name) ? 'claude' : /^codex/i.test(name) ? 'codex' : 'other');
 const byteLength = text => new TextEncoder().encode(String(text)).length;
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -299,7 +300,11 @@ export class TalkPanel {
     const info = this.info(), d = this.draft(), agentId = this.agent?.id;
     if (!info || d.sending || this.pendingStart) return;
     const text = d.text.trim(); if (!text) { this.focus(); return; }
-    if (info.kind === 'external' || info.kind === 'live') { this.offerContinue(info, text); return; }
+    if (info.kind === 'external' || info.kind === 'live') {
+      if (d.continuedCopy?.source === copySourceKey(info.agent)) await this.continueConversation(info, text);
+      else this.offerContinue(info, text);
+      return;
+    }
     d.sending = true; d.error = null; this.error.dataset.msg = ''; this.renderComposer(info);
     let ok = false;
     try {
@@ -308,7 +313,7 @@ export class TalkPanel {
       ok = true;
     } catch (error) { d.error = { message: error?.message || String(error || 'Unknown error') }; }
     finally { d.sending = false; }
-    if (ok) Object.assign(d, { text: '', pending: null, longFile: undefined, longSaved: undefined });
+    if (ok) Object.assign(d, { text: '', pending: null, longFile: undefined, longSaved: undefined, continuedCopy: null });
     if (this.agent?.id !== agentId) return;
     if (ok) { this.input.value = ''; this.autoGrow(); this.forceBottom = true; this.onSent?.(text); }
     this.refresh(); if (ok) this.focus();
@@ -328,21 +333,32 @@ export class TalkPanel {
     d.sending = true; d.error = null;
     if (this.agent?.id === originalId) this.renderComposer(info);
     try {
-      const s = await continueTalkCopy(info.agent, info.project, { call: this.featureCall, client: this.sessions });
+      const source = copySourceKey(info.agent);
+      const s = d.continuedCopy?.source === source ? d.continuedCopy.session
+        : await continueTalkCopy(info.agent, info.project, { call: this.featureCall, client: this.sessions });
+      // Keep the admitted copy on the shared draft even if the owner leaves before its first send.
+      d.continuedCopy = { source, session: s };
       const next = { id: 'sess:' + s.id, kind: 'session', sessionId: s.id, name: s.title || info.name, provider: s.provider,
         currentProjectId: info.project?.id || s.projectId, cwd: s.cwd, status: 'idle', look: info.look };
-      d.sending = false; this.drafts.set(next.id, d);
+      this.drafts.set(next.id, d);
       if (this.agent?.id === originalId) {
+        d.sending = false; // send() acquires its own lock for the displayed copy.
         this.onAgentChanged?.(next); if (this.agent?.id !== next.id) this.open(next);
         await this.send();
       } else {
-        await sendTalkSession(this.sessions, talkRoute(next, this.store), text); d.text = '';
+        // Keep the lock while this background send is unresolved, including if the source reopens.
+        await sendTalkSession(this.sessions, talkRoute(next, this.store), text);
+        d.text = ''; d.continuedCopy = null;
       }
       return true;
     } catch (error) {
-      d.error = { message: error?.message || String(error) }; d.sending = false;
-      if (this.agent?.id === originalId) this.refresh();
+      d.error = { message: error?.message || String(error) };
       return true;
+    } finally {
+      d.sending = false;
+      if (this.isOpen && this.draft() === d) {
+        this.input.value = d.text; this.autoGrow(); this.refresh();
+      }
     }
   }
   async sendMailbox(info, d, text) {
