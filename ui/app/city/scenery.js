@@ -4,6 +4,7 @@
 import { THREE, toonMaterial, addOutline } from './toon.js';
 import { RoundedBoxGeometry } from '../../vendor/three/addons/RoundedBoxGeometry.js';
 import { hash } from '../avatar/spec.js';
+import { buildDowntownParks } from './parks.js';
 import { mergeParts, placed, instancedOutline, plaqueTexture, clockTexture, sideTexture } from './fx.js';
 import { PITCH, ASPHALT, LOT_HALF, islandHalf, cellCenter } from './layout.js';
 import { riverZ, riverCellUsable, riverFootprintClear, bridgeCrossings, RIVER_HALF_WIDTH, RIVER_BANK_WIDTH } from './river-path.js';
@@ -275,55 +276,6 @@ export function benchGeometry() {
   return benchGeo;
 }
 
-/** Small urban gardens belong to vacant lots only. Lot coordinates, rather than the
- * island's current size, seed the plan so expansion never reshuffles a plaza. */
-export function downtownPlazaPlan(i, j, occupied = false) {
-  if (occupied) return { variant: 0, planters: [], benches: [[BENCH_OFFSET.x, BENCH_OFFSET.z, 0]], fountain: false };
-  const value = hash(`plaza:${i},${j}`), variant = value % 4;
-  const corners = [[-3.55, -3.55], [3.55, 3.55], [3.55, -3.55], [-3.55, 3.55]];
-  const start = (value >>> 3) % corners.length, count = variant % 2 ? 2 : 3;
-  const planters = Array.from({ length: count }, (_, n) => {
-    const [x, z] = corners[(start + n) % corners.length];
-    return { x, z, scale: 0.62 + ((value >>> (n + 5)) % 4) * 0.035 };
-  });
-  const benches = [[BENCH_OFFSET.x, BENCH_OFFSET.z, 0]];
-  if (variant % 2 === 0) benches.push([-4.55, 0, Math.PI / 2]);
-  return { variant, planters, benches, fountain: variant === 0 };
-}
-
-/** All plaza hardscape shares a handful of merged draws. Trees and benches use the
- * city's existing instance batches; occupied lots get no new building obstruction. */
-function addDowntownPlazas(group, plazas) {
-  if (!plazas.length) return;
-  const urban = new THREE.Group(); urban.name = 'downtown-plazas'; group.add(urban);
-  const paving = [[], []], joints = [], stone = [], soil = [], water = [];
-  for (const { x, z, plan } of plazas) {
-    paving[plan.variant % 2].push(placed(new THREE.BoxGeometry(9.1, 0.018, 9.1), { x, y: LAWN_TOP + 0.01, z }));
-    for (const offset of [-4.5, -2.25, 0, 2.25, 4.5]) {
-      joints.push(placed(new THREE.BoxGeometry(0.035, 0.012, 9.1), { x: x + offset, y: LAWN_TOP + 0.026, z }));
-      joints.push(placed(new THREE.BoxGeometry(9.1, 0.012, 0.035), { x, y: LAWN_TOP + 0.026, z: z + offset }));
-    }
-    for (const planter of plan.planters) {
-      const px = x + planter.x, pz = z + planter.z;
-      stone.push(placed(new THREE.BoxGeometry(1.45, 0.48, 1.45), { x: px, y: LAWN_TOP + 0.24, z: pz }));
-      soil.push(placed(new THREE.BoxGeometry(1.19, 0.03, 1.19), { x: px, y: LAWN_TOP + 0.477, z: pz }));
-    }
-    if (plan.fountain) {
-      // A compact two-tier fountain: supported bowls and short water falls, all
-      // inside the vacant plot. Static water also respects reduced motion.
-      stone.push(placed(new THREE.CylinderGeometry(1.55, 1.65, 0.28, 16), { x, y: LAWN_TOP + 0.18, z }));
-      stone.push(placed(new THREE.CylinderGeometry(0.19, 0.25, 0.66, 10), { x, y: LAWN_TOP + 0.64, z }));
-      stone.push(placed(new THREE.CylinderGeometry(0.67, 0.3, 0.25, 16), { x, y: LAWN_TOP + 1.03, z }));
-      water.push(placed(new THREE.CylinderGeometry(1.37, 1.37, 0.035, 16), { x, y: LAWN_TOP + 0.33, z }));
-      water.push(placed(new THREE.CylinderGeometry(0.59, 0.59, 0.025, 16), { x, y: LAWN_TOP + 1.16, z }));
-      for (const [dx, dz] of [[-0.62, 0], [0.62, 0], [0, -0.62], [0, 0.62]]) water.push(placed(new THREE.CylinderGeometry(0.055, 0.075, 0.82, 6), { x: x + dx, y: LAWN_TOP + 0.75, z: z + dz }));
-    }
-  }
-  for (const [parts, tint, cast] of [[paving[0], '#e5ecea', false], [paving[1], '#dce6e7', false], [joints, '#bccacc', false], [stone, '#a0b5b6', true], [soil, '#65786a', false], [water, '#72cbd3', false]]) {
-    if (parts.length) urban.add(mesh(mergeParts(parts), toonMaterial(tint), { cast, receive: true, outline: 0 }));
-  }
-}
-
 /** Bare riverside plots stay as low meadow clearings instead of raised lawns,
  * paving or structures. Every patch clears the curved bank and bridge approach. */
 function addRiparianClearings(group, cells) {
@@ -345,22 +297,17 @@ function addRiparianClearings(group, cells) {
 export function buildDecor(rings, lots, half, { districts = false } = {}) {
   const group = new THREE.Group(); group.name = 'decor';
   let trees = [], flowers = [], benches = [], ponds = [];
-  const plazas = [], clearings = [];
+  const parks = [], clearings = [];
   const rnd = seeded(`decor:${rings}`);
   const occupied = new Set([...lots.values()].map(l => `${l.i},${l.j}`));
   for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
     if (i === 0 && j === 0) continue;
     const c = cellCenter(i, j), r = seeded(`lot:${i},${j}`);
     if (districts && !riverCellUsable(i, j)) { clearings.push(c); continue; }
-    // Downtown's empty plots are small paved plazas. Their planters stay well
-    // inside the lot, with clear bridge approaches and riverbanks.
+    // Vacant Downtown lots are formal green parks; occupied towers keep their bench.
     if (districts && districtForCell({ i, j }) === DOWNTOWN) {
-      const hasBuilding = occupied.has(`${i},${j}`), plan = downtownPlazaPlan(i, j, hasBuilding);
-      for (const [x, z, ry] of plan.benches) benches.push([c.x + x, c.z + z, ry]);
-      if (!hasBuilding) {
-        plazas.push({ ...c, plan });
-        for (const p of plan.planters) trees.push({ x: c.x + p.x, y: LAWN_TOP + 0.49, z: c.z + p.z, kind: 'ball', scale: p.scale, color: ['#65b691', '#7cc5a3', '#8abd86'][plan.variant % 3] });
-      }
+      if (occupied.has(`${i},${j}`)) benches.push([c.x + BENCH_OFFSET.x, c.z + BENCH_OFFSET.z, 0]);
+      else parks.push({ i, j, ...c, scaleX: riverSceneryClear(c.x, c.z, 5.55, 5.55) ? 1 : 0.94 });
       continue;
     }
     // Each suburban home owns its lawn, driveway, small trees and fence. Keep
@@ -407,7 +354,7 @@ export function buildDecor(rings, lots, half, { districts = false } = {}) {
     ponds = ponds.filter(([x, z, radius]) => riverSceneryClear(x, z, radius + 0.4, radius + 0.4));
     addRiparianClearings(group, clearings);
   }
-  addDowntownPlazas(group, plazas);
+  if (parks.length) group.add(buildDowntownParks(parks, { lampMaterial: lampMaterial() }));
   addTrees(group, trees);
   addFlowers(group, flowers);
   if (benches.length) {

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { THREE } from '../app/city/toon.js';
-import { downtownPlazaPlan, buildDecor, buildRoads, riverSceneryClear, BENCH_OFFSET } from '../app/city/scenery.js';
-import { LOT_HALF, islandHalf } from '../app/city/layout.js';
+import { buildDecor, buildRoads, riverSceneryClear, BENCH_OFFSET } from '../app/city/scenery.js';
+import { islandHalf } from '../app/city/layout.js';
 import { disposeAll } from '../app/city/fx.js';
 import { riverZ, riverSide, riverBankPoint, riverCellUsable, riverFootprintClear, bridgeSpan, bridgeCrossings, bridgeAt } from '../app/city/river-path.js';
 
@@ -40,37 +40,30 @@ function renderedBounds(root, visit) {
 }
 const footprint = box => [(box.min.x + box.max.x) / 2, (box.min.z + box.max.z) / 2, Math.max(0, (box.max.x - box.min.x) / 2 - 1e-5), Math.max(0, (box.max.z - box.min.z) / 2 - 1e-5)];
 
-test('Downtown plaza plans are stable, varied, and stay inside their vacant lots', () => {
-  const variants = new Set(); let fountains = 0;
-  for (let i = -4; i <= 4; i++) for (let j = -4; j < 0; j++) {
-    const plan = downtownPlazaPlan(i, j);
-    assert.deepEqual(downtownPlazaPlan(i, j), plan);
-    variants.add(plan.variant); fountains += Number(plan.fountain);
-    assert.ok(plan.planters.length >= 2 && plan.planters.length <= 3);
-    assert.ok(plan.benches.length >= 1 && plan.benches.length <= 2);
-    for (const p of plan.planters) {
-      assert.ok(Math.abs(p.x) + 0.725 < LOT_HALF);
-      assert.ok(Math.abs(p.z) + 0.725 < LOT_HALF);
-      assert.ok(p.scale <= 0.725);
-    }
-  }
-  assert.equal(variants.size, 4);
-  assert.ok(fountains > 0 && fountains < 18, 'fountains are occasional');
-});
-
 test('occupied Downtown lots keep their existing bench and leave tower space clear', () => {
-  const plan = downtownPlazaPlan(2, -1, true);
-  assert.deepEqual(plan.planters, []);
-  assert.equal(plan.fountain, false);
-  assert.deepEqual(plan.benches, [[BENCH_OFFSET.x, BENCH_OFFSET.z, 0]]);
+  const lot = { i: 2, j: -2, padW: 5.8, padD: 5.4, cz: -0.3 };
+  const decor = buildDecor(3, new Map([['2,-2', lot]]), islandHalf(3), { districts: true });
+  assert.ok(!decor.getObjectByName('downtown-parks').userData.parks.some(p => p.i === lot.i && p.j === lot.j));
+  const tower = new THREE.Box3(new THREE.Vector3(29.2, 0.2, -34.8), new THREE.Vector3(34.8, 6, -29.8));
+  renderedBounds(decor, box => assert.ok(!box.intersectsBox(tower), 'park geometry intrudes into an occupied tower'));
+  const matrix = new THREE.Matrix4(), at = new THREE.Vector3(); let benchFound = false;
+  decor.traverse(node => {
+    if (!node.isInstancedMesh) return;
+    for (let n = 0; n < node.count; n++) {
+      node.getMatrixAt(n, matrix); at.setFromMatrixPosition(matrix);
+      if (Math.abs(at.x - (32 + BENCH_OFFSET.x)) < 1e-5 && Math.abs(at.z - (-32 + BENCH_OFFSET.z)) < 1e-5) benchFound = true;
+    }
+  });
+  assert.ok(benchFound, 'established NPC bench remains on the occupied lot');
+  disposeAll(decor);
 });
 
-test('Downtown hardscape uses bounded merged draws, does not intercept picking, and disposes', () => {
+test('Downtown parks use bounded merged draws, does not intercept picking, and disposes', () => {
   for (const rings of [2, 3]) {
     const decor = buildDecor(rings, new Map(), islandHalf(rings), { districts: true });
-    const urban = decor.getObjectByName('downtown-plazas');
+    const urban = decor.getObjectByName('downtown-parks');
     assert.ok(urban);
-    assert.ok(urban.children.length <= 6, 'hardscape batches do not grow with lot count');
+    assert.ok(urban.children.length <= 5, 'park batches do not grow with lot count');
     const hits = [];
     const ray = new THREE.Raycaster(new THREE.Vector3(0, 20, -16), new THREE.Vector3(0, -1, 0));
     ray.intersectObject(decor, true, hits);
@@ -88,7 +81,7 @@ test('river clearings replace unsafe lots and every decor footprint clears water
     for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) if (riverCellUsable(i, j) && (i + j) % 3 === 0) lots.set(`${i},${j}`, { i, j, padW: 5.8, padD: 5.4, cz: -0.3 });
     const decor = buildDecor(rings, lots, islandHalf(rings), { districts: true });
     assert.ok(decor.getObjectByName('riparian-clearings'));
-    assert.ok(decor.getObjectByName('downtown-plazas'));
+    assert.ok(decor.getObjectByName('downtown-parks'));
     let pieces = 0;
     renderedBounds(decor, box => {
       pieces++;
@@ -167,11 +160,11 @@ test('river scenery releases owned geometry, instance buffers, and materials on 
 
 test('contributor islands retain the existing park scenery', () => {
   const decor = buildDecor(1, new Map(), islandHalf(1));
-  assert.equal(decor.getObjectByName('downtown-plazas'), undefined);
+  assert.equal(decor.getObjectByName('downtown-parks'), undefined);
   disposeAll(decor);
 });
 
-test('occupied Suburbs plots contain no shared decor while vacant parks and Downtown plazas survive', () => {
+test('occupied Suburbs plots contain no shared decor while vacant parks and Downtown parks survive', () => {
   const rings = 3, occupied = new Map();
   for (let i = -rings; i <= rings; i++) for (let j = 0; j <= rings; j++) if ((i || j) && riverCellUsable(i, j)) occupied.set(`${i},${j}`, { i, j, district: 'suburbs', padW: 11.2, padD: 11.2, cz: -0.3 });
   const homes = buildDecor(rings, occupied, islandHalf(rings), { districts: true });
@@ -183,9 +176,9 @@ test('occupied Suburbs plots contain no shared decor while vacant parks and Down
     renderedBounds(parks, box => { if (box.intersectsBox(area)) vacantParkParts++; });
   }
   assert.ok(vacantParkParts > 100, 'vacant Suburbs lots retain trees and grassy parks');
-  const before = parks.getObjectByName('downtown-plazas'), after = homes.getObjectByName('downtown-plazas');
+  const before = parks.getObjectByName('downtown-parks'), after = homes.getObjectByName('downtown-parks');
   assert.equal(before.children.length, after.children.length);
-  before.children.forEach((mesh, index) => assert.deepEqual(after.children[index].geometry.attributes.position.array, mesh.geometry.attributes.position.array, 'Downtown plaza geometry stays unchanged'));
+  before.children.forEach((mesh, index) => assert.deepEqual(after.children[index].geometry.attributes.position.array, mesh.geometry.attributes.position.array, 'Downtown park geometry stays unchanged'));
   disposeAll(homes); disposeAll(parks);
 });
 
