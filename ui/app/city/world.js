@@ -18,6 +18,7 @@ import { Particles, disposeAll } from './fx.js';
 import { islandHalf } from './layout.js';
 import { setBuildingNight } from './buildings.js';
 import { DECK_Y } from './spark.js';
+import { islandFitDistance, cameraBounds, clampCameraTarget, cameraIdle } from './camera-math.js';
 
 /* ---------- turning the island over ---------- */
 /** Island-space height of the pivot: midway between the two faces, so either face rests at the same height. */
@@ -201,8 +202,8 @@ export class World {
     // The polar limits follow the zoom every frame (updatePitch).
     Object.assign(controls, { enableDamping: true, dampingFactor: 0.085, screenSpacePanning: false, minDistance: 3, maxPolarAngle: 1.3, minPolarAngle: 0.12, rotateSpeed: 0.55, enableZoom: true, zoomToCursor: true, zoomSpeed: 1.25, panSpeed: 0.95 });
     controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-    controls.addEventListener('start', () => { this.tween = null; this.pendingFlight = null; this.userMoved = true; });
     this.controls = controls;
+    this.bindCameraActivity();
     this.limits();
     this.resetView({ instant: true, auto: true });
     this.bindTilt();
@@ -274,9 +275,42 @@ export class World {
   occluders() { return this.island ? this.island.group.children.filter(child => child.userData.occluder) : []; }
 
   limits() {
-    this.controls.maxTargetRadius = this.half * 0.95;
-    this.controls.maxDistance = 70 + this.half * 1.9;
+    const preserve = !this.overview || this.street || this.shot || this.pendingFlight;
+    // Temporary street/talk views retain room for the camera snapshot they will
+    // restore, even if the live close-up is much nearer after a viewport resize.
+    const heldDistance = this.street || this.shot ? Math.max(this.distance, this.controls.maxDistance || 0) : this.distance;
+    const bounds = cameraBounds(this.half, this.fitDistance(), preserve ? heldDistance : 0);
+    this.panLimit = bounds.pan;
+    this.controls.maxTargetRadius = Infinity;
+    this.controls.maxDistance = bounds.maxDistance;
+    this.camera.far = bounds.far; this.camera.updateProjectionMatrix();
     this.applyPolarLimits();
+  }
+  markCameraMoved(now = performance.now()) {
+    this.lastCameraMove = now; this.userMoved = true; this.centerTarget = false; this.overview = false;
+  }
+  bindCameraActivity() {
+    this.controls.addEventListener('start', () => { this.tween = null; this.pendingFlight = null; this.controlsActive = true; this.markCameraMoved(); });
+    this.controls.addEventListener('change', () => { if (this.controlsActive) this.markCameraMoved(); });
+    this.controls.addEventListener('end', () => {
+      // City pointerup may already have focused the clicked object. Record the
+      // gesture's end without undoing that newer, explicit camera destination.
+      if (this.controlsActive) { this.lastCameraMove = performance.now(); this.userMoved = true; }
+      this.controlsActive = false;
+    });
+  }
+  canAutoRefit(now = performance.now()) {
+    return !this.street && !this.shot && !this.controlsActive && !this.pendingFlight && cameraIdle(now, this.lastCameraMove);
+  }
+  /** Keep both camera and target translated together, including after cursor zoom.
+   * The local square also applies after a yawed Spark flip. */
+  clampTarget() {
+    if (this.turn || this.street || this.shot || !this.controls) return;
+    const target = this.controls.target, local = this.toLocal(target, this._panLocal ||= new THREE.Vector3());
+    const bounded = clampCameraTarget(local, this.panLimit);
+    if (bounded.x === local.x && bounded.z === local.z) return;
+    const next = this.toWorld(bounded, { out: this._panWorld ||= new THREE.Vector3() });
+    const delta = next.sub(target); target.add(delta); this.camera.position.add(delta);
   }
   /** Polar limits for the current distance: held where it is while the island can be turned, else
    *  a band around the zoom curve (widened to the current pitch, so nothing snaps). updatePitch
@@ -310,7 +344,7 @@ export class World {
     c.minPolarAngle = this.underside ? s.phi : Math.min(s.phi, Math.max(P.min, curve - P.up));
     c.maxPolarAngle = this.underside ? s.phi : Math.max(s.phi, Math.min(P.max, curve + P.down));
     // Eye height: raise a low orbit target as the camera closes in; lower it again (only what was raised) going out.
-    const lift = eyeLiftForDistance(d), want = lift > 1e-3 ? GROUND_Y + lift : -Infinity;
+    const lift = this.centerTarget ? 0 : eyeLiftForDistance(d), want = lift > 1e-3 ? GROUND_Y + lift : -Infinity;
     let dy = 0;
     if (t.y < want - 1e-4) dy = want - t.y;
     else if (this.eyeRaise > 1e-4 && t.y > want + 1e-4) dy = -Math.min(this.eyeRaise, t.y - want);
@@ -355,7 +389,7 @@ export class World {
     if (t?.mode === 'drag') return true;
     const angle = t ? t.angle : 0;
     this.turn = { mode: 'drag', axis: t ? t.axis : this.tiltAxis(), angle, base: angle, velocity: 0, at: performance.now() };
-    this.userMoved = true;
+    this.markCameraMoved();
     this.makeRoom();
     return true;
   }
@@ -365,6 +399,7 @@ export class World {
     const t = this.turn;
     if (t?.mode !== 'drag') return;
     const now = performance.now(), angle = t.base + dy / TILT_PX * Math.PI;
+    this.markCameraMoved(now);
     const step = Math.max(4, now - t.at) / 1000;
     t.velocity = t.velocity * 0.35 + ((angle - t.angle) / step) * 0.65;
     t.angle = angle; t.at = now;
@@ -526,25 +561,30 @@ export class World {
   }
 
   /* ---------- camera ---------- */
+  fitDistance() {
+    return islandFitDistance({ half: this.half, fov: this.camera.fov, aspect: this.camera.aspect, polar: TILT_POLAR, azimuth: .62 });
+  }
   /** The framed overview, from the front of whichever face is (or will be) up. */
   defaultView() {
     const x = this._pv.set(1, 0, 0).applyQuaternion(this.restQuaternion(this._qr)), yaw = Math.atan2(-x.z, x.x);
-    const distance = Math.min(190, 34 + this.half * 1.75);
-    return { target: new THREE.Vector3(0, 0, 0), distance, polar: polarForDistance(distance), azimuth: 0.62 + yaw };
+    const distance = this.fitDistance();
+    return { target: new THREE.Vector3(0, 0, 0), distance, polar: TILT_POLAR, azimuth: 0.62 + yaw };
   }
-  resetView(opts = {}) { this.flyTo(this.defaultView(), opts); }
+  resetView(opts = {}) { this.limits(); this.flyAfterTurn(this.defaultView(), { ...opts, center: true }); this.overview = true; }
   /** flyTo now, or once the island has finished turning: a flight during a flip would carry the
    *  camera into the island's swing (makeRoom backs it out first). A newer flight, another flip or
    *  the owner grabbing the view drops it. */
   flyAfterTurn(view, opts) { if (this.turn) this.pendingFlight = [view, opts]; else this.flyTo(view, opts); }
   /** Ease the camera to { target, distance?, polar?, azimuth? }. Any flight that isn't the city's own
-   * auto-framing (auto: true) counts as the owner moving the camera, so auto-framing stops overriding them.
+    * auto-framing (auto: true) counts as owner movement and suppresses expansion refits for thirty seconds.
    * No polar: the zoom curve at the new distance (an offset from it eases away with the zoom). An explicit
    * polar is kept (and held until the next zoom). A low target is raised to eye height for a close
-   * landing. free: a scripted shot (talk mode), no distance / pitch limits and no eye-height raise. */
-  flyTo({ target, distance, polar, azimuth }, { instant = false, duration = 0.95, auto = false, free = false } = {}) {
+   * landing. center preserves the exact requested target after landing. free is a scripted shot
+   * (talk mode), without distance / pitch limits; it also preserves the target. */
+  flyTo({ target, distance, polar, azimuth }, { instant = false, duration = 0.95, auto = false, free = false, center = false } = {}) {
     this.pendingFlight = null; this.zoomPending = 0;   // a flight replaces any wheel zoom still playing out
-    if (!auto) this.userMoved = true;
+    if (!auto) this.markCameraMoved();
+    this.centerTarget = Boolean(center || free);
     const offset = new THREE.Vector3().subVectors(this.camera.position, this.controls?.target || new THREE.Vector3());
     const from = new THREE.Spherical().setFromVector3(offset);
     if (!this.controls) { this.camera.position.copy(target).add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(distance, polar, azimuth))); return; }
@@ -562,17 +602,18 @@ export class World {
     while (dTheta > Math.PI) dTheta -= Math.PI * 2; while (dTheta < -Math.PI) dTheta += Math.PI * 2;
     to.theta = from.theta + dTheta;
     const toTarget = target.clone();
-    if (!free) { const lift = eyeLiftForDistance(radius); if (lift > 1e-3 && toTarget.y < GROUND_Y + lift) { raise = GROUND_Y + lift - toTarget.y; toTarget.y += raise; } }
+    if (!this.centerTarget) { const lift = eyeLiftForDistance(radius); if (lift > 1e-3 && toTarget.y < GROUND_Y + lift) { raise = GROUND_Y + lift - toTarget.y; toTarget.y += raise; } }
     this.resetControlMomentum();
     this.eyeRaise = 0;   // the flight carries the target from its raised height (nothing left to lower if it is cut short)
-    const tween = { t: 0, duration, fromTarget: this.controls.target.clone(), toTarget, from, to, bias, raise, free };
+    const tween = { t: 0, duration, fromTarget: this.controls.target.clone(), toTarget, from, to, bias, raise, free, center: this.centerTarget };
     if (instant || this.reducedMotion()) { this.tween = null; this.applyTween(tween, 1); this.endTween(tween); }
     else this.tween = tween;
   }
   /** A flight landed: its pitch offset holds until the next zoom; the eye-height raise is remembered. */
   endTween(tw) {
     if (this.tween === tw) this.tween = null;
-    if (tw.free) return;
+    this.centerTarget = tw.center;
+    if (tw.free) { this.pitchBias = tw.to.phi - polarForDistance(tw.to.radius); this.eyeRaise = 0; this._pitchD = 0; return; }
     this.pitchBias = tw.bias; this.eyeRaise = tw.raise; this._pitchD = 0;
   }
   applyTween(tw, t) {
@@ -595,14 +636,14 @@ export class World {
     this.zoomPending = queueZoomLog(this.zoomPending || 0, log, this.distance, c.minDistance, c.maxDistance);
     this.zoomAnchor = Number.isFinite(clientX) && Number.isFinite(clientY) ? { x: clientX, y: clientY } : null;
     if (this.tween) this.tween = null;
-    this.pendingFlight = null; this.userMoved = true;
+    this.pendingFlight = null; this.markCameraMoved();
     if (this.reducedMotion() || !this.raf) this.stepZoom(1);
   }
   stepZoom(k) {
     const log = (this.zoomPending || 0) * k;
     this.zoomPending = Math.abs(this.zoomPending - log) < 1e-4 ? 0 : this.zoomPending - log;
     this.zoomAt(Math.exp(log), this.zoomAnchor);
-    if (!this.raf) { this.updatePitch(1); this.controls.update(); this.renderOnce(); }
+    if (!this.raf) { this.updatePitch(1); this.controls.update(); this.clampTarget(); this.renderOnce(); }
   }
   /** Scale the camera's distance by factor about the ground point under the anchor (the point under
    *  the pointer stays put, like a map); about the orbit target when the pointer is on the sky. */
@@ -623,6 +664,7 @@ export class World {
     if (f < 1 && this.collide?.(this.toLocal(next, this._zl ||= new THREE.Vector3()))) { this.zoomPending = 0; return; }
     c.target.sub(p).multiplyScalar(f).add(p);
     cam.copy(next);
+    this.clampTarget();
   }
   rotateBy(angle) {
     const offset = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
@@ -636,6 +678,7 @@ export class World {
     const side = new THREE.Vector3(-dir.z, 0, dir.x);
     const move = side.multiplyScalar(right).add(dir.multiplyScalar(forward));
     this.controls.target.add(move); this.camera.position.add(move);
+    this.clampTarget();
   }
   /* ---------- street view ---------- */
   /** Third-person camera behind a walker. pose(dt) → { x, y, z, heading, back, up, look } in island
@@ -647,7 +690,7 @@ export class World {
     this.controls.enabled = !this.street && !this.shot;
     this.tween = null; this.pendingFlight = null;
     this.clearKeys(); this.resetControlMomentum();
-    if (this.street) { this.userMoved = true; this.streetSnap = this.reducedMotion(); }
+    if (this.street) { this.markCameraMoved(); this.streetSnap = this.reducedMotion(); }
   }
   updateStreet(dt) {
     const s = this.street(dt);
@@ -682,9 +725,9 @@ export class World {
     const k = this.keys, speed = this.distance * 0.75 * dt;
     const right = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
     const forward = (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0) - (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0);
-    if (right || forward) { this.panBy(right * speed, forward * speed); this.userMoved = true; this.onKeyPan?.(); }
+    if (right || forward) { this.panBy(right * speed, forward * speed); this.markCameraMoved(); this.onKeyPan?.(); }
     const spin = (k.has('KeyE') ? 1 : 0) - (k.has('KeyQ') ? 1 : 0);
-    if (spin) { this.rotateBy(spin * dt * 1.4); this.userMoved = true; }
+    if (spin) { this.rotateBy(spin * dt * 1.4); this.markCameraMoved(); }
   }
 
   /* ---------- loop ---------- */
@@ -722,7 +765,7 @@ export class World {
       }
     }
     if (this.zoomPending && !this.tween && !this.street && !this.shot) this.stepZoom(reduced ? 1 : 1 - Math.exp(-dt * 14));
-    if (!this.tween && !this.street && !this.shot) { this.updatePitch(dt); this.controls.update(); }
+    if (!this.tween && !this.street && !this.shot) { this.updatePitch(dt); this.controls.update(); this.clampTarget(); }
     const env = { night: this.current.night, reducedMotion: reduced, particles: this.particles, quality: this.quality };
     if (this.islandAnim) {
       const a = this.islandAnim; a.t = Math.min(1, a.t + dt / 0.9);
@@ -751,6 +794,12 @@ export class World {
     this.camera.aspect = w / h; this.camera.updateProjectionMatrix();
     this.particles.setViewport(h * this.renderer.getPixelRatio(), this.camera.fov);
     this.size = { w, h };
+    if (this.controls) {
+      this.limits();
+      // An explicit Home overview stays framed as its viewport changes. The
+      // thirty-second grace applies to expansion, not this existing overview.
+      if (this.overview && !this.street && !this.shot && !this.controlsActive && !this.pendingFlight) this.resetView({ instant: true, auto: true });
+    }
     if (this.raf === 0 && this.scene) this.renderOnce();
   }
   renderOnce() { try { this.renderer.render(this.scene, this.camera); } catch { /* not ready */ } }

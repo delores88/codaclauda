@@ -68,6 +68,7 @@ function labelBoards(parent, project, { x, y, z, width, height = 0.20, kind = 'h
     const face = mesh(mount, new THREE.PlaneGeometry(width, height), new THREE.MeshBasicMaterial({ map: plaqueTexture(project.label, { accent }), transparent: true, side: THREE.DoubleSide, toneMapped: false }), low, false);
     face.position.z = side * (depth / 2 + 0.001); if (side < 0) face.rotation.y = Math.PI;
     face.userData = { mountedLabel: true, projectId: project.projectId }; face.castShadow = false;
+    face.raycast = THREE.Mesh.prototype.raycast;
   }
 }
 function person(parts, low, x, shirt) {

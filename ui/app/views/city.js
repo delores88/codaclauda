@@ -21,6 +21,7 @@ import { openAssignDialog } from '../city/assign.js';
 import { CityCi } from '../city/ci.js';
 import { tickerBank, tickerSegments } from '../city/ticker.js';
 import { buildingStreetBoxes, buildingSolidAt } from '../city/street-collision.js';
+import { boxFitDistance } from '../city/camera-math.js';
 
 registerIcons({
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.6 2.4c-.8.4-1.2.9-1.2 1.7v.4M12 17h.01"/>',
@@ -152,7 +153,37 @@ export function mount(root, ctx) {
   return { show: params => view.show(params), hide: () => view.hide(), destroy: () => view.destroy() };
 }
 
-class CityView {
+/** Visible geometry in the island's resting world frame. A new building is framed at its
+ * settled size while its rise animation plays; no live transforms are changed. */
+export function focusBounds(object, world, settled = []) {
+  if (!object) return null;
+  object.updateWorldMatrix(true, true);
+  const bounds = new THREE.Box3(), point = new THREE.Vector3(), matrices = new Map();
+  const fullScale = new Set(settled), one = new THREE.Vector3(1, 1, 1);
+  const matrixFor = node => {
+    if (!node) return new THREE.Matrix4();
+    if (!matrices.has(node)) {
+      const local = fullScale.has(node) ? new THREE.Matrix4().compose(node.position, node.quaternion, one) : node.matrix;
+      matrices.set(node, matrixFor(node.parent).clone().multiply(local));
+    }
+    return matrices.get(node);
+  };
+  object.traverseVisible(node => {
+    if (!node.geometry) return;
+    if (node.isInstancedMesh) node.computeBoundingBox();
+    else if (!node.geometry.boundingBox) node.geometry.computeBoundingBox();
+    const box = node.isInstancedMesh ? node.boundingBox : node.geometry.boundingBox;
+    if (!box || box.isEmpty()) return;
+    const matrix = matrixFor(node);
+    for (const x of [box.min.x, box.max.x]) for (const y of [box.min.y, box.max.y]) for (const z of [box.min.z, box.max.z]) {
+      point.set(x, y, z).applyMatrix4(matrix);
+      bounds.expandByPoint(world.toWorld(world.toLocal(point), { atRest: true }));
+    }
+  });
+  return bounds.isEmpty() ? null : bounds;
+}
+
+export class CityView {
   constructor(root, ctx) {
     this.root = root;
     this.ctx = ctx;
@@ -315,7 +346,7 @@ class CityView {
     this.help = h('div.city-help.card', { hidden: true, role: 'dialog', 'aria-label': 'City controls' },
       h('div.city-help-head', h('strong', 'Getting around'), iconButton('close', 'Close help', () => this.toggleHelp(false))),
       h('dl.city-help-list',
-        ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Drag an agent', 'Drop it on a building to give it a task there'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
+        ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Drag an agent', 'Drop it on a building to give it a task there'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click a building', 'Center it on either face'], ['Double-click ground', 'Walk your avatar there'], ['Click a boat label', 'Center that boat'], ['F / Focus', 'Center the selected building, agent or boat'], ['Jump', 'Select and center a building or agent'], ['H', 'Fit the whole island'], ['Esc', 'Deselect']]
           .flatMap(([k, v]) => [h('dt', h('kbd', k)), h('dd', v)])),
       h('p.city-note', 'A winding river connects Downtown (GitHub projects) and Suburbs (local folders without a repo). Road bridges link the districts. Pale Downtown ghosts have a ground sign and open a panel where you can clone the repo. Tickers sit on real buildings only. Both districts keep at least three empty plots and grow without moving placed buildings.'),
       h('p.city-note', 'Suburbs have low modern homes with at most two storeys. Larger projects add wings and a wider footprint; Downtown towers grow taller. A contractor van and ladder show an agent working at a home, and a solar-panel glint marks a busy home.'),
@@ -423,8 +454,6 @@ class CityView {
     this.occupied = new Set([...cells.values()].map(c => cellKey(c.i, c.j)));
     this.persistLots(fresh);
     const ringsChanged = this.world.setRings(rings, { animate: Boolean(this.firstSyncDone), districts });
-    // Until the owner moves the camera, keep the whole (growing) island framed.
-    if (ringsChanged && !this.world.userMoved && !this.pendingFocus && !this.talk) this.world.resetView({ instant: !this.firstSyncDone, auto: true });
     const agents = this.allAgents();   // the board's agents + CodaClauda sessions + desktop sessions (zero-config)
     const active = new Set(agents.filter(a => a.status === 'active' && a.currentProjectId).map(a => store.project(a.currentProjectId)?.id || a.currentProjectId));
     const lotsChanged = this.buildings.sync(projects, cells, active, { animate: true, tickers: this.tickerMap(projects, agents), districts });
@@ -467,6 +496,9 @@ class CityView {
     this.legendGear.hidden = !this.spark.gears.size;
     this.syncRunnerLabels();
     this.renderMachines(machines, mode);
+    // Fit the completed scene only. A recent owner gesture skips this expansion's refit;
+    // becoming idle later never schedules a surprise camera reset.
+    this.refitForGrowth(ringsChanged);
     this.firstSyncDone = true;
     this.syncLabels(agents);
     this.weather?.setHome(!this.islands?.current);   // contributor islands (city/portal.js) have no weather; IslandMode.apply syncs after each switch
@@ -478,6 +510,12 @@ class CityView {
     this.tryPendingFocus();
   }
 
+  refitForGrowth(changed) {
+    if (changed && !this.pendingFocus && !this.talk && !this.street && !this.streetPending && !this.following && this.world.canAutoRefit()) {
+      this.world.resetView({ instant: !this.firstSyncDone, auto: true });
+    }
+  }
+
   /* ---------------- per-frame ---------------- */
   frame(dt, elapsed, env) {
     if (this.dirty) this.sync();
@@ -485,6 +523,7 @@ class CityView {
     tickerBank.update(dt, env.reducedMotion);
     this.ci?.update(dt, elapsed);
     if (!this.islands?.current) this.river?.update(dt, elapsed, env);
+    this.updateBoatFocus();
     try { this.npcs.update(dt, elapsed, env); }
     catch (error) { if (!this.npcError) { this.npcError = true; console.error('City: agent animation failed', error); } }
     try { this.spark.update(dt, elapsed, env); }
@@ -514,7 +553,10 @@ class CityView {
   /** Is this target on the face that's up, with the island still? (Overlays only show then.) */
   facesUp(target) {
     const world = this.world;
-    return world.settled && world.side === (SPARK_KINDS.has(target?.kind) ? 'spark' : 'pc');
+    const boat = target?.kind === 'boat' ? this.river.getBoat(target.id) : null;
+    if (target?.kind === 'boat' && !boat) return false;
+    const side = boat ? (boat.position.y < -3.6 ? 'spark' : 'pc') : SPARK_KINDS.has(target?.kind) ? 'spark' : 'pc';
+    return world.settled && world.side === side;
   }
   updateOverlays() {
     const world = this.world, cam = world.camera;
@@ -737,6 +779,7 @@ class CityView {
     if (target.kind === 'gear') { const p = this.spark.gearPoint(target.id); return p ? at(p.x, p.y + lift, p.z) : null; }
     if (target.kind === 'plot') { const c = cellCenter(target.i, target.j); return at(c.x, GROUND_Y + 1.4 + lift, c.z); }
     if (target.kind === 'bridge') return at(target.x, this.npcs.surfaceY(target.x, target.z) + 0.5 + lift, target.z);
+    if (target.kind === 'boat') { const boat = this.river.getBoat(target.id); return boat ? boat.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0, 1.4 + lift, 0)) : null; }
     return null;
   }
   /** The camera in island space (people turn to face it). */
@@ -771,21 +814,25 @@ class CityView {
       this.onClick(this.pick(event.clientX, event.clientY));
     });
     canvas.addEventListener('dblclick', event => {
-      clearTimeout(this.plotClickTimer); this.plotClickTimer = 0;   // a double-click on an empty plot walks, it doesn't open the dialog
-      if (this.talk) return;   // talk mode: the camera is staged; clicks pick who to talk to
-      const target = this.pick(event.clientX, event.clientY);
-      if (target?.kind === 'runner' || target?.kind === 'foundry' || target?.kind === 'gear') return;
-      if (target?.kind === 'spark') { if (!this.sparkOffline) this.select({ kind: 'building', id: target.id }); return; }
-      if (this.street) return;   // street view: you walk with the keys
-      if (target?.kind === 'bridge') { this.npcs.walkOwner(target.x, target.z); return; }
-      if (target && target.kind !== 'owner' && target.kind !== 'plot') { this.select(target); this.focusSelection(); return; }
-      const ground = this.world.groundAt(this.world.ndc(event.clientX, event.clientY));
-      if (ground) this.npcs.walkOwner(ground.x, ground.z);
+      this.onDoubleClick(this.pick(event.clientX, event.clientY), event.clientX, event.clientY);
     });
     canvas.addEventListener('contextmenu', event => event.preventDefault());
     this.onKeyDown = event => this.keyDown(event);
     this.onKeyUp = event => { this.world.keyUp(event.code); this.streetKeys.delete(event.code); };
     this.onBlur = () => { this.world.clearKeys(); this.streetKeys.clear(); this.world.releaseTilt?.(); };   // a held drag lets go: the island settles flat
+  }
+  onDoubleClick(target, clientX, clientY) {
+    clearTimeout(this.plotClickTimer); this.plotClickTimer = 0;
+    if (this.talk || !this.world.settled) return;
+    if (target?.kind === 'foundry' || target?.kind === 'gear') return;
+    if (target && !['owner', 'plot', 'bridge'].includes(target.kind)) {
+      this.select(target.kind === 'spark' ? { kind: 'building', id: target.id } : target);
+      this.focusSelection(); return;
+    }
+    if (this.street) return;
+    if (target?.kind === 'bridge') { this.npcs.walkOwner(target.x, target.z); return; }
+    const ground = this.world.groundAt(this.world.ndc(clientX, clientY));
+    if (ground) this.npcs.walkOwner(ground.x, ground.z);
   }
   /** Drag to assign: a left press on an agent (This PC side up, island still, no talk / street view)
    *  is caught in the capture phase on the stage, before the orbit controls and the island tilt see
@@ -914,13 +961,14 @@ class CityView {
   pickAny(clientX, clientY) {
     const ndc = this.world.ndc(clientX, clientY);
     // Island slabs and the Spark deck are occluders: a ray never reaches through to the other side.
-    const hit = this.world.raycast(ndc, [...this.npcs.pickables(), ...this.buildings.pickables(), ...this.world.hq.pickables, ...this.spark.pickables(), ...(!this.islands?.current ? this.river.pickables() : []), ...this.world.occluders(), ...this.spark.occluders()]);
+    const hit = this.world.raycast(ndc, [...this.npcs.pickables(), ...this.buildings.pickables(), ...this.world.hq.pickables, ...this.spark.pickables(), ...(!this.islands?.current ? [...this.river.pickables(), ...this.river.labelPickables(), ...this.river.occluders()] : []), ...this.world.occluders(), ...this.spark.occluders()]);
     if (!hit || hit.object.userData?.occluder) return this.plotAt(clientX, clientY);
     const object = hit.object;
     const person = this.npcs.targetOf(object);
     if (person) return person;
     for (let node = object; node; node = node.parent) {
       const data = node.userData || {};
+      if (data.boatId) return this.river.getBoat(data.boatId) ? { kind: 'boat', id: data.boatId } : null;
       if (data.riverBridge) {
         const point = this.world.toLocal(hit.point.clone());
         return { kind: 'bridge', id: `bridge:${data.crossing?.id || data.crossingId || data.crossingX}`, x: point.x, z: point.z };
@@ -985,6 +1033,7 @@ class CityView {
   describe(target) {
     if (!target) return null;
     if (target.kind === 'bridge') return { title: 'River bridge', sub: 'Click to walk across the river' };
+    if (target.kind === 'boat') return { title: 'River boat', sub: 'Click its label to center the boat' };
     if (target.kind === 'agent') {
       const agent = this.agentById(target.id);
       if (!agent) return null;
@@ -1098,6 +1147,7 @@ class CityView {
     const extra = target?.kind === 'agent' && extraKind(this.agentById(target.id));
     if (this.talk) { if (target?.kind === 'agent' && !extra) this.enterTalk(target.id); else if (target?.kind !== 'owner') this.exitTalk(); return; }
     if (!target) { this.select(null); return; }
+    if (target.kind === 'boat') { this.select(target); this.focusSelection(); return; }
     if (target.kind === 'bridge') { this.select(null); if (!this.street) this.npcs.walkOwner(target.x, target.z); return; }
     // A CodaClauda session or a desktop session: its card (talk mode is for board agents).
     if (extra) { const agent = this.agentById(target.id); this.select(target); this.showBubble(target, this.bubbleText(agent)); return; }
@@ -1159,27 +1209,59 @@ class CityView {
    *  is up, the island turns back over first. A building is framed on whichever face is up. */
   focusSelection() {
     const world = this.world, s = this.selection;
+    this.boatFocus = null;
+    if (this.talk) this.exitTalk({ instant: true });
     if (this.street || this.streetPending) this.exitStreet({ fly: false });   // any framing flight leaves street view
-    const fly = (x, y, z, distance, polar) => world.flyAfterTurn({ target: world.toWorld(new THREE.Vector3(x, y, z), { atRest: true }), distance, polar });
+    if (this.following) this.toggleFollow(false);
+    const fly = (x, y, z, distance, polar) => world.flyAfterTurn({ target: world.toWorld(new THREE.Vector3(x, y, z), { atRest: true }), distance, polar }, { center: true });
+    const frame = (object, minimum = 12, settled = [], polar = 1) => {
+      const bounds = focusBounds(object, world, settled);
+      if (!bounds) return false;
+      const azimuth = world.azimuth;
+      const distance = Math.max(minimum, boxFitDistance(bounds.getSize(new THREE.Vector3()), { fov: world.camera.fov, aspect: world.camera.aspect, polar, azimuth, margin: .25 }));
+      world.flyAfterTurn({ target: bounds.getCenter(new THREE.Vector3()), distance, polar, azimuth }, { center: true });
+      return true;
+    };
     const pcFirst = () => { if (world.underside) world.flipTo('pc'); };
-    if (!s || s.kind === 'owner') { const owner = this.npcs.ownerPosition; if (owner) { pcFirst(); fly(owner.x, 1, owner.z, s ? 11 : 16, s ? 1.1 : 1.0); } return; }
+    if (!s || s.kind === 'owner') { const owner = this.npcs.ownerPosition; if (owner) { pcFirst(); if (!frame(this.npcs.owner?.person.object, s ? 11 : 16)) fly(owner.x, owner.y + 1, owner.z, s ? 11 : 16, s ? 1.1 : 1.0); } return; }
     if (s.kind === 'agent') {
       const p = this.npcs.position(s);
-      if (p) { pcFirst(); fly(p.x, 1, p.z, 15, 1.02); }
-    } else if (s.kind === 'building') {
+      if (p) { pcFirst(); if (!frame(this.npcs.npcs?.get(s.id)?.person.object, 13)) fly(p.x, p.y + 1, p.z, 13, 1.02); }
+    } else if (s.kind === 'building' || s.kind === 'spark') {
+      if (s.kind === 'spark' && world.underside) world.flipTo('spark');
       const spark = world.restSide === 'spark' && this.spark.shown ? this.spark.buildings.get(s.id) : null;
       const b = spark || this.buildings.get(s.id);
-      if (b) { const height = b.size.H, p = b.worldPoint(0, Math.min(14, height * 0.42), 0); fly(p.x, p.y, p.z, Math.max(20, height * 1.45 + b.size.W * 2.2), 1.0); }
-    } else if (s.kind === 'hq') { pcFirst(); fly(0, 3, -0.5, 26, 1.0); }
+      if (b) frame(b.group, 18, [b.tower, b.padGroup]);
+    } else if (s.kind === 'boat') {
+      const boat = this.river.getBoat(s.id);
+      if (boat) {
+        if (world.underside) world.flipTo(boat.position.y < -3.6 ? 'spark' : 'pc');
+        // Water sits below the quay: look down past its rail instead of through it.
+        frame(boat, 10, [], .62);
+        if (world.settled && world.tween) this.boatFocus = { id: s.id, tween: world.tween };
+      }
+    } else if (s.kind === 'hq') { pcFirst(); if (!frame(world.hq.group, 26)) fly(0, 3, -.5, 26, 1); }
     else if (s.kind === 'runner') {
       // Spark runners and crew live on the Spark face: roll it up first, then fly to where they'll be.
       const r = this.spark.runner(s.id);
       if (r) {
-        const local = world.toLocal(r.person.object.getWorldPosition(new THREE.Vector3()));
         if (world.underside && world.restSide !== 'spark') world.flipTo('spark');
-        world.flyAfterTurn({ target: world.toWorld(local, { atRest: true }), distance: 15, polar: 1.02 });
+        frame(r.person.object, 13);
       }
     }
+  }
+  /** Follow a moving boat only during this exact centering flight, including its final
+   * frame. Another camera action cancels it; reaching the boat never starts a follow mode. */
+  updateBoatFocus() {
+    const focus = this.boatFocus, world = this.world;
+    if (!focus) return;
+    const tween = focus.tween, finished = !world.tween && tween.t >= 1;
+    if ((!finished && world.tween !== tween) || !world.centerTarget || !world.settled || this.selection?.kind !== 'boat' || this.selection.id !== focus.id) { this.boatFocus = null; return; }
+    const bounds = focusBounds(this.river.getBoat(focus.id), world);
+    if (!bounds) { this.boatFocus = null; return; }
+    tween.toTarget.copy(bounds.getCenter(new THREE.Vector3()));
+    world.applyTween(tween, tween.t);
+    if (finished) this.boatFocus = null;
   }
   /** show({ focusProject }) / show({ focusAgent }) once those exist in the scene. */
   tryPendingFocus() {
@@ -1211,7 +1293,7 @@ class CityView {
   /* ---------------- panels ---------------- */
   refreshPanel() {
     const s = this.selection;
-    if (!s) { this.panel.hidden = true; this.root.classList.remove('city-has-panel'); this.panelSig = ''; return; }
+    if (!s || s.kind === 'boat') { this.panel.hidden = true; this.root.classList.remove('city-has-panel'); this.panelSig = ''; return; }
     let sig, render;
     const island = this.islands?.panelFor(s);   // contributor island: repo and town-hall cards
     if (island) ({ sig, render } = island);
@@ -1797,13 +1879,12 @@ class CityView {
     if (!open) storage.set(HELP_KEY, '1');
     this.renderToolbarState();
   }
-  /** Home / H: back to the framed overview, and let auto-framing follow the island again. */
+  /** Home / H: back to the framed overview. This explicit camera action starts the idle grace period. */
   resetCamera() {
     if (!this.world) return;
     if (this.street || this.streetPending) this.exitStreet({ fly: false });
     if (this.following) this.toggleFollow(false);
-    this.world.resetView({ auto: true });
-    this.world.userMoved = false;
+    this.world.resetView();
   }
   /** Show / Hide the DGX Spark side (only offered while DGXBridge is configured). */
   toggleSpark() {
@@ -1871,7 +1952,8 @@ class CityView {
     if (owner) this.npcs.driveOwner(owner.pos.x, owner.pos.z, st.heading, false);
     if (fly && back) {
       const s = new THREE.Spherical().setFromVector3(back.position.clone().sub(back.target));
-      world.flyTo({ target: back.target, distance: s.radius, polar: s.phi, azimuth: s.theta }, { duration: 0.85, instant });
+      world.flyTo({ target: back.target, distance: s.radius, polar: s.phi, azimuth: s.theta }, { duration: 0.85, instant, center: back.center });
+      world.overview = Boolean(back.overview);
     }
     this.renderToolbarState();
     this.refreshPanel();
@@ -1921,16 +2003,17 @@ class CityView {
   flipSide() {
     if (!this.world?.underside || this.street) return;
     if (this.following) this.toggleFollow(false);
+    this.world.markCameraMoved();
     this.world.flip();
     this.stage.focus({ preventScroll: true });
   }
 
-  /** Where the camera is (or where a flight under way is heading): { target, position }, world space. */
+  /** Save the actual pose and framing mode, including an in-progress flight's destination. */
   cameraPose() {
     const world = this.world, tw = world.tween;
     return tw && !tw.free
-      ? { target: tw.toTarget.clone(), position: new THREE.Vector3().setFromSpherical(tw.to).add(tw.toTarget) }
-      : { target: world.controls.target.clone(), position: world.camera.position.clone() };
+      ? { target: tw.toTarget.clone(), position: new THREE.Vector3().setFromSpherical(tw.to).add(tw.toTarget), center: Boolean(tw.center), overview: Boolean(world.overview) }
+      : { target: world.controls.target.clone(), position: world.camera.position.clone(), center: Boolean(world.centerTarget), overview: Boolean(world.overview) };
   }
 
   /* ---------------- talk mode ---------------- */
@@ -1971,7 +2054,8 @@ class CityView {
     world.setShot(null);
     if (t.back) {
       const s = new THREE.Spherical().setFromVector3(t.back.position.clone().sub(t.back.target));
-      world.flyAfterTurn({ target: t.back.target, distance: s.radius, polar: s.phi, azimuth: s.theta }, { duration: 1, instant });
+      world.flyAfterTurn({ target: t.back.target, distance: s.radius, polar: s.phi, azimuth: s.theta }, { duration: 1, instant, center: t.back.center });
+      world.overview = Boolean(t.back.overview);
     }
     this.declutterAt = 0;
     this.renderToolbarState();

@@ -12,6 +12,13 @@ const SLAB = .18, RIPPLE_COUNT = 26;
 const box = (w, h, d, x, y, z) => placed(new THREE.BoxGeometry(w, h, d), { x, y, z });
 const vector = p => new THREE.Vector3(p.x, p.y, p.z);
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+// A bank blocks selection from either direction. Raycasting is synchronous;
+// restore the shared toon material before any render or another object's query.
+function bankRaycast(raycaster, hits) {
+  const side = this.material.side;
+  try { this.material.side = THREE.DoubleSide; THREE.Mesh.prototype.raycast.call(this, raycaster, hits); }
+  finally { this.material.side = side; }
+}
 function add(group, geometry, material, shadow = false, pickable = false, outline = true) {
   const mesh = new THREE.Mesh(geometry, material); mesh.castShadow = shadow; mesh.receiveShadow = shadow;
   if (!pickable) mesh.raycast = () => {};
@@ -206,6 +213,12 @@ export class River {
     add(top, bankGeometry(xs, -1, half), toonMaterial('#c9c2b0'), !low).name = 'downtown-stone-quay';
     add(top, bankGeometry(xs, 1, half), toonMaterial('#7cc56a'), !low).name = 'suburbs-grassy-bank';
     this.buildBanks(top, points, low); this.buildBridges(top, low); this.buildDocks(top, low); this.landscape.add(mirrorLandscape(top));
+    this.bankOccluders = [];
+    this.landscape.traverse(node => {
+      if (node.name === 'downtown-stone-quay' || node.name === 'suburbs-grassy-bank') {
+        node.raycast = bankRaycast; node.userData.occluder = true; this.bankOccluders.push(node);
+      }
+    });
     for (let i = 0; i < 4; i++) {
       const fall = i % 2 === 1, geo = fall ? waterfallRibbon(this.loop, this.loop.joins[i], this.loop.joins[i + 1], low ? 1 : .4) : riverWaterGeometry(xs, i === 2, half);
       const water = add(this.landscape, geo, waterMaterial(low, half), false, false, false); outlineWater(water);
@@ -306,6 +319,20 @@ export class River {
     this.foamOutline = instancedOutline(this.foam, .007); this.foamOutline.name = 'waterfall-foam-outlines'; this.landscape.add(this.foamOutline);
   }
   pickables() { return this.group.visible ? this.bridges : []; }
+  occluders() { return this.group.visible ? this.bankOccluders || [] : []; }
+  labelPickables() {
+    if (!this.group.visible) return [];
+    return this.boats.filter(boat => boat.visible).flatMap(boat => boat.labelPickables || []);
+  }
+  getBoat(id) { return this.group.visible ? this.boats.find(boat => boat.userData.boatId === id) || null : null; }
+  makeBoat(entry, index) {
+    const boat = createBoat(entry, { low: this.quality === 'low' });
+    const id = `${this.wasReduced ? 'moored' : 'loop'}-slot-${index}`, labels = [];
+    boat.userData.boatId = id;
+    boat.traverse(node => { if (node.userData.mountedLabel) { node.userData.boatId = id; labels.push(node); } });
+    boat.labelPickables = labels;
+    this.group.add(boat); return boat;
+  }
   groundAt(x, z) { return this.group.visible ? bridgeHeight(x, z, this.crossings) : null; }
   refreshTiming() { if (this.loop) this.timing = loopTiming(this.loop.length, { sample: this.timingSample, types: this.slots.map(s => s.type) }); }
   nextType() { const choice = chooseBoatTypes(1, { bag: this.typeBag, previous: this.lastBoatType, random: this.random }); this.typeBag = choice.bag; this.lastBoatType = choice.lastType; return choice.types[0]; }
@@ -321,7 +348,7 @@ export class River {
     for (const boat of this.boats) { boat.removeFromParent(); disposeAll(boat); }
     if (this.wasReduced && !this.mooredEntries) { const pair = ['barge', 'sailboat'].map((type, n) => this.entry(type, n)); this.mooredEntries = [...pair, ...pair]; }
     const entries = this.wasReduced ? this.mooredEntries : this.slots.map(slot => slot.entry);
-    this.boats = entries.map(entry => { const boat = createBoat(entry, { low: this.quality === 'low' }); this.group.add(boat); return boat; }); this.fleet = entries; this.fleetTypes = entries.map(e => e.type);
+    this.boats = entries.map((entry, index) => this.makeBoat(entry, index)); this.fleet = entries; this.fleetTypes = entries.map(e => e.type);
   }
   placeBoats() {
     if (!this.loop) return;
@@ -340,7 +367,7 @@ export class River {
       this.phase += Math.max(0, dt) * this.timing.speed / this.loop.length; this.waterTime += Math.max(0, dt) * (1 - night * .85);
       this.slots.forEach((slot, index) => { const { lap } = loopPhase(this.phase, 1, index, this.fleetCount);
         if (lap > slot.lap) { for (let turn = slot.lap; turn < lap; turn++) slot.type = this.nextType(); slot.lap = lap; slot.entry = this.entry(slot.type, index);
-          const old = this.boats[index]; old.removeFromParent(); disposeAll(old); this.boats[index] = createBoat(slot.entry, { low }); this.group.add(this.boats[index]); this.refreshTiming(); }
+          const old = this.boats[index]; old.removeFromParent(); disposeAll(old); this.boats[index] = this.makeBoat(slot.entry, index); this.refreshTiming(); }
       }); this.fleet = this.slots.map(s => s.entry); this.fleetTypes = this.slots.map(s => s.type);
     }
     this.placeBoats(); this.boats.forEach(boat => updateBoat(boat, reduced ? 0 : dt, this.waterTime, { night, reducedMotion: reduced, low }));
@@ -365,5 +392,5 @@ export class River {
       } this.foam.instanceMatrix.needsUpdate = true;
     }
   }
-  dispose() { this.group.removeFromParent(); disposeAll(this.group); this.boats = []; this.bridges = []; this.slots = []; this.projects = []; }
+  dispose() { this.group.removeFromParent(); disposeAll(this.group); this.boats = []; this.bridges = []; this.bankOccluders = []; this.slots = []; this.projects = []; }
 }

@@ -2,10 +2,11 @@
 
 Prepared 2026-10-25 on `codex/codaclauda-0.7-city`, in the isolated
 `local/worktrees/07-city` worktree. The final combined update builds on
-`732b4a5` and includes modern Suburbs plus the continuous river circuit.
+`c6b1b63` and includes modern Suburbs, the continuous river circuit, and the
+camera refinement below.
 
 Implementation and independent source review are complete. The stable-source UI
-suite passed **217 tests, 0 failures**. Final headless workflows, visual inspection
+suite passed **240 tests, 0 failures**. Final headless workflows, visual inspection
 and performance checks passed. Earlier checkpoint previews remain historical
 evidence, separate from the final combined results recorded here.
 
@@ -124,7 +125,7 @@ Final full-suite command, run from the worktree `ui` directory:
 
 ```text
 node --test
-217 passed, 0 failed
+240 passed, 0 failed
 ```
 
 Coverage includes fixed curve extrema, normal-width sections, full-footprint
@@ -184,6 +185,62 @@ Sequential 3.5-second animation-frame samples recorded:
 These figures are recorded in the final `preview.json` receipt. Short headless
 samples establish behavior only on the measured machine, not sustained
 large-city or installed WebView performance.
+
+## Camera refinement and acceptance
+
+Home and H now fit the complete island using its half-size, the camera field of
+view, viewport aspect and all projected volume corners, with a 10% framing margin.
+The volume also covers rooftops and the river rim. The initial view uses the same
+fit, with no fixed overview-distance cap. Maximum zoom-out is at least 1.3 times
+that fit distance; the far plane scales too. Square pan bounds extend beyond the
+island by 10% or four units, preserving access to corner lots on both faces.
+
+Expansion refits when the owner has not moved the camera during the previous
+30 seconds. A skipped expansion does not schedule a later surprise reset.
+An overview refits when the viewport changes; a manually positioned camera keeps
+its pose, including its existing distance when narrowing zoom limits would
+otherwise cause OrbitControls to snap inward. Minimum zoom and street controls
+retain their existing behavior.
+
+F, Jump and building double-click focus rendered bounds, including homes and
+unbuilt ghosts. Exact centering remains stable after controls update and after
+returning from street or conversation views. Ground double-click still walks.
+Boat plaques resolve stable slot IDs across model replacements and center that
+boat from a steeper angle that clears the quay; an active focus flight updates its target until landing without enabling
+permanent following. Picking respects the visible face and nearer occluders, including both sides of
+the river banks; clicks cannot select plaques through a quay wall.
+
+The final suite has **240 passing tests**. Independent review covered camera
+projection, both-face pan bounds, actual OrbitControls updates, the 30-second
+boundary, manual/overview resize, click event ordering, temporary camera modes,
+focus bounds, boat label picking, replacement IDs and disposal. Review findings
+were corrected and re-reviewed before the local handoff.
+
+Headless Chrome at 1600x1000 verified initial fitting, H/Home, automatic ring
+4-to-7 expansion fitting, a centered corner ghost through Jump and double-click,
+F on another ghost, agent focus, Spark fit and focus, portrait fit, resize without
+moving a manual view, pan limits, and ring 7-to-8 expansion with recent camera
+input preserved. Actual boat-label clicks centered their boat. Ground double-click
+walked the avatar without opening a new-project dialog. Street and conversation
+round trips restored the exact focused target and distance. Reduced motion, Low,
+Spark flipping and contributor round trips also passed. No browser errors occurred.
+
+New camera evidence and reproduction scripts are under
+`local/city-camera-evidence/`: `camera-preview.json`, `focus-return.json`,
+`workflow.json`, `ui-tests.txt` and their adjacent `.cjs` scripts. The final captures
+are also copied to `local/city-07-evidence/`:
+
+- `camera-fit-small.png`
+- `camera-fit-expanded.png`
+- `camera-focus-corner.png`
+- `camera-fit-spark.png`
+- `camera-fit-portrait.png`
+- `camera-focus-boat.png`
+
+The earlier river/model images and performance samples below describe the
+unchanged visual geometry at the river checkpoint; the camera images and
+240-test suite record this later source revision. All browser evidence remains
+synthetic headless preview acceptance, not installed/native acceptance.
 
 ## Local evidence and brief history
 
