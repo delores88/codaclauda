@@ -19,9 +19,9 @@ function makeRiver(quality = 'high', half = 61.5) {
 const near = (a, b, epsilon = 1e-6) => assert.ok(Math.abs(a - b) <= epsilon, `${a} != ${b}`);
 const snapshot = river => river.boats.map(boat => ({ position: boat.position.toArray(), quaternion: boat.quaternion.toArray(), type: boat.userData.boatType, projects: boat.userData.projectIds }));
 
-test('both bridge directions raycast at their shared humped walking heights', () => {
+test('all crossing bridges raycast at their shared humped walking heights', () => {
   const { river } = makeRiver(); river.group.updateMatrixWorld(true);
-  assert.deepEqual(new Set(river.crossings.map(span => span.axis)), new Set(['x', 'z']));
+  assert.deepEqual(new Set(river.crossings.map(span => span.axis)), new Set(['z']));
   assert.equal(river.pickables().length, river.crossings.length);
   for (const span of river.crossings) for (const fraction of [.01, .16, .35, .5, .65, .84, .99]) {
     const along = span.min + (span.max - span.min) * fraction;
@@ -48,9 +48,9 @@ test('the top and mirrored water share terrain sections and recessed heights', (
   river.dispose();
 });
 
-test('joining collars physically close the oblique waterfall gaps at X and Z rims on both faces', () => {
+test('joining collars physically close the waterfall gaps at both X rims on both faces', () => {
   const { river } = makeRiver(); let checks = 0;
-  assert.ok(Math.abs(river.loop.start.z) === river.half && river.loop.end.x === river.half);
+  assert.ok(river.loop.start.x === -river.half && river.loop.end.x === river.half);
   for (const index of [1, 3]) {
     const waterfall = river.waterMeshes[index], geo = waterfall.geometry, positions = geo.getAttribute('position');
     const probe = new THREE.Mesh(geo, waterfall.material); probe.updateMatrixWorld(true);

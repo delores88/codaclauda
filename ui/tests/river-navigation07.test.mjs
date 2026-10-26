@@ -19,7 +19,7 @@ function supported(from, route, bridges = crossings) {
   }
 }
 
-test('routes between districts preserve dry endpoints and cross supported streets in both axes', () => {
+test('routes between districts preserve dry endpoints and cross the river on supported bridges', () => {
   const cells = DISTRICTS.flatMap(d => districtCells(4, d));
   for (let i = 0; i < cells.length; i += 4) for (let j = 1; j < cells.length; j += 7) {
     const from = { x: cells[i].i * 16, z: cells[i].j * 16 + 5.8 }, to = { x: cells[j].i * 16, z: cells[j].j * 16 + 5.8 };
@@ -28,7 +28,7 @@ test('routes between districts preserve dry endpoints and cross supported street
   }
 });
 
-test('clicks on either bridge orientation reach the chosen deck or approach', () => {
+test('clicks on every perpendicular bridge reach the chosen deck or approach', () => {
   const from = { x: 0, z: 4 }, seen = new Set();
   for (const span of crossings) {
     seen.add(span.axis);
@@ -39,7 +39,7 @@ test('clicks on either bridge orientation reach the chosen deck or approach', ()
       assert.ok(bridgeHeight(to.x, to.z, crossings) >= .14);
     }
   }
-  assert.deepEqual(seen, new Set(['x', 'z']));
+  assert.deepEqual(seen, new Set(['z']));
 });
 
 test('water clicks clamp to dry banks and street movement cannot tunnel across water', () => {
@@ -48,10 +48,8 @@ test('water clicks clamp to dry banks and street movement cannot tunnel across w
   assert.ok(riverWalkable(route.at(-1).x, route.at(-1).z, crossings)); supported(from, route);
   const a = { x: 0, z: riverZ(0) - 20 }, b = { x: 0, z: riverZ(0) + 20 };
   assert.deepEqual(riverStep(a, b, []), a);
-  for (const axis of ['x', 'z']) {
-    const bridge = crossings.find(span => span.axis === axis);
-    const from = axis === 'x' ? { x: bridge.min - .1, z: bridge.z } : { x: bridge.x, z: bridge.min - .1 };
-    const to = axis === 'x' ? { x: bridge.max + .1, z: bridge.z } : { x: bridge.x, z: bridge.max + .1 };
+  for (const bridge of crossings) {
+    const from = { x: bridge.x, z: bridge.min - .1 }, to = { x: bridge.x, z: bridge.max + .1 };
     assert.deepEqual(riverStep(from, to, crossings), to);
   }
 });
@@ -59,13 +57,15 @@ test('water clicks clamp to dry banks and street movement cannot tunnel across w
 test('raised bridge destinations are approached through supported grades, never lateral walls', () => {
   const examples = new Map();
   for (const span of crossings) {
-    if (examples.has(span.axis)) continue;
-    for (let coordinate = span.min + 1; coordinate < span.max - 1; coordinate += .5) {
-      const to = span.axis === 'x' ? { x: coordinate, z: span.z } : { x: span.x, z: coordinate };
-      const from = span.axis === 'x' ? { x: coordinate, z: span.z + span.halfWidth + .6 } : { x: span.x + span.halfWidth + .6, z: coordinate };
-      if ((bridgeHeight(to.x, to.z, crossings) || 0) < .7 || bridgeAt(from.x, from.z, crossings) || !riverWalkable(from.x, from.z, crossings)) continue;
-      if (riverSegmentWalkable(from, to, crossings)) continue;
-      examples.set(span.axis, { from, to }); break;
+    for (const side of [-1, 1]) {
+      if (examples.has(side)) continue;
+      for (let coordinate = span.min + 1; coordinate < span.max - 1; coordinate += .5) {
+        const to = { x: span.x, z: coordinate };
+        const from = { x: span.x + side * (span.halfWidth + .6), z: coordinate };
+        if ((bridgeHeight(to.x, to.z, crossings) || 0) < .7 || bridgeAt(from.x, from.z, crossings) || !riverWalkable(from.x, from.z, crossings)) continue;
+        if (riverSegmentWalkable(from, to, crossings)) continue;
+        examples.set(side, { from, to }); break;
+      }
     }
   }
   assert.equal(examples.size, 2);

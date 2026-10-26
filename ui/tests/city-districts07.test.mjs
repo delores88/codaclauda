@@ -42,10 +42,50 @@ test('districts distinguish local-only, linked GitHub, and unbuilt GitHub projec
 
 test('the empty city has at least three safe free plots in each river district', () => {
   const result = new SlotMap().assign([]);
-  assert.equal(result.rings, 3);
+  assert.equal(result.rings, 2);
   checkFree(result);
-  assert.equal(result.emptyPlots.downtown.length, 6);
-  assert.equal(result.emptyPlots.suburbs.length, 25);
+  assert.equal(result.emptyPlots.downtown.length, 5);
+  assert.equal(result.emptyPlots.suburbs.length, 10);
+});
+
+test('gentle river districts stay within one plot row of equal area through rings three to seven', () => {
+  for (let ring = 3; ring <= 7; ring++) {
+    const downtown = districtCells(ring, DOWNTOWN), suburbs = districtCells(ring, SUBURBS);
+    assert.ok(Math.abs(downtown.length - suburbs.length) <= ring * 2 + 1, `ring${ring} counts ${downtown.length}/${suburbs.length}`);
+    for (const district of DISTRICTS) {
+      const current = districtCells(ring, district), expanded = districtCells(ring + 1, district);
+      assert.deepEqual(expanded.slice(0, current.length), current, 'growth appends new perimeter cells without shifting existing plots');
+    }
+  }
+});
+
+test('fresh one-project cities and the six-repo/two-local preview mix use the smallest sufficient ring', () => {
+  const fixtures = [
+    { projects: [both('single-repo')], rings: 2, free: [4, 10] },
+    { projects: [local('single-folder')], rings: 2, free: [5, 9] },
+    { projects: [...Array.from({ length: 6 }, (_, n) => repo(`preview-${n}`)), local('garden-notes'), local('workshop')], rings: 3, free: [8, 19] },
+  ];
+  for (const fixture of fixtures) {
+    const result = new SlotMap().assign(fixture.projects);
+    assert.equal(result.rings, fixture.rings);
+    assert.deepEqual(DISTRICTS.map(d => result.emptyPlots[d].length), fixture.free);
+    assert.ok(DISTRICTS.some(d => districtCells(result.rings - 1, d).length - fixture.projects.filter(p => districtOf(p) === d).length < 3), 'one fewer ring cannot hold projects and three spare plots on both sides');
+    checkFree(result);
+  }
+});
+
+test('one added project grows exactly one ring only when a district needs spare plots, and removal never shrinks', () => {
+  const slots = new SlotMap(), projects = [both('boundary-one')];
+  let result = slots.assign(projects), previous = new Map(result.cells), ring = result.rings;
+  for (let n = 2; n <= 45; n++) {
+    const freeBefore = result.emptyPlots[DOWNTOWN].length;
+    projects.push(both(`boundary-${n}`)); result = slots.assign(projects);
+    assert.equal(result.rings, freeBefore === 3 ? ring + 1 : ring);
+    for (const [id, cell] of previous) assert.deepEqual(result.cells.get(id), cell);
+    previous = new Map(result.cells); ring = result.rings; checkFree(result);
+  }
+  const reduced = slots.assign(projects.slice(0, 1));
+  assert.equal(reduced.rings, ring); assert.deepEqual(reduced.cells.get(projects[0].id), previous.get(projects[0].id)); checkFree(reduced);
 });
 
 test('the Suburbs name preserves existing coordinate pins through reload and expansion', () => {
@@ -231,9 +271,9 @@ test('an initially empty district ring does not prevent deterministic assignment
   checkFree(result);
 });
 
-test('the diagonal river migrates dry district-mismatched pins once and preserves correct-side pins', () => {
-  const projects = [both('diagonal-tower'), local('diagonal-home'), both('fixed-tower'), local('fixed-home')];
-  const pins = { [projects[0].id]: { i: -1, j: -1 }, [projects[1].id]: { i: 8, j: 1 }, [projects[2].id]: { i: 2, j: -2 }, [projects[3].id]: { i: 0, j: 1 } };
+test('dry district-mismatched pins migrate once while safe matching pins remain fixed', () => {
+  const projects = [both('relocated-tower'), local('relocated-home'), both('fixed-tower'), local('fixed-home')];
+  const pins = { [projects[0].id]: { i: -1, j: 1 }, [projects[1].id]: { i: 8, j: -2 }, [projects[2].id]: { i: 2, j: -2 }, [projects[3].id]: { i: 0, j: 1 } };
   for (const pin of Object.values(pins)) assert.ok(riverCellUsable(pin.i, pin.j), 'this migration is caused by district membership, not water');
   const first = new SlotMap().assign(projects, { pins });
   assert.deepEqual(new Set(first.migrated.map(change => change.id)), new Set(projects.slice(0, 2).map(p => p.id)));

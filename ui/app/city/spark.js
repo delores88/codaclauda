@@ -52,7 +52,7 @@ function buildDeck(rings, { districts = false } = {}) {
   }
   const extent = (rings + 0.5) * PITCH;
   const trace = (axis, line, limit, width) => {
-    const cuts = districts ? riverCuts(axis, line, width / 2) : [];
+    const cuts = districts ? riverCuts(axis, line, width / 2, limit) : [];
     for (const [a, b] of outsideIntervals(-limit, limit, cuts)) traces.push(placed(new THREE.BoxGeometry(axis === 'x' ? b - a : width, 0.05, axis === 'z' ? b - a : width),
       { x: axis === 'x' ? (a + b) / 2 : line, y: 0.025, z: -(axis === 'z' ? (a + b) / 2 : line) }));
   };

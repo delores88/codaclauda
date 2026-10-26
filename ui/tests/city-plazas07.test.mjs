@@ -133,7 +133,10 @@ test('river roads and sidewalks end at bridge approaches with no submerged aspha
       }
       assert.equal(hit(...at(span.min + 0.1)), false, 'no hidden asphalt beneath ramp');
     }
-    assert.equal(hit(0, -8), true, 'dry horizontal street remains connected across the grid');
+    for (const z of [-40, 8]) for (const x of [-16, 0, 16]) {
+      assert.ok(riverFootprintClear(x, z, 1.5, 1.5), 'connectivity probe is on dry land');
+      assert.equal(hit(x, z), true, 'dry horizontal streets remain connected in both districts');
+    }
     disposeAll(group);
   }
 });

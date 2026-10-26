@@ -5,7 +5,7 @@ import { disposeAll, mergeParts, placed, instancedOutline } from './fx.js';
 import { riverSection, riverRoadIntervals, sampleRiver, RIVER_HALF_WIDTH, WATER_Y,
   bridgeSpan, bridgeHeight, bridgeAt, bridgeCrossings } from './river-path.js';
 import { selectBoatManifest, chooseBoatTypes, boatFleet, loopTiming, loopPhase } from './boats.js';
-import { createBoat, updateBoat } from './boat-models.js';
+import { createBoat, updateBoat, addBoatNameLabel, sizeBoatNameLabel } from './boat-models.js';
 import { createRiverLoop, riverLoopPose, riverFrame, RIVER_DECK_Y } from './river-loop.js';
 
 const SLAB = .18, RIPPLE_COUNT = 26;
@@ -56,7 +56,7 @@ function waterfallRibbon(loop, start, end, step) {
       const center = clamp(p.z, low, high), z = fraction <= .5 ? low + (center - low) * fraction * 2 : center + (high - center) * (fraction - .5) * 2;
       return { x, y: p.y, z };
     }
-    const z = Math.sign(p.z) * loop.half, intervals = riverRoadIntervals('x', z, 0);
+    const z = Math.sign(p.z) * loop.half, intervals = riverRoadIntervals('x', z, 0, loop.half);
     const interval = intervals.find(span => p.x >= span.min - .02 && p.x <= span.max + .02);
     const low = clamp(interval?.min ?? p.x - RIVER_HALF_WIDTH, -loop.half, loop.half), high = clamp(interval?.max ?? p.x + RIVER_HALF_WIDTH, -loop.half, loop.half);
     const center = clamp(p.x, low, high), across = pose.right.x >= 0 ? fraction : 1 - fraction;
@@ -69,7 +69,8 @@ function waterfallRibbon(loop, start, end, step) {
       const offset = (j / across * 2 - 1) * RIVER_HALF_WIDTH;
       const point = i === -1 || i === count + 1 ? rim(pose, j / across) : { x: pose.position.x + pose.right.x * offset, y: pose.position.y + pose.right.y * offset, z: pose.position.z + pose.right.z * offset };
       positions.push(point.x, point.y, point.z);
-      normals.push(pose.up.x, pose.up.y, pose.up.z); uv.push(distance, j / across);
+      normals.push(pose.up.x, pose.up.y, pose.up.z);
+      uv.push(clamp((WATER_Y - point.y) / (2 * WATER_Y - RIVER_DECK_Y), 0, 1), j / across);
       if (i <= count && j < across) { const n = (i + 1) * (across + 1) + j; indices.push(n, n + 1, n + across + 1, n + 1, n + across + 2, n + across + 1); }
     }
   }
@@ -85,18 +86,33 @@ function waterfallRibbon(loop, start, end, step) {
   }
   return geometry(positions, indices, normals, uv);
 }
-function waterMaterial(low, half) {
-  const material = toonMaterial('#ffffff', { cache: false, side: THREE.DoubleSide }); material.vertexColors = true;
+function waterMaterial(low, half, fall = false) {
+  const material = toonMaterial('#ffffff', { cache: false, side: THREE.DoubleSide, transparent: fall, opacity: fall ? .7 : 1 }); material.vertexColors = true;
+  if (fall) { material.depthWrite = false; material.emissive.set('#6db9db'); material.emissiveIntensity = .35; }
   if (!low) {
     const uniforms = { riverTime: { value: 0 }, riverNight: { value: 0 }, riverMotion: { value: 1 }, riverHalf: { value: half } }; material.userData.waterUniforms = uniforms;
     material.onBeforeCompile = shader => {
       Object.assign(shader.uniforms, uniforms);
-      shader.vertexShader = 'uniform float riverTime; uniform float riverNight; uniform float riverMotion; uniform float riverHalf;\n' + shader.vertexShader;
+      shader.vertexShader = 'uniform float riverTime; uniform float riverNight; uniform float riverMotion; uniform float riverHalf; varying vec2 riverUv;\n' + shader.vertexShader;
       shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
+        riverUv = uv;
         float rimCalm=smoothstep(0.0,.8,riverHalf-max(abs(position.x),abs(position.z)));
         transformed += normal * sin(position.x*.3+position.z*.2-riverTime*.7)*.03*sin(uv.y*3.14159265)*riverMotion*(1.0-riverNight*.8)*rimCalm;`);
+      if (fall) {
+        shader.fragmentShader = 'uniform float riverTime; varying vec2 riverUv;\n' + shader.fragmentShader;
+        shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', `#include <color_fragment>
+          float streak = 0.0;
+          for (int lane = 0; lane < 4; lane++) {
+            float center = .17 + float(lane)*.22;
+            float width = 1.0-smoothstep(.006,.019,abs(riverUv.y-center));
+            float run = fract(riverUv.x-riverTime*.18+float(lane)*.19);
+            float dash = smoothstep(.01,.08,run)*(1.0-smoothstep(.34,.55,run));
+            streak = max(streak,width*dash);
+          }
+          diffuseColor.rgb = mix(diffuseColor.rgb,vec3(1.0),streak*.78);`);
+      }
     };
-    material.customProgramCacheKey = () => 'city-river-toon-wave';
+    material.customProgramCacheKey = () => fall ? 'city-waterfall-streaks' : 'city-river-toon-wave';
   }
   return material;
 }
@@ -127,9 +143,10 @@ function waterColors(mesh, night) {
   const geo = mesh.geometry, uv = geo.getAttribute('uv'), fall = mesh.userData.riverSection % 2;
   let colors = geo.getAttribute('color'); if (!colors) { colors = new THREE.Float32BufferAttribute(new Float32Array(uv.count * 3), 3); geo.setAttribute('color', colors); }
   const underside = mesh.userData.riverSection === 2;
-  const edge = new THREE.Color(underside ? '#64c1d0' : '#6cc0de'), center = new THREE.Color(underside ? '#358eac' : '#3f8fc0'), dusk = new THREE.Color('#1f3f66'), white = new THREE.Color('#e6f6f4'), tint = new THREE.Color();
+  const edge = new THREE.Color(underside ? '#64c1d0' : '#6cc0de'), center = new THREE.Color(underside ? '#358eac' : '#3f8fc0'), dusk = new THREE.Color('#1f3f66'), fallBlue = new THREE.Color('#bfe6f5'), white = new THREE.Color('#ffffff'), tint = new THREE.Color();
   for (let n = 0; n < uv.count; n++) {
-    tint.copy(fall ? white : edge).lerp(fall ? white : center, Math.sin(uv.getY(n) * Math.PI)).lerp(dusk, night * (fall ? .5 : 1));
+    if (fall) tint.copy(fallBlue).lerp(white, uv.getX(n) * .78).lerp(dusk, night * .4);
+    else tint.copy(edge).lerp(center, Math.sin(uv.getY(n) * Math.PI)).lerp(dusk, night);
     colors.setXYZ(n, tint.r, tint.g, tint.b);
   }
   colors.needsUpdate = true;
@@ -221,7 +238,8 @@ export class River {
     });
     for (let i = 0; i < 4; i++) {
       const fall = i % 2 === 1, geo = fall ? waterfallRibbon(this.loop, this.loop.joins[i], this.loop.joins[i + 1], low ? 1 : .4) : riverWaterGeometry(xs, i === 2, half);
-      const water = add(this.landscape, geo, waterMaterial(low, half), false, false, false); outlineWater(water);
+      const water = add(this.landscape, geo, waterMaterial(low, half, fall), false, false, false); outlineWater(water);
+      if (fall) { const ink = water.children[0]; ink.material.color.set('#a8d8e9'); ink.material.opacity = .25; }
       water.name = ['river-water-top', 'river-waterfall-downstream', 'river-water-underside', 'river-waterfall-upstream'][i]; water.userData.riverSection = i; waterColors(water, 0); this.waterMeshes.push(water);
     }
     this.water = this.waterMeshes[0]; this.buildWaterDetails(low); this.refreshTiming(); this.placeBoats();
@@ -314,7 +332,7 @@ export class River {
     this.ripples = new THREE.InstancedMesh(dash, new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: .35, side: THREE.DoubleSide, depthWrite: false }), RIPPLE_COUNT);
     this.ripples.name = 'river-ripples'; this.ripples.raycast = () => {}; this.ripples.frustumCulled = false; this.landscape.add(this.ripples);
     this.rippleOutline = instancedOutline(this.ripples, .004); this.rippleOutline.name = 'river-ripple-outlines'; this.landscape.add(this.rippleOutline);
-    this.foam = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(.11, 0), new THREE.MeshBasicMaterial({ color: '#e5f8f5' }), 36);
+    this.foam = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(.19, 0), new THREE.MeshBasicMaterial({ color: '#ffffff' }), 96);
     this.foam.name = 'waterfall-foam'; this.foam.raycast = () => {}; this.foam.frustumCulled = false; this.landscape.add(this.foam);
     this.foamOutline = instancedOutline(this.foam, .007); this.foamOutline.name = 'waterfall-foam-outlines'; this.landscape.add(this.foamOutline);
   }
@@ -322,11 +340,12 @@ export class River {
   occluders() { return this.group.visible ? this.bankOccluders || [] : []; }
   labelPickables() {
     if (!this.group.visible) return [];
-    return this.boats.filter(boat => boat.visible).flatMap(boat => boat.labelPickables || []);
+    return this.boats.filter(boat => boat.visible).flatMap(boat => (boat.labelPickables || []).filter(label => label.visible));
   }
   getBoat(id) { return this.group.visible ? this.boats.find(boat => boat.userData.boatId === id) || null : null; }
   makeBoat(entry, index) {
     const boat = createBoat(entry, { low: this.quality === 'low' });
+    addBoatNameLabel(boat); sizeBoatNameLabel(boat, this.world.camera, this.world.size?.h);
     const id = `${this.wasReduced ? 'moored' : 'loop'}-slot-${index}`, labels = [];
     boat.userData.boatId = id;
     boat.traverse(node => { if (node.userData.mountedLabel) { node.userData.boatId = id; labels.push(node); } });
@@ -370,8 +389,12 @@ export class River {
           const old = this.boats[index]; old.removeFromParent(); disposeAll(old); this.boats[index] = this.makeBoat(slot.entry, index); this.refreshTiming(); }
       }); this.fleet = this.slots.map(s => s.entry); this.fleetTypes = this.slots.map(s => s.type);
     }
-    this.placeBoats(); this.boats.forEach(boat => updateBoat(boat, reduced ? 0 : dt, this.waterTime, { night, reducedMotion: reduced, low }));
+    this.placeBoats(); this.boats.forEach(boat => {
+      updateBoat(boat, reduced ? 0 : dt, this.waterTime, { night, reducedMotion: reduced, low });
+      sizeBoatNameLabel(boat, this.world.camera, this.world.size?.h);
+    });
     for (const water of this.waterMeshes) { const uniforms = water.material.userData.waterUniforms;
+      if (water.userData.riverSection % 2) water.material.emissiveIntensity = .35 - night * .22;
       if (uniforms) { uniforms.riverTime.value = this.waterTime; uniforms.riverNight.value = night; uniforms.riverMotion.value = Number(!reduced); }
       if (this.lastNight === undefined || Math.abs(this.lastNight - night) > .004) waterColors(water, night);
     }
@@ -385,10 +408,16 @@ export class River {
       } this.ripples.instanceMatrix.needsUpdate = true;
     }
     if (this.foam) { this.foam.visible = !reduced; this.foamOutline.visible = !reduced;
-      for (let n = 0; n < 36; n++) { const start = n < 18 ? this.loop.riverLength : this.loop.riverLength * 2 + this.loop.arcLength, within = ((n % 18) / 18 + this.waterTime * .08) % 1;
-        const pose = riverLoopPose(this.loop, (start + within * this.loop.arcLength) / this.loop.length), across = Math.sin(n * 7.2) * (RIVER_HALF_WIDTH - .25);
-        pose.position.x += pose.right.x * across + pose.up.x * .035; pose.position.z += pose.right.z * across + pose.up.z * .035; pose.position.y += pose.up.y * .035;
-        this.foam.setMatrixAt(n, frameMatrix(pose, .7 + (n % 3) * .25));
+      // Four contact bands: both top lips and both joins onto the Spark face.
+      // Foam stays on those joins instead of orbiting the whole waterfall curl.
+      for (let n = 0; n < this.foam.count; n++) {
+        const join = this.loop.joins[1 + Math.floor(n / 24)], across = ((n % 24) / 23 * 2 - 1) * (RIVER_HALF_WIDTH - .18);
+        const pose = riverLoopPose(this.loop, join / this.loop.length), drift = Math.sin(n * 2.3 + this.waterTime) * .035;
+        pose.position.x += pose.right.x * across + pose.up.x * .035 + pose.forward.x * drift;
+        pose.position.z += pose.right.z * across + pose.up.z * .035 + pose.forward.z * drift;
+        pose.position.y += pose.up.y * .035 + pose.forward.y * drift;
+        const matrix = frameMatrix(pose); matrix.scale(new THREE.Vector3(1.1, .3, 1.2 + Math.sin(n * 1.7) * .15));
+        this.foam.setMatrixAt(n, matrix);
       } this.foam.instanceMatrix.needsUpdate = true;
     }
   }

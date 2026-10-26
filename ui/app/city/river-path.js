@@ -1,8 +1,9 @@
-/* Fixed Catmull-Rom river. Shared tube sections align banks, terrain, placement
+/* Fixed gentle cosine river. Shared tube sections align banks, terrain, placement
  * and walking. Expansion clips a longer piece; it never changes the interior. */
 export const RIVER_GRID_PITCH = 16;
-export const RIVER_CENTER_Z = -26;
-export const RIVER_AMPLITUDE = 9.6;
+export const RIVER_CENTER_Z = -12;
+export const RIVER_AMPLITUDE = 2.5;
+export const RIVER_WAVELENGTH = 17;
 export const RIVER_HALF_WIDTH = 5.5;
 export const RIVER_BANK_WIDTH = 0.8;
 export const WATER_Y = -0.76;
@@ -13,37 +14,12 @@ export const BRIDGE_GROUND_Y = 0.14;
 export const BRIDGE_DECK_Y = 1.7;
 export const BRIDGE_CLEAR_Y = 1.6;
 export const BRIDGE_RAMP_LENGTH = 5;
-const CORE_START = -48, CORE_END = 80, KNOT_STEP = 16, BASE_SLOPE = 0.6;
 const SAMPLE_STEP = 0.5, CURVE_ERROR = 0.01, EPS = 1e-8;
-const offsets = [0, 1, 0, -1, 0, 1, 0, -1, 0];
-export const RIVER_CONTROL_POINTS = Object.freeze(offsets.map((offset, index) => {
-  const x = CORE_START + index * KNOT_STEP;
-  return Object.freeze({ x, z: BASE_SLOPE * x + RIVER_CENTER_Z + offset * RIVER_AMPLITUDE });
-}));
-export function catmullRom(p0, p1, p2, p3, t) {
-  return p1 + 0.5 * t * (p2 - p0 + t * (2 * p0 - 5 * p1 + 4 * p2 - p3 + t * (3 * (p1 - p2) + p3 - p0)));
-}
-const coefficients = offsets.slice(0, -1).map((_, index) => {
-  // Mirrored residual controls give straight diagonal tangents at the ends.
-  const [p0, p1, p2, p3] = [index - 1, index, index + 1, index + 2].map(i => {
-    const residual = i < 0 ? offsets[1] : i >= offsets.length ? offsets.at(-2) : offsets[i];
-    return BASE_SLOPE * (CORE_START + i * KNOT_STEP) + RIVER_CENTER_Z + residual * RIVER_AMPLITUDE;
-  });
-  return [p1, (p2 - p0) / 2, (2 * p0 - 5 * p1 + 4 * p2 - p3) / 2, (3 * (p1 - p2) + p3 - p0) / 2];
-});
-function segmentAt(x) {
-  const index = Math.min(coefficients.length - 1, Math.max(0, Math.floor((x - CORE_START) / KNOT_STEP)));
-  return { c: coefficients[index], t: (x - CORE_START - index * KNOT_STEP) / KNOT_STEP };
-}
 export function riverZ(x) {
-  if (!Number.isFinite(x)) return NaN;
-  if (x <= CORE_START || x >= CORE_END) return BASE_SLOPE * x + RIVER_CENTER_Z;
-  const { c, t } = segmentAt(x); return c[0] + t * (c[1] + t * (c[2] + t * c[3]));
+  return Number.isFinite(x) ? RIVER_CENTER_Z - RIVER_AMPLITUDE * Math.cos(x / RIVER_WAVELENGTH) : NaN;
 }
 export function riverSlope(x) {
-  if (!Number.isFinite(x)) return NaN;
-  if (x <= CORE_START || x >= CORE_END) return BASE_SLOPE;
-  const { c, t } = segmentAt(x); return (c[1] + t * (2 * c[2] + t * 3 * c[3])) / KNOT_STEP;
+  return Number.isFinite(x) ? RIVER_AMPLITUDE / RIVER_WAVELENGTH * Math.sin(x / RIVER_WAVELENGTH) : NaN;
 }
 export function riverFrame(x) {
   const slope = riverSlope(x), length = Math.hypot(1, slope), tx = 1 / length, tz = slope / length;
@@ -51,28 +27,20 @@ export function riverFrame(x) {
 }
 export const riverSide = (x, z) => z < riverZ(x) ? -1 : 1;
 
-/** Exact cubic extrema include local reversals between control points. */
+/** Exact cosine extrema include every peak/trough in a queried interval. */
 export function riverRange(minX, maxX) {
   if (![minX, maxX].every(Number.isFinite)) return null;
   if (minX > maxX) [minX, maxX] = [maxX, minX];
   const values = [riverZ(minX), riverZ(maxX)];
-  coefficients.forEach((c, index) => {
-    const start = CORE_START + index * KNOT_STEP, low = Math.max(0, (minX - start) / KNOT_STEP), high = Math.min(1, (maxX - start) / KNOT_STEP);
-    if (low > high) return;
-    const roots = [], a = 3 * c[3], b = 2 * c[2], d = c[1];
-    if (Math.abs(a) < EPS) { if (Math.abs(b) > EPS) roots.push(-d / b); }
-    else { const discriminant = b * b - 4 * a * d; if (discriminant >= 0) roots.push((-b - Math.sqrt(discriminant)) / (2 * a), (-b + Math.sqrt(discriminant)) / (2 * a)); }
-    for (const t of [low, high, ...roots]) if (t >= low && t <= high) values.push(c[0] + t * (c[1] + t * (c[2] + t * c[3])));
-  });
+  const first = Math.ceil(minX / (Math.PI * RIVER_WAVELENGTH)), last = Math.floor(maxX / (Math.PI * RIVER_WAVELENGTH));
+  if (first <= last) values.push(RIVER_CENTER_Z - RIVER_AMPLITUDE * (first % 2 ? -1 : 1));
+  if (first < last) values.push(RIVER_CENTER_Z + RIVER_AMPLITUDE * (first % 2 ? -1 : 1));
   return { min: Math.min(...values), max: Math.max(...values) };
 }
-const core = Array.from({ length: (CORE_END - CORE_START) / SAMPLE_STEP + 1 }, (_, n) => {
-  const x = CORE_START + n * SAMPLE_STEP; return Object.freeze({ x, z: riverZ(x) });
-});
 function pointsBetween(minX, maxX) {
   const points = [{ x: minX, z: riverZ(minX) }];
-  const start = Math.max(0, Math.floor((minX - CORE_START) / SAMPLE_STEP) + 1), end = Math.min(core.length - 1, Math.ceil((maxX - CORE_START) / SAMPLE_STEP) - 1);
-  for (let i = start; i <= end; i++) points.push(core[i]);
+  const start = Math.floor(minX / SAMPLE_STEP) + 1, end = Math.ceil(maxX / SAMPLE_STEP) - 1;
+  for (let i = start; i <= end; i++) { const x = i * SAMPLE_STEP; points.push({ x, z: riverZ(x) }); }
   points.push({ x: maxX, z: riverZ(maxX) }); return points;
 }
 function pointSegmentDistance(x, z, a, b) {
@@ -83,10 +51,11 @@ function pointSegmentDistance(x, z, a, b) {
 export function riverDistance(x, z, limit = Infinity) {
   if (![x, z].every(Number.isFinite)) return Infinity;
   const vertical = Math.abs(z - riverZ(x));
-  // Every cubic slope is below 2; this Lipschitz lower bound cheaply rejects
+  // The cosine's bounded slope gives a Lipschitz lower bound that rejects
   // distant land without walking any centerline segments.
-  if (vertical > limit * Math.sqrt(5)) return vertical / Math.sqrt(5);
-  const reach = Math.min(vertical, limit) + 1, points = pointsBetween(x - reach, x + reach);
+  const slopeBound = Math.hypot(1, RIVER_AMPLITUDE / RIVER_WAVELENGTH);
+  if (vertical > limit * slopeBound) return vertical / slopeBound;
+  const reach = Math.min(vertical, limit, Math.PI * RIVER_WAVELENGTH) + 1, points = pointsBetween(x - reach, x + reach);
   let distance = vertical;
   for (let n = 1; n < points.length; n++) distance = Math.min(distance, pointSegmentDistance(x, z, points[n - 1], points[n]));
   return distance;
@@ -124,18 +93,24 @@ function capsuleSection(a, b, line, axis, radius) {
   }
   return values.length ? { min: Math.min(...values), max: Math.max(...values) } : null;
 }
-/** axis means road travel. margin adds distance beyond water: 0=water, default=bank. */
-export function riverRoadIntervals(axis, line, margin = RIVER_BANK_WIDTH) {
+/** axis means road travel. margin adds distance beyond water: 0=water, default=bank.
+ * Horizontal queries clip the repeating wave to +/-half; the default covers the
+ * supported saved-pin grid. Renderers pass their actual island half extent. */
+export function riverRoadIntervals(axis, line, margin = RIVER_BANK_WIDTH, half = RIVER_GRID_PITCH * 25) {
   if (!['x', 'z'].includes(axis) || ![line, margin].every(Number.isFinite) || margin < 0) return [];
+  if (axis === 'x' && (!Number.isFinite(half) || half <= 0)) return [];
   const radius = RIVER_HALF_WIDTH + margin;
-  const minX = axis === 'z' ? line - radius - 1 : Math.min(CORE_START, (line - radius - RIVER_CENTER_Z) / BASE_SLOPE) - radius - 1;
-  const maxX = axis === 'z' ? line + radius + 1 : Math.max(CORE_END, (line + radius - RIVER_CENTER_Z) / BASE_SLOPE) + radius + 1;
+  if (axis === 'x' && Math.abs(line - RIVER_CENTER_Z) > radius + RIVER_AMPLITUDE) return [];
+  if (axis === 'x' && Math.abs(line - RIVER_CENTER_Z) + RIVER_AMPLITUDE <= radius) return [{ min: -half, max: half }];
+  const minX = axis === 'z' ? line - radius - 1 : -half - radius - 1;
+  const maxX = axis === 'z' ? line + radius + 1 : half + radius + 1;
   const points = pointsBetween(minX, maxX), intervals = [];
   for (let n = 1; n < points.length; n++) { const section = capsuleSection(points[n - 1], points[n], line, axis, radius); if (section) intervals.push(section); }
-  return mergeIntervals(intervals);
+  const merged = mergeIntervals(intervals);
+  return axis === 'z' ? merged : merged.map(i => ({ min: Math.max(-half, i.min), max: Math.min(half, i.max) })).filter(i => i.max >= i.min);
 }
-export function riverRoadInterval(axis, line, margin = RIVER_BANK_WIDTH) {
-  const intervals = riverRoadIntervals(axis, line, margin);
+export function riverRoadInterval(axis, line, margin = RIVER_BANK_WIDTH, half = RIVER_GRID_PITCH * 25) {
+  const intervals = riverRoadIntervals(axis, line, margin, half);
   return intervals.length ? { min: intervals[0].min, max: intervals.at(-1).max } : null;
 }
 export const riverBoundsAtX = (x, margin = RIVER_BANK_WIDTH) => riverRoadInterval('z', x, margin);
@@ -175,7 +150,7 @@ export function riverCellUsable(i, j) {
   if (!usableCells.has(name)) usableCells.set(name, riverFootprintClear(i * RIVER_GRID_PITCH, j * RIVER_GRID_PITCH, RIVER_LOT_HALF + RIVER_LOT_MARGIN));
   return usableCells.get(name);
 }
-/** Centerline endpoints lie on the island rim, without moving any control point. */
+/** Centerline endpoints lie on the island rim without changing the interior wave. */
 export function sampleRiver(half, step = 1) {
   if (!Number.isFinite(half) || half <= 0) return [];
   const samples = pointsBetween(-half, half), clipped = [];
@@ -208,7 +183,7 @@ const spanCache = new Map();
 export function bridgeSpan(crossing) {
   if (crossing && typeof crossing === 'object' && Number.isFinite(crossing.min) && Number.isFinite(crossing.max)) return crossing;
   const axis = typeof crossing === 'number' ? 'z' : crossing?.axis, line = typeof crossing === 'number' ? crossing : axis === 'z' ? crossing?.x : crossing?.z;
-  if (!['x', 'z'].includes(axis) || !Number.isFinite(line)) return null;
+  if (axis !== 'z' || !Number.isFinite(line)) return null;
   const name = `${axis}:${line}`;
   if (spanCache.has(name)) return spanCache.get(name);
   const intervals = riverRoadIntervals(axis, line, RIVER_BANK_WIDTH + BRIDGE_HALF_WIDTH);
@@ -218,7 +193,8 @@ export function bridgeSpan(crossing) {
 export function bridgeCrossings(half) {
   if (!Number.isFinite(half) || half <= 0) return [];
   const output = [], first = Math.ceil(-half / RIVER_GRID_PITCH - 0.5), last = Math.floor(half / RIVER_GRID_PITCH - 0.5);
-  for (const axis of ['x', 'z']) for (let k = first; k <= last; k++) {
+  const axis = 'z';
+  for (let k = first; k <= last; k++) {
     const line = (k + 0.5) * RIVER_GRID_PITCH, feet = riverRoadIntervals(axis, line, RIVER_BANK_WIDTH + BRIDGE_RAMP_LENGTH + BRIDGE_HALF_WIDTH);
     const deckIntervals = riverRoadIntervals(axis, line, RIVER_BANK_WIDTH + BRIDGE_HALF_WIDTH);
     feet.forEach((foot, index) => {
@@ -235,7 +211,7 @@ export function bridgeCrossings(half) {
 function candidatesAt(x, z, crossings) {
   if (Array.isArray(crossings)) return crossings;
   const line = value => (Math.round(value / RIVER_GRID_PITCH - 0.5) + 0.5) * RIVER_GRID_PITCH;
-  return [bridgeSpan(line(x)), bridgeSpan({ axis: 'x', z: line(z) })].filter(Boolean);
+  return [bridgeSpan(line(x))].filter(Boolean);
 }
 export function bridgeAt(x, z, crossings = null) {
   if (![x, z].every(Number.isFinite)) return null;
@@ -245,7 +221,7 @@ export function bridgeAt(x, z, crossings = null) {
   }
   return null;
 }
-/** The shared profile joins perpendicular road bridges at identical heights. */
+/** One shared hump keeps the rendered deck and walking surface aligned. */
 export function bridgeProfileHeight(x, z) {
   const corridor = RIVER_HALF_WIDTH + RIVER_BANK_WIDTH, distance = riverDistance(x, z, corridor + BRIDGE_RAMP_LENGTH + 1);
   if (distance <= corridor) return BRIDGE_CLEAR_Y + (BRIDGE_DECK_Y - BRIDGE_CLEAR_Y) * (1 - distance / corridor) ** 2;

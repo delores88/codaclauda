@@ -1,12 +1,12 @@
 # City 0.7 UI acceptance
 
 Prepared 2026-10-25 on `codex/codaclauda-0.7-city`, in the isolated
-`local/worktrees/07-city` worktree. The final combined update builds on
-`c6b1b63` and includes modern Suburbs, the continuous river circuit, and the
-camera refinement below.
+`local/worktrees/07-city` worktree. This river correction builds on `e60a36f`
+and retains modern Suburbs, the continuous river circuit and camera refinement.
+The separate parks and camera/picker ports still require combined integration.
 
 Implementation and independent source review are complete. The stable-source UI
-suite passed **240 tests, 0 failures**. Final headless workflows, visual inspection
+suite passed **249 tests, 0 failures**. Final headless workflows, visual inspection
 and performance checks passed. Earlier checkpoint previews remain historical
 evidence, separate from the final combined results recorded here.
 
@@ -18,9 +18,12 @@ acceptance is claimed. No Rust or external-project changes are included.
 
 ### River, terrain and district placement
 
-- A fixed diagonal Catmull-Rom centerline has two gentle S-bends and an
-  approximately 11-unit water width measured across the channel. Expansion
-  exposes more of the same curve without moving its existing interior.
+- The river follows the original gentle cosine across the island along x:
+  `z = -12 - 2.5 * cos(x / 17)`, with an approximately 11-unit water width.
+  The fixed centre clears the existing HQ and Spark Foundry without moving them.
+  Expansion exposes more of the same curve without moving its existing interior.
+  Both districts gain rows together and their usable lot totals differ by no
+  more than one row. Correct, safe pins stay in place.
 - Downtown has a stone quay, railing and warm lamps; Suburbs have grassy banks,
   rocks and reeds. Water is recessed 0.9 units below road height. Terrain is
   physically cut on both faces, including the mirrored Spark deck; the underside
@@ -33,9 +36,9 @@ acceptance is claimed. No Rust or external-project changes are included.
   motion and adds warm quay reflections. High quality includes narrow white
   ripples and waterfall foam; low quality removes those effects and river
   shadows. Reduced motion freezes the water and hides moving ripple/foam effects.
-- Streets cross on supported stone bridges in both grid directions. The shared
-  bridge profile gives perpendicular intersections the same height. Clicking a
-  bridge targets its actual deck; walking uses supported approaches and surface
+- Each crossing street has one perpendicular supported stone bridge, with a
+  humped profile and no intersecting bridge decks. Clicking a bridge targets its
+  actual deck; walking uses supported approaches and surface
   heights. Outlet streets remain cut until both bridge approaches fit on the
   island. Water targets near an outlet cannot route a walker beyond the island.
 - Placement checks the complete lot and sidewalk, with an extra one-unit margin,
@@ -65,8 +68,11 @@ acceptance is claimed. No Rust or external-project changes are included.
   carry distinct recent project labels where available. A valid commit date must
   be within 24 hours; a positive weekly count is the fallback when no valid date
   exists. No activity produces unlabelled craft, not invented activity.
-- Labels attach to physical hull boards or individual crates. Moving oars and
-  wheels retain supported pivots. Warm navigation lights respond to night.
+- Labels retain physical hull boards or individual crates and add upright
+  camera-facing project names with 12-pixel text on both faces. Labels respect
+  nearer geometry when rendering and picking, and keep the boat's stable focus
+  identity across model replacements. Moving oars and wheels retain supported
+  pivots. Warm navigation lights respond to night.
   Low quality simplifies every model and has no smoke, bobbing or shadows.
 - Reduced motion moors a barge and sailboat at the docks on each face, with no
   rig, smoke or bob animation. Mooring entries and positions survive quality
@@ -125,11 +131,11 @@ Final full-suite command, run from the worktree `ui` directory:
 
 ```text
 node --test
-240 passed, 0 failed
+249 passed, 0 failed
 ```
 
 Coverage includes fixed curve extrema, normal-width sections, full-footprint
-placement, safe-pin migration, spare plots and expansion; both bridge directions,
+placement, safe-pin migration, spare plots and expansion; perpendicular bridges,
 surface heights, picking and dry routes; continuous loop phases and type rotation;
 all six model dimensions, animations, mounted labels, quality/reduced-motion
 stability and disposal; and all four Suburbs variants, growth, collision,
@@ -149,7 +155,42 @@ Spark deck present. Spark deck world-coordinate checks found no water intrusion
 among 20,082 sampled vertices. These are source/geometry checks, not browser or
 installed acceptance.
 
-## Final headless preview acceptance
+## Gentle-path correction acceptance
+
+Independent review covered the periodic path and bounded street cuts, HQ and
+Spark Foundry footprints, bridge clearance, minimum initial size and gradual
+growth. Rendered HQ/Foundry geometry clears both water and bridge approaches.
+Boat names remain at 12 pixels across camera distances and viewport sizes;
+tests raycast every name row against actual opaque boat geometry from four
+directions on both faces and both quality modes. Names no longer hide behind
+their own cargo. Transparent smoke has no opaque outline shell.
+
+The final correction suite passes 249 tests. Headless Chrome verified day/night,
+the waterfall loop, six model silhouettes, Spark-side names, sailboat passage
+under a bridge, bridge walking, reduced motion, Low quality and expansion.
+Actual new billboard clicks focused the correct boat on both faces. Empty plots
+opened Create/Link and a ghost opened Clone with the correct repository, without
+performing those operations. No browser errors occurred.
+
+The preview's six Downtown and two Suburbs projects start at ring 3: 14 and 21
+usable plots, with 8 and 19 free. One fresh linked project starts at ring 2:
+5 Downtown and 10 Suburbs plots, with 4 and 10 free. One local-only project also
+starts at ring 2, leaving 5 and 9 free. Each preceding ring is insufficient.
+Growth occurs one ring at a time when needed, never shrinks, and preserves pins.
+Ring 3 through 7 totals differ by exactly one row, satisfying the agreed balance.
+
+Evidence is in `local/city-river-correction-evidence/`: `preview.json`,
+`billboard-click.json`, `interaction-check.json`, `boats-sheet.json`, the adjacent
+reproduction scripts and `ui-tests.txt`. Images are also copied to
+`local/city-07-evidence/`, including `overview.png` (first load), `river-day.png`,
+`river-night.png`, `river-waterfall.png`, `river-spark.png`,
+`river-bridge-boat.png`, `river-boats-sheet.png`, `river-expansion.png`,
+`river-reduced-motion.png`, `river-reduced-spark.png` and `river-low-quality.png`.
+The final 3.5-second headless samples measured 59.94 FPS in High and Low with
+16.8 ms p95 on the previously documented GPU. This remains synthetic preview
+evidence, not sustained installed performance or native acceptance.
+
+## Earlier continuous-loop preview (historical)
 
 The combined update was exercised in headless Chrome with synthetic
 `ui/dev/mock.js` data on loopback. The final retained run recorded these results:
@@ -210,7 +251,7 @@ boat from a steeper angle that clears the quay; an active focus flight updates i
 permanent following. Picking respects the visible face and nearer occluders, including both sides of
 the river banks; clicks cannot select plaques through a quay wall.
 
-The final suite has **240 passing tests**. Independent review covered camera
+The camera checkpoint had **240 passing tests**. Independent review covered camera
 projection, both-face pan bounds, actual OrbitControls updates, the 30-second
 boundary, manual/overview resize, click event ordering, temporary camera modes,
 focus bounds, boat label picking, replacement IDs and disposal. Review findings
@@ -237,9 +278,10 @@ are also copied to `local/city-07-evidence/`:
 - `camera-fit-portrait.png`
 - `camera-focus-boat.png`
 
-The earlier river/model images and performance samples below describe the
-unchanged visual geometry at the river checkpoint; the camera images and
-240-test suite record this later source revision. All browser evidence remains
+The earlier river/model images and performance samples below describe their
+historical river checkpoint; the camera images and 240-test suite record the
+subsequent camera revision. The correction evidence above supersedes the old
+river path captures. All browser evidence remains
 synthetic headless preview acceptance, not installed/native acceptance.
 
 ## Local evidence and brief history

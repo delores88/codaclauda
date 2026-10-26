@@ -1,24 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { catmullRom, riverZ, riverSlope, riverRange, riverFrame, riverSection, riverRoadIntervals, riverBoundsAtX, riverContains,
+import { riverZ, riverSlope, riverRange, riverFrame, riverSection, riverRoadIntervals, riverBoundsAtX, riverContains,
   riverFootprintClear, riverCellUsable, sampleRiver, bridgeCrossings, bridgeSpan, bridgeAt, bridgeHeight,
-  RIVER_CONTROL_POINTS, RIVER_AMPLITUDE, RIVER_HALF_WIDTH, RIVER_BANK_WIDTH, RIVER_LOT_HALF, RIVER_LOT_MARGIN,
+  RIVER_CENTER_Z, RIVER_WAVELENGTH, RIVER_AMPLITUDE, RIVER_HALF_WIDTH, RIVER_BANK_WIDTH, RIVER_LOT_HALF, RIVER_LOT_MARGIN,
   BRIDGE_GROUND_Y, BRIDGE_CLEAR_Y, WATER_Y } from '../app/city/river-path.js';
 import { MODEL_MAX_TOP } from '../app/city/boat-models.js';
 const near = (a, b, epsilon = 1e-7) => assert.ok(Math.abs(a - b) <= epsilon, `${a} approximately ${b}`);
 
-test('the diagonal Catmull-Rom core has exactly two fixed residual waves and keeps HQ dry', () => {
-  near(catmullRom(0, 1, 2, 3, 0), 1); near(catmullRom(0, 1, 2, 3, 1), 2);
-  assert.deepEqual(RIVER_CONTROL_POINTS.map(p => Math.round((p.z - (0.6 * p.x - 26)) / RIVER_AMPLITUDE)), [0, 1, 0, -1, 0, 1, 0, -1, 0]);
-  for (const point of RIVER_CONTROL_POINTS) near(riverZ(point.x), point.z);
-  for (let x = -48; x <= 80; x += 0.25) assert.ok(Math.abs(riverZ(x) - (0.6 * x - 26)) <= RIVER_AMPLITUDE + 1e-8);
+test('the fixed gentle cosine crosses from X rim to X rim and protects headquarters', () => {
+  near(RIVER_AMPLITUDE, 2.5); near(RIVER_WAVELENGTH, 17);
+  for (let x = -400; x <= 400; x += .25) {
+    near(riverZ(x), RIVER_CENTER_Z - 2.5 * Math.cos(x / 17));
+    near(riverZ(x), riverZ(-x));
+    assert.ok(Math.abs(riverSlope(x)) <= 2.5 / 17 + 1e-8);
+  }
   for (const x of [-400, -80, -32, 0, 19, 64, 110, 400]) near(riverSlope(x), (riverZ(x + .00001) - riverZ(x - .00001)) / .00002, 1e-5);
-  near(riverSlope(-100), .6); near(riverSlope(200), .6);
+  near(riverSlope(0), 0);
   assert.ok(riverCellUsable(0, 0));
   assert.ok(riverFootprintClear(0, 0, 7.5), 'HQ and its complete sidewalk have extra clearance');
 });
 
-test('cubic range queries include all interior extrema and are independent of expansion', () => {
+test('cosine range queries include interior extrema and expansion preserves every previous interior point', () => {
   for (const [min, max] of [[-75, 90], [-36, -10], [17, 67], [-400, 400]]) {
     const range = riverRange(min, max); assert.deepEqual(riverRange(max, min), range);
     for (let x = min; x <= max; x += .05) assert.ok(riverZ(x) >= range.min - 1e-7 && riverZ(x) <= range.max + 1e-7);
@@ -29,7 +31,7 @@ test('cubic range queries include all interior extrema and are independent of ex
     const points = sampleRiver(half);
     assert.ok(points.length > 2);
     for (const p of points) { assert.ok(Math.abs(p.x) <= half + 1e-8 && Math.abs(p.z) <= half + 1e-8); near(p.z, riverZ(p.x), .011); }
-    for (const p of [points[0], points.at(-1)]) near(Math.max(Math.abs(p.x), Math.abs(p.z)), half);
+    near(points[0].x, -half); near(points.at(-1).x, half);
     for (const p of before) { near(riverZ(p.x), p.z); assert.deepEqual(riverSection(p.x), p.section); }
   }
 });
@@ -40,16 +42,18 @@ test('normal-width water and shared terrain sections agree in both road orientat
     assert.ok(riverContains(frame.x + frame.nx * side * 5.49, frame.z + frame.nz * side * 5.49));
     assert.equal(riverContains(frame.x + frame.nx * side * 5.6, frame.z + frame.nz * side * 5.6), false);
   }
-  near(riverSection(-200).waterMaxZ - riverSection(-200).waterMinZ, 11 * Math.hypot(1, .6));
+  near(riverSection(0).waterMaxZ - riverSection(0).waterMinZ, 11, .001);
   for (const axis of ['x', 'z']) for (let line = -72; line <= 88; line += 16) {
-    for (const interval of riverRoadIntervals(axis, line)) {
+    for (const interval of riverRoadIntervals(axis, line, RIVER_BANK_WIDTH, 125.5)) {
       for (const coordinate of [interval.min + .05, (interval.min + interval.max) / 2, interval.max - .05]) {
         const [x, z] = axis === 'x' ? [coordinate, line] : [line, coordinate];
         assert.ok(riverContains(x, z, RIVER_BANK_WIDTH), `${axis} road interval matches the bank tube`);
       }
     }
   }
-  assert.ok(Array.from({ length: 129 }, (_, x) => riverSlope(x - 48)).some(slope => slope < 0), 'horizontal roads must handle the centerline reversing locally');
+  const partial = riverRoadIntervals('x', RIVER_CENTER_Z + RIVER_HALF_WIDTH, 0, 200);
+  assert.ok(partial.length >= 3, 'bounded horizontal queries preserve repeated separated dry stretches');
+  assert.ok(partial.every(p => p.min >= -200 && p.max <= 200));
   for (const x of [-40, 0, 32, 85]) {
     const section = riverSection(x), bounds = riverBoundsAtX(x);
     near(section.bankMinZ, bounds.min); near(section.bankMaxZ, bounds.max);
@@ -74,9 +78,10 @@ test('full lots plus one unit clear the tube; center-only placement is rejected'
   assert.equal(riverFootprintClear(0, 0, -1), false);
 });
 
-test('both street orientations have grounded humped bridges and boat headroom', () => {
+test('each perpendicular street has one grounded humped bridge with no overlapping crossings', () => {
   const half = 93.5, crossings = bridgeCrossings(half);
-  assert.deepEqual(new Set(crossings.map(b => b.axis)), new Set(['x', 'z']));
+  assert.deepEqual(new Set(crossings.map(b => b.axis)), new Set(['z']));
+  assert.deepEqual(crossings.map(b => b.x), Array.from({ length: 12 }, (_, n) => -88 + n * 16));
   assert.equal(new Set(crossings.map(b => b.id)).size, crossings.length);
   for (const span of crossings) {
     assert.equal(bridgeSpan(span), span);
@@ -94,13 +99,8 @@ test('both street orientations have grounded humped bridges and boat headroom', 
   }
   assert.ok(BRIDGE_CLEAR_Y - .18 - (WATER_Y + MODEL_MAX_TOP) >= .3, 'the tallest animated model has at least .3 under the slab');
   near(WATER_Y, BRIDGE_GROUND_Y - .9);
-  let overlaps = 0;
-  for (const a of crossings) for (const b of crossings) {
-    if (a.axis === b.axis) continue;
-    const x = (Math.max(a.x0, b.x0) + Math.min(a.x1, b.x1)) / 2, z = (Math.max(a.z0, b.z0) + Math.min(a.z1, b.z1)) / 2;
-    if (bridgeAt(x, z, [a]) && bridgeAt(x, z, [b])) { overlaps++; near(bridgeHeight(x, z, [a]), bridgeHeight(x, z, [b])); }
-  }
-  assert.ok(overlaps > 0, 'perpendicular bridge intersections share one surface');
+  for (let n = 1; n < crossings.length; n++) assert.ok(crossings[n - 1].x1 < crossings[n].x0, 'bridge slabs never overlap');
+  assert.equal(bridgeSpan({ axis: 'x', z: -8 }), null, 'no bridge runs along the river');
 });
 
 test('explicit crossing lists do not invent bridges and edge approaches remain supported', () => {

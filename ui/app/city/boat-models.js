@@ -87,6 +87,7 @@ export function createBoat(entry = {}, { low = false } = {}) {
   const seen = new Set(), projects = source.filter(item => item?.projectId && !seen.has(item.projectId) && seen.add(item.projectId)).slice(0, crateCount || 1).map(item => ({ projectId: item.projectId, label: String(item.label || item.projectId).slice(0, 40) }));
   const group = new THREE.Group(); group.name = `${type}:${projects[0]?.projectId || 'empty'}`;
   group.userData = { boatType: type, type, projectIds: projects.map(item => item.projectId), projectId: projects[0]?.projectId || null };
+  group.projectLabels = projects;
   const model = new THREE.Group(); model.name = 'boat-model'; group.add(model);
   const motion = { model, oars: [], paddles: [], wheel: null, smoke: [], lights: [], low }; group.motion = motion;
   const parts = new Parts(), { length, width } = BOAT_DIMENSIONS[type];
@@ -126,7 +127,9 @@ export function createBoat(entry = {}, { low = false } = {}) {
       for (const side of [-1, 1]) for (const x of [-0.65, 0.54]) parts.add(dark, placed(new THREE.TorusGeometry(0.10, 0.035, 5, 8), { x, y: 0.10, z: side * 0.38 }));
       for (let n = 0; n < 3; n++) {
         const material = toonMaterial('#aab0ad', { transparent: true, opacity: 0.45, cache: false }); material.depthWrite = false;
-        const puff = mesh(model, sphere(0.075, 0, 0, 0, false), material, true); puff.name = 'funnel-smoke'; puff.castShadow = false;
+        // Smoke is translucent throughout: an opaque ink shell would write depth
+        // in front of the stack's name annotation even after the puff fades.
+        const puff = mesh(model, sphere(0.075, 0, 0, 0, false), material, true, false); puff.name = 'funnel-smoke'; puff.castShadow = false;
         motion.smoke.push(puff);
       }
     }
@@ -189,6 +192,55 @@ export function createBoat(entry = {}, { low = false } = {}) {
   updateBoat(group, 0, 0, { low, reducedMotion: false, night: 0 });
   group.userData.maxTop = MODEL_MAX_TOP;
   return group;
+}
+
+/** A screen-sized annotation, attached to a solid model top by a short leader.
+ * Its depth-tested sprite faces the camera on either island face; the physical
+ * model and its bridge clearance stay unchanged. The renderer owns its size. */
+export function addBoatNameLabel(boat) {
+  const projects = boat.projectLabels || [];
+  if (!projects.length) return null;
+  const canvas = document.createElement('canvas'), context = canvas.getContext('2d');
+  const font = '650 24px system-ui, sans-serif', rowHeight = 44, leader = 12;
+  context.font = font;
+  const width = Math.ceil(Math.max(120, ...projects.map(project => context.measureText(project.label).width + 36)));
+  canvas.width = width; canvas.height = projects.length * rowHeight + leader;
+  context.font = font; context.textAlign = 'center'; context.textBaseline = 'middle';
+  context.fillStyle = '#fffaf0'; context.strokeStyle = '#8d879e'; context.lineWidth = 2;
+  // A narrow leader meets a mast, stack, crate or rower; no unattached 3D sign.
+  context.beginPath(); context.moveTo(width / 2 - 7, canvas.height - leader - 1);
+  context.lineTo(width / 2, canvas.height - 1); context.lineTo(width / 2 + 7, canvas.height - leader - 1);
+  context.fill(); context.stroke();
+  for (let n = 0; n < projects.length; n++) {
+    context.fillStyle = '#fffaf0'; context.beginPath(); context.roundRect(1, n * rowHeight + 1, width - 2, rowHeight - 3, 20); context.fill(); context.stroke();
+    context.fillStyle = '#2d2940'; context.fillText(projects[n].label, width / 2, n * rowHeight + rowHeight / 2);
+  }
+  const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearFilter; texture.generateMipmaps = false;
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: true, depthWrite: false, sizeAttenuation: false, toneMapped: false });
+  const label = new THREE.Sprite(material); label.name = 'boat-project-name'; label.center.set(.5, 0);
+  const count = boat.userData.crateCount || 2;
+  const anchor = {
+    sailboat: [-.12, 1.78, 0], rowboat: [-.16, .805, 0], tugboat: [.42, .8, 0],
+    barge: [-(count - 1) * 1.4 / count, .68, 0], 'paddle-steamer': [.33, 1.54, 0], canoe: [-.16, .805, 0],
+  }[boat.userData.boatType];
+  label.position.set(anchor[0], anchor[1] + .014, anchor[2]);
+  label.scale.set(0, 0, 1); label.frustumCulled = false; label.visible = false;
+  label.renderOrder = 2; // Transparent smoke and water cannot tint the text afterward.
+  label.userData = { mountedLabel: true, boatNameLabel: true, projectId: projects[0].projectId, projectIds: projects.map(project => project.projectId), pixelWidth: width / 2, pixelHeight: canvas.height / 2, fontPixels: 12, support: anchor };
+  // Sprite shares Three's unit quad by default. Own a clone so disposal cannot
+  // release another boat's sprite buffer.
+  label.geometry = label.geometry.clone();
+  boat.motion.model.add(label); boat.nameLabel = label;
+  return label;
+}
+
+export function sizeBoatNameLabel(boat, camera, viewportHeight) {
+  const label = boat.nameLabel;
+  if (!label || !camera?.isPerspectiveCamera || !(viewportHeight > 0)) return;
+  const unit = 2 / (camera.projectionMatrix.elements[5] * viewportHeight);
+  label.scale.set(label.userData.pixelWidth * unit, label.userData.pixelHeight * unit, 1);
+  label.visible = true;
 }
 
 /** No allocations or random state during animation. Reduced motion freezes all

@@ -98,7 +98,7 @@ export function buildSideSign(texture, { board = '#fff1de', post = '#8a6a4a', wi
 /* ---------- roads, sidewalks, lawns, lamps ---------- */
 const sceneryCrossings = new Map();
 function crossingsNear(x, z, halfX, halfZ) {
-  // Include the far foot of a long diagonal approach even when this decoration
+  // Include the far foot of a bridge approach even when this decoration
   // is beside its near foot. The final renderer clips crossings to the island.
   const half = Math.ceil((Math.max(Math.abs(x) + halfX, Math.abs(z) + halfZ) + PITCH * 8) / PITCH) * PITCH;
   if (!sceneryCrossings.has(half)) {
@@ -118,7 +118,7 @@ export function riverSceneryClear(x, z, halfX, halfZ) {
 }
 
 function streetParts(axis, line, min, max, width, top, bridges) {
-  const rectangles = outsideIntervals(min, max, riverCuts(axis, line, width / 2)).map(([a, b]) => axis === 'x'
+  const rectangles = outsideIntervals(min, max, riverCuts(axis, line, width / 2, Math.max(Math.abs(min), Math.abs(max)))).map(([a, b]) => axis === 'x'
     ? { x0: a, x1: b, z0: line - width / 2, z1: line + width / 2 }
     : { x0: line - width / 2, x1: line + width / 2, z0: a, z1: b });
   return outsideRectangles(rectangles, bridges).map(r => placed(new THREE.BoxGeometry(r.x1 - r.x0, top, r.z1 - r.z0),

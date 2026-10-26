@@ -49,7 +49,7 @@ test('Spark deck cutout mirrors the top channel without reversing ground faces',
 
 test('cut grid lines retain separate dry intervals while excluding the whole water corridor', () => {
   for (const axis of ['x', 'z']) for (const line of [-56, -40, -24, -8, 8, 24, 40, 56]) {
-    const pieces = outsideIntervals(-77, 77, riverCuts(axis, line, 0.4));
+    const pieces = outsideIntervals(-77, 77, riverCuts(axis, line, 0.4, 77));
     for (const [a, b] of pieces) for (let along = a + 0.03; along < b; along += 0.3) {
       const x = axis === 'x' ? along : line, z = axis === 'z' ? along : line;
       assert.equal(riverContains(x, z), false, `${axis} street at ${line} crosses water`);

@@ -38,8 +38,8 @@ export function outsideIntervals(min, max, cuts) {
 
 /** Preserve separate dry stretches where a winding river meets one street more
  * than once. Extra normal margin conservatively covers the strip's full width. */
-export function riverCuts(axis, line, halfWidth = 0) {
-  return riverRoadIntervals(axis, line, RIVER_BANK_WIDTH + halfWidth + 0.03).map(({ min, max }) => [min, max]);
+export function riverCuts(axis, line, halfWidth = 0, half = 400) {
+  return riverRoadIntervals(axis, line, RIVER_BANK_WIDTH + halfWidth + 0.03, half).map(({ min, max }) => [min, max]);
 }
 
 /** A perpendicular approach can overlap just one edge of another road. Keep its
