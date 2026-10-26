@@ -118,7 +118,7 @@ test('unbuilt repositories stay pickable without a crane; local linking builds t
   assert.ok(building.pickables.includes(building.plaque));
   assert.equal(building.plaque.userData.buildingId, project.id);
   assert.ok(drawnText.includes(project.name));
-  assert.ok(drawnText.includes('Not on this PC · click to clone'));
+  assert.ok(drawnText.includes('Clone to build'));
   const sign = building.unbuiltSign;
   assert.equal(sign.parent, building.group);
   building.setActive(true); assert.equal(building.active, false); assert.equal(building.scaffold, null);

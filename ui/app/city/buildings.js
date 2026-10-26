@@ -6,8 +6,8 @@
 import { THREE, toonMaterial, addOutline, shade, pastel } from './toon.js';
 import { RoundedBoxGeometry } from '../../vendor/three/addons/RoundedBoxGeometry.js';
 import { mergeParts, placed, plaqueTexture, githubFlagTexture, lockTexture, disposeAll as disposeObject } from './fx.js';
-import { cellCenter, cellKey } from './layout.js';
-import { GROUND_Y, seeded, lotSeats } from './scenery.js';
+import { cellCenter, cellKey, LOT_HALF } from './layout.js';
+import { GROUND_Y, seeded, lotSeats, riverSceneryClear } from './scenery.js';
 import { Ticker, TICKER } from './ticker.js';
 import { districtOf, isUnbuilt } from './districts.js';
 import { suburbPlan, buildSuburbHome, buildSuburbYard, buildContractor, HOME_BODY_COLORS, HOME_WOOD, HOME_ROOF, HOME_LOT_SIZE } from './suburbs.js';
@@ -244,6 +244,63 @@ class Batch {
   }
 }
 
+/** Downtown landscaping uses building-local coordinates: the tower's unchanged
+ * CZ offset means the lawn itself is centred at -CZ. Fit only the landscaping
+ * beside bridge approaches; never move or resize a placed tower. */
+export function downtownBasePlan(size, cell, unbuilt = false) {
+  const c = cellCenter(cell.i, cell.j);
+  const halfX = riverSceneryClear(c.x, c.z, 5.55, 5.55) ? 5.5 : 5.17;
+  const lawn = { w: halfX * 2, d: 11, z: -CZ, top: unbuilt ? PAD_TOP : GROUND_Y + 0.04 };
+  const paving = unbuilt ? null : { w: Math.min(size.W + 1.8, halfX * 2 - 0.16), d: size.D + 1.8, z: 0, top: PAD_TOP };
+  const start = unbuilt ? size.D / 2 : paving.d / 2;
+  const end = LOT_HALF - CZ - 0.005; // float-safe inset at the sidewalk seam
+  const entry = { w: 1.1, d: end - start, z: (end + start) / 2, top: PAD_TOP + (unbuilt ? 0.008 : 0) };
+  const plants = [];
+  if (!unbuilt) {
+    // The front pair leaves the existing scenery bench at (4,4.85) and the
+    // entry path clear. Smaller towers also have a pair of rear garden beds.
+    for (const [x, cellZ] of [[-3.7, 5.08], [1.9, 5.08], [-4.3, -4.95], [4.3, -4.95]]) {
+      const z = cellZ - CZ, w = 1.05, d = cellZ > 0 ? 0.55 : 0.65, radius = cellZ > 0 ? 0.34 : 0.42;
+      const hx = w / 2 + 0.04, hz = radius + 0.04;
+      if (Math.abs(x) + hx > halfX || Math.abs(cellZ) + hz > 5.5) continue;
+      if (Math.abs(x) - hx < paving.w / 2 + 0.03 && Math.abs(z) - hz < paving.d / 2 + 0.03) continue;
+      if (!riverSceneryClear(c.x + x, c.z + cellZ, hx, hz)) continue;
+      plants.push({ x, z, w, d, radius });
+    }
+  }
+  return { lawn, paving, entry, plants, unbuilt };
+}
+
+/** Owned geometry, shared toon materials, and a few merged planting draws per
+ * lot. Existing building picking remains on the tower/sign meshes. */
+export function buildDowntownBase(plan, { tag = {} } = {}) {
+  const group = new THREE.Group(); group.name = 'downtown-base'; group.userData.plan = plan;
+  const surface = (name, rect, color, thickness, outline = 0) => {
+    const geometry = placed(new THREE.BoxGeometry(rect.w, thickness, rect.d), { y: rect.top - thickness / 2, z: rect.z });
+    const mesh = new THREE.Mesh(geometry, toonMaterial(color)); mesh.name = name;
+    mesh.receiveShadow = true; Object.assign(mesh.userData, tag);
+    if (outline) addOutline(mesh, { thickness: outline });
+    group.add(mesh); return mesh;
+  };
+  surface('downtown-lawn', plan.lawn, '#8aca70', plan.unbuilt ? 0.12 : 0.04);
+  if (plan.paving) surface('downtown-paving', plan.paving, '#e5d7bc', 0.12, 0.02);
+  surface('downtown-entry-walk', plan.entry, '#f1e6ce', 0.08);
+  if (plan.plants.length) {
+    const planting = new THREE.Group(); planting.name = 'downtown-planters';
+    planting.userData.count = plan.plants.length; group.add(planting);
+    const batch = new Batch(), soilTop = plan.lawn.top + 0.26;
+    for (const p of plan.plants) {
+      batch.add('#d7c3a2', placed(new THREE.BoxGeometry(p.w, 0.26, p.d), { x: p.x, y: plan.lawn.top + 0.13, z: p.z }));
+      batch.add('#5b9f66', placed(new THREE.BoxGeometry(p.w - 0.14, 0.035, p.d - 0.14), { x: p.x, y: soilTop + 0.005, z: p.z }));
+      batch.add('#b77c4e', placed(new THREE.CylinderGeometry(0.07, 0.1, 1.18, 6), { x: p.x, y: soilTop + 0.59, z: p.z }));
+      batch.add('#5b9f66', placed(new THREE.IcosahedronGeometry(p.radius, 1), { x: p.x, y: soilTop + 1.48, z: p.z, sy: 1.8 }));
+    }
+    batch.build(planting, { tag, outline: 0.025 });
+  }
+  group.traverse(node => { if (node.isMesh) node.raycast = () => {}; });
+  return group;
+}
+
 const easeOutBack = t => { const c = 1.6; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); };
 const easeIn = t => t * t * t;
 
@@ -251,15 +308,15 @@ const easeIn = t => t * t * t;
 function unbuiltSignTexture(name) {
   const canvas = document.createElement('canvas'); canvas.width = 768; canvas.height = 192;
   const context = canvas.getContext('2d');
-  context.fillStyle = '#e7edf0'; context.fillRect(0, 0, 768, 192);
-  context.strokeStyle = '#91a7b3'; context.lineWidth = 6; context.strokeRect(3, 3, 762, 186);
+  context.fillStyle = '#fff5df'; context.fillRect(0, 0, 768, 192);
+  context.strokeStyle = '#b59a7e'; context.lineWidth = 6; context.strokeRect(3, 3, 762, 186);
   context.textAlign = 'center'; context.textBaseline = 'middle';
   const label = String(name || 'Repository').replace(/\s+/g, ' ').trim();
   let fontSize = 48;
   do { context.font = `600 ${fontSize}px "Segoe UI", system-ui, sans-serif`; fontSize -= 2; } while (context.measureText(label).width > 704 && fontSize > 22);
-  context.fillStyle = '#425967'; context.fillText(label, 384, 66, 704);
-  context.font = '30px "Segoe UI", system-ui, sans-serif'; context.fillStyle = '#586d79';
-  context.fillText('Not on this PC · click to clone', 384, 132, 704);
+  context.fillStyle = '#60513f'; context.fillText(label, 384, 66, 704);
+  context.font = '40px "Segoe UI", system-ui, sans-serif'; context.fillStyle = '#625343';
+  context.fillText('Clone to build', 384, 132, 704);
   const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
   return texture;
 }
@@ -318,6 +375,9 @@ export class Building {
       this.anim = { kind: 'widen', t: 0, fromX: previous.W / size.W, fromZ: previous.D / size.D };
       this.tower.scale.set(this.anim.fromX, 1, this.anim.fromZ);
     } else if (previous && previous.floors !== size.floors && !reduced) {
+      // Initial metrics can replace a still-running arrival with floor growth.
+      // The new animation scales only the tower; finish its Downtown lawn first.
+      if (this.district === 'downtown') this.padGroup.scale.setScalar(1);
       this.anim = { kind: 'grow', t: 0, from: previous.H / size.H, up: size.floors > previous.floors };
       this.tower.scale.y = previous.H / size.H;
       if (this.anim.up && !this.mirror) this.env.particles.emit('sparkle', this.topPoint(), 26, { spread: size.W * 0.8 });
@@ -518,15 +578,13 @@ export class Building {
     this.tower.add(body, frame); this.body = body; this.pickables.push(body);
     const sign = new THREE.Group(); sign.name = `unbuilt-sign:${this.id}`;
     sign.position.set(0, PAD_TOP, D / 2 + 0.33);
-    const plaqueW = Math.min(W * 0.8, 4.6), plaqueH = plaqueW / 4;
-    for (const x of [-plaqueW * 0.35, plaqueW * 0.35]) {
-      const post = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1, 0.12), toonMaterial('#788d99'));
-      post.position.set(x, 0.5, 0); sign.add(post);
-    }
-    const backing = new THREE.Mesh(new THREE.BoxGeometry(plaqueW + 0.1, plaqueH + 0.1, 0.1), toonMaterial('#91a7b3'));
-    backing.position.y = 1.1; backing.userData = { ...tag }; sign.add(backing);
+    const plaqueW = Math.min(W * 0.65, 2.6), plaqueH = plaqueW / 4;
+    const posts = new THREE.Mesh(mergeParts([-plaqueW * 0.35, plaqueW * 0.35].map(x => placed(new THREE.BoxGeometry(0.1, 0.8, 0.1), { x, y: 0.4 }))), toonMaterial('#b58c62'));
+    addOutline(posts, { thickness: 0.02 }); sign.add(posts);
+    const backing = new THREE.Mesh(new THREE.BoxGeometry(plaqueW + 0.1, plaqueH + 0.1, 0.1), toonMaterial('#c5a17b'));
+    backing.position.y = 0.88; backing.userData = { ...tag }; addOutline(backing, { thickness: 0.02 }); sign.add(backing);
     const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueH), new THREE.MeshBasicMaterial({ map: unbuiltSignTexture(this.project.name) }));
-    plaque.position.set(0, 1.1, 0.056); plaque.userData = { ...tag };
+    plaque.position.set(0, 0.88, 0.056); plaque.userData = { ...tag };
     sign.add(plaque); this.group.add(sign); this.unbuiltSign = sign;
     this.pickables.push(backing, plaque); this.plaque = plaque;
     this.roofTop = this.roofSurface = PAD_TOP + ghostHeight;
@@ -640,12 +698,18 @@ export class Building {
 
   buildPad() {
     for (const child of [...this.padGroup.children]) { this.padGroup.remove(child); disposeObject(child); }
+    this.downtownBase = null;
     if (this.suburbs) {
       const yard = buildSuburbYard(this.suburbs, { baseY: PAD_TOP, tag: { buildingId: this.id }, centerZ: -CZ });
       this.padGroup.add(yard); this.pad = yard; return;
     }
+    if (this.district === 'downtown') {
+      this.downtownBase = downtownBasePlan(this.size, this.cell, this.unbuilt);
+      const landscape = buildDowntownBase(this.downtownBase, { tag: { buildingId: this.id } });
+      this.padGroup.add(landscape); this.pad = landscape; return;
+    }
     const { W, D } = this.size;
-    const padMaterial = this.mirror ? SPARK_MATERIALS.pad : this.district === 'downtown' ? toonMaterial('#9daeb9') : MATERIALS.pad;
+    const padMaterial = this.mirror ? SPARK_MATERIALS.pad : MATERIALS.pad;
     const pad = new THREE.Mesh(placed(new RoundedBoxGeometry(W + 1.2, 0.14, D + 1.2, 1, 0.12), { y: GROUND_Y + 0.05 }), padMaterial);
     pad.receiveShadow = true; pad.userData = this.mirror ? { sparkBuildingId: this.id } : { buildingId: this.id };
     addOutline(pad, { thickness: 0.03 });
@@ -765,7 +829,7 @@ export class Building {
 
   /** Returns false when a sink animation has finished and the building can be disposed. */
   update(dt, elapsed, env) {
-    if (this.suburbs && env.reducedMotion && this.anim) {
+    if ((this.suburbs || this.district === 'downtown') && env.reducedMotion && this.anim) {
       if (this.anim.kind === 'sink') return false;
       this.anim = null; this.tower.scale.set(1, 1, 1); this.padGroup.scale.setScalar(1);
     }
