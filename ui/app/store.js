@@ -14,6 +14,8 @@ import { sparkLink, sparkFresh, jobRunning, jobEndSec } from './spark-link.js';
 import { accessFor, normalizeLevel } from './access.js';
 import { expiryMs, liveGrantUsable } from './budgets.js';
 import { TEAM_ADDRESS } from './team.js';
+import { CITY_HYDRATION_MS, withTimeout, createRequestPool } from './project-hydration.js';
+import { githubIdentity } from './github-identity.js';
 
 const OWNER = 'owner';
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'needs-owner']);
@@ -61,6 +63,10 @@ class Store extends EventTarget {
     this.claims = [];
     this.manifest = null;
     this.cityProjectsReady = false; // first bank choice waits for the initial project inventory
+    this._manifestRevision = 0;
+    this._scanRequests = new Map();
+    this._scanPool = createRequestPool();
+    this._githubRequests = new Map();
     this.paths = {};
     this.prefsInfo = {};
     this.desktop = emptyDesktop();
@@ -81,9 +87,10 @@ class Store extends EventTarget {
   /* ---------------- lifecycle ---------------- */
   async start() {
     if (!this._desktopLoaded) await this.loadDesktop();
+    const inventory = this.refreshManifest();
     try { this.paths = await desktop.paths(); } catch { this.paths = {}; }
     try { this.prefsInfo = await desktop.preferences(); } catch { this.prefsInfo = {}; }
-    await Promise.allSettled([this.refreshBoard(), this.refreshMail(true), this.refreshManifest()]);
+    await Promise.allSettled([this.refreshBoard(), this.refreshMail(true), inventory]);
     this.startSeq = Math.max(0, ...[...this.messages.values()].map(m => m.sequence || 0));
     this.resumeLiveRuns();
     this.emit('change');
@@ -147,28 +154,72 @@ class Store extends EventTarget {
     return next;
   }
 
+  /** Arm once, including when City renders before Store.start. Metadata can arrive later. */
+  beginCityHydration() {
+    if (!this._cityHydration) {
+      this._cityHydration = new Promise(resolve => { this._cityHydrationDone = resolve; });
+      if (this.cityProjectsReady) this._cityHydrationDone();
+      else this._cityHydrationTimer = setTimeout(() => this.finishCityHydration(), CITY_HYDRATION_MS);
+    }
+    return this._cityHydration;
+  }
+  finishCityHydration() {
+    if (this.cityProjectsReady) return;
+    clearTimeout(this._cityHydrationTimer); this._cityHydrationTimer = null;
+    this.cityProjectsReady = true; this._cityHydrationDone?.(); this.emit('change');
+  }
   async refreshManifest() {
-    try { const data = await desktop.loadManifest(); const next = data?.manifest || null; if (JSON.stringify(next) !== JSON.stringify(this.manifest)) { this.manifest = next; this.emit('change'); this.adoptManifest(); } }
-    catch { /* optional file */ }
-    if (!this.cityProjectsReady) this.adoptManifest();
+    this.beginCityHydration();
+    if (!this._manifestRequest) {
+      const request = Promise.resolve().then(() => desktop.loadManifest());
+      this._manifestRequest = request;
+      // Keep the actual invocation in flight after its bounded wait expires.
+      request.then(data => {
+        if (this._manifestRequest !== request) return;
+        this._manifestRequest = null;
+        const next = data?.manifest || null, changed = JSON.stringify(next) !== JSON.stringify(this.manifest);
+        if (changed) { this.manifest = next; this._manifestRevision++; this.emit('change'); this.adoptManifest(); }
+        else if (!this._adopting) this.finishCityHydration();
+      }, () => {
+        if (this._manifestRequest !== request) return;
+        this._manifestRequest = null;
+        if (!this._adopting) this.finishCityHydration();
+      });
+    }
+    // Cached folders are useful immediately; a slow optional manifest must not
+    // prevent their scans. A changed manifest queues one further adoption pass.
+    this.adoptManifest();
+    try { await withTimeout(this._manifestRequest); } catch { /* optional file */ }
   }
 
   /** Agent-written manifest: link its local folders (scanned in the background) and its GitHub user once. */
-  async adoptManifest() {
-    if (this._adopting) return;
-    this._adopting = true;
-    try {
+  adoptManifest() {
+    this.beginCityHydration();
+    if (this._adopting) {
+      this._adoptAgain ||= this._adoptRevision !== this._manifestRevision;
+      return this._adopting;
+    }
+    this._adoptRevision = this._manifestRevision;
+    const run = Promise.resolve().then(async () => {
       const items = Array.isArray(this.manifest?.projects) ? this.manifest.projects : [];
       const known = new Set(this.desktop.projects.local.map(p => normalizePath(p.path)));
-      const fresh = items.filter(item => typeof item?.local_path === 'string' && item.local_path && !known.has(normalizePath(item.local_path)));
+      const fresh = items.filter(item => {
+        if (typeof item?.local_path !== 'string' || !item.local_path) return false;
+        const path = normalizePath(item.local_path); if (known.has(path)) return false;
+        known.add(path); return true;
+      });
       if (fresh.length) this.updateDesktop(d => { for (const item of fresh) d.projects.local.push({ path: item.local_path, name: item.name, addedAt: Date.now(), fromManifest: true }); });
       const user = /^[A-Za-z0-9-]{1,39}$/.test(this.manifest?.github_user || '') ? this.manifest.github_user : '';
-      if (user && !this.desktop.projects.github.user) await this.linkGithub(user).catch(() => {});
-      for (const item of this.desktop.projects.local.filter(p => !p.scannedAt)) await this.scanProject(item.path).catch(() => {});
-      // Initial scans can discover Git remotes and merge local folders with
-      // fetched repos. Choose the home banks only after these identities settle.
-      if (!this.cityProjectsReady) { this.cityProjectsReady = true; this.emit('change'); }
-    } finally { this._adopting = false; }
+      const work = this.desktop.projects.local.filter(p => !p.scannedAt).map(item => this.scanProject(item.path));
+      if (user && !this.desktop.projects.github.user) work.push(this.linkGithub(user, { automatic: true }));
+      await Promise.allSettled(work);
+    });
+    this._adopting = run.catch(() => {}).then(() => {
+      this._adopting = null;
+      if (this._adoptAgain) { this._adoptAgain = false; return this.adoptManifest(); }
+      if (!this._manifestRequest) this.finishCityHydration();
+    });
+    return this._adopting;
   }
 
   /** DGXBridge (sparkdev) status through the board's owner-only, read-only Spark status call. */
@@ -294,32 +345,35 @@ class Store extends EventTarget {
     const d = this.desktop.projects;
     const settings = d.settings || {};
     const byKey = new Map();
-    const remoteKey = url => { const m = /github\.com[:/]([^/]+\/[^/.]+?)(?:\.git)?\/?$/i.exec(String(url || '')); return m ? `gh:${m[1].toLowerCase()}` : null; };
     const add = project => { byKey.set(project.id, project); return project; };
     const blank = (id, name) => ({ id, ids: [id], name, source: 'local', path: '', repo: null, aliases: [], description: '', stats: {}, homeAgents: [] });
 
     for (const item of d.local || []) {
       const id = `local:${normalizePath(item.path)}`;
       const project = add({ ...blank(id, item.name || item.path.split(/[\\/]/).pop()), path: item.path, stats: item.stats || {}, scannedAt: item.scannedAt || 0, aliases: item.aliases || [] });
-      const gh = remoteKey(item.stats?.git?.remote);
+      const gh = githubIdentity(item.stats?.git?.remote);
       if (gh) project.ids.push(gh);
     }
     const manifestProjects = Array.isArray(this.manifest?.projects) ? this.manifest.projects : [];
-    for (const item of manifestProjects) {
+    // Local entries go first so a matching remote-only row cannot hide their path.
+    for (const item of [...manifestProjects].sort((a, b) => Number(Boolean(b?.local_path)) - Number(Boolean(a?.local_path)))) {
       if (!item || typeof item.name !== 'string') continue;
       const localId = item.local_path ? `local:${normalizePath(item.local_path)}` : null;
-      const ghId = item.github ? `gh:${String(item.github).toLowerCase()}` : null;
-      let project = [...byKey.values()].find(p => (localId && p.ids.includes(localId)) || (ghId && p.ids.includes(ghId)));
+      const ghId = githubIdentity(item.github, { allowSlug: true });
+      let project = (localId && byKey.get(localId)) || [...byKey.values()].find(p => ghId && p.ids.includes(ghId) && (!localId || !p.path || normalizePath(p.path) === normalizePath(item.local_path)));
       if (!project) project = add({ ...blank(localId || ghId || `manifest:${squash(item.name)}`, item.name), path: item.local_path || '', fromManifest: true });
       if (localId && !project.ids.includes(localId)) project.ids.push(localId);
       if (ghId && !project.ids.includes(ghId)) project.ids.push(ghId);
+      if (localId && !project.path) project.path = item.local_path;
       project.name = item.name;
       project.description ||= String(item.description || '').slice(0, 300);
       project.aliases.push(...(Array.isArray(item.aliases) ? item.aliases.map(String) : []));
       project.homeAgents.push(...(Array.isArray(item.agents) ? item.agents.map(String) : []));
     }
     for (const repo of d.github?.repos || []) {
-      const ghId = `gh:${String(repo.full_name || repo.name).toLowerCase()}`;
+      const owner = repo.owner?.login || d.github?.user;
+      const ghId = githubIdentity(repo.full_name || (owner && repo.name ? `${owner}/${repo.name}` : repo.name), { allowSlug: true });
+      if (!ghId) continue;
       let project = [...byKey.values()].find(p => p.ids.includes(ghId));
       if (!project) project = add({ ...blank(ghId, repo.name), source: 'github' });
       else project.source = project.path ? 'both' : 'github';
@@ -541,20 +595,66 @@ class Store extends EventTarget {
     return path;
   }
   async scanProject(path) {
-    const stats = await desktop.scanProject(path);
-    this.updateDesktop(d => { const item = d.projects.local.find(p => normalizePath(p.path) === normalizePath(path)); if (item) { item.stats = stats; item.scannedAt = Date.now(); } });
-    return stats;
+    const name = normalizePath(path);
+    let request = this._scanRequests.get(name);
+    if (!request) {
+      const original = this.desktop.projects.local.find(p => normalizePath(p.path) === name);
+      const previousStats = original?.stats, previousScan = original?.scannedAt;
+      request = this._scanPool.run(async () => {
+        const stats = await desktop.scanProject(path);
+        const current = this.desktop.projects.local.find(p => normalizePath(p.path) === name);
+        // Removal/relink or a newer state snapshot invalidates this old answer.
+        if (current && current === original && current.stats === previousStats && current.scannedAt === previousScan) {
+          this.updateDesktop(() => { current.stats = stats; current.scannedAt = Date.now(); });
+        }
+        return stats;
+      });
+      this._scanRequests.set(name, request);
+      const clear = () => { if (this._scanRequests.get(name) === request) this._scanRequests.delete(name); };
+      request.then(clear, clear);
+    }
+    return withTimeout(request);
   }
   async discoverDesktop() { return desktop.discoverDesktop(); }
-  async linkGithub(user) {
-    const result = await desktop.githubRepos(user || this.desktop.projects.github.user || '');
-    this.updateDesktop(d => { d.projects.github = { user: result.user, repos: result.repos || [], fetchedAt: Date.now(), source: result.source }; });
-    return result;
+  async linkGithub(user, { automatic = false } = {}) {
+    const name = String(user || this.desktop.projects.github.user || '').toLowerCase();
+    if (automatic && this._githubManualRequest) return withTimeout(this._githubManualRequest);
+    let entry = this._githubRequests.get(name);
+    if (!entry) {
+      entry = { previous: this.desktop.projects.github };
+      entry.promise = Promise.resolve().then(() => desktop.githubRepos(user || this.desktop.projects.github.user || '')).then(result => {
+        if (this._githubSelection === entry && this.desktop.projects.github === entry.previous) {
+          this.updateDesktop(d => { d.projects.github = { user: result.user, repos: result.repos || [], fetchedAt: Date.now(), source: result.source }; });
+        }
+        return result;
+      });
+      this._githubRequests.set(name, entry);
+      this._githubSelection = entry;
+      const clear = () => {
+        if (this._githubRequests.get(name) === entry) this._githubRequests.delete(name);
+        if (this._githubManualRequest === entry.promise) this._githubManualRequest = null;
+      };
+      entry.promise.then(clear, clear);
+    }
+    if (!automatic) {
+      // A -> B -> A reuses A's invocation but gives the latest explicit choice
+      // selection precedence, including if B completed before that choice.
+      entry.previous = this.desktop.projects.github;
+      this._githubSelection = entry; this._githubManualRequest = entry.promise;
+    }
+    return withTimeout(entry.promise);
   }
   unlinkProject(project) {
+    const ids = new Set([project.id, ...(project.ids || [])]);
     this.updateDesktop(d => {
-      d.projects.local = d.projects.local.filter(p => !project.ids.includes(`local:${normalizePath(p.path)}`));
-      d.projects.github.repos = d.projects.github.repos.filter(r => !project.ids.includes(`gh:${String(r.full_name || r.name).toLowerCase()}`));
+      d.projects.local = d.projects.local.filter(p => !ids.has(`local:${normalizePath(p.path)}`));
+      const github = d.projects.github;
+      // Replace the snapshot so an already-running fetch cannot resurrect an
+      // explicitly removed project when its old inventory arrives later.
+      d.projects.github = { ...github, repos: github.repos.filter(repo => {
+        const owner = repo.owner?.login || github.user;
+        return !ids.has(githubIdentity(repo.full_name || (owner && repo.name ? `${owner}/${repo.name}` : repo.name), { allowSlug: true }));
+      }) };
     });
   }
   /** visibility: { board?: boolean, city?: boolean, name?, aliases? } */

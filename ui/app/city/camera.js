@@ -1,4 +1,5 @@
 /* Pure overview and navigation math. Distances are island units; FOV is degrees. */
+import { islandHalf } from './layout.js';
 export const OVERVIEW_POLAR = 0.82;
 export const OVERVIEW_AZIMUTH = 0.62;
 export const CAMERA_IDLE_MS = 30_000;
@@ -151,12 +152,16 @@ export function largestFreeRect(bounds, { blockers = [] } = {}) {
 }
 
 export const cameraZoomLimit = fitDistance => fitDistance * 1.5;
-export const panLimit = half => half * 1.12;
+/** Inventory can still be loading while camera gestures are already available. */
+export const cameraIslandHalf = half => Number.isFinite(half) && half > 0 ? half : islandHalf(1);
+export const panLimit = half => cameraIslandHalf(half) * 1.12;
 
 /** Retain manual and saved temporary views when a new viewport has a nearer fit. */
 export function cameraBounds(half, fitDistance, preserveDistance = 0) {
-  const pan = panLimit(Math.max(1, Number(half) || 1));
-  const maxDistance = Math.max(cameraZoomLimit(Math.max(1, Number(fitDistance) || 1)), Number(preserveDistance) || 0);
+  const pan = panLimit(half);
+  const fit = Number.isFinite(fitDistance) && fitDistance > 0 ? fitDistance : pan * 4;
+  const held = Number.isFinite(preserveDistance) && preserveDistance > 0 ? preserveDistance : 0;
+  const maxDistance = Math.max(cameraZoomLimit(fit), held);
   return { pan, maxDistance, far: Math.max(3000, maxDistance + 2 * Math.SQRT2 * pan + 100) };
 }
 

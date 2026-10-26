@@ -1,5 +1,6 @@
 /* Browser-preview backend. Loaded ONLY when the page runs outside the CodaClauda
  * desktop window (no window.__TAURI__). Synthetic data; it never touches a real board. */
+import { createPreviewScenario } from './mock-scenarios.js';
 const now = () => Math.floor(Date.now() / 1000);
 const ago = minutes => now() - Math.round(minutes * 60);
 let seq = 0;
@@ -1085,21 +1086,21 @@ const desktopHandlers = {
 /** For node tests: the handler tables, without starting the preview timers. */
 export const mockHandlers = () => ({ rpc: handlers, desktop: desktopHandlers, preview: { usageHold: mockUsageHold, usageStop: mockUsageStop } });
 
-export function createMock() {
-  simulateJoins();
-  startMockTimers();
+export function createMock({ search = globalThis.location?.search || '', baseURL = globalThis.location?.href, fetch: fetchImpl = globalThis.fetch, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), storage = globalThis.sessionStorage, timers = true } = {}) {
+  if (timers) { simulateJoins(); startMockTimers(); }
+  const scenario = createPreviewScenario({ search, baseURL, fetchImpl, sleep, storage, statsForPath: path => desktopHandlers.project_scan({ path }) });
   return {
     async invoke(command, args = {}) {
-      await new Promise(r => setTimeout(r, 40));
+      await sleep(40);
       try {
         if (command === 'rpc') {
           const fn = handlers[args.op];
           if (!fn) return { ok: false, error: { code: 'MOCK_UNSUPPORTED', message: `Preview has no mock for ${args.op}` } };
-          return { ok: true, data: structuredClone(fn(args.args || {})) };
+          return { ok: true, data: structuredClone(await fn(args.args || {})) };
         }
         const fn = desktopHandlers[command];
         if (!fn) return { ok: false, error: { code: 'MOCK_UNSUPPORTED', message: `Preview has no mock for ${command}` } };
-        return { ok: true, data: structuredClone(fn(args)) };
+        return { ok: true, data: structuredClone(await scenario.run(command, args, fn)) };
       } catch (error) { return { ok: false, error: { code: error.code || 'MOCK_ERROR', message: error.message } }; }
     },
     /** Mirrors Tauri's event listen for 'session://event' and 'schedule://event'; returns an unlisten function. */

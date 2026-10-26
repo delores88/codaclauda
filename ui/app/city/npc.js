@@ -4,7 +4,7 @@
  *   active  → walks the roads to its current project's door and works facing the building
  * People come from ./people.js (createPerson); a simple stand-in is used if it fails to load. */
 import { THREE, toonMaterial, addOutline } from './toon.js';
-import { planPath, perimeterPoint, perimeterParam, perimeterRoute, cellOf } from './layout.js';
+import { planPath, perimeterPoint, perimeterParam, perimeterRoute, cellOf, cellCenter, WALK_HALF } from './layout.js';
 import { HQ, GROUND_Y } from './scenery.js';
 import { hash, defaultAvatar, normalizeAvatar } from '../avatar/spec.js';
 import { disposeAll } from './fx.js';
@@ -83,12 +83,13 @@ class Npc {
 }
 
 export class NpcManager {
-  constructor(parent, { buildings, particles, reducedMotion, river = () => null }) {
+  constructor(parent, { buildings, particles, reducedMotion, river = () => null, resolveProjectId = id => id }) {
     this.parent = parent;
     this.buildings = buildings;
     this.particles = particles;
     this.reducedMotion = reducedMotion;
     this.river = river;
+    this.resolveProjectId = resolveProjectId;
     this.npcs = new Map();
     this.owner = null;
     this.ownerSig = '';
@@ -170,38 +171,72 @@ export class NpcManager {
   /** Decide where every agent wants to be. Stable: same inputs → same seat/slot. */
   assignGoals() {
     const list = [...this.npcs.values()].sort((a, b) => a.id.localeCompare(b.id));
-    const usedSeats = new Set(), slotCount = new Map();
-    let restCount = 0;
+    const building = id => id ? this.buildings.get(this.resolveProjectId(id) || id) || this.buildings.get(id) : null;
+    const locations = new Map(list.map(npc => {
+      const current = building(npc.agent.currentProjectId), home = building(npc.agent.homeProjectId);
+      return [npc.id, npc.agent.status === 'offline' ? home || current : current || home];
+    }));
+    const unassigned = list.filter(npc => !locations.get(npc.id));
+    // Allocate the whole HQ sidewalk ring across statuses, so equal hashes and
+    // simultaneous arrivals cannot put several people at the same fallback.
+    const fallback = new Map(unassigned.map((npc, slot) => [npc.id, {
+      slot, point: perimeterPoint(0, 0, (slot + 0.5) * 4 / unassigned.length),
+    }]));
+    const usedSeats = new Set(), workSlots = new Map();
+    const workSpot = where => {
+      let points = workSlots.get(where.id);
+      if (!points) { points = []; workSlots.set(where.id, points); }
+      const center = cellCenter(where.cell.i, where.cell.j);
+      let point = null, best = null, clearance = -1;
+      const consider = candidate => {
+        if (Math.abs(candidate.x - center.x) > WALK_HALF + 1e-8 || Math.abs(candidate.z - center.z) > WALK_HALF + 1e-8) return false;
+        const distance = points.reduce((nearest, p) => Math.min(nearest, Math.hypot(p.x - candidate.x, p.z - candidate.z)), Infinity);
+        if (distance > clearance) { best = candidate; clearance = distance; }
+        if (distance < 0.72) return false;
+        point = candidate; return true;
+      };
+      // Narrow models clamp multiple candidate columns onto the same point;
+      // home doorways are also closer than a person's width. Skip those slots.
+      for (let k = 0; k < 64 && !point; k++) consider(where.workSpot(k));
+      // Overflow stays on this lot's sidewalk rather than extending rows into
+      // a neighbouring building. Even unusually large crowds get unique sites.
+      const steps = Math.max(64, points.length * 2);
+      for (let k = 0; k < steps && !point; k++) {
+        const p = perimeterPoint(where.cell.i, where.cell.j, (k + 0.5) * 4 / steps);
+        const dx = center.x - p.x, dz = center.z - p.z, length = Math.hypot(dx, dz);
+        consider({ ...p, fx: dx / length, fz: dz / length });
+      }
+      point ||= best;
+      points.push(point);
+      return { point, slot: points.length - 1 };
+    };
     for (const npc of list) {
       const a = npc.agent;
-      const current = this.buildings.get(a.currentProjectId);
-      const home = this.buildings.get(a.homeProjectId);
+      const where = locations.get(npc.id), hq = fallback.get(npc.id);
       let goal;
-      if (a.status === 'offline') {
-        const seats = [...(home ? home.seats.map((s, k) => ({ ...s, key: `lot:${home.id}:${k}` })) : []), ...HQ.seats.map((s, k) => ({ ...s, key: `hq:${k}` }))];
+      if (hq) {
+        const type = a.status === 'active' ? 'work' : a.status === 'offline' ? 'rest' : 'stroll';
+        goal = { type, key: `${type}:hq:${hq.slot}:${unassigned.length}`, point: hq.point, cell: { i: 0, j: 0 }, face: { x: 0, z: 0 } };
+      } else if (a.status === 'offline') {
+        const seats = (where.seats || []).map((s, k) => ({ ...s, key: `lot:${where.id}:${k}` }));
         const seat = seats.find(s => !usedSeats.has(s.key));
         if (seat) { usedSeats.add(seat.key); goal = { type: 'sit', key: `sit:${seat.key}`, point: seat, face: { x: seat.x + seat.fx * 4, z: seat.z + seat.fz * 4 } }; }
         else {
-          const k = restCount++, a2 = k * 0.9;
-          const p = { x: Math.sin(a2) * 2.1, z: 2.2 + Math.cos(a2) * 2.1 };
-          goal = { type: 'rest', key: `rest:${k}`, point: p, face: { x: 0, z: 2.2 } };
+          const { point, slot } = workSpot(where);
+          goal = { type: 'rest', key: `rest:${where.id}:${slot}`, point, face: { x: point.x + point.fx * 4, z: point.z + point.fz * 4 } };
         }
       } else if (a.status === 'active') {
-        const where = current || home;
-        const slotKey = where ? where.id : 'hq';
-        const k = slotCount.get(slotKey) || 0; slotCount.set(slotKey, k + 1);
-        const spot = where ? where.workSpot(k) : { ...HQ.work[k % HQ.work.length], z: HQ.work[0].z + Math.floor(k / HQ.work.length) * 0.9 };
-        goal = { type: 'work', key: `work:${slotKey}:${k}`, point: spot, face: { x: spot.x + spot.fx * 4, z: spot.z + spot.fz * 4 } };
+        const { point, slot } = workSpot(where);
+        goal = { type: 'work', key: `work:${where.id}:${slot}`, point, face: { x: point.x + point.fx * 4, z: point.z + point.fz * 4 } };
       } else {
-        const where = current || home;
-        const cell = where ? where.cell : { i: 0, j: 0 };
+        const cell = where.cell;
         goal = { type: 'stroll', key: `stroll:${cell.i},${cell.j}`, cell };
       }
+      if (goal.type === 'stroll' && !goal.point) goal.point = perimeterPoint(goal.cell.i, goal.cell.j, (hash(npc.id) % 400) / 100);
       if (goal.key === npc.goalKey) { npc.goal = goal; continue; }
       const previous = npc.goal;
       npc.goal = goal; npc.goalKey = goal.key;
-      if (goal.type === 'stroll') goal.point = perimeterPoint(goal.cell.i, goal.cell.j, (hash(npc.id) % 400) / 100);
-      if (this.first) { npc.place(goal.point.x, goal.point.z); this.arrive(npc); }
+      if (this.first || (hq && npc.fresh)) { npc.place(goal.point.x, goal.point.z); this.arrive(npc); }
       else {
         if (npc.fresh) npc.place(HQ.door.x + (Math.random() - 0.5), HQ.door.z + 0.4);
         npc.path = this.route(npc.pos, planPath({ x: npc.pos.x, z: npc.pos.z }, goal.point, npc.lane));

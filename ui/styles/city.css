@@ -118,15 +118,15 @@
 .city-flip.to-pc .icon { color: var(--accent-2); }
 
 /* Find me (your portrait) and Street view */
-.city-findme, .city-street-btn { display: inline-flex; align-items: center; gap: 6px; height: 34px; margin-right: 2px; padding: 0 12px 0 6px; border: 0; border-radius: 10px; background: var(--accent-soft); color: var(--text); font-size: 12.5px; font-weight: 650; white-space: nowrap; cursor: pointer; transition: background var(--fast); }
+.city-findme, .city-street-btn, .city-pan-btn { display: inline-flex; align-items: center; gap: 6px; height: 34px; margin-right: 2px; padding: 0 12px 0 6px; border: 0; border-radius: 10px; background: var(--accent-soft); color: var(--text); font-size: 12.5px; font-weight: 650; white-space: nowrap; cursor: pointer; transition: background var(--fast); }
 .city-findme:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
 .city-findme-art { display: inline-flex; }
 /* Street view: always labelled and easy to spot (it is the way down to street level). */
-.city-street-btn { padding-left: 9px; background: var(--accent-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
-.city-street-btn:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
-.city-street-btn .icon { width: 16px; height: 16px; color: var(--accent-2); }
-.city-street-btn[aria-pressed="true"] { background: var(--accent); color: var(--accent-contrast); }
-.city-street-btn[aria-pressed="true"] .icon { color: inherit; }
+.city-street-btn, .city-pan-btn { padding-left: 9px; background: var(--accent-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+.city-street-btn:hover, .city-pan-btn:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+.city-street-btn .icon, .city-pan-btn .icon { width: 16px; height: 16px; color: var(--accent-2); }
+.city-street-btn[aria-pressed="true"], .city-pan-btn[aria-pressed="true"] { background: var(--accent); color: var(--accent-contrast); }
+.city-street-btn[aria-pressed="true"] .icon, .city-pan-btn[aria-pressed="true"] .icon { color: inherit; }
 .city-street-hint { position: absolute; left: 50%; bottom: 66px; z-index: 3; padding: 7px 14px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: color-mix(in srgb, var(--surface) 84%, transparent); backdrop-filter: blur(12px) saturate(1.2); -webkit-backdrop-filter: blur(12px) saturate(1.2); color: var(--text-2); font-size: 12px; font-weight: 600; white-space: nowrap; box-shadow: var(--shadow-sm); transform: translateX(-50%); pointer-events: none; }
 /* Street view: only what applies stays (the toolbar shows Find me and Exit street view). */
 .city-root.is-street .city-hud, .city-root.is-street .city-legend, .city-root.is-street .city-machines, .city-root.is-street .city-help, .city-root.is-street .city-empty { display: none; }
@@ -295,11 +295,11 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .city-bubble, .city-help, .city-panel, .city-task-form, .city-cluster-pop, .city-zoom-hint { animation: none; }
-  .city-toolbar, .city-meter-fill, .city-flip, .city-cluster, .city-side, .city-findme, .city-street-btn { transition: none; }
+  .city-toolbar, .city-meter-fill, .city-flip, .city-cluster, .city-side, .city-findme, .city-street-btn, .city-pan-btn { transition: none; }
 }
 /* The app's own Reduce motion setting (toggled on the view root). */
 .city-view.reduce-motion .city-zoom-hint, .city-view.reduce-motion .city-bubble, .city-view.reduce-motion .city-help, .city-view.reduce-motion .city-panel, .city-view.reduce-motion .city-task-form, .city-view.reduce-motion .city-cluster-pop { animation: none; }
-.city-view.reduce-motion .city-toolbar, .city-view.reduce-motion .city-meter-fill, .city-view.reduce-motion .city-flip, .city-view.reduce-motion .city-cluster, .city-view.reduce-motion .city-side, .city-view.reduce-motion .city-findme, .city-view.reduce-motion .city-street-btn { transition: none; }
+.city-view.reduce-motion .city-toolbar, .city-view.reduce-motion .city-meter-fill, .city-view.reduce-motion .city-flip, .city-view.reduce-motion .city-cluster, .city-view.reduce-motion .city-side, .city-view.reduce-motion .city-findme, .city-view.reduce-motion .city-street-btn, .city-view.reduce-motion .city-pan-btn { transition: none; }
 
 /* Talk mode (click an agent): letterbox bars, the way out, what you both say over your heads and the
    conversation docked on the right (a bottom sheet on narrow windows). The HUD and chrome step aside. */

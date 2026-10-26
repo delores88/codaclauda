@@ -46,7 +46,7 @@ test('first manifest hydration waits for fetched repos and local remote identiti
   desktop.githubRepos.mock.mockImplementation(() => github.promise);
   desktop.scanProject.mock.mockImplementation(async path => { await scanning.promise; return scanStats(path); });
   await f.store.refreshManifest();
-  assert.equal(f.store.cityProjectsReady, false); assert.equal(f.view.homeBanks, undefined);
+  assert.equal(f.store.cityProjectsReady, false); assert.notEqual(f.view.homeBanksFinal, true);
   assert.equal(f.writes.mock.callCount(), 0);
   github.resolve({ user: 'owner', repos: repos() }); await tick();
   assert.equal(f.store.projects.length, 14, 'unscanned folders and their repos have not merged yet');
@@ -134,7 +134,7 @@ test('City sync offers the complete inventory to bank selection, including hidde
   view.sync(); assert.equal(offered, all);
 });
 
-test('saved home layouts wait for merged identities so reload cannot spuriously grow another ring', () => {
+test('saved home and contributor layouts remain interactive during bounded hydration', () => {
   const transient = folders().map(p => ({ ...p, id: `local:${p.path}`, visible: { city: true } }));
   const store = { prefs: { cityLargerDistrictV1: DOWNTOWN }, cityProjectsReady: false,
     projects: transient, visibleProjects: () => transient };
@@ -145,11 +145,12 @@ test('saved home layouts wait for merged identities so reload cannot spuriously 
   view.ensureDistrictBanks(transient);
   let assigned = 0;
   view.slots.assign = () => { assigned++; throw new Error('assignment reached'); };
-  view.sync(); assert.equal(assigned, 0, 'transient home identities must not allocate plots');
+  assert.throws(() => view.sync(), /assignment reached/);
+  assert.equal(assigned, 1, 'known projects render while background hydration continues');
   store.cityProjectsReady = true;
   assert.throws(() => view.sync(), /assignment reached/);
-  assert.equal(assigned, 1, 'complete inventory releases layout');
+  assert.equal(assigned, 2, 'complete inventory continues layout');
   store.cityProjectsReady = false; view.islands.current = 'contributor';
   assert.throws(() => view.sync(), /assignment reached/);
-  assert.equal(assigned, 2, 'contributor layout does not depend on home hydration');
+  assert.equal(assigned, 3, 'contributor layout does not depend on home hydration');
 });

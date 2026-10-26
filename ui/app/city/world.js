@@ -18,7 +18,7 @@ import { Particles, disposeAll } from './fx.js';
 import { islandHalf } from './layout.js';
 import { setBuildingNight } from './buildings.js';
 import { DECK_Y } from './spark.js';
-import { fitCameraPoints, buildingFocusDistance, cameraBounds, cameraIdle, clampPanTarget, OVERVIEW_POLAR, OVERVIEW_AZIMUTH } from './camera.js';
+import { fitCameraPoints, buildingFocusDistance, cameraBounds, cameraIdle, cameraIslandHalf, clampPanTarget, OVERVIEW_POLAR, OVERVIEW_AZIMUTH } from './camera.js';
 
 /* ---------- turning the island over ---------- */
 /** Island-space height of the pivot: midway between the two faces, so either face rests at the same height. */
@@ -304,8 +304,8 @@ export class World {
   overviewPoints() {
     const points = this.boundsPoints?.();
     if (points?.length) return points;
-    const slab = [];
-    for (const x of [-this.half, this.half]) for (const y of [DECK_Y, GROUND_Y]) for (const z of [-this.half, this.half]) slab.push(this.toWorld(new THREE.Vector3(x, y, z), { atRest: true }));
+    const slab = [], half = cameraIslandHalf(this.half);
+    for (const x of [-half, half]) for (const y of [DECK_Y, GROUND_Y]) for (const z of [-half, half]) slab.push(this.toWorld(new THREE.Vector3(x, y, z), { atRest: true }));
     return slab;
   }
   overviewAzimuth() {
@@ -537,7 +537,7 @@ export class World {
       pointers.add(event.pointerId);
       if (pointers.size > 1) { end(); return; }
       end();   // a drag whose up never arrived must not leave the island held mid-turn
-      const rotate = event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+      const rotate = !this.panMode && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey;
       drag = rotate && this.underside && !this.street && !this.shot && event.target === canvas ? { id: event.pointerId, x: event.clientX, y: event.clientY, tilting: false } : null;
       if (drag && !canvas.hasPointerCapture?.(event.pointerId)) { try { canvas.setPointerCapture(event.pointerId); } catch { /* not capturable */ } }
     });
@@ -759,6 +759,18 @@ export class World {
     const move = side.multiplyScalar(right).add(dir.multiplyScalar(forward));
     this.controls.target.add(move); this.camera.position.add(move);
     this.clampPan();
+  }
+  /** An explicit pan tool makes the same navigation available without a modifier or right button. */
+  setPanMode(enabled) {
+    const next = Boolean(enabled);
+    if (next === Boolean(this.panMode)) return false;
+    this.releaseTilt?.();
+    this.panMode = next;
+    this.controls.mouseButtons.LEFT = next ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
+    this.controls.touches.ONE = next ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE;
+    this.tween = null; this.pendingFlight = null; this.zoomPending = 0;
+    this.resetControlMomentum(); this.markCameraMoved();
+    return true;
   }
   /* ---------- street view ---------- */
   /** Third-person camera behind a walker. pose(dt) → { x, y, z, heading, back, up, look } in island

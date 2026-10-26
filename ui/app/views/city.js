@@ -25,6 +25,7 @@ import { JumpToPicker } from '../city/jumpto.js';
 import { largestFreeRect, buildingFocusDistance, boxFitDistance } from '../city/camera.js';
 
 registerIcons({
+  'city-pan': '<path d="M12 3v18M3 12h18M8 7l4-4 4 4M8 17l4 4 4-4M7 8l-4 4 4 4M17 8l4 4-4 4"/>',
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.6 2.4c-.8.4-1.2.9-1.2 1.7v.4M12 17h.01"/>',
   crosshair: '<circle cx="12" cy="12" r="7"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="1.4"/>',
   cube: '<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/>',
@@ -279,7 +280,7 @@ export class CityView {
 
   /* ---------------- DOM skeleton ---------------- */
   buildDom() {
-    this.stage = h('div.city-stage', { tabindex: '0', role: 'application', 'aria-label': 'Project city. Click an agent to talk to them. Drag to orbit, right-drag to pan, scroll to zoom. With the Spark side on, drag up or down to turn the island over, or press V to flip it. W A S D pan, Q and E rotate, F focuses the selection, H resets the view, M finds your avatar, G starts street view (W and S walk, A and D turn, Escape exits).' });
+    this.stage = h('div.city-stage', { tabindex: '0', role: 'application', 'aria-label': 'Project city. Click an agent to talk to them. Drag to orbit, use Pan or P to drag the view, right-drag to pan, scroll to zoom. With the Spark side on, drag up or down to turn the island over, or press V to flip it. W A S D pan, Q and E rotate, F focuses the selection, H resets the view, M finds your avatar, G starts street view (W and S walk, A and D turn, Escape exits).' });
     this.tag = h('div.city-tag', { hidden: true, 'aria-hidden': 'true' });
     this.bubble = h('div.city-bubble', { hidden: true, role: 'status' });
     this.labelLayer = h('div.city-labels', { 'aria-hidden': 'true' });
@@ -339,11 +340,12 @@ export class CityView {
     this.findBtn = h('button.city-findme', { type: 'button', title: 'Find me (M)', 'aria-label': 'Find me: fly to your avatar (M)', onclick: () => this.findMe() }, this.findArt, h('span', 'Find me'));
     this.streetLabel = h('span', 'Street view');
     this.streetBtn = h('button.city-street-btn', { type: 'button', title: 'Street view (G)', 'aria-pressed': 'false', onclick: () => this.toggleStreet() }, icon('city-street'), this.streetLabel);
+    this.panBtn = h('button.city-pan-btn', { type: 'button', title: 'Pan: drag to move the view (P)', 'aria-pressed': 'false', onclick: () => this.togglePan() }, icon('city-pan'), h('span', 'Pan'));
     this.streetHint = h('div.city-street-hint', { hidden: true, role: 'note' }, 'W/S walk · A/D turn · drag to look · Esc to exit');
     // Zoomed all the way in (This PC side up): one more zoom-in step drops into street view.
     this.zoomHint = h('div.city-zoom-hint', { hidden: true, role: 'status' }, icon('city-street'), 'Keep zooming → Street view');
     this.toolbar = h('div.city-toolbar', { role: 'toolbar', 'aria-label': 'City controls' },
-      this.findBtn, this.streetBtn,
+      this.findBtn, this.streetBtn, this.panBtn,
       this.flipBtn,
       iconButton('zoomIn', 'Zoom in', () => this.world?.zoomBy(0.72), 'city-tool'),
       iconButton('zoomOut', 'Zoom out', () => this.world?.zoomBy(1.38), 'city-tool'),
@@ -353,7 +355,7 @@ export class CityView {
     this.help = h('div.city-help.card', { hidden: true, role: 'dialog', 'aria-label': 'City controls' },
       h('div.city-help-head', h('strong', 'Getting around'), iconButton('close', 'Close help', () => this.toggleHelp(false))),
       h('dl.city-help-list',
-        ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Drag an agent', 'Drop it on a building to give it a task there'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click a building', 'Center it on either face'], ['Double-click ground', 'Walk your avatar there'], ['Click a boat label', 'Center that boat'], ['F / Focus', 'Center the selected building, agent or boat'], ['Jump', 'Select and center a building or agent'], ['H', 'Fit the whole island'], ['Esc', 'Deselect']]
+        ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Pan / P', 'Toggle drag-to-pan mode'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Drag an agent', 'Drop it on a building to give it a task there'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click a building', 'Center it on either face'], ['Double-click ground', 'Walk your avatar there'], ['Click a boat label', 'Center that boat'], ['F / Focus', 'Center the selected building, agent or boat'], ['Jump', 'Select and center a building or agent'], ['H', 'Fit the whole island'], ['Esc', 'Deselect']]
           .flatMap(([k, v]) => [h('dt', h('kbd', k)), h('dd', v)])),
       h('p.city-note', 'A winding river connects Downtown (GitHub projects) and Suburbs (local folders without a repo). Road bridges link the districts. Pale Downtown ghosts have a ground sign and open a panel where you can clone the repo. Tickers sit on real buildings only. Both districts keep at least three empty plots and grow without moving placed buildings.'),
       h('p.city-note', 'Suburbs have low modern homes with at most two storeys. Larger projects add wings and a wider footprint; Downtown towers grow taller. A contractor van and ladder show an agent working at a home, and a solar-panel glint marks a busy home.'),
@@ -410,7 +412,7 @@ export class CityView {
     this.world.collide = p => this.solidAt(p);
     this.buildings = new BuildingManager(this.world.city, { particles: this.world.particles, reducedMotion: () => this.reduced() });
     this.river = new River(this.world);
-    this.npcs = new NpcManager(this.world.city, { buildings: this.buildings, particles: this.world.particles, reducedMotion: () => this.reduced(), river: () => this.islands?.current ? null : this.river });
+    this.npcs = new NpcManager(this.world.city, { buildings: this.buildings, particles: this.world.particles, reducedMotion: () => this.reduced(), river: () => this.islands?.current ? null : this.river, resolveProjectId: id => this.store.project(id)?.id || id });
     this.spark = new SparkCity(this.world, { makePerson: (spec, options) => this.npcs.makePerson(spec, options), reducedMotion: () => this.reduced(), topBuildings: this.buildings });
     this.world.boundsPoints = () => this.cameraBounds();
     this.plotMarker = buildPlotMarker();
@@ -505,16 +507,23 @@ export class CityView {
     }, 0);
   }
 
-  /** Decide home banks once, after inventory hydration, before writing migrated pins. */
+  /** Render immediately; save the first bank choice when hydration settles or its deadline expires. */
   ensureDistrictBanks(projects) {
-    if (this.islands?.current || this.homeBanks) return true;
+    if (this.islands?.current || this.homeBanksFinal) return true;
     const store = this.store, saved = store.prefs.cityLargerDistrictV1;
-    if (![DOWNTOWN, SUBURBS].includes(saved) && store.cityProjectsReady === false) return false;
-    const choice = chooseLargerDistrict(projects, saved);
-    this.homeBanks = districtBanks(choice);
-    this.slots = new SlotMap({ banks: this.homeBanks });
-    if (this.islands?.homeSlots) this.islands.homeSlots = this.slots;
-    if (saved !== choice) store.setPref('cityLargerDistrictV1', choice);
+    store.beginCityHydration?.();
+    const final = [DOWNTOWN, SUBURBS].includes(saved) || store.cityProjectsReady !== false;
+    const choice = final ? chooseLargerDistrict(projects, saved)
+      : this.homeBanks?.largerDistrict || chooseLargerDistrict(projects);
+    if (this.homeBanks?.largerDistrict !== choice) {
+      this.homeBanks = districtBanks(choice);
+      this.slots = new SlotMap({ banks: this.homeBanks });
+      if (this.islands?.homeSlots) this.islands.homeSlots = this.slots;
+    }
+    if (final) {
+      this.homeBanksFinal = true;
+      if (saved !== choice) store.setPref('cityLargerDistrictV1', choice);
+    }
     return true;
   }
 
@@ -526,15 +535,14 @@ export class CityView {
     const projects = store.visibleProjects('city');
     const districts = !this.islands?.current;
     if (!this.ensureDistrictBanks(store.projects)) return;
-    // Even with saved banks, transient unmerged identities must not grow the
-    // island during startup: expansion deliberately never shrinks afterward.
-    if (districts && store.cityProjectsReady === false) return;
     const hold = Boolean(this.plotDialog && performance.now() - this.plotDialog.at < PLOT_HOLD_MS);
     const { cells, rings, fresh = [], reserved = new Map(), emptyPlots, pinRepairs } = this.slots.assign(projects, { pins: store.cityLots || {}, reserve: store.projects.filter(p => !p.visible.city), hold, districts });
     this.emptyPlots = emptyPlots;
     this.cells = cells; this.rings = rings; this.reserved = reserved;
     this.occupied = new Set([...cells.values()].map(c => cellKey(c.i, c.j)));
-    this.persistLots(fresh, pinRepairs);
+    // Provisional plots stay interactive, but a temporary identity inventory
+    // must not write migrated pins before the bounded first bank decision.
+    if (!districts || (this.homeBanksFinal && store.cityProjectsReady !== false)) this.persistLots(fresh, pinRepairs);
     const ringsChanged = this.world.setRings(rings, { animate: Boolean(this.firstSyncDone), districts, banks: this.homeBanks });
     // A skipped expansion holds its old pose, including through later HUD resize
     // callbacks. It becomes an overview again when the owner explicitly asks.
@@ -937,7 +945,7 @@ export class CityView {
     };
     this.stage.addEventListener('pointerdown', event => {
       if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || !event.isPrimary) return;
-      if (event.target !== canvas || this.talk || this.street || this.streetPending || !this.world.settled || this.islands?.blocking || this.failed) return;
+      if (event.target !== canvas || this.world.panMode || this.talk || this.street || this.streetPending || !this.world.settled || this.islands?.blocking || this.failed) return;
       const target = this.pick(event.clientX, event.clientY);
       if (target?.kind !== 'agent' || !this.agentById(target.id)) return;
       event.stopPropagation();   // no orbit, no tilt, no click handling below: this handler owns the gesture
@@ -1223,12 +1231,19 @@ export class CityView {
     else if (code === 'KeyV') { if (!event.repeat) { event.preventDefault(); this.flipSide(); } }
     else if (code === 'KeyM') { if (!event.repeat) { event.preventDefault(); this.findMe(); } }
     else if (code === 'KeyG') { if (!event.repeat) { event.preventDefault(); this.toggleStreet(); } }
+    else if (code === 'KeyP') { if (!event.repeat) { event.preventDefault(); this.togglePan(); } }
     else if (code === 'Escape') { if (this.street || this.streetPending) this.exitStreet(); else if (this.cluster) this.closeCluster(true); else if (!this.help.hidden) this.toggleHelp(false); else this.select(null); }
     else if (event.key === '+' || event.key === '=') this.world.zoomBy(0.75);
     else if (event.key === '-' || event.key === '_') this.world.zoomBy(1.33);
   }
 
   /* ---------------- selection ---------------- */
+  togglePan() {
+    if (!this.world || this.street || this.streetPending || this.talk) return;
+    if (this.following) this.toggleFollow(false);
+    this.world.setPanMode(!this.world.panMode);
+    this.renderToolbarState();
+  }
   onClick(target) {
     // Talk mode: another agent switches the conversation; empty ground (or anything else but you) leaves it.
     const extra = target?.kind === 'agent' && extraKind(this.agentById(target.id));
@@ -1874,6 +1889,7 @@ export class CityView {
     this.qualityBtn.title = qualityLabel; this.qualityBtn.setAttribute('aria-label', qualityLabel);
     this.qualityBtn.setAttribute('aria-pressed', String(high));
     this.followBtn.setAttribute('aria-pressed', String(Boolean(this.following)));
+    this.panBtn?.setAttribute('aria-pressed', String(Boolean(this.world.panMode)));
     this.helpBtn.setAttribute('aria-pressed', String(!this.help.hidden));
     // Show / Hide Spark side: only once DGXBridge is configured (otherwise there is no Spark side at all).
     const shown = this.sparkMode() !== 'off';

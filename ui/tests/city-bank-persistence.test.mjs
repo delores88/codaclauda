@@ -21,11 +21,14 @@ function fixture({ saved, ready = true, current = null } = {}) {
   return { view, writes, slots };
 }
 
-test('initial bank choice waits for project inventory before changing slots or preferences', () => {
+test('provisional banks render immediately and the final inventory choice is saved once', () => {
   const { view, writes, slots } = fixture({ ready: false });
-  assert.equal(view.ensureDistrictBanks(projects(0, 2)), false);
-  assert.equal(view.slots, slots); assert.equal(view.homeBanks, undefined);
+  assert.equal(view.ensureDistrictBanks(projects(0, 2)), true);
+  assert.notEqual(view.slots, slots); assert.equal(view.homeBanks.positiveZ, SUBURBS);
   assert.deepEqual(writes, []);
+  const provisional = view.slots;
+  view.ensureDistrictBanks(projects(6, 2));
+  assert.equal(view.slots, provisional, 'pending updates cannot flip provisional banks');
   view.store.cityProjectsReady = true;
   assert.equal(view.ensureDistrictBanks(projects(6, 2)), true);
   assert.equal(view.homeBanks.positiveZ, DOWNTOWN);
@@ -47,9 +50,10 @@ test('saved banks apply before hydration and survive reload with a new majority'
   }
 });
 
-test('invalid saved choices wait for hydration and are replaced once', () => {
+test('invalid saved choices still render and are replaced once hydration finishes', () => {
   const { view, writes } = fixture({ saved: 'invalid', ready: false });
-  assert.equal(view.ensureDistrictBanks([]), false);
+  assert.equal(view.ensureDistrictBanks([]), true);
+  assert.deepEqual(writes, []);
   view.store.cityProjectsReady = true;
   assert.equal(view.ensureDistrictBanks(projects(2, 6)), true);
   assert.equal(view.homeBanks.positiveZ, SUBURBS);
