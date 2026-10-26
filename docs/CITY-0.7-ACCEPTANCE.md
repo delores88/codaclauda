@@ -6,7 +6,7 @@ correction, modern Suburbs, six Downtown parks, planted building bases, visible
 viewport camera fitting and the grouped searchable Jump-to picker.
 
 Implementation and independent source review are complete. The stable-source UI
-suite passed **294 tests, 0 failures**. Final headless workflows, visual inspection
+suite passed **316 tests, 0 failures**. Final headless workflows, visual inspection
 and performance checks passed. Earlier checkpoint previews remain historical
 evidence, separate from the final combined results recorded here.
 
@@ -24,6 +24,11 @@ acceptance is claimed. No Rust or external-project changes are included.
   Expansion exposes more of the same curve without moving its existing interior.
   Both districts gain rows together and their usable lot totals differ by no
   more than one row. Correct, safe pins stay in place.
+- The district with more projects on first layout receives the larger positive-z
+  bank. Ghost repos count Downtown and ties choose Downtown. The choice is saved
+  once, including the first 0.7 migration; later count changes never swap banks.
+  Initial loading waits for GitHub links and local Git remote scans so duplicate
+  local/repo identities are merged before counting. Hidden projects count too.
 - Downtown has a stone quay, railing and warm lamps; Suburbs have grassy banks,
   rocks and reeds. Water is recessed 0.9 units below road height. Terrain is
   physically cut on both faces, including the mirrored Spark deck; the underside
@@ -132,7 +137,7 @@ Final full-suite command, run from the worktree `ui` directory:
 
 ```text
 node --test
-294 passed, 0 failed
+316 passed, 0 failed
 ```
 
 Coverage includes fixed curve extrema, normal-width sections, full-footprint
@@ -174,7 +179,7 @@ down agents, with counts, filtering and keyboard navigation. Project panels show
 their associated agents; You and HQ shortcuts remain available. Mobile uses a
 full-width sheet.
 
-The final combined UI suite passes 294 tests. Independent integration review
+The final combined UI suite passes 316 tests. Independent integration review
 passed 77 focused checks. Combined headless checks passed all 8 camera viewport
 scenarios, 12 focus/interaction scenarios and 10 picker scenarios, with no browser
 errors. Actual moving boat clicks, exact street/conversation camera return,
@@ -191,6 +196,29 @@ are copied to `local/city-07-evidence/`, including `jumpto-open.png`,
 `legend-collapsed.png`, `legend-open.png`, and the updated river/day/night/Spark,
 overview, parks and ghost/tower captures. Earlier checkpoint receipts below remain
 historical; the combined evidence supersedes their scene captures.
+
+The final saved-bank revision starts the six-Downtown/two-Suburbs mock at ring 2,
+with 10 Downtown and 5 Suburbs usable plots, leaving 4 and 3 free. The initial
+majority chooses the larger bank only once; both orientations were independently
+reviewed across 300 real/ghost bases and 50 parks, including actual outline
+geometry, road support, district lamps, rim trees and disposal. Readiness tests
+cover absent or failed optional manifests, failed scans, remote discovery,
+hidden projects, saved choices and contributor visits. The initial identity
+scans finish before an unsaved choice can persist. Reload also waits for merged
+identities before allocating plots, avoiding an unnecessary permanent growth
+ring from transient duplicate entries.
+
+Final expansion from ring 2 to ring 6 preserved every original pin, kept all
+footprints dry and left 24 Downtown and 63 Suburbs plots free. River and island
+half-widths matched at 109.5. The saved choice survives changed project counts,
+reloads and contributor round trips. `bank-persistence.json` records that browser
+workflow. The fixed river interior never moves and the island never shrinks.
+
+Final sequential 3.5-second headless overview samples on the RTX 4090 Laptop GPU,
+1600x1000 at device scale 1, measured High 59.94006 fps (1,532 draws, 626,788
+triangles) and Low 59.94177 fps (1,352 draws, 423,930 triangles), both with
+16.8 ms p95 frame times and three boats. These are short synthetic preview
+measurements, not sustained large-city or installed WebView performance.
 
 ## Gentle-path correction acceptance (before integration)
 
@@ -209,7 +237,8 @@ Actual new billboard clicks focused the correct boat on both faces. Empty plots
 opened Create/Link and a ghost opened Clone with the correct repository, without
 performing those operations. No browser errors occurred.
 
-The preview's six Downtown and two Suburbs projects start at ring 3: 14 and 21
+Before saved-bank selection, the preview's six Downtown and two Suburbs projects
+started at ring 3: 14 and 21
 usable plots, with 8 and 19 free. One fresh linked project starts at ring 2:
 5 Downtown and 10 Suburbs plots, with 4 and 10 free. One local-only project also
 starts at ring 2, leaving 5 and 9 free. Each preceding ring is insufficient.
@@ -323,7 +352,7 @@ synthetic headless preview acceptance, not installed/native acceptance.
 
 ## Local evidence and brief history
 
-Current evidence is kept outside tracked files under
+Historical continuous-loop evidence is kept outside tracked files under
 `local/city-loop-evidence/` in the original checkout:
 
 - `river-day.png`, `river-night.png`, `river-boats-sheet.png`,

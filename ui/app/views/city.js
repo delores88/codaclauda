@@ -8,7 +8,7 @@ import { World, webglAvailable, wheelZoomLog } from '../city/world.js';
 import { BuildingManager } from '../city/buildings.js';
 import { NpcManager, loadPeople, setPeopleReducedMotion, streetMove } from '../city/npc.js';
 import { SlotMap, cellCenter, cellOf, cellKey, LOT_HALF, PITCH } from '../city/layout.js';
-import { DOWNTOWN, SUBURBS, districtOf, districtForCell, isUnbuilt } from '../city/districts.js';
+import { DOWNTOWN, SUBURBS, districtOf, districtForCell, districtBanks, chooseLargerDistrict, isUnbuilt } from '../city/districts.js';
 import { River } from '../city/river.js';
 import { buildPlotMarker, GROUND_Y } from '../city/scenery.js';
 import { SparkCity, FOUNDRY, DECK_Y, jobLabel } from '../city/spark.js';
@@ -504,6 +504,19 @@ export class CityView {
     }, 0);
   }
 
+  /** Decide home banks once, after inventory hydration, before writing migrated pins. */
+  ensureDistrictBanks(projects) {
+    if (this.islands?.current || this.homeBanks) return true;
+    const store = this.store, saved = store.prefs.cityLargerDistrictV1;
+    if (![DOWNTOWN, SUBURBS].includes(saved) && store.cityProjectsReady === false) return false;
+    const choice = chooseLargerDistrict(projects, saved);
+    this.homeBanks = districtBanks(choice);
+    this.slots = new SlotMap({ banks: this.homeBanks });
+    if (this.islands?.homeSlots) this.islands.homeSlots = this.slots;
+    if (saved !== choice) store.setPref('cityLargerDistrictV1', choice);
+    return true;
+  }
+
   sync() {
     if (this.failed || !this.world) return;
     this.dirty = false;
@@ -511,13 +524,17 @@ export class CityView {
     const store = this.store;
     const projects = store.visibleProjects('city');
     const districts = !this.islands?.current;
+    if (!this.ensureDistrictBanks(store.projects)) return;
+    // Even with saved banks, transient unmerged identities must not grow the
+    // island during startup: expansion deliberately never shrinks afterward.
+    if (districts && store.cityProjectsReady === false) return;
     const hold = Boolean(this.plotDialog && performance.now() - this.plotDialog.at < PLOT_HOLD_MS);
     const { cells, rings, fresh = [], reserved = new Map(), emptyPlots } = this.slots.assign(projects, { pins: store.cityLots || {}, reserve: store.projects.filter(p => !p.visible.city), hold, districts });
     this.emptyPlots = emptyPlots;
     this.cells = cells; this.rings = rings; this.reserved = reserved;
     this.occupied = new Set([...cells.values()].map(c => cellKey(c.i, c.j)));
     this.persistLots(fresh);
-    const ringsChanged = this.world.setRings(rings, { animate: Boolean(this.firstSyncDone), districts });
+    const ringsChanged = this.world.setRings(rings, { animate: Boolean(this.firstSyncDone), districts, banks: this.homeBanks });
     // A skipped expansion holds its old pose, including through later HUD resize
     // callbacks. It becomes an overview again when the owner explicitly asks.
     if (ringsChanged && this.firstSyncDone && (!this.world.canAutoRefit() || this.pendingFocus || this.talk || this.street || this.streetPending || this.following)) this.world.overview = false;
@@ -536,7 +553,7 @@ export class CityView {
     this.legendScaffolding.textContent = 'Scaffold: working';
     if (districts) {
       this.river.setQuality(quality);
-      this.river.setBounds({ half: this.world.half });
+      this.river.setBounds({ half: this.world.half, banks: this.homeBanks });
       this.river.setProjects(projects);
     }
     const timeMode = TIME_MODES.includes(store.prefs.cityTime) ? store.prefs.cityTime : 'auto';
@@ -1057,7 +1074,7 @@ export class CityView {
     const ground = this.world.groundAt(this.world.ndc(clientX, clientY));
     if (!ground) return null;
     const { i, j } = cellOf(ground.x, ground.z);
-    if (!districtForCell({ i, j })) return null;
+    if (!districtForCell({ i, j }, this.homeBanks)) return null;
     if ((!i && !j) || Math.max(Math.abs(i), Math.abs(j)) > this.rings) return null;
     const c = cellCenter(i, j);
     if (Math.abs(ground.x - c.x) > LOT_HALF - 0.15 || Math.abs(ground.z - c.z) > LOT_HALF - 0.15) return null;
@@ -2307,7 +2324,7 @@ export class CityView {
     let result = null;
     try {
       const { openNewProjectDialog } = await import('../newproject.js');
-      result = await openNewProjectDialog(this.ctx, { lot, tab: districtForCell(lot) === SUBURBS ? 'link' : 'create' });
+      result = await openNewProjectDialog(this.ctx, { lot, tab: districtForCell(lot, this.homeBanks) === SUBURBS ? 'link' : 'create' });
     } catch (error) {
       console.error('City: New Project dialog failed', error);
       toast(`Could not start a project here: ${error?.message || error}`, { kind: 'error' });

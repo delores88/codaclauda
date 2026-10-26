@@ -60,6 +60,7 @@ class Store extends EventTarget {
     this.cursors = {};              // addr -> next_cursor
     this.claims = [];
     this.manifest = null;
+    this.cityProjectsReady = false; // first bank choice waits for the initial project inventory
     this.paths = {};
     this.prefsInfo = {};
     this.desktop = emptyDesktop();
@@ -149,20 +150,24 @@ class Store extends EventTarget {
   async refreshManifest() {
     try { const data = await desktop.loadManifest(); const next = data?.manifest || null; if (JSON.stringify(next) !== JSON.stringify(this.manifest)) { this.manifest = next; this.emit('change'); this.adoptManifest(); } }
     catch { /* optional file */ }
+    if (!this.cityProjectsReady) this.adoptManifest();
   }
 
   /** Agent-written manifest: link its local folders (scanned in the background) and its GitHub user once. */
   async adoptManifest() {
-    if (this._adopting || !this.manifest) return;
+    if (this._adopting) return;
     this._adopting = true;
     try {
-      const items = Array.isArray(this.manifest.projects) ? this.manifest.projects : [];
+      const items = Array.isArray(this.manifest?.projects) ? this.manifest.projects : [];
       const known = new Set(this.desktop.projects.local.map(p => normalizePath(p.path)));
       const fresh = items.filter(item => typeof item?.local_path === 'string' && item.local_path && !known.has(normalizePath(item.local_path)));
       if (fresh.length) this.updateDesktop(d => { for (const item of fresh) d.projects.local.push({ path: item.local_path, name: item.name, addedAt: Date.now(), fromManifest: true }); });
-      const user = /^[A-Za-z0-9-]{1,39}$/.test(this.manifest.github_user || '') ? this.manifest.github_user : '';
+      const user = /^[A-Za-z0-9-]{1,39}$/.test(this.manifest?.github_user || '') ? this.manifest.github_user : '';
       if (user && !this.desktop.projects.github.user) await this.linkGithub(user).catch(() => {});
       for (const item of this.desktop.projects.local.filter(p => !p.scannedAt)) await this.scanProject(item.path).catch(() => {});
+      // Initial scans can discover Git remotes and merge local folders with
+      // fetched repos. Choose the home banks only after these identities settle.
+      if (!this.cityProjectsReady) { this.cityProjectsReady = true; this.emit('change'); }
     } finally { this._adopting = false; }
   }
 

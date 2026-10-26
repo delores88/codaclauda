@@ -7,6 +7,7 @@ import { riverSection, riverRoadIntervals, sampleRiver, RIVER_HALF_WIDTH, WATER_
 import { selectBoatManifest, chooseBoatTypes, boatFleet, loopTiming, loopPhase } from './boats.js';
 import { createBoat, updateBoat, addBoatNameLabel, sizeBoatNameLabel } from './boat-models.js';
 import { createRiverLoop, riverLoopPose, riverFrame, RIVER_DECK_Y } from './river-loop.js';
+import { DOWNTOWN, districtBanks } from './districts.js';
 
 const SLAB = .18, RIPPLE_COUNT = 26;
 const box = (w, h, d, x, y, z) => placed(new THREE.BoxGeometry(w, h, d), { x, y, z });
@@ -154,11 +155,11 @@ function waterColors(mesh, night) {
 
 // All bank seams use the terrain's exact x-section envelope. The outer edge is
 // y=0; quay parapets sit .35 above it and grassy banks descend to the water.
-function bankGeometry(xs, side, half) {
-  const positions = [], indices = [], columns = side < 0 ? 5 : 3;
+function bankGeometry(xs, side, half, urban) {
+  const positions = [], indices = [], columns = urban ? 5 : 3;
   for (let i = 0; i < xs.length; i++) {
     const x = xs[i], s = riverSection(x), inner = side < 0 ? s.waterMinZ : s.waterMaxZ, outer = side < 0 ? s.bankMinZ : s.bankMaxZ;
-    const profile = side < 0 ? [[inner, WATER_Y - .1], [inner, .35], [inner + (outer - inner) * .28, .35], [inner + (outer - inner) * .28, .02], [outer, 0]]
+    const profile = urban ? [[inner, WATER_Y - .1], [inner, .35], [inner + (outer - inner) * .28, .35], [inner + (outer - inner) * .28, .02], [outer, 0]]
       : [[inner, WATER_Y - .1], [inner + (outer - inner) * .35, WATER_Y + .18], [outer, 0]];
     for (const [z, y] of profile) positions.push(x, y, clamp(z, -half, half));
     if (i + 1 < xs.length) for (let j = 0; j + 1 < columns; j++) { const n = i * columns + j, next = n + columns;
@@ -214,11 +215,12 @@ export class River {
     this.fleetCount = this.quality === 'low' ? 2 : 3;
     this.setBounds({ half: world.half || 29.5 }); this.initFleet(); this.renderBoats(); this.placeBoats();
   }
-  setBounds({ half, crossings } = {}) {
+  setBounds({ half, crossings, banks = this.banks || districtBanks() } = {}) {
     if (!Number.isFinite(half) || half < 12) return;
+    banks = districtBanks(banks?.largerDistrict);
     const spans = (crossings || bridgeCrossings(half)).map(bridgeSpan).filter(Boolean);
-    const signature = JSON.stringify([half, spans, this.quality]); if (signature === this.boundsSignature) return;
-    this.boundsSignature = signature; this.half = half; this.crossings = spans; this.loop = createRiverLoop(half);
+    const signature = JSON.stringify([half, spans, this.quality, banks.key]); if (signature === this.boundsSignature) return;
+    this.boundsSignature = signature; this.half = half; this.crossings = spans; this.banks = banks; this.urbanSide = banks.positiveZ === DOWNTOWN ? 1 : -1; this.loop = createRiverLoop(half);
     if (this.landscape) { this.landscape.removeFromParent(); disposeAll(this.landscape); }
     this.landscape = new THREE.Group(); this.landscape.name = 'river-landscape'; this.group.add(this.landscape);
     this.bridges = []; this.waterMeshes = []; this.lastNight = undefined;
@@ -227,8 +229,8 @@ export class River {
     const inside = x => { const section = riverSection(x); return section.bankMinZ < half && section.bankMaxZ > -half; };
     const xs = all.filter((x, n) => inside(x) || (n && inside(all[n - 1])) || (n < count && inside(all[n + 1]))), top = new THREE.Group(); top.name = 'river-top-banks-bridges-docks';
     this.landscape.add(top);
-    add(top, bankGeometry(xs, -1, half), toonMaterial('#c9c2b0'), !low).name = 'downtown-stone-quay';
-    add(top, bankGeometry(xs, 1, half), toonMaterial('#7cc56a'), !low).name = 'suburbs-grassy-bank';
+    add(top, bankGeometry(xs, this.urbanSide, half, true), toonMaterial('#c9c2b0'), !low).name = 'downtown-stone-quay';
+    add(top, bankGeometry(xs, -this.urbanSide, half, false), toonMaterial('#7cc56a'), !low).name = 'suburbs-grassy-bank';
     this.buildBanks(top, points, low); this.buildBridges(top, low); this.buildDocks(top, low); this.landscape.add(mirrorLandscape(top));
     this.bankOccluders = [];
     this.landscape.traverse(node => {
@@ -246,7 +248,9 @@ export class River {
   }
   buildBanks(top, points, low) {
     const railing = [], posts = [], rocks = [], reeds = [], lamps = [], panels = [], streaks = [];
-    const urban = x => ({ x, y: .35, z: riverSection(x).waterMinZ - .10 });
+    const urbanSide = this.urbanSide, grassSide = -urbanSide;
+    const edge = (section, side) => side < 0 ? section.waterMinZ : section.waterMaxZ;
+    const urban = x => ({ x, y: .35, z: edge(riverSection(x), urbanSide) + urbanSide * .10 });
     for (let n = 1; n < points.length; n++) { const a = urban(points[n - 1].x), b = urban(points[n].x);
       if (Math.abs(a.z) < this.half && Math.abs(b.z) < this.half && !bridgeAt(a.x, a.z, this.crossings) && !bridgeAt(b.x, b.z, this.crossings)) railing.push(beam({ ...a, y: .88 }, { ...b, y: .88 }, .065));
     }
@@ -257,13 +261,13 @@ export class River {
         if (Math.floor(distance / (low ? 5.5 : 3.3)) % 4 === 0) {
           lamps.push(box(.08, 2.1, .08, p.x, 1.4, p.z), box(.35, .12, .24, p.x, 2.48, p.z));
           panels.push(box(.25, .025, .16, p.x, 2.4075, p.z));
-          for (let k = 0; k < 3; k++) streaks.push(box(.65 - k * .14, .006, .06, p.x + k * .13, WATER_Y + .034, section.waterMinZ + .35 + k * .24));
+          for (let k = 0; k < 3; k++) streaks.push(box(.65 - k * .14, .006, .06, p.x + k * .13, WATER_Y + .034, edge(section, urbanSide) - urbanSide * (.35 + k * .24)));
         }
       }
-      const z = section.waterMaxZ + (section.bankMaxZ - section.waterMaxZ) * .46;
+      const inner = edge(section, grassSide), outer = grassSide < 0 ? section.bankMinZ : section.bankMaxZ, z = inner + (outer - inner) * .46;
       if (!bridgeAt(x, z, this.crossings)) {
         rocks.push(placed(new THREE.IcosahedronGeometry(.22, 0), { x, y: WATER_Y + .23, z, sy: .7, sx: 1.3 }));
-        if (!low) for (let k = 0; k < 3; k++) reeds.push(box(.025, .32 + k * .04, .025, x + (k - 1) * .055, WATER_Y + .37, z + k * .035));
+        if (!low) for (let k = 0; k < 3; k++) reeds.push(box(.025, .32 + k * .04, .025, x + (k - 1) * .055, WATER_Y + .37, z + grassSide * k * .035));
       }
     }
     solid(top, railing, '#53605d', 'quay-railing', low); solid(top, posts, '#67736a', 'quay-posts', low);
@@ -313,16 +317,17 @@ export class River {
       && !this.crossings.some(span => rect.x0 < span.x1 + .15 && rect.x1 > span.x0 - .15 && rect.z0 < span.z1 + .15 && rect.z1 > span.z0 - .15);
     this.moorings = []; this.dockXs = [];
     for (const side of [-1, 1]) {
+      const urban = side === this.urbanSide;
       const dockX = candidates.find(x => clear(footprint(riverFrame(x, side * (RIVER_HALF_WIDTH + .04)), 6.9, side < 0 ? -1.3 : -.55, side > 0 ? 1.3 : .55))
         && clear(footprint(riverFrame(x, side * (RIVER_HALF_WIDTH - 1.18)), 3.8, -.92, .92))) ?? center;
       this.dockXs.push(dockX); this.dockX = this.dockXs[0];
-      const dock = new THREE.Group(); dock.name = side < 0 ? 'downtown-stone-dock' : 'suburbs-wood-dock'; top.add(dock);
+      const dock = new THREE.Group(); dock.name = urban ? 'downtown-stone-dock' : 'suburbs-wood-dock'; top.add(dock);
       const pose = riverFrame(dockX, side * (RIVER_HALF_WIDTH + .04), WATER_Y + .22); dock.position.copy(vector(pose.position)); dock.quaternion.setFromRotationMatrix(frameMatrix({ ...pose, position: { x: 0, y: 0, z: 0 } }));
-      const deck = [], piles = [], stairs = [], color = side < 0 ? '#c9c2b0' : '#b77a45';
-      if (low || side < 0) deck.push(box(6.7, .13, 1.05, 0, 0, 0)); else for (let x = -3.15; x <= 3.16; x += .45) deck.push(box(.43, .13, 1.05, x, 0, 0));
+      const deck = [], piles = [], stairs = [], color = urban ? '#c9c2b0' : '#b77a45';
+      if (low || urban) deck.push(box(6.7, .13, 1.05, 0, 0, 0)); else for (let x = -3.15; x <= 3.16; x += .45) deck.push(box(.43, .13, 1.05, x, 0, 0));
       for (const x of [-2.8, 2.8]) for (const z of [-.35, .35]) piles.push(box(.16, .80, .16, x, -.31, z));
       for (let k = 0; k < 4; k++) { const height = .13 + k * .14; stairs.push(box(1.05, height, .26, 0, height / 2 - .065, side * (.43 + k * .23))); }
-      solid(dock, deck, color, 'dock-planks', low); solid(dock, piles, side < 0 ? '#a19a89' : '#806750', 'dock-piles', low); solid(dock, stairs, color, 'dock-steps', low);
+      solid(dock, deck, color, 'dock-planks', low); solid(dock, piles, urban ? '#a19a89' : '#806750', 'dock-piles', low); solid(dock, stairs, color, 'dock-steps', low);
       this.moorings.push(riverFrame(dockX, side * (RIVER_HALF_WIDTH - 1.18)));
     }
   }

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { THREE } from '../app/city/toon.js';
-import { buildDecor, buildRoads, riverSceneryClear, BENCH_OFFSET } from '../app/city/scenery.js';
+import { buildDecor, buildRoads, riverSceneryClear, BENCH_OFFSET, PALETTE } from '../app/city/scenery.js';
 import { islandHalf } from '../app/city/layout.js';
+import { DISTRICTS, DOWNTOWN, SUBURBS, districtBanks, districtForCell } from '../app/city/districts.js';
 import { disposeAll } from '../app/city/fx.js';
 import { riverZ, riverSide, riverBankPoint, riverCellUsable, riverFootprintClear, bridgeSpan, bridgeCrossings, bridgeAt } from '../app/city/river-path.js';
 
@@ -41,26 +42,29 @@ function renderedBounds(root, visit) {
 const footprint = box => [(box.min.x + box.max.x) / 2, (box.min.z + box.max.z) / 2, Math.max(0, (box.max.x - box.min.x) / 2 - 1e-5), Math.max(0, (box.max.z - box.min.z) / 2 - 1e-5)];
 
 test('occupied Downtown lots keep their existing bench and leave tower space clear', () => {
-  const lot = { i: 2, j: -2, padW: 5.8, padD: 5.4, cz: -0.3 };
-  const decor = buildDecor(3, new Map([['2,-2', lot]]), islandHalf(3), { districts: true });
-  assert.ok(!decor.getObjectByName('downtown-parks').userData.parks.some(p => p.i === lot.i && p.j === lot.j));
-  const tower = new THREE.Box3(new THREE.Vector3(29.2, 0.2, -34.8), new THREE.Vector3(34.8, 6, -29.8));
-  renderedBounds(decor, box => assert.ok(!box.intersectsBox(tower), 'park geometry intrudes into an occupied tower'));
-  const matrix = new THREE.Matrix4(), at = new THREE.Vector3(); let benchFound = false;
-  decor.traverse(node => {
-    if (!node.isInstancedMesh) return;
-    for (let n = 0; n < node.count; n++) {
-      node.getMatrixAt(n, matrix); at.setFromMatrixPosition(matrix);
-      if (Math.abs(at.x - (32 + BENCH_OFFSET.x)) < 1e-5 && Math.abs(at.z - (-32 + BENCH_OFFSET.z)) < 1e-5) benchFound = true;
-    }
-  });
-  assert.ok(benchFound, 'established NPC bench remains on the occupied lot');
-  disposeAll(decor);
+  for (const larger of DISTRICTS) {
+    const banks = districtBanks(larger), j = banks.positiveZ === DOWNTOWN ? 2 : -2;
+    const lot = { i: 2, j, padW: 5.8, padD: 5.4, cz: -0.3 };
+    const decor = buildDecor(3, new Map([[`2,${j}`, lot]]), islandHalf(3), { districts: true, banks });
+    assert.ok(!decor.getObjectByName('downtown-parks').userData.parks.some(p => p.i === lot.i && p.j === lot.j));
+    const tower = new THREE.Box3(new THREE.Vector3(29.2, 0.2, j * 16 - 2.8), new THREE.Vector3(34.8, 6, j * 16 + 2.2));
+    renderedBounds(decor, box => assert.ok(!box.intersectsBox(tower), 'park geometry intrudes into an occupied tower'));
+    const matrix = new THREE.Matrix4(), at = new THREE.Vector3(); let benchFound = false;
+    decor.traverse(node => {
+      if (!node.isInstancedMesh) return;
+      for (let n = 0; n < node.count; n++) {
+        node.getMatrixAt(n, matrix); at.setFromMatrixPosition(matrix);
+        if (Math.abs(at.x - (32 + BENCH_OFFSET.x)) < 1e-5 && Math.abs(at.z - (j * 16 + BENCH_OFFSET.z)) < 1e-5) benchFound = true;
+      }
+    });
+    assert.ok(benchFound, 'established NPC bench remains on the occupied lot');
+    disposeAll(decor);
+  }
 });
 
 test('Downtown parks use bounded merged draws, does not intercept picking, and disposes', () => {
-  for (const rings of [2, 3]) {
-    const decor = buildDecor(rings, new Map(), islandHalf(rings), { districts: true });
+  for (const larger of DISTRICTS) for (const rings of [2, 3]) {
+    const decor = buildDecor(rings, new Map(), islandHalf(rings), { districts: true, banks: districtBanks(larger) });
     const urban = decor.getObjectByName('downtown-parks');
     assert.ok(urban);
     assert.ok(urban.children.length <= 5, 'park batches do not grow with lot count');
@@ -76,10 +80,10 @@ test('Downtown parks use bounded merged draws, does not intercept picking, and d
 });
 
 test('river clearings replace unsafe lots and every decor footprint clears water, banks, and bridge ramps', () => {
-  for (const rings of [3, 4]) {
+  for (const larger of DISTRICTS) for (const rings of [3, 4]) {
     const lots = new Map();
     for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) if (riverCellUsable(i, j) && (i + j) % 3 === 0) lots.set(`${i},${j}`, { i, j, padW: 5.8, padD: 5.4, cz: -0.3 });
-    const decor = buildDecor(rings, lots, islandHalf(rings), { districts: true });
+    const decor = buildDecor(rings, lots, islandHalf(rings), { districts: true, banks: districtBanks(larger) });
     assert.ok(decor.getObjectByName('riparian-clearings'));
     assert.ok(decor.getObjectByName('downtown-parks'));
     let pieces = 0;
@@ -96,8 +100,8 @@ test('river clearings replace unsafe lots and every decor footprint clears water
 
 test('river roads and sidewalks end at bridge approaches with no submerged asphalt or crossing dashes', t => {
   fakeCanvas(t);
-  for (const rings of [2, 4]) {
-    const { group } = buildRoads(rings, { districts: true });
+  for (const larger of DISTRICTS) for (const rings of [2, 4]) {
+    const { group } = buildRoads(rings, { districts: true, banks: districtBanks(larger) });
     renderedBounds(group, (box, node) => assert.ok(riverFootprintClear(...footprint(box)), `${node.name || node.type} intersects river banks: ${JSON.stringify(footprint(box))}`));
     for (const name of ['street-lamp-poles', 'street-lamp-heads', 'suburbs-lamp-poles', 'suburbs-lamp-housings', 'suburbs-lamp-panels']) {
       const lamps = group.getObjectByName(name);
@@ -145,7 +149,7 @@ test('clearance rejects a safe centre when a canopy or bridge-side footprint wou
 
 test('river scenery releases owned geometry, instance buffers, and materials on rebuild', t => {
   fakeCanvas(t);
-  for (const root of [buildDecor(2, new Map(), islandHalf(2), { districts: true }), buildRoads(2, { districts: true }).group]) {
+  for (const larger of DISTRICTS) for (const root of [buildDecor(2, new Map(), islandHalf(2), { districts: true, banks: districtBanks(larger) }), buildRoads(2, { districts: true, banks: districtBanks(larger) }).group]) {
     const resources = new Set(), released = new Set();
     root.traverse(node => {
       if (node.isInstancedMesh) resources.add(node);
@@ -165,36 +169,85 @@ test('contributor islands retain the existing park scenery', () => {
 });
 
 test('occupied Suburbs plots contain no shared decor while vacant parks and Downtown parks survive', () => {
-  const rings = 3, occupied = new Map();
-  for (let i = -rings; i <= rings; i++) for (let j = 0; j <= rings; j++) if ((i || j) && riverCellUsable(i, j)) occupied.set(`${i},${j}`, { i, j, district: 'suburbs', padW: 11.2, padD: 11.2, cz: -0.3 });
-  const homes = buildDecor(rings, occupied, islandHalf(rings), { districts: true });
-  const parks = buildDecor(rings, new Map(), islandHalf(rings), { districts: true });
-  let vacantParkParts = 0;
-  for (const lot of occupied.values()) {
-    const area = new THREE.Box3(new THREE.Vector3(lot.i * 16 - 5.6, -0.01, lot.j * 16 - 5.6), new THREE.Vector3(lot.i * 16 + 5.6, 10, lot.j * 16 + 5.6));
-    renderedBounds(homes, box => assert.ok(!box.intersectsBox(area), `shared decor intrudes into home lot ${lot.i},${lot.j}`));
-    renderedBounds(parks, box => { if (box.intersectsBox(area)) vacantParkParts++; });
+  for (const larger of DISTRICTS) {
+    const rings = 3, occupied = new Map(), banks = districtBanks(larger);
+    for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) if (districtForCell({ i, j }, banks) === SUBURBS) occupied.set(`${i},${j}`, { i, j, district: 'suburbs', padW: 11.2, padD: 11.2, cz: -0.3 });
+    const homes = buildDecor(rings, occupied, islandHalf(rings), { districts: true, banks });
+    const parks = buildDecor(rings, new Map(), islandHalf(rings), { districts: true, banks });
+    let vacantParkParts = 0;
+    for (const lot of occupied.values()) {
+      const area = new THREE.Box3(new THREE.Vector3(lot.i * 16 - 5.6, -0.01, lot.j * 16 - 5.6), new THREE.Vector3(lot.i * 16 + 5.6, 10, lot.j * 16 + 5.6));
+      renderedBounds(homes, box => assert.ok(!box.intersectsBox(area), `shared decor intrudes into home lot ${lot.i},${lot.j}`));
+      renderedBounds(parks, box => { if (box.intersectsBox(area)) vacantParkParts++; });
+    }
+    assert.ok(vacantParkParts > 100, 'vacant Suburbs lots retain trees and grassy parks');
+    const before = parks.getObjectByName('downtown-parks'), after = homes.getObjectByName('downtown-parks');
+    assert.equal(before.children.length, after.children.length);
+    before.children.forEach((mesh, index) => assert.deepEqual(after.children[index].geometry.attributes.position.array, mesh.geometry.attributes.position.array, 'Downtown park geometry stays unchanged'));
+    disposeAll(homes); disposeAll(parks);
   }
-  assert.ok(vacantParkParts > 100, 'vacant Suburbs lots retain trees and grassy parks');
-  const before = parks.getObjectByName('downtown-parks'), after = homes.getObjectByName('downtown-parks');
-  assert.equal(before.children.length, after.children.length);
-  before.children.forEach((mesh, index) => assert.deepEqual(after.children[index].geometry.attributes.position.array, mesh.geometry.attributes.position.array, 'Downtown park geometry stays unchanged'));
-  disposeAll(homes); disposeAll(parks);
 });
 
 test('Suburbs lamps use grounded slim poles and attached flat warm panels', t => {
   fakeCanvas(t);
-  const { group } = buildRoads(2, { districts: true }), poles = group.getObjectByName('suburbs-lamp-poles'), housings = group.getObjectByName('suburbs-lamp-housings'), panels = group.getObjectByName('suburbs-lamp-panels');
-  assert.ok(poles.count > 0); assert.equal(poles.count, housings.count); assert.equal(poles.count, panels.count);
-  for (const lamp of [poles, housings, panels]) lamp.geometry.computeBoundingBox();
-  assert.ok(Math.abs(poles.geometry.boundingBox.min.y) < 1e-6, 'pole starts at the supporting sidewalk');
-  assert.ok(poles.geometry.boundingBox.max.x - poles.geometry.boundingBox.min.x < 0.16, 'modern pole is slim');
-  assert.ok(poles.geometry.boundingBox.intersectsBox(housings.geometry.boundingBox), 'housing is attached to pole');
-  assert.ok(housings.geometry.boundingBox.intersectsBox(panels.geometry.boundingBox), 'light panel is mounted in housing');
-  assert.ok(panels.geometry.boundingBox.max.y - panels.geometry.boundingBox.min.y < 0.03, 'luminaire is a flat panel');
-  assert.equal(panels.material.emissive.getHexString(), 'ffcf6b');
-  const matrix = new THREE.Matrix4(), at = new THREE.Vector3();
-  for (let index = 0; index < poles.count; index++) { poles.getMatrixAt(index, matrix); at.setFromMatrixPosition(matrix); assert.equal(riverSide(at.x, at.z), 1, 'modern lamps stay on the Suburbs bank'); assert.ok(Math.abs(at.y - 0.2) < 1e-6); }
-  disposeAll(group);
+  for (const larger of DISTRICTS) {
+    const banks = districtBanks(larger);
+    const { group } = buildRoads(2, { districts: true, banks }), poles = group.getObjectByName('suburbs-lamp-poles'), housings = group.getObjectByName('suburbs-lamp-housings'), panels = group.getObjectByName('suburbs-lamp-panels');
+    assert.ok(poles.count > 0); assert.equal(poles.count, housings.count); assert.equal(poles.count, panels.count);
+    for (const lamp of [poles, housings, panels]) lamp.geometry.computeBoundingBox();
+    assert.ok(Math.abs(poles.geometry.boundingBox.min.y) < 1e-6, 'pole starts at the supporting sidewalk');
+    assert.ok(poles.geometry.boundingBox.max.x - poles.geometry.boundingBox.min.x < 0.16, 'modern pole is slim');
+    assert.ok(poles.geometry.boundingBox.intersectsBox(housings.geometry.boundingBox), 'housing is attached to pole');
+    assert.ok(housings.geometry.boundingBox.intersectsBox(panels.geometry.boundingBox), 'light panel is mounted in housing');
+    assert.ok(panels.geometry.boundingBox.max.y - panels.geometry.boundingBox.min.y < 0.03, 'luminaire is a flat panel');
+    assert.equal(panels.material.emissive.getHexString(), 'ffcf6b');
+    const matrix = new THREE.Matrix4(), at = new THREE.Vector3();
+    for (let index = 0; index < poles.count; index++) { poles.getMatrixAt(index, matrix); at.setFromMatrixPosition(matrix); if (Math.abs(at.x) < 8 && Math.abs(at.z) < 8) continue; assert.equal(riverSide(at.x, at.z), banks.positiveZ === SUBURBS ? 1 : -1, 'modern lamps stay on the Suburbs bank'); assert.ok(Math.abs(at.y - 0.2) < 1e-6); }
+    disposeAll(group);
+  }
   const island = buildRoads(1).group; assert.equal(island.getObjectByName('suburbs-lamp-panels'), undefined); disposeAll(island);
+});
+
+test('lot surfaces, district lamps and rim trees follow the saved bank choice', t => {
+  fakeCanvas(t);
+  for (const larger of DISTRICTS) {
+    const banks = districtBanks(larger), rings = 3;
+    const roads = buildRoads(rings, { districts: true, banks }).group;
+    const decor = buildDecor(rings, new Map(), islandHalf(rings), { districts: true, banks });
+    roads.updateMatrixWorld(true); decor.updateMatrixWorld(true);
+    const vertical = new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3(0, -1, 0));
+    const matrix = new THREE.Matrix4(), at = new THREE.Vector3();
+    const counts = { [DOWNTOWN]: 0, [SUBURBS]: 0 };
+    for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
+      const district = districtForCell({ i, j }, banks);
+      if (!district) continue;
+      vertical.ray.origin.set(i * 16, 10, j * 16);
+      const hits = vertical.intersectObject(roads, true).sort((a, b) => a.distance - b.distance);
+      assert.ok(hits.length, 'every eligible lot has a ground surface');
+      assert.equal(hits[0].object.material.color.getHexString(), new THREE.Color(district === DOWNTOWN ? '#d4dee0' : PALETTE.lawn).getHexString(), `${district} surface follows its saved bank`);
+      counts[district]++;
+    }
+    assert.ok(counts[DOWNTOWN] && counts[SUBURBS]);
+    for (const [name, district] of [['street-lamp-poles', DOWNTOWN], ['suburbs-lamp-poles', SUBURBS]]) {
+      const poles = roads.getObjectByName(name); let checked = 0;
+      for (let i = 0; i < poles.count; i++) {
+        poles.getMatrixAt(i, matrix); at.setFromMatrixPosition(matrix);
+        const cell = { i: Math.round(at.x / 16), j: Math.round(at.z / 16) };
+        if (!cell.i && !cell.j) continue; // Headquarters keeps its established neutral lamp treatment.
+        assert.equal(districtForCell(cell, banks), district, `${name} stays with its district`); checked++;
+      }
+      assert.ok(checked > 0);
+    }
+    let rimParts = 0;
+    renderedBounds(decor, (box, mesh) => {
+      if (!mesh.isInstancedMesh) return;
+      const center = box.getCenter(new THREE.Vector3());
+      if (Math.max(Math.abs(center.x), Math.abs(center.z)) <= (rings + .5) * 16 + 1) return;
+      assert.equal(riverSide(center.x, center.z), banks.positiveZ === SUBURBS ? 1 : -1, 'complete rim tree instances follow the Suburbs bank');
+      assert.ok(riverSceneryClear(...footprint(box)), 'rim canopy and ink stay clear of water and bridges');
+      rimParts++;
+    });
+    assert.ok(rimParts > 10, 'the audit includes actual rim tree instances');
+    disposeAll(roads); disposeAll(decor);
+  }
 });

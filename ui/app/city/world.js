@@ -220,13 +220,13 @@ export class World {
   }
 
   /* ---------- island lifecycle ---------- */
-  setRings(rings, { animate = true, districts = false } = {}) {
-    if (rings === this.rings && districts === this.districts) return false;
+  setRings(rings, { animate = true, districts = false, banks = this.banks } = {}) {
+    if (rings === this.rings && districts === this.districts && banks?.key === this.banks?.key) return false;
     const before = this.half;
     const grew = rings > this.rings;
     for (const key of ['island', 'roads', 'clouds']) if (this[key]) { this[key].group.removeFromParent(); disposeAll(this[key].group); }
-    this.rings = rings; this.half = islandHalf(rings); this.districts = districts;
-    this.island = buildIsland(rings, { districts }); this.roads = buildRoads(rings, { districts });
+    this.rings = rings; this.half = islandHalf(rings); this.districts = districts; this.banks = banks;
+    this.island = buildIsland(rings, { districts }); this.roads = buildRoads(rings, { districts, banks });
     // Clouds stay in world space, outside the sphere the island sweeps when it turns over.
     this.clouds = buildClouds(this.half, this.quality, { center: PIVOT_Y, clear: this.sweepRadius() + CLOUD_MARGIN, island: this.half * 1.3 });
     this.land.add(this.island.group, this.roads.group);
@@ -243,7 +243,7 @@ export class World {
   }
   setLots(lots) {
     if (this.decor) { this.decor.removeFromParent(); disposeAll(this.decor); }
-    this.decor = buildDecor(this.rings, lots, this.half, { districts: this.districts });
+    this.decor = buildDecor(this.rings, lots, this.half, { districts: this.districts, banks: this.banks });
     this.land.add(this.decor);
   }
   /* ---------- Spark side ---------- */

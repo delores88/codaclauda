@@ -6,7 +6,7 @@
  * two road points are joined by a Manhattan route through road intersections ("nodes").
  * Sidewalks sit SIDEWALK units either side of each road centre line. */
 import { hash } from '../avatar/spec.js';
-import { DISTRICTS, MIN_EMPTY_PLOTS, districtOf, districtForCell, districtCells, districtSlot, projectIds } from './districts.js';
+import { DISTRICTS, MIN_EMPTY_PLOTS, districtBanks, districtOf, districtForCell, districtCells, districtSlot, projectIds } from './districts.js';
 
 export const PITCH = 16;            // distance between lot centres
 export const ASPHALT = 3.0;         // drivable width
@@ -58,7 +58,8 @@ export function pinOf(project, pins) {
  * reshuffles the others. assign() reports projects that got their first lot (`fresh`) so the
  * caller can pin them. */
 export class SlotMap {
-  constructor() {
+  constructor({ banks } = {}) {
+    Object.defineProperty(this, 'banks', { value: districtBanks(banks?.largerDistrict), enumerable: true });
     this.memo = new Map();   // project id → { i, j } placed this session
     this.rings = 1;
     this.legacy = {};
@@ -75,6 +76,7 @@ export class SlotMap {
    * exists. `emptyPlots` excludes hidden reservations, and always has at least three per side.
    * Contributor islands use districts:false to retain their established compact layout. */
   assignDistricts(projects, { pins = {}, reserve = [], hold = false } = {}) {
+    const banks = this.banks;
     const cells = new Map(), taken = new Set(), fresh = [], reserved = new Map(), migrated = [], districts = new Map();
     const same = (a, b) => a && b && a.i === b.i && a.j === b.j;
     const memoOf = p => projectIds(p).map(id => this.memo.get(id)).find(Boolean) || null;
@@ -82,11 +84,11 @@ export class SlotMap {
     const info = [...projects.map(p => ({ p, hidden: false })), ...reserve.filter(p => !visible.has(p.id) && (pinOf(p, pins) || memoOf(p))).map(p => ({ p, hidden: true }))]
       .sort((a, b) => a.p.id.localeCompare(b.p.id)).map(x => {
         const district = districtOf(x.p), pin = pinOf(x.p, pins), mem = memoOf(x.p);
-        return { ...x, district, oldPin: pin, oldMem: mem, pin: districtForCell(pin) === district ? pin : null, mem: districtForCell(mem) === district ? mem : null, done: false };
+        return { ...x, district, oldPin: pin, oldMem: mem, pin: districtForCell(pin, banks) === district ? pin : null, mem: districtForCell(mem, banks) === district ? mem : null, done: false };
       });
     const claim = (x, c) => {
       const key = cellKey(c.i, c.j);
-      if (taken.has(key) || districtForCell(c) !== x.district) return false;
+      if (taken.has(key) || districtForCell(c, banks) !== x.district) return false;
       taken.add(key);
       const cell = { i: c.i, j: c.j, ring: ringOf(c.i, c.j) };
       if (x.hidden) reserved.set(key, x.p);
@@ -108,24 +110,24 @@ export class SlotMap {
       const legacy = this.legacy[x.p.id];
       if (x.done || !Number.isInteger(legacy) || legacy < 0 || legacy >= (MAX_PIN_RING * 2 + 1) ** 2 - 1) continue;
       const c = slotCell(legacy);
-      if (districtForCell(c) === x.district) claim(x, c);
+      if (districtForCell(c, banks) === x.district) claim(x, c);
     }
     const rest = info.filter(x => !x.done && !(hold && !x.oldPin && !x.oldMem)).sort((a, b) => hash(a.p.id) - hash(b.p.id) || a.p.id.localeCompare(b.p.id));
     for (const x of rest) {
-      let firstRing = 1, initial = districtCells(firstRing, x.district).length;
-      while (!initial) initial = districtCells(++firstRing, x.district).length;
+      let firstRing = 1, initial = districtCells(firstRing, x.district, banks).length;
+      while (!initial) initial = districtCells(++firstRing, x.district, banks).length;
       const start = hash(x.p.id) % initial;
       let slot = 0;
-      while (!claim(x, districtSlot(slot < initial ? (slot + start) % initial : slot, x.district))) slot++;
+      while (!claim(x, districtSlot(slot < initial ? (slot + start) % initial : slot, x.district, banks))) slot++;
     }
     let rings = this.rings;
     for (const c of cells.values()) rings = Math.max(rings, c.ring);
     for (const x of info) if (x.done) { const c = this.memo.get(x.p.id); rings = Math.max(rings, c.ring); }
-    const free = district => districtCells(rings, district).filter(c => !taken.has(cellKey(c.i, c.j)));
+    const free = district => districtCells(rings, district, banks).filter(c => !taken.has(cellKey(c.i, c.j)));
     while (DISTRICTS.some(district => free(district).length < MIN_EMPTY_PLOTS)) rings++;
     this.rings = rings;
     const emptyPlots = Object.fromEntries(DISTRICTS.map(district => [district, free(district)]));
-    return { cells, rings, fresh, reserved, districts, emptyPlots, migrated };
+    return { cells, rings, fresh, reserved, districts, emptyPlots, migrated, banks };
   }
   assignLegacy(projects, { pins = {}, reserve = [], hold = false } = {}) {
     const cells = new Map(), taken = new Set(), fresh = [], reserved = new Map();

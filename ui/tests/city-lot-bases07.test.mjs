@@ -5,9 +5,9 @@ import { Building, BuildingManager } from '../app/city/buildings.js';
 import { NpcManager, groundY } from '../app/city/npc.js';
 import { LOT_HALF, PITCH, islandHalf } from '../app/city/layout.js';
 import { buildDecor } from '../app/city/scenery.js';
-import { districtForCell, DOWNTOWN } from '../app/city/districts.js';
+import { districtForCell, districtBanks, DISTRICTS, DOWNTOWN } from '../app/city/districts.js';
 import { PARK_TYPES } from '../app/city/parks.js';
-import { riverFootprintClear, bridgeCrossings } from '../app/city/river-path.js';
+import { riverZ, riverFootprintClear, bridgeCrossings } from '../app/city/river-path.js';
 import { disposeAll } from '../app/city/fx.js';
 
 function canvas(t) {
@@ -23,15 +23,18 @@ const bounds = mesh => new THREE.Box3().setFromObject(mesh);
 
 /** Each newly added column contributes its closest eligible Downtown lot to the
  * river. Eligibility, rather than an obsolete fixed row, follows the shared path. */
-function boundaryLots() {
+function boundaryLots(banks) {
   const seen = new Set(), groups = [];
   for (const rings of [2, 4, 8, 12]) {
     const cells = [];
-    for (let i = -rings; i <= rings; i++) for (let j = rings; j >= -rings; j--) {
-      if (districtForCell({ i, j }) !== DOWNTOWN) continue;
+    for (let i = -rings; i <= rings; i++) {
+      const candidates = [];
+      for (let j = -rings; j <= rings; j++) if (districtForCell({ i, j }, banks) === DOWNTOWN) candidates.push(j);
+      candidates.sort((a, b) => Math.abs(a * PITCH - riverZ(i * PITCH)) - Math.abs(b * PITCH - riverZ(i * PITCH)));
+      if (!candidates.length) continue;
+      const j = candidates[0];
       const id = `${i},${j}`;
       if (!seen.has(id)) { seen.add(id); cells.push({ i, j }); }
-      break;
     }
     assert.ok(cells.length > 0, `expansion to ring ${rings} contributes eligible river-side lots`);
     groups.push({ rings, cells });
@@ -114,7 +117,7 @@ test('tower paving stays close to its footprint while lawn survives outside it',
 test('landscape geometry clears the lot and bridge approaches for all tower footprints', t => {
   canvas(t);
   let bases = 0, triangles = 0, outlines = 0;
-  for (const { rings, cells } of boundaryLots()) {
+  for (const larger of DISTRICTS) for (const { rings, cells } of boundaryLots(districtBanks(larger))) {
     const crossings = bridgeCrossings(islandHalf(rings));
     for (const cell of cells) for (const footprint of [1, 2, 3]) for (const local of [false, true]) {
       const b = make(project(footprint, local), cell);
@@ -128,28 +131,31 @@ test('landscape geometry clears the lot and bridge approaches for all tower foot
 });
 
 test('all six parks produced by merged scenery clear the river and bridge approaches as the island expands', t => {
-  const types = new Set(); let parks = 0, triangles = 0, outlines = 0;
-  for (const { rings, cells } of boundaryLots()) {
-    const chosen = new Map(cells.map(cell => [`${cell.i},${cell.j}`, cell])), occupied = new Map();
-    for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
-      if ((!i && !j) || !districtForCell({ i, j }) || chosen.has(`${i},${j}`)) continue;
-      occupied.set(`${i},${j}`, { i, j, padW: 5.8, padD: 5.4, cz: -.3 });
+  let parks = 0, triangles = 0, outlines = 0;
+  for (const larger of DISTRICTS) {
+    const banks = districtBanks(larger), types = new Set();
+    for (const { rings, cells } of boundaryLots(banks)) {
+      const chosen = new Map(cells.map(cell => [`${cell.i},${cell.j}`, cell])), occupied = new Map();
+      for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
+        if ((!i && !j) || !districtForCell({ i, j }, banks) || chosen.has(`${i},${j}`)) continue;
+        occupied.set(`${i},${j}`, { i, j, padW: 5.8, padD: 5.4, cz: -.3 });
+      }
+      const decor = buildDecor(rings, occupied, islandHalf(rings), { districts: true, banks });
+      const parkGroup = decor.getObjectByName('downtown-parks'); assert.ok(parkGroup);
+      assert.equal(parkGroup.userData.parks.length, chosen.size, 'only the eligible vacant boundary lots become parks');
+      for (const park of parkGroup.userData.parks) {
+        assert.ok(chosen.has(`${park.i},${park.j}`)); types.add(park.type); parks++;
+      }
+      const audit = auditTriangles(parkGroup, bridgeCrossings(islandHalf(rings)), box => {
+        const center = box.getCenter(new THREE.Vector3()), cell = { i: Math.round(center.x / PITCH), j: Math.round(center.z / PITCH) };
+        assert.ok(chosen.has(`${cell.i},${cell.j}`), 'every merged park triangle belongs to a selected valid lot');
+        insideLot(box, cell);
+      });
+      triangles += audit.triangles; outlines += audit.outlineTriangles;
+      disposeAll(decor);
     }
-    const decor = buildDecor(rings, occupied, islandHalf(rings), { districts: true });
-    const parkGroup = decor.getObjectByName('downtown-parks'); assert.ok(parkGroup);
-    assert.equal(parkGroup.userData.parks.length, chosen.size, 'only the eligible vacant boundary lots become parks');
-    for (const park of parkGroup.userData.parks) {
-      assert.ok(chosen.has(`${park.i},${park.j}`)); types.add(park.type); parks++;
-    }
-    const audit = auditTriangles(parkGroup, bridgeCrossings(islandHalf(rings)), box => {
-      const center = box.getCenter(new THREE.Vector3()), cell = { i: Math.round(center.x / PITCH), j: Math.round(center.z / PITCH) };
-      assert.ok(chosen.has(`${cell.i},${cell.j}`), 'every merged park triangle belongs to a selected valid lot');
-      insideLot(box, cell);
-    });
-    triangles += audit.triangles; outlines += audit.outlineTriangles;
-    disposeAll(decor);
+    assert.deepEqual([...types].sort(), [...PARK_TYPES].sort(), `${larger} on the larger bank covers all six park designs`);
   }
-  assert.deepEqual([...types].sort(), [...PARK_TYPES].sort());
   assert.ok(outlines > 0, 'merged park ink hulls participate in the clearance audit');
   t.diagnostic(`${parks} parks across all six types; ${triangles} triangles, including ${outlines} outline triangles`);
 });

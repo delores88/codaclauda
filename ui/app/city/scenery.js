@@ -8,7 +8,7 @@ import { buildDowntownParks } from './parks.js';
 import { mergeParts, placed, instancedOutline, plaqueTexture, clockTexture, sideTexture } from './fx.js';
 import { PITCH, ASPHALT, LOT_HALF, islandHalf, cellCenter } from './layout.js';
 import { riverZ, riverCellUsable, riverFootprintClear, bridgeCrossings, RIVER_HALF_WIDTH, RIVER_BANK_WIDTH } from './river-path.js';
-import { districtForCell, DOWNTOWN } from './districts.js';
+import { districtForCell, districtBanks, DOWNTOWN, SUBURBS } from './districts.js';
 import { riverLandGeometry, outsideIntervals, outsideRectangles, riverCuts } from './river-terrain.js';
 
 export const PALETTE = {
@@ -126,7 +126,7 @@ function streetParts(axis, line, min, max, width, top, bridges) {
     { x: (r.x0 + r.x1) / 2, y: top / 2, z: (r.z0 + r.z1) / 2 }));
 }
 
-export function buildRoads(rings, { districts = false } = {}) {
+export function buildRoads(rings, { districts = false, banks } = {}) {
   const group = new THREE.Group(); group.name = 'roads';
   const extent = (rings + 0.5) * PITCH;
   const strips = [], bridges = districts ? bridgeCrossings(islandHalf(rings)) : [], roadTop = districts ? GROUND_Y : ROAD_TOP;
@@ -151,7 +151,7 @@ export function buildRoads(rings, { districts = false } = {}) {
       walks.push(placed(new THREE.BoxGeometry(band, SIDEWALK_TOP, inner * 2), { x: x + mid, y: SIDEWALK_TOP / 2, z }));
       walks.push(placed(new THREE.BoxGeometry(band, SIDEWALK_TOP, inner * 2), { x: x - mid, y: SIDEWALK_TOP / 2, z }));
     }
-    (districts && districtForCell({ i, j }) === DOWNTOWN ? paved : lawns).push(placed(new THREE.BoxGeometry(inner * 2, LAWN_TOP, inner * 2), { x, y: LAWN_TOP / 2, z }));
+    (districts && districtForCell({ i, j }, banks) === DOWNTOWN ? paved : lawns).push(placed(new THREE.BoxGeometry(inner * 2, LAWN_TOP, inner * 2), { x, y: LAWN_TOP / 2, z }));
   }
   if (districts) for (let k = -rings - 1; k <= rings; k++) {
     const line = (k + 0.5) * PITCH;
@@ -190,7 +190,7 @@ export function buildRoads(rings, { districts = false } = {}) {
     if (districts && !riverCellUsable(i, j)) continue;
     const curb = districts ? 6.32 : 6.42; // the entire pole base, including its outline, rests on the sidewalk
     for (const [sx, sz, ry] of [[x - 3.2, z + curb, -Math.PI / 2], [x + curb, z + 2.8, 0]]) {
-      const suburban = districts && districtForCell({ i, j }) !== DOWNTOWN, reach = suburban ? 0.38 : 0.28;
+      const suburban = districts && districtForCell({ i, j }, banks) !== DOWNTOWN, reach = suburban ? 0.38 : 0.28;
       if (districts && !riverSceneryClear(sx, sz, reach, reach)) continue;
       if (suburban) suburbanSpots.push([sx, sz, ry]); else lampSpots.push([sx, sz]);
     }
@@ -294,8 +294,9 @@ function addRiparianClearings(group, cells) {
 }
 
 /** lots: Map(cellKey → { i, j, padW, padD, cz }) for occupied lots. */
-export function buildDecor(rings, lots, half, { districts = false } = {}) {
+export function buildDecor(rings, lots, half, { districts = false, banks } = {}) {
   const group = new THREE.Group(); group.name = 'decor';
+  const bankSides = districtBanks(banks?.largerDistrict);
   let trees = [], flowers = [], benches = [], ponds = [];
   const parks = [], clearings = [];
   const rnd = seeded(`decor:${rings}`);
@@ -305,7 +306,7 @@ export function buildDecor(rings, lots, half, { districts = false } = {}) {
     const c = cellCenter(i, j), r = seeded(`lot:${i},${j}`);
     if (districts && !riverCellUsable(i, j)) { clearings.push(c); continue; }
     // Vacant Downtown lots are formal green parks; occupied towers keep their bench.
-    if (districts && districtForCell({ i, j }) === DOWNTOWN) {
+    if (districts && districtForCell({ i, j }, banks) === DOWNTOWN) {
       if (occupied.has(`${i},${j}`)) benches.push([c.x + BENCH_OFFSET.x, c.z + BENCH_OFFSET.z, 0]);
       else parks.push({ i, j, ...c, scaleX: riverSceneryClear(c.x, c.z, 5.55, 5.55) ? 1 : 0.94 });
       continue;
@@ -341,7 +342,7 @@ export function buildDecor(rings, lots, half, { districts = false } = {}) {
       if (rnd() < 0.3) continue;
       const [x, z] = side === 0 ? [t, ring] : side === 1 ? [ring, -t] : side === 2 ? [-t, -ring] : [-ring, t];
       if (Math.abs(x) > half - 1.2 || Math.abs(z) > half - 1.2) continue;
-      if (districts && z < riverZ(x)) continue;
+      if (districts && (z < riverZ(x) ? bankSides.negativeZ : bankSides.positiveZ) !== SUBURBS) continue;
       if (side === 0 && Math.abs(t) < 5.6) continue;
       trees.push({ x: x + (rnd() - 0.5), y: 0, z: z + (rnd() - 0.5), kind: rnd() < 0.7 ? 'cone' : 'ball', scale: 0.8 + rnd() * 0.5, color: CANOPY[Math.floor(rnd() * 4)] });
     }
