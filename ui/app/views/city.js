@@ -319,7 +319,7 @@ class CityView {
           .flatMap(([k, v]) => [h('dt', h('kbd', k)), h('dd', v)])),
       h('p.city-note', 'A winding river connects Downtown (GitHub projects) and Suburbs (local folders without a repo). Road bridges link the districts. Pale Downtown ghosts have a ground sign and open a panel where you can clone the repo. Tickers sit on real buildings only. Both districts keep at least three empty plots and grow without moving placed buildings.'),
       h('p.city-note', 'Suburbs have low modern homes with at most two storeys. Larger projects add wings and a wider footprint; Downtown towers grow taller. A contractor van and ladder show an agent working at a home, and a solar-panel glint marks a busy home.'),
-      h('p.city-note', 'Sailboats, rowboats, tugboats, barges, paddle steamers and canoes pass every 90–180 seconds with recent project names on their hulls. Barges carry up to three names. Reduced motion moors boats at the dock. Click a bridge to walk there. A red rooftop beacon and “CI failing” ticker mark failed builds; weather is independent.'),
+      h('p.city-note', 'Sailboats, rowboats, tugboats, barges, paddle steamers and canoes travel a continuous river loop, over the waterfalls and along the Spark face. Boat labels show projects with recent commits; barges carry several names on their crates. Reduced motion moors boats at the docks on both faces. Click a bridge to walk there. A red rooftop beacon and CI failing ticker mark failed builds; weather is independent.'),
       h('button.btn.small.primary', { type: 'button', onclick: () => this.toggleHelp(false) }, 'Got it'));
 
     this.machinesCard = h('section.city-machines', { hidden: true, 'aria-label': 'Machine load' });
@@ -438,7 +438,7 @@ class CityView {
     this.legendScaffolding.textContent = districts ? 'Downtown scaffolding = an agent is working there' : 'Scaffolding = an agent is working there';
     if (districts) {
       this.river.setQuality(quality);
-      this.river.setBounds({ half: this.world.half, crossings: Array.from({ length: rings * 2 + 2 }, (_, i) => (i - rings - 0.5) * PITCH) });
+      this.river.setBounds({ half: this.world.half });
       this.river.setProjects(projects);
     }
     const timeMode = TIME_MODES.includes(store.prefs.cityTime) ? store.prefs.cityTime : 'auto';
@@ -923,7 +923,7 @@ class CityView {
       const data = node.userData || {};
       if (data.riverBridge) {
         const point = this.world.toLocal(hit.point.clone());
-        return { kind: 'bridge', id: `bridge:${data.crossingX}`, x: point.x, z: point.z };
+        return { kind: 'bridge', id: `bridge:${data.crossing?.id || data.crossingId || data.crossingX}`, x: point.x, z: point.z };
       }
       if (data.buildingId) return this.buildings.get(data.buildingId) ? { kind: 'building', id: data.buildingId } : null;
       if (data.sparkBuildingId) return this.spark.buildings.get(data.sparkBuildingId) ? { kind: 'spark', id: data.sparkBuildingId } : null;

@@ -1,237 +1,213 @@
 # City 0.7 UI acceptance
 
-Prepared 2026-10-25 (local time) on `codex/codaclauda-0.7-city`. The river
-refinement follows `53e721dc3f7fdfc43c9b24ddd30acb3f1c726939`. The six-boat follow-up
-builds on river commit `9ff9a0068a6e9319df14d844745aca10601c0218`; the branch is based
-on `v0.6.2` (`ae5ddfadae2fa7d28655163a89b0e1fc1c204339`). This is UI source and
-headless preview evidence. The Suburbs refinement below builds on
-`663623ad21fd66c1a500d08ebc95638d65753ffb`. No Rust, installation, publication or
-external project changes are included.
+Prepared 2026-10-25 on `codex/codaclauda-0.7-city`, in the isolated
+`local/worktrees/07-city` worktree. The final combined update builds on
+`732b4a5` and includes modern Suburbs plus the continuous river circuit.
+
+Implementation and independent source review are complete. The stable-source UI
+suite passed **217 tests, 0 failures**. Final headless workflows, visual inspection
+and performance checks passed. Earlier checkpoint previews remain historical
+evidence, separate from the final combined results recorded here.
+
+This is local UI work. No push, installer, installation, release, publication,
+Marketplace admission, native desktop acceptance or real-owner workflow
+acceptance is claimed. No Rust or external-project changes are included.
 
 ## Implemented behavior
 
-- A gently winding river connects Downtown and Suburbs. Its curve uses fixed
-  world coordinates, so expansion extends the water without shifting existing
-  banks, bridges or safe pins. Water has subtle surface animation, calmer at
-  night; low quality uses a simple material. Banks have grass and stones.
-- Each crossing street has a supported road bridge with continuous approaches.
-  Clicking a bridge walks the avatar there. Paths and street controls use dry
-  banks and bridge approaches, including the deck's actual height. Water and
-  reserved bank clearings cannot be selected as project plots.
-- Plot assignment checks the entire lot and sidewalk footprint against the river
-  envelope. Newly unsafe or district-mismatched pins migrate once; valid pins and
-  subsequent placements remain stable through expansion and reopening. Each
-  district keeps at least three unreserved empty plots. Hidden reservations and
-  project aliases remain supported.
-- Expansion keeps roads, banks and bridges fixed while animating the island's
-  depth below ground and emitting dust. New buildings retain their rise animation.
-- Small independent boats pass every randomized 90-180 seconds. Travel speed grows
-  on very large islands so a pass clears before the next departure. Up to six carry
-  recent project labels: commits within 24 hours, or weekly counts when a commit
-  date is unavailable. With no activity, unlabelled boats pass. Reduced motion
-  moors up to two boats at the dock and freezes the water. No sound is used.
-- Six original low-poly models distinguish sailboats, rowboats, tugboats, cargo
-  barges, paddle steamers and canoes. A shuffled bag visits every type before
-  refilling and prevents consecutive repeats across fleets. All types can carry
-  recent project names; barges carry up to three distinct names. Quality and label
-  refreshes preserve the chosen hulls and moored positions without consuming the
-  next type choices. Low quality reduces model detail and disables shadows.
-- Boat hulls cross the waterline, stay within the river and island, and fit under
-  every bridge. Labels are mounted on the boats. Bridge decks, ramps, parapets,
-  supports and docks form connected structures. Low quality has no river shadows.
-- Downtown retains cool glass towers, planted plazas and pale ghost volumes for
-  uncloned repositories. Ghosts are 83% of nominal height at 23% opacity, with
-  supported ground signs and no ticker bands or rooftop CI effects. Suburbs use
-  low modern homes, lawns, driveways and slim street lights; their refinement is
-  recorded separately below.
-- Real buildings retain roof tickers and the red CI beacon. CI creates no weather.
-  Compact cranes have no suspended loads; growth effects follow building scale.
-  Clone selection and new-project dialogs on both district sides remain available.
-- Contributor islands keep their established layout; the river is hidden while
-  visiting them. Spark remains available. Help and legend describe the river,
-  bridges and boats, including `River boats = projects with recent commits`.
+### River, terrain and district placement
+
+- A fixed diagonal Catmull-Rom centerline has two gentle S-bends and an
+  approximately 11-unit water width measured across the channel. Expansion
+  exposes more of the same curve without moving its existing interior.
+- Downtown has a stone quay, railing and warm lamps; Suburbs have grassy banks,
+  rocks and reeds. Water is recessed 0.9 units below road height. Terrain is
+  physically cut on both faces, including the mirrored Spark deck; the underside
+  banks remain supported when the optional Spark deck is hidden.
+- The river forms a closed circuit across the PC face, around a downstream
+  waterfall, along the underside, and around an upstream waterfall. Joining
+  surfaces close the gaps between the square island rim and angled waterfall
+  lips. Boat position and orientation remain continuous at all four joins.
+- Water uses toon shading, outlines and a subtle surface wave. Night reduces
+  motion and adds warm quay reflections. High quality includes narrow white
+  ripples and waterfall foam; low quality removes those effects and river
+  shadows. Reduced motion freezes the water and hides moving ripple/foam effects.
+- Streets cross on supported stone bridges in both grid directions. The shared
+  bridge profile gives perpendicular intersections the same height. Clicking a
+  bridge targets its actual deck; walking uses supported approaches and surface
+  heights. Outlet streets remain cut until both bridge approaches fit on the
+  island. Water targets near an outlet cannot route a walker beyond the island.
+- Placement checks the complete lot and sidewalk, with an extra one-unit margin,
+  against the water and banks. Unsafe or district-mismatched saved pins migrate
+  once. Safe pins, aliases and hidden reservations survive reload and expansion.
+  Each district retains at least three available empty plots.
+- Home-city expansion preserves terrain, roads, banks and bridge alignment;
+  dust and new-building rise animations show growth. Water and bank clearings
+  cannot be chosen as project plots. Scenery excludes the complete footprints of
+  bridges, banks and occupied Suburbs yards.
+
+### Continuous boat fleet
+
+- Two or three vessels remain on the circuit and keep equal spacing. Initial
+  high quality uses three slots; initial low quality uses two. A later quality
+  change preserves the existing slot count, phase, types and project labels.
+- A shuffled six-type bag supplies replacement types only as a slot completes
+  its upstream lap. Ordinary updates and quality rebuilds consume no type
+  choices. Boats are not removed midway along the river.
+- The original outlined models are a white 2.2-unit sailboat with a 1.6-unit mast
+  and cream/violet sail; a wooden 1.4-unit rowboat with a rower and moving oars;
+  a red 1.8-unit tug with white cabin, black funnel and high-quality smoke;
+  a green 3.6-by-1.2-unit barge with two to four crates; a cream 3-unit two-deck
+  steamer with twin stacks and a rotating red sternwheel; and a yellow 1.6-unit
+  canoe with a paddler alternating strokes. Lengths describe the hulls.
+- A non-barge has a 50% chance of carrying one recent project label. Barge crates
+  carry distinct recent project labels where available. A valid commit date must
+  be within 24 hours; a positive weekly count is the fallback when no valid date
+  exists. No activity produces unlabelled craft, not invented activity.
+- Labels attach to physical hull boards or individual crates. Moving oars and
+  wheels retain supported pivots. Warm navigation lights respond to night.
+  Low quality simplifies every model and has no smoke, bobbing or shadows.
+- Reduced motion moors a barge and sailboat at the docks on each face, with no
+  rig, smoke or bob animation. Mooring entries and positions survive quality
+  rebuilds; actual project-manifest changes may refresh the labels.
+- Models, outlines, private materials and label textures are released on
+  replacement or removal. No sound is used.
+
+### Suburbs and retained City behavior
+
+- Local-only projects use four deterministic lot-selected modern homes:
+  cantilever, L-shaped ranch, split-level and townhouse pair. Light stucco,
+  charcoal roofs, large dark-framed windows and a wood entry accent distinguish
+  them from Downtown towers.
+- Homes have at most two storeys. Larger projects widen wings and garages
+  instead of adding height; the house, yard and activity geometry fit the lot.
+  Each home has a street-facing garage and driveway, lawn, one or two trees,
+  low fence and warm modern wall lights. Trees clear entry walks and driveways.
+- An active agent adds a small contractor van, amber beacon, supported ladder
+  and solar-panel glints. Homes do not use tower cranes or scaffolding. Reduced
+  motion keeps the lights steady and settles an in-progress footprint expansion.
+- Home walking heights match the rendered lawn, path and driveway. Collision
+  follows individual offset wings and the active van while leaving courtyards
+  accessible. Roof tickers and CI markers use an actual supporting roof block.
+- Downtown retains glass towers and planted plazas. GitHub-only repositories
+  use pale ghost volumes at 83% nominal height and 23% opacity, supported ground
+  signs, and no rooftop ticker or CI effects. Their panels retain Clone/Link
+  actions; this update does not itself clone any repository.
+- Real buildings retain roof tickers and the red CI-failure beacon. CI never
+  creates clouds or rain. Tower cranes have no detached loads, and construction
+  effects follow the building's current scale.
+- Contributor islands retain their established architecture and layout; the
+  river is hidden while visiting them. Spark buildings, jobs and flipping remain
+  available with the matching river cutout. Help and legend describe the final
+  districts, bridges, loop, boats and CI marker.
+
+## Design reconciliation
+
+All moving slots share one travel speed to preserve exact equal spacing. The
+mean relative speed of the current type mix weights the fleet's target: barges
+and steamers bias it slower, canoes faster. The target lap is 240–360 seconds,
+but physical speed is clamped to **0.8–3 world units per second**. On very short
+or very long routes the clamp takes precedence, so the actual lap can fall
+outside four to six minutes. The policy returns both target and actual duration.
+
+The bridge roadway rises to **y = 1.6–1.7**, above the nominal +1-unit rise,
+while its approaches meet the road at **y = 0.14**. This reconciles supported
+road ends with the tall sailboat. Water is **y = -0.76**; the conservative model
+envelope is **1.84 units above water**, including outline and maximum bob.
+With the 0.18-unit bridge slab, minimum clearance is **0.34 units**, exceeding
+the 0.3-unit clearance requirement. The measured tallest animated model reaches
+approximately 1.822 units above water.
 
 ## Automated tests and independent review
 
-At the six-boat checkpoint,
-`node --test --test-reporter=spec ui/tests/*.test.mjs`: **184 passed, 0 failed**.
-`git diff --check` passed. Tests cover river extrema and full-footprint clearance,
-220-project expansion, safe-pin preservation and migration, bridge surfaces and
-ray picking, boat schedule/selection/containment/headroom, reduced motion, low
-quality, scenery support and disposal, and routes across the river.
+Final full-suite command, run from the worktree `ui` directory:
 
-An independent source review checked the renderer, scenery and navigation. It
-identified lateral entry through raised bridge walls, an empty-crossing-list
-fallback, portal relocation behavior, bridge target identity, and expansion
-alignment. These were corrected. Re-review found no blockers; 64,009 sampled
-routes between dry/bridge/approach endpoints had no unsupported segments.
+```text
+node --test
+217 passed, 0 failed
+```
 
-The boat follow-up received a separate independent source review. It checked
-all twelve model/quality combinations at 101 positions each (1,212 clearance
-samples), label backing-board contact with the hull, dock gaps, resource disposal,
-recent-commit filtering and stability through ten quality/label refresh cycles.
-No blocking findings remained. The visual pass also moved plaques clear of oars
-and paddle wheels before the final captures; 216 sightline rays verify these
-labels remain unobstructed from either side at both quality levels.
+Coverage includes fixed curve extrema, normal-width sections, full-footprint
+placement, safe-pin migration, spare plots and expansion; both bridge directions,
+surface heights, picking and dry routes; continuous loop phases and type rotation;
+all six model dimensions, animations, mounted labels, quality/reduced-motion
+stability and disposal; and all four Suburbs variants, growth, collision,
+walking heights, roof attachments and resource ownership.
 
-## Observed browser preview acceptance
+Independent review checked the terrain, scenery, Spark reversal, navigation,
+renderer lifecycle and model geometry. Findings corrected before final preview
+include unsupported underside banks without Spark, bridge target identity,
+outlet routes extending beyond the island, resampled reduced-motion labels on
+quality changes, and gaps at angled waterfall lips. No blocking source/test
+findings remained after re-review.
 
-Headless Chrome used `ui/dev/mock.js` on loopback, with synthetic projects. The
-implementing Codex agent inspected the day/night, boat, bridge, expansion,
-reduced-motion and growth/crane images. This does not establish installed/native
-or real-owner workflow acceptance.
+Additional geometry evidence includes 960 model/quality animation-envelope
+samples; 5,000 orthonormal loop-frame samples; physical ray tests across both
+waterfall joins and both faces; and actual underside-bank support rays with no
+Spark deck present. Spark deck world-coordinate checks found no water intrusion
+among 20,082 sampled vertices. These are source/geometry checks, not browser or
+installed acceptance.
 
-- Day/night and growth/crane previews completed without browser errors.
-- An actual canvas click selected bridge 24 and walked the owner onto its deck.
-  The final avatar height matched the bridge surface at y = 1.95.
-- Sampled boats sat at water y = 0.18, with hull bounds spanning the waterline;
-  all six current model types satisfy at least 0.18 units of bridge clearance.
-  The tallest model, the sailboat, measured 0.24 units below the bridge underside.
-  Boat and night-water captures showed no detached river furniture or loads.
-- Reduced-motion snapshots had identical boat positions and water time. Low
-  quality disabled renderer shadows and all river shadow flags, and used no
-  water shader.
-- Adding 24 synthetic repos expanded ring 3 to ring 5. Every existing cell stayed
-  unchanged; all new cells were dry; free counts were 18 Downtown and 53 Suburbs.
-  River and island bounds both reached 93.5. Roads/decor/river stayed unscaled
-  during growth, and the final capture settled the building rise animations.
-- Actual empty-plot clicks opened Create in Downtown and Link in Suburbs. An
-  uncloned repo's ground sign opened the existing Clone dialog with the correct
-  repo selected. No repository was cloned. Water returned no project plot.
-- Spark flipped PC to Spark to PC. Contributor round trips starting on a bridge
-  and in Downtown returned the owner to HQ and preserved exact home pins/cells.
-  The river was hidden while away. All completed preview runs had no browser errors.
+## Final headless preview acceptance
 
-At 1600x1000, device scale 1, eight matching synthetic projects and a fixed camera,
-sequential 3.5-second rAF samples on an RTX 4090 Laptop GPU (ANGLE D3D11) measured:
+The combined update was exercised in headless Chrome with synthetic
+`ui/dev/mock.js` data on loopback. The final retained run recorded these results:
 
-| Preview | High quality | Low quality | p95 frame time |
-| --- | ---: | ---: | ---: |
-| Baseline 53e721d | 59.942 FPS | 59.942 FPS | 16.8 ms |
-| River refinement | 59.942 FPS | 59.942 FPS | 16.8 ms |
+- Actual canvas clicks reached bridges in both street directions. Empty plots
+  opened Create in Downtown and Link in Suburbs. A ghost sign opened Clone with
+  the correct repository selected; no clone/link operation was performed. Water
+  was not selectable as a project plot.
+- Expansion grew ring 4 to ring 7, with 15 free Downtown plots and 115 free
+  Suburbs plots. Every existing pin remained fixed, complete new footprints were
+  dry, the original curve stayed fixed, and river/island half-width reached 125.5.
+- Reduced-motion and low-quality checks passed. Spark flipped to its underside
+  and back. Contributor trips beginning on a bridge and in Downtown preserved
+  exact home pins and cells on return.
+- The completed workflow runs reported no browser errors. Day/night, boat,
+  bridge, waterfall, underside and Suburbs captures were retained for inspection.
 
-These samples support the 60 Hz preview target on this machine. They are not a
-sustained performance guarantee for larger cities, other hardware or an installed
-WebView. The river sample used 951 high-quality / 825 low-quality draw calls,
-versus 948 / 822 in the matching baseline scene.
+Final visual inspection confirmed clean waterfall joins without filled black
+outline wedges, an attached boat midway around a waterfall, a visible Spark-side
+boat and label, and sailboat clearance below a bridge. Open water surfaces use
+thin owned perimeter outlines. The 13 focused loop/renderer tests also pass,
+including physical seam rays and outline disposal.
 
-The six-boat follow-up repeated the day/night, expansion, bridge click,
-reduced-motion and low-quality checks, and captured each model at both quality
-levels. Every hull crossed the waterline; all labels had physical mounts. The
-sailboat was also captured under a bridge. These runs had no browser errors.
+The final run used a fixed synthetic fixture and camera, a 1600x1000 viewport,
+device scale 1, three boats, and an RTX 4090 Laptop GPU through ANGLE D3D11.
+Sequential 3.5-second animation-frame samples recorded:
 
-A separate sequential comparison against river commit `9ff9a00` kept all six
-boats visible throughout each 3.5-second sample, with the same eight-project
-fixture, viewport, camera and GPU described above:
+| Quality | FPS | p95 frame time | Maximum frame time | Draw calls | Triangles |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| High | 59.94006 | 16.8 ms | 17.2 ms | 1,629 | 1,113,250 |
+| Low | 59.94177 | 16.8 ms | 16.8 ms | 1,452 | 900,708 |
 
-| Preview with six visible boats | High quality | Low quality | p95 frame time |
-| --- | ---: | ---: | ---: |
-| River baseline 9ff9a00 | 59.93 FPS | 59.94 FPS | 16.8 ms |
-| Six-model boat variety | 59.94 FPS | 59.94 FPS | 16.8 ms |
+These figures are recorded in the final `preview.json` receipt. Short headless
+samples establish behavior only on the measured machine, not sustained
+large-city or installed WebView performance.
 
-The current scene used 1,033 / 901 draw calls versus baseline 999 / 873
-(high / low). This is a short headless preview sample, not sustained or installed
-performance acceptance.
+## Local evidence and brief history
 
-## Suburbs refinement and acceptance
+Current evidence is kept outside tracked files under
+`local/city-loop-evidence/` in the original checkout:
 
-Local-only projects now use four lot-hash-selected modern home shapes:
-cantilever, L-shaped ranch, split-level and townhouse pair. Light stucco volumes,
-dark-framed windows, charcoal roofs and a wood entry accent replace the earlier
-architecture. Every home has a garage, driveway, lawn, one or two trees and a low
-fence. Homes stay at one or two storeys; larger project metrics widen their wings
-and garages without adding height. The active-agent state adds a contractor van
-with an amber beacon, a wall ladder and solar-panel glints. Wall lights and slim
-modern street lamps glow warmly at night. Empty grass parks, Downtown plazas and
-towers retain their existing behavior. Help, legend and panel pills say Suburbs.
+- `river-day.png`, `river-night.png`, `river-boats-sheet.png`,
+  `river-bridge-boat.png`, `river-bridge-click-x.png`, `river-bridge-click-z.png`
+- `river-waterfall.png`, `river-spark.png`, `river-reduced-motion.png`,
+  `river-reduced-spark.png`, `river-low-quality.png`, `river-expansion.png`
+- `suburbs-day.png`, `suburbs-night.png`, `after-clone-dialog.png`,
+  and the `workflow-*.png` captures
+- Reproduction and receipts: `preview.cjs` / `preview.json`,
+  `boats-sheet.cjs` / `boats-sheet.json`, `interaction-check.cjs` /
+  `interaction-check.json`, `workflow-check.cjs` / `workflow.json`, and
+  `moorings.cjs` / `moorings.json`; `ui-tests.txt` retains the full suite output
 
-`node --test` from `ui`: **203 passed, 0 failed**. `git diff --check` passed.
-New coverage includes all four shapes across three size tiers, fixed height and
-outward growth, pin/alias preservation through district renaming and expansion,
-rendered lawn/path/driveway heights, offset-wing and contractor collision,
-courtyard access, physical attachments, roof markers, resource disposal and
-reduced motion enabled during growth. Existing Downtown, contributor and Spark
-architecture tests remain green.
+The final review images are also copied to `local/city-07-evidence/`, including
+`river-*.png`, `suburbs-day.png`, `suburbs-night.png`, and `overview.png`.
 
-Independent source and geometry review checked twelve variant/tier combinations.
-It found and prompted fixes for entry-tree clearance, yard/sidewalk alignment,
-small attachment gaps, raised-yard walking heights and offset-wing collision.
-The final home geometry review passed. Independent collision and surface-height
-integration review also passed, with 16 focused tests rerun and no blocking
-findings.
-
-Observed headless Chrome acceptance, with synthetic mock data:
-
-- Inspected all four home variants, day/night close-ups, overview, growth,
-  reduced-motion and Low-quality captures. No detached home elements were visible
-  in the inspected frames. Growth retained its roof height and exact lot/pins.
-- An actual canvas click opened a home's Suburbs panel. Empty plots opened Create
-  Downtown and Link in Suburbs. A ghost's ground sign opened Clone with the correct
-  repo selected; the dialog was cancelled. Water remained unselectable as a plot.
-- Owner placement on the entry path matched its rendered top at y = 0.2865.
-  Both camera zoom and street walking recognized the rear wall of the offset wing.
-- Reduced motion froze the contractor beacon and solar glints, and settled an
-  in-progress home expansion. Low quality disabled renderer shadows.
-- Spark flipped to its underside and back. Contributor trips from the bridge and
-  Downtown returned to HQ, preserving exact home pins and cells. No browser errors
-  occurred in the completed runs.
-
-Sequential 3.5-second rAF samples used the same ten-project fixture (four homes,
-one active contractor), camera, 1600x1000 viewport, device scale 1 and RTX 4090
-Laptop GPU with ANGLE D3D11:
-
-| Preview | High quality | Low quality | p95 frame time | Draw calls (High / Low) |
-| --- | ---: | ---: | ---: | ---: |
-| Baseline 663623a | 59.94 FPS | 59.94 FPS | 16.8 ms | 1,090 / 951 |
-| Modern Suburbs | 59.94 FPS | 59.94 FPS | 16.8 ms | 1,102 / 963 |
-
-These short samples establish headless preview behavior on this machine, not
-installed/native acceptance or sustained performance on larger cities.
-
-The separate proposed diagonal S-bend river, asymmetric quay, waterfalls and
-continuous boat circuit through the Spark side are **not implemented by this
-refinement**. Bridge/mast clearance and preserving dry pins across a new diagonal
-district boundary still need design resolution. The current river behavior above
-describes the existing checkpoint, not acceptance of that later design.
-
-## Local evidence
-
-River evidence lives in `local/city-river-evidence/` in the original checkout,
-outside tracked files. Earlier City evidence remains in `local/city-07-evidence/`.
-
-- `after-day.png`, `after-night.png`, `after-grow.png`, `after-crane.png`
-- `after-boats.png`, `after-boats-night.png`, `after-bridge-click.png`,
-  `after-expansion.png`, `after-reduced-motion.png`, `after-low-quality.png`
-- `after-clone-dialog.png`, `workflow-reduced-motion.png`,
-  `workflow-low-quality.png`, `workflow-spark-flip.png`, and contributor/home
-  round-trip captures listed by `workflow.json`
-- Receipts: `tests.txt`, `after-browser.json`, `river-check.json`,
-  `interaction-check.json`, `workflow.json`
-- Reproduction scripts: `preview.cjs`, `river-check.cjs`, `interaction-check.cjs`,
-  `workflow-check.cjs`
-
-The latest boat-variety evidence is in `local/city-boat-variety-evidence/`:
-
-- `high-{sailboat,rowboat,tugboat,barge,paddle-steamer,canoe}.png` and matching
-  `low-*.png` close-ups, `six-boats-day.png`, `six-boats-night.png`,
-  `sailboat-under-bridge.png`, `moored-boats-day.png`, `moored-boats-low.png`,
-  `baseline-six-boats.png`, `after-six-boats-default.png`
-- `after-boats.png`, `after-boats-night.png`, `after-bridge-click.png`,
-  `after-expansion.png`, `after-reduced-motion.png`, `after-low-quality.png`
-- Receipts and reproduction: `tests.txt`, `river-check.json`, `variety-check.json`,
-  `river-check.cjs`, `variety-check.cjs`
-
-Suburbs evidence is in `local/city-suburbs-evidence/` in the original checkout:
-
-- `before-{overview,day,night}.png`, `after-{overview,day,night}.png`
-- `after-{cantilever,l-ranch,split-level,townhouse-pair}.png`,
-  `after-reduced-motion.png`, `after-low-quality.png`, `home-growth.png`,
-  `home-panel.png`, `after-clone-dialog.png` and the `workflow-*.png` captures
-- Receipts: `tests.txt`, `before-preview.json`, `after-preview.json`,
-  `home-workflow.json`, `interaction-check.json`, `workflow.json`
-- Reproduction: `preview.cjs`, `home-workflow.cjs`, `interaction-check.cjs`,
-  `workflow-check.cjs`
-- Review copies: `local/city-07-evidence/suburbs-{overview,day,night}.png`
-
-No release tag or installer was produced by this UI change. Source integration,
-publication, installation and real-project acceptance remain separate steps.
+Earlier local checkpoints are retained only for comparison: `53e721d` refined
+ghosts and plazas; `9ff9a00` introduced the first river; `663623a` introduced six
+boat silhouettes; and `732b4a5` completed modern Suburbs. Their evidence remains
+in `local/city-07-evidence/`, `local/city-river-evidence/`,
+`local/city-boat-variety-evidence/` and `local/city-suburbs-evidence/`.
+Earlier preview timings and acceptance results do not apply automatically to
+this final combined revision.

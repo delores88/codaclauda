@@ -4,7 +4,7 @@ import { THREE } from '../app/city/toon.js';
 import { downtownPlazaPlan, buildDecor, buildRoads, riverSceneryClear, BENCH_OFFSET } from '../app/city/scenery.js';
 import { LOT_HALF, islandHalf } from '../app/city/layout.js';
 import { disposeAll } from '../app/city/fx.js';
-import { riverZ, riverCellUsable, riverFootprintClear, bridgeSpan } from '../app/city/river-path.js';
+import { riverZ, riverSide, riverBankPoint, riverCellUsable, riverFootprintClear, bridgeSpan, bridgeCrossings, bridgeAt } from '../app/city/river-path.js';
 
 function fakeCanvas(t) {
   const original = globalThis.document;
@@ -83,7 +83,7 @@ test('Downtown hardscape uses bounded merged draws, does not intercept picking, 
 });
 
 test('river clearings replace unsafe lots and every decor footprint clears water, banks, and bridge ramps', () => {
-  for (const rings of [2, 4]) {
+  for (const rings of [3, 4]) {
     const lots = new Map();
     for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) if (riverCellUsable(i, j) && (i + j) % 3 === 0) lots.set(`${i},${j}`, { i, j, padW: 5.8, padD: 5.4, cz: -0.3 });
     const decor = buildDecor(rings, lots, islandHalf(rings), { districts: true });
@@ -120,27 +120,30 @@ test('river roads and sidewalks end at bridge approaches with no submerged aspha
       const poles = group.getObjectByName(name);
       for (let index = 0; index < poles.count; index++) {
         poles.getMatrixAt(index, matrix); at.setFromMatrixPosition(matrix);
-        for (const dx of [-0.13, 0.13]) for (const dz of [-0.13, 0.13]) assert.ok(hit(at.x + dx, at.z + dz, sidewalk), 'entire lamp base rests on a sidewalk');
+        for (const dx of [-0.13, 0.13]) for (const dz of [-0.13, 0.13]) assert.ok(hit(at.x + dx, at.z + dz, sidewalk), `entire lamp base rests on a sidewalk: ${at.x},${at.z} offset ${dx},${dz}`);
       }
     }
-    for (let k = -rings - 1; k <= rings; k++) {
-      const x = (k + 0.5) * 16, span = bridgeSpan(x);
-      assert.equal(hit(x, riverZ(x)), false, 'river crossing contains no ground asphalt');
-      assert.equal(hit(x, span.minZ - 0.1), true, 'north road meets bridge ramp');
-      assert.equal(hit(x, span.maxZ + 0.1), true, 'south road meets bridge ramp');
-      assert.equal(hit(x, span.minZ + 0.1), false, 'no hidden asphalt beneath ramp');
+    const crossings = bridgeCrossings(islandHalf(rings));
+    for (const span of crossings) {
+      const at = along => span.axis === 'x' ? [along, span.z] : [span.x, along];
+      assert.equal(hit(span.x, span.z), false, 'river crossing contains no ground asphalt');
+      for (const end of [span.min - 0.1, span.max + 0.1]) {
+        const [x, z] = at(end);
+        if (!bridgeAt(x, z, crossings) && Math.max(Math.abs(x), Math.abs(z)) < (rings + 0.5) * 16) assert.equal(hit(x, z), true, `road meets the bridge approach ${span.id} at ${x},${z}`);
+      }
+      assert.equal(hit(...at(span.min + 0.1)), false, 'no hidden asphalt beneath ramp');
     }
-    assert.equal(hit(0, -8), false, 'obsolete horizontal street is absent');
+    assert.equal(hit(0, -8), true, 'dry horizontal street remains connected across the grid');
     disposeAll(group);
   }
 });
 
 test('clearance rejects a safe centre when a canopy or bridge-side footprint would intrude', () => {
-  const x = 16, z = riverZ(x) + 3.2;
+  const x = 16, { z } = riverBankPoint(x, 1, 0.1);
   assert.ok(riverFootprintClear(x, z, 0, 0));
   assert.equal(riverSceneryClear(x, z, 1, 1), false);
   const span = bridgeSpan(8);
-  assert.equal(riverSceneryClear(span.x + span.halfWidth + 0.4, span.maxZ - 0.2, 0.3, 0.3), false);
+  assert.equal(riverSceneryClear(span.x + span.halfWidth + 0.4, span.max - 0.2, 0.3, 0.3), false);
   assert.equal(riverSceneryClear(0, 16, 1, 1), true);
 });
 
@@ -195,7 +198,7 @@ test('Suburbs lamps use grounded slim poles and attached flat warm panels', t =>
   assert.ok(panels.geometry.boundingBox.max.y - panels.geometry.boundingBox.min.y < 0.03, 'luminaire is a flat panel');
   assert.equal(panels.material.emissive.getHexString(), 'ffcf6b');
   const matrix = new THREE.Matrix4(), at = new THREE.Vector3();
-  for (let index = 0; index < poles.count; index++) { poles.getMatrixAt(index, matrix); at.setFromMatrixPosition(matrix); assert.ok(at.z > 0, 'modern lamps stay on the Suburbs side'); assert.ok(Math.abs(at.y - 0.2) < 1e-6); }
+  for (let index = 0; index < poles.count; index++) { poles.getMatrixAt(index, matrix); at.setFromMatrixPosition(matrix); assert.equal(riverSide(at.x, at.z), 1, 'modern lamps stay on the Suburbs bank'); assert.ok(Math.abs(at.y - 0.2) < 1e-6); }
   disposeAll(group);
   const island = buildRoads(1).group; assert.equal(island.getObjectByName('suburbs-lamp-panels'), undefined); disposeAll(island);
 });

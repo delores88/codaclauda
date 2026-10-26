@@ -16,6 +16,8 @@ import { mergeParts, placed, plaqueTexture, sideTexture, disposeAll, Particles, 
 import { PITCH, LOT_HALF, islandHalf, cellCenter } from './layout.js';
 import { GROUND_Y, buildSideSign, seeded, benchGeometry } from './scenery.js';
 import { agentAvatar, hash } from '../avatar/spec.js';
+import { riverCellUsable, riverFootprintClear } from './river-path.js';
+import { riverLandGeometry, outsideIntervals, riverCuts } from './river-terrain.js';
 
 export const DECK_Y = -7.2;          // island-space height of the Spark side's "ground"
 export const RUNNER_CAP = 24;
@@ -31,10 +33,11 @@ export function jobLabel(job) {
 }
 
 /* ---------- deck: a light circuit board with green traces, pale plots and the DGX SPARK emblem ---------- */
-function buildDeck(rings) {
+function buildDeck(rings, { districts = false } = {}) {
   const half = islandHalf(rings), size = half * 2, M = SPARK_MATERIALS;
   const group = new THREE.Group(); group.name = 'spark-deck';
-  const plate = new THREE.Mesh(placed(new RoundedBoxGeometry(size - 3, 0.8, size - 3, 2, 0.6), { y: -0.4 }), M.board);
+  const plate = new THREE.Mesh(districts ? riverLandGeometry(half - 1.5, { top: 0.02, bottom: -0.8, mirror: true }) : placed(new RoundedBoxGeometry(size - 3, 0.8, size - 3, 2, 0.6), { y: -0.4 }), M.board);
+  plate.name = districts ? 'spark-river-cut-deck' : 'spark-deck-plate';
   plate.userData.occluder = true;
   plate.castShadow = true; plate.receiveShadow = true;   // shades the face that's down, takes the Spark city's shadows when up
   addOutline(plate, { thickness: 0.08 });
@@ -43,24 +46,32 @@ function buildDeck(rings) {
   const plots = [], traces = [], vias = [], chips = [], pins = [];
   for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
     if (!i && !j) continue;
+    if (districts && !riverCellUsable(i, -j)) continue;
     const c = cellCenter(i, j);
     plots.push(placed(new THREE.BoxGeometry(LOT_HALF * 2 - 0.4, GROUND_Y, LOT_HALF * 2 - 0.4), { x: c.x, y: GROUND_Y / 2, z: c.z }));
   }
   const extent = (rings + 0.5) * PITCH;
+  const trace = (axis, line, limit, width) => {
+    const cuts = districts ? riverCuts(axis, line, width / 2) : [];
+    for (const [a, b] of outsideIntervals(-limit, limit, cuts)) traces.push(placed(new THREE.BoxGeometry(axis === 'x' ? b - a : width, 0.05, axis === 'z' ? b - a : width),
+      { x: axis === 'x' ? (a + b) / 2 : line, y: 0.025, z: -(axis === 'z' ? (a + b) / 2 : line) }));
+  };
   for (let k = -rings - 1; k <= rings; k++) {
     const line = (k + 0.5) * PITCH;
-    traces.push(placed(new THREE.BoxGeometry(0.34, 0.05, extent * 2), { x: line, y: 0.025 }));
-    traces.push(placed(new THREE.BoxGeometry(extent * 2, 0.05, 0.34), { z: line, y: 0.025 }));
-    for (let q = -rings - 1; q <= rings; q++) vias.push(placed(new THREE.CylinderGeometry(0.46, 0.46, 0.08, 12), { x: line, y: 0.04, z: (q + 0.5) * PITCH }));
+    trace('z', line, extent, 0.34); trace('x', line, extent, 0.34);
+    for (let q = -rings - 1; q <= rings; q++) {
+      const z = (q + 0.5) * PITCH;
+      if (!districts || riverFootprintClear(line, -z, 0.5, 0.5)) vias.push(placed(new THREE.CylinderGeometry(0.46, 0.46, 0.08, 12), { x: line, y: 0.04, z }));
+    }
   }
   // Border trace round the rim, and a little IC package in each corner.
   const border = extent + 1.2;
   for (const s of [-1, 1]) {
-    traces.push(placed(new THREE.BoxGeometry(border * 2 + 0.3, 0.05, 0.3), { z: s * border, y: 0.025 }));
-    traces.push(placed(new THREE.BoxGeometry(0.3, 0.05, border * 2 + 0.3), { x: s * border, y: 0.025 }));
+    trace('x', s * border, border + 0.15, 0.3); trace('z', s * border, border + 0.15, 0.3);
   }
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
     const x = sx * (extent + 2.6), z = sz * (extent + 2.6);
+    if (districts && !riverFootprintClear(x, -z, 1.25, 1.25)) continue;
     chips.push(placed(new RoundedBoxGeometry(1.8, 0.34, 1.8, 1, 0.1), { x, y: 0.17, z }));
     for (const o of [-0.55, 0, 0.55]) {
       pins.push(placed(new THREE.BoxGeometry(0.16, 0.06, 0.34), { x: x + o, y: 0.03, z: z + 1.05 }), placed(new THREE.BoxGeometry(0.16, 0.06, 0.34), { x: x + o, y: 0.03, z: z - 1.05 }));
@@ -179,7 +190,7 @@ function plantMesh(group, geometry, material, items, { outline = 0.04, cast = tr
 /** Plants on the Spark face (local coordinates: +y points away from the deck, so they stand on
  *  the Spark side only): little parks on lots without a Spark building, a bush or two behind the
  *  narrower buildings, planter boxes of glowing moss along the traces, bushes round the Foundry plaza. */
-function buildGreenery(rings, buildings) {
+function buildGreenery(rings, buildings, { districts = false } = {}) {
   const group = new THREE.Group(); group.name = 'spark-greenery';
   const geo = {
     bush: placed(new THREE.IcosahedronGeometry(0.62, 1), { y: 0.44, sy: 0.78 }),
@@ -192,7 +203,11 @@ function buildGreenery(rings, buildings) {
   const byCell = new Map(buildings.map(b => [`${b.cell.i},${b.cell.j}`, b]));
   for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
     const c = cellCenter(i, j);
-    for (const sx of [-1, 1]) for (const dz of [-2.7, 2.7]) planters.push({ x: c.x + sx * 6.7, y: 0, z: c.z + dz });
+    if (districts && !riverCellUsable(i, -j) && (i || j)) continue;
+    for (const sx of [-1, 1]) for (const dz of [-2.7, 2.7]) {
+      const x = c.x + sx * 6.7, z = c.z + dz;
+      if (!districts || riverFootprintClear(x, -z, 0.35, 1.1)) planters.push({ x, y: 0, z });
+    }
     if (!i && !j) continue;
     const r = seeded(`spark-lot:${i},${j}`), b = byCell.get(`${i},${j}`);
     if (!b) {
@@ -350,7 +365,7 @@ export class SparkCity {
     this.shown = Boolean(shown);
     this.group.visible = this.shown;
     if (this.shown) {
-      if (rings !== this.rings || !this.deck) this.buildDeck(rings);
+      if (rings !== this.rings || !this.deck || this.deckDistricts !== Boolean(this.world.districts)) this.buildDeck(rings);
       // The group is turned about x (local z = -island z): lot (i, -j) here is the other face of lot (i, j).
       const under = new Map();
       for (const [id, cell] of cells) under.set(id, { ...cell, j: -cell.j });
@@ -379,11 +394,11 @@ export class SparkCity {
   /** Plants follow the lots: rebuilt only when the rings or the Spark buildings' footprints change. */
   syncGreenery(rings) {
     const list = this.buildings.list || [];
-    const sig = `${rings}|${list.map(b => `${b.cell.i},${b.cell.j},${b.size.W.toFixed(1)}`).sort().join(';')}`;
+    const sig = `${rings}|${Boolean(this.world.districts)}|${list.map(b => `${b.cell.i},${b.cell.j},${b.size.W.toFixed(1)}`).sort().join(';')}`;
     if (sig === this.greenSig && this.greenery) return;
     this.greenSig = sig;
     if (this.greenery) { this.greenery.removeFromParent(); disposeAll(this.greenery); }
-    this.greenery = buildGreenery(rings, list);
+    this.greenery = buildGreenery(rings, list, { districts: Boolean(this.world.districts) });
     this.group.add(this.greenery);
   }
   syncCrew(quality) {
@@ -410,7 +425,8 @@ export class SparkCity {
   buildDeck(rings) {
     if (this.deck) { this.tintSigns(false); this.dropGreys(); this.group.remove(this.deck.group); disposeAll(this.deck.group); }
     this.rings = rings;
-    this.deck = buildDeck(rings);
+    this.deckDistricts = Boolean(this.world.districts);
+    this.deck = buildDeck(rings, { districts: this.deckDistricts });
     this.group.add(this.deck.group);
   }
   /** Offline: the DGX SPARK emblem and the Foundry plaque (their own, possibly cached, materials)

@@ -6,7 +6,9 @@ import { RoundedBoxGeometry } from '../../vendor/three/addons/RoundedBoxGeometry
 import { hash } from '../avatar/spec.js';
 import { mergeParts, placed, instancedOutline, plaqueTexture, clockTexture, sideTexture } from './fx.js';
 import { PITCH, ASPHALT, LOT_HALF, islandHalf, cellCenter } from './layout.js';
-import { riverZ, riverCellUsable, riverFootprintClear, bridgeSpan, RIVER_HALF_WIDTH, RIVER_BANK_WIDTH } from './river-path.js';
+import { riverZ, riverCellUsable, riverFootprintClear, bridgeCrossings, RIVER_HALF_WIDTH, RIVER_BANK_WIDTH } from './river-path.js';
+import { districtForCell, DOWNTOWN } from './districts.js';
+import { riverLandGeometry, outsideIntervals, outsideRectangles, riverCuts } from './river-terrain.js';
 
 export const PALETTE = {
   grass: '#93d46c', grassSide: '#7cc25a', lawn: '#9ddb74', dirt: '#bf8a5a', dirtDark: '#9c6b45', stone: '#a3aac6', stoneDark: '#858ca9',
@@ -28,16 +30,23 @@ function mesh(geometry, material, { cast = true, receive = true, outline = 0.05 
 /* ---------- island ---------- */
 /** The island's slabs, rim and (Spark side off) its tapering rock underside. The rim stays clean:
  *  grass top, layered soil edge, nothing dangling or floating. */
-export function buildIsland(rings) {
+export function buildIsland(rings, { districts = false } = {}) {
   const half = islandHalf(rings), size = half * 2;
   const group = new THREE.Group(); group.name = 'island';
   const rnd = seeded(`island:${rings}`);
   // The three slabs block picking (a hover never reaches through the island to the other side).
   // The grass slab casts: once the island is turned over it shades the face that is now down.
   const slab = (...args) => { const m = mesh(...args); m.userData.occluder = true; return m; };
-  group.add(slab(placed(rbox(size, 1.0, size, 1.6, 3), { y: -0.5 }), toonMaterial(PALETTE.grass), { cast: true, outline: 0.09 }));
-  group.add(slab(placed(rbox(size - 0.9, 2.8, size - 0.9, 1.4, 2), { y: -2.1 }), toonMaterial(PALETTE.dirt), { cast: false, receive: false, outline: 0.09 }));
-  group.add(slab(placed(rbox(size - 4, 3.4, size - 4, 1.4, 2), { y: -4.9 }), toonMaterial(PALETTE.stone), { cast: false, receive: false, outline: 0.09 }));
+  if (districts) {
+    const top = slab(riverLandGeometry(half), toonMaterial(PALETTE.grass), { cast: true, outline: 0.025 }); top.name = 'river-cut-land'; group.add(top);
+    group.add(slab(placed(rbox(size - 0.9, 2.25, size - 0.9, 1.4, 2), { y: -2.375 }), toonMaterial(PALETTE.dirt), { cast: false, receive: false, outline: 0.05 }));
+    group.add(slab(placed(rbox(size - 4, 2.3, size - 4, 1.4, 2), { y: -4.65 }), toonMaterial(PALETTE.stone), { cast: false, receive: false, outline: 0.05 }));
+    const under = slab(riverLandGeometry(half, { top: -5.8, bottom: -7.2 }), toonMaterial(PALETTE.stone), { cast: false, receive: false, outline: 0.025 }); under.name = 'river-cut-underland'; group.add(under);
+  } else {
+    group.add(slab(placed(rbox(size, 1.0, size, 1.6, 3), { y: -0.5 }), toonMaterial(PALETTE.grass), { cast: true, outline: 0.09 }));
+    group.add(slab(placed(rbox(size - 0.9, 2.8, size - 0.9, 1.4, 2), { y: -2.1 }), toonMaterial(PALETTE.dirt), { cast: false, receive: false, outline: 0.09 }));
+    group.add(slab(placed(rbox(size - 4, 3.4, size - 4, 1.4, 2), { y: -4.9 }), toonMaterial(PALETTE.stone), { cast: false, receive: false, outline: 0.09 }));
+  }
   // Tapering underside: a stack of stone chunks.
   const chunks = [[0.66, -7.6, 2.4], [0.42, -9.8, 2.2], [0.2, -11.8, 2]];
   for (const [k, y, h] of chunks) {
@@ -56,6 +65,7 @@ export function buildIsland(rings) {
     const t = -half + 1.6 + (k + 0.5) * ((size - 3.2) / perSide);
     const out = half - 0.12, h = 0.7 + rnd() * 0.9;
     const [x, z, ry] = side === 0 ? [t, out, 0] : side === 1 ? [out, -t, Math.PI / 2] : side === 2 ? [-t, -out, 0] : [-out, t, Math.PI / 2];
+    if (districts && !riverFootprintClear(x, z, 1.8, 1.8, RIVER_BANK_WIDTH + 1)) continue;
     m4.compose(v.set(x, -0.7 - h / 2 + 0.3, z), q.setFromEuler(new THREE.Euler(0, ry, 0)), s.set(1.7 + rnd() * 1.6, h, 0.55));
     drips.setMatrixAt(n++, m4);
   }
@@ -86,41 +96,42 @@ export function buildSideSign(texture, { board = '#fff1de', post = '#8a6a4a', wi
 }
 
 /* ---------- roads, sidewalks, lawns, lamps ---------- */
+const sceneryCrossings = new Map();
+function crossingsNear(x, z, halfX, halfZ) {
+  // Include the far foot of a long diagonal approach even when this decoration
+  // is beside its near foot. The final renderer clips crossings to the island.
+  const half = Math.ceil((Math.max(Math.abs(x) + halfX, Math.abs(z) + halfZ) + PITCH * 8) / PITCH) * PITCH;
+  if (!sceneryCrossings.has(half)) {
+    if (sceneryCrossings.size > 32) sceneryCrossings.clear();
+    sceneryCrossings.set(half, bridgeCrossings(half));
+  }
+  return sceneryCrossings.get(half);
+}
 /** Conservative footprint clearance for scenery, including the bridge ramps and
  * rails. Test the whole footprint, not only its centre; canopy outlines count. */
 export function riverSceneryClear(x, z, halfX, halfZ) {
   if (!riverFootprintClear(x, z, halfX, halfZ)) return false;
-  const first = Math.floor((x - halfX) / PITCH - 0.5) - 1;
-  const last = Math.ceil((x + halfX) / PITCH - 0.5) + 1;
-  for (let k = first; k <= last; k++) {
-    const bridge = bridgeSpan((k + 0.5) * PITCH);
-    if (x + halfX >= bridge.x - bridge.halfWidth - 0.35 && x - halfX <= bridge.x + bridge.halfWidth + 0.35 && z + halfZ >= bridge.minZ - 0.2 && z - halfZ <= bridge.maxZ + 0.2) return false;
+  for (const bridge of crossingsNear(x, z, halfX, halfZ)) {
+    if (x + halfX >= bridge.x0 - 0.35 && x - halfX <= bridge.x1 + 0.35 && z + halfZ >= bridge.z0 - 0.35 && z - halfZ <= bridge.z1 + 0.35) return false;
   }
   return true;
 }
 
-function outsideSpan(min, max, span) {
-  return [[min, Math.min(max, span.minZ)], [Math.max(min, span.maxZ), max]].filter(([a, b]) => b - a > 1e-4);
-}
-
-function horizontalWalkParts(x, z, half, band) {
-  let intervals = [[x - half, x + half]];
-  for (const crossing of [x - PITCH / 2, x + PITCH / 2]) {
-    const bridge = bridgeSpan(crossing);
-    if (z + band / 2 < bridge.minZ || z - band / 2 > bridge.maxZ) continue;
-    intervals = intervals.flatMap(([min, max]) => outsideSpan(min, max, { minZ: crossing - bridge.halfWidth - 0.02, maxZ: crossing + bridge.halfWidth + 0.02 }));
-  }
-  return intervals.map(([min, max]) => placed(new THREE.BoxGeometry(max - min, SIDEWALK_TOP, band), { x: (min + max) / 2, y: SIDEWALK_TOP / 2, z }));
+function streetParts(axis, line, min, max, width, top, bridges) {
+  const rectangles = outsideIntervals(min, max, riverCuts(axis, line, width / 2)).map(([a, b]) => axis === 'x'
+    ? { x0: a, x1: b, z0: line - width / 2, z1: line + width / 2 }
+    : { x0: line - width / 2, x1: line + width / 2, z0: a, z1: b });
+  return outsideRectangles(rectangles, bridges).map(r => placed(new THREE.BoxGeometry(r.x1 - r.x0, top, r.z1 - r.z0),
+    { x: (r.x0 + r.x1) / 2, y: top / 2, z: (r.z0 + r.z1) / 2 }));
 }
 
 export function buildRoads(rings, { districts = false } = {}) {
   const group = new THREE.Group(); group.name = 'roads';
   const extent = (rings + 0.5) * PITCH;
-  const strips = [];
+  const strips = [], bridges = districts ? bridgeCrossings(islandHalf(rings)) : [], roadTop = districts ? GROUND_Y : ROAD_TOP;
   if (districts) for (let k = -rings - 1; k <= rings; k++) {
     const line = (k + 0.5) * PITCH;
-    for (const [min, max] of outsideSpan(-extent - ASPHALT / 2, extent + ASPHALT / 2, bridgeSpan(line))) strips.push(placed(new THREE.BoxGeometry(ASPHALT, 0.12, max - min), { x: line, y: ROAD_TOP - 0.06, z: (min + max) / 2 }));
-    if (k !== -1) strips.push(placed(new THREE.BoxGeometry(extent * 2 + ASPHALT, 0.12, ASPHALT), { y: ROAD_TOP - 0.06, z: line }));
+    for (const axis of ['x', 'z']) strips.push(...streetParts(axis, line, -extent - ASPHALT / 2, extent + ASPHALT / 2, ASPHALT, roadTop, bridges));
   }
   const asphalt = mesh(districts ? mergeParts(strips) : placed(rbox(extent * 2 + ASPHALT, 0.12, extent * 2 + ASPHALT, 1.2, 2), { y: ROAD_TOP - 0.06 }), toonMaterial(PALETTE.road), { cast: false, outline: districts ? 0 : 0.05 });
   asphalt.name = 'road-asphalt';
@@ -131,8 +142,7 @@ export function buildRoads(rings, { districts = false } = {}) {
     const { x, z } = cellCenter(i, j);
     if (districts && !riverCellUsable(i, j)) continue;
     const mid = (outer + inner) / 2;
-    if (districts) walks.push(...horizontalWalkParts(x, z + mid, outer, band), ...horizontalWalkParts(x, z - mid, outer, band));
-    else {
+    if (!districts) {
       walks.push(placed(new THREE.BoxGeometry(outer * 2, SIDEWALK_TOP, band), { x, y: SIDEWALK_TOP / 2, z: z + mid }));
       walks.push(placed(new THREE.BoxGeometry(outer * 2, SIDEWALK_TOP, band), { x, y: SIDEWALK_TOP / 2, z: z - mid }));
     }
@@ -140,14 +150,12 @@ export function buildRoads(rings, { districts = false } = {}) {
       walks.push(placed(new THREE.BoxGeometry(band, SIDEWALK_TOP, inner * 2), { x: x + mid, y: SIDEWALK_TOP / 2, z }));
       walks.push(placed(new THREE.BoxGeometry(band, SIDEWALK_TOP, inner * 2), { x: x - mid, y: SIDEWALK_TOP / 2, z }));
     }
-    (districts && j < 0 ? paved : lawns).push(placed(new THREE.BoxGeometry(inner * 2, LAWN_TOP, inner * 2), { x, y: LAWN_TOP / 2, z }));
+    (districts && districtForCell({ i, j }) === DOWNTOWN ? paved : lawns).push(placed(new THREE.BoxGeometry(inner * 2, LAWN_TOP, inner * 2), { x, y: LAWN_TOP / 2, z }));
   }
   if (districts) for (let k = -rings - 1; k <= rings; k++) {
-    const line = (k + 0.5) * PITCH, span = bridgeSpan(line);
-    // Continue the road's two sidewalks through clearings up to the supported
-    // ramps, while retaining gaps at the other horizontal road intersections.
-    for (let j = -rings; j <= rings; j++) for (const side of [-1, 1]) {
-      for (const [min, max] of outsideSpan(j * PITCH - outer, j * PITCH + outer, span)) walks.push(placed(new THREE.BoxGeometry(band, SIDEWALK_TOP, max - min), { x: line + side * (ASPHALT / 2 + band / 2), y: SIDEWALK_TOP / 2, z: (min + max) / 2 }));
+    const line = (k + 0.5) * PITCH;
+    for (let j = -rings; j <= rings; j++) for (const side of [-1, 1]) for (const axis of ['x', 'z']) {
+      walks.push(...streetParts(axis, line + side * (ASPHALT / 2 + band / 2), j * PITCH - outer, j * PITCH + outer, band, SIDEWALK_TOP, bridges));
     }
   }
   if (walks.length) { const walk = mesh(mergeParts(walks), toonMaterial(PALETTE.sidewalk), { cast: false, outline: 0 }); walk.name = 'road-sidewalks'; group.add(walk); }
@@ -163,13 +171,13 @@ export function buildRoads(rings, { districts = false } = {}) {
       for (let d = -3; d <= 3; d++) {
         const along = centre + d * 1.6;
         if (!districts || riverSceneryClear(line, along, 0.08, 0.4)) dashes.push([line, along, true]);
-        if (!districts || k !== -1) dashes.push([along, line, false]);
+        if (!districts || riverSceneryClear(along, line, 0.4, 0.08)) dashes.push([along, line, false]);
       }
     }
   }
   const dashMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.16, 0.02, 0.8), toonMaterial(PALETTE.dash, { cache: false }), dashes.length);
   const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), qr = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2), one = new THREE.Vector3(1, 1, 1), v = new THREE.Vector3();
-  dashes.forEach(([x, z, vert], index) => { m4.compose(v.set(x, ROAD_TOP + 0.01, z), vert ? q.identity() : qr, one); dashMesh.setMatrixAt(index, m4); });
+  dashes.forEach(([x, z, vert], index) => { m4.compose(v.set(x, roadTop + 0.01, z), vert ? q.identity() : qr, one); dashMesh.setMatrixAt(index, m4); });
   dashMesh.receiveShadow = true; dashMesh.userData.noOutline = true;
   group.add(dashMesh);
 
@@ -181,7 +189,7 @@ export function buildRoads(rings, { districts = false } = {}) {
     if (districts && !riverCellUsable(i, j)) continue;
     const curb = districts ? 6.32 : 6.42; // the entire pole base, including its outline, rests on the sidewalk
     for (const [sx, sz, ry] of [[x - 3.2, z + curb, -Math.PI / 2], [x + curb, z + 2.8, 0]]) {
-      const suburban = districts && j >= 0, reach = suburban ? 0.38 : 0.28;
+      const suburban = districts && districtForCell({ i, j }) !== DOWNTOWN, reach = suburban ? 0.38 : 0.28;
       if (districts && !riverSceneryClear(sx, sz, reach, reach)) continue;
       if (suburban) suburbanSpots.push([sx, sz, ry]); else lampSpots.push([sx, sz]);
     }
@@ -346,7 +354,7 @@ export function buildDecor(rings, lots, half, { districts = false } = {}) {
     if (districts && !riverCellUsable(i, j)) { clearings.push(c); continue; }
     // Downtown's empty plots are small paved plazas. Their planters stay well
     // inside the lot, with clear bridge approaches and riverbanks.
-    if (districts && j < 0) {
+    if (districts && districtForCell({ i, j }) === DOWNTOWN) {
       const hasBuilding = occupied.has(`${i},${j}`), plan = downtownPlazaPlan(i, j, hasBuilding);
       for (const [x, z, ry] of plan.benches) benches.push([c.x + x, c.z + z, ry]);
       if (!hasBuilding) {

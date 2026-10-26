@@ -1,82 +1,145 @@
-/* River-aware walking: keep existing routes where dry, and join the banks via a
- * road bridge when a segment would enter the water. Contributor islands opt out. */
-import { riverZ, riverContains, bridgeAt, bridgeSpan, bridgeHeight, BRIDGE_HALF_WIDTH, RIVER_HALF_WIDTH, RIVER_BANK_WIDTH, RIVER_GRID_PITCH } from './river-path.js';
+/* River-aware walking. Dry routes stay unchanged; blocked segments use the
+ * existing street grid, whose supported edges include bridges in both axes. */
+import { riverContains, riverFootprintClear, riverSide, riverBankPoint, bridgeAt, bridgeHeight, bridgeSpan, bridgeCrossings, RIVER_BANK_WIDTH, RIVER_GRID_PITCH } from './river-path.js';
 
 export function riverWalkable(x, z, crossings = null) {
   const bridge = bridgeAt(x, z, crossings);
-  if (bridge && Math.abs(x - bridge.x) <= BRIDGE_HALF_WIDTH - 0.25) return true;
+  if (bridge) {
+    const across = bridge.axis === 'x' ? Math.abs(z - bridge.z) : Math.abs(x - bridge.x);
+    if (across <= bridge.halfWidth - 0.25) return true;
+    if (Array.isArray(crossings) && crossings.some(c => {
+      const b = bridgeSpan(c);
+      return b && x >= b.x0 && x <= b.x1 && z >= b.z0 && z <= b.z1 && (b.axis === 'x' ? Math.abs(z - b.z) : Math.abs(x - b.x)) <= b.halfWidth - 0.25;
+    })) return true;
+  }
   return !riverContains(x, z, RIVER_BANK_WIDTH + 0.25);
 }
-
 export function riverSegmentWalkable(a, b, crossings = null) {
-  const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 0.2));
+  if (Array.isArray(crossings)) {
+    const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x), z0 = Math.min(a.z, b.z), z1 = Math.max(a.z, b.z);
+    const touchesBridge = crossings.some(c => { const span = bridgeSpan(c); return span && x1 >= span.x0 && x0 <= span.x1 && z1 >= span.z0 && z0 <= span.z1; });
+    if (!touchesBridge && riverFootprintClear((x0 + x1) / 2, (z0 + z1) / 2, (x1 - x0) / 2, (z1 - z0) / 2, RIVER_BANK_WIDTH + 0.25)) return true;
+  }
+  const distance = Math.hypot(b.x - a.x, b.z - a.z), count = Math.max(1, Math.ceil(distance / 0.25)), step = distance / count;
   let previousY = bridgeHeight(a.x, a.z, crossings) ?? 0.2;
-  const step = Math.hypot(b.x - a.x, b.z - a.z) / n;
-  for (let i = 0; i <= n; i++) {
-    const x = a.x + (b.x - a.x) * i / n, z = a.z + (b.z - a.z) * i / n;
+  for (let i = 0; i <= count; i++) {
+    const x = a.x + (b.x - a.x) * i / count, z = a.z + (b.z - a.z) * i / count;
     if (!riverWalkable(x, z, crossings)) return false;
     const y = bridgeHeight(x, z, crossings) ?? 0.2;
-    if (Math.abs(y - previousY) > step * 0.6 + 0.08) return false; // no lateral jumps through a bridge wall
+    if (Math.abs(y - previousY) > step * 0.65 + 0.08) return false;
     previousY = y;
   }
   return true;
 }
-
-const sideOf = p => p.z < riverZ(p.x) ? -1 : 1;
-const nearestCrossing = x => (Math.round(x / RIVER_GRID_PITCH - 0.5) + 0.5) * RIVER_GRID_PITCH;
-
-function bankPoint(x, side, crossings) {
-  let z = riverZ(x) + side * (RIVER_HALF_WIDTH + RIVER_BANK_WIDTH + 0.65);
-  // Walk around each approach's foot instead of stepping sideways onto a raised ramp.
-  const bx = (crossings || [nearestCrossing(x)]).find(v => Math.abs(v - x) < 5);
-  if (bx !== undefined) {
-    const span = bridgeSpan(bx), end = side < 0 ? span.minZ - 0.35 : span.maxZ + 0.35;
-    const blend = Math.min(1, (5 - Math.abs(x - bx)) / 2.4);
-    z += side * Math.max(0, side * (end - z)) * blend;
+const distance = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
+const graphCache = new Map();
+function navigationGraph(half, crossings) {
+  const signature = JSON.stringify([half, crossings.map(b => [b.id, b.axis, b.x, b.z, b.min, b.max])]);
+  if (graphCache.has(signature)) return graphCache.get(signature);
+  const first = Math.ceil((-half + 0.5) / RIVER_GRID_PITCH - 0.5), last = Math.floor((half - 0.5) / RIVER_GRID_PITCH - 0.5);
+  const nodes = [], byCell = new Map();
+  for (let i = first; i <= last; i++) for (let j = first; j <= last; j++) {
+    const point = { x: (i + 0.5) * RIVER_GRID_PITCH, z: (j + 0.5) * RIVER_GRID_PITCH };
+    if (!riverWalkable(point.x, point.z, crossings)) continue;
+    byCell.set(`${i},${j}`, nodes.length); nodes.push({ ...point, i, j, edges: [] });
   }
-  return { x, z };
+  nodes.forEach((node, index) => {
+    for (const [i, j] of [[node.i + 1, node.j], [node.i, node.j + 1]]) {
+      const other = byCell.get(`${i},${j}`);
+      if (other === undefined || !riverSegmentWalkable(node, nodes[other], crossings)) continue;
+      node.edges.push({ index: other, cost: RIVER_GRID_PITCH }); nodes[other].edges.push({ index, cost: RIVER_GRID_PITCH });
+    }
+  });
+  const graph = { nodes, crossings, half };
+  if (graphCache.size >= 6) graphCache.delete(graphCache.keys().next().value);
+  graphCache.set(signature, graph); return graph;
 }
-
-function bankRoute(a, b, side, crossings) {
-  const n = Math.max(1, Math.ceil(Math.abs(b.x - a.x) / 0.5));
-  return Array.from({ length: n + 1 }, (_, i) => bankPoint(a.x + (b.x - a.x) * i / n, side, crossings));
+function connect(point, graph) {
+  const ordered = graph.nodes.map((node, index) => ({ index, cost: distance(point, node) })).sort((a, b) => a.cost - b.cost);
+  const connections = [];
+  for (const edge of ordered.slice(0, 48)) {
+    if (riverSegmentWalkable(point, graph.nodes[edge.index], graph.crossings)) connections.push(edge);
+    if (connections.length >= 8) break;
+  }
+  return connections;
 }
-
-/** Unsupported intermediate waypoints are discarded; endpoints are clamped to a
- * bank. Every generated crossing runs along an actual bridge's centerline. */
+function push(heap, value) {
+  let index = heap.length; heap.push(value);
+  while (index > 0) { const parent = (index - 1) >> 1; if (heap[parent].score <= value.score) break; heap[index] = heap[parent]; index = parent; }
+  heap[index] = value;
+}
+function pop(heap) {
+  const first = heap[0], last = heap.pop();
+  if (!heap.length) return first;
+  let index = 0;
+  while (index * 2 + 1 < heap.length) {
+    let child = index * 2 + 1;
+    if (child + 1 < heap.length && heap[child + 1].score < heap[child].score) child++;
+    if (heap[child].score >= last.score) break;
+    heap[index] = heap[child]; index = child;
+  }
+  heap[index] = last; return first;
+}
+function supportedRoute(from, target, graph) {
+  const start = connect(from, graph), finish = new Map(connect(target, graph).map(edge => [edge.index, edge.cost]));
+  if (!start.length || !finish.size) return null;
+  const costs = new Map(), previous = new Map(), heap = [];
+  for (const edge of start) { costs.set(edge.index, edge.cost); previous.set(edge.index, -1); push(heap, { index: edge.index, cost: edge.cost, score: edge.cost + distance(graph.nodes[edge.index], target) }); }
+  let best = null, bestCost = Infinity;
+  while (heap.length) {
+    const current = pop(heap);
+    if (current.cost !== costs.get(current.index) || current.score >= bestCost) continue;
+    if (finish.has(current.index)) { const total = current.cost + finish.get(current.index); if (total < bestCost) { bestCost = total; best = current.index; } }
+    for (const edge of graph.nodes[current.index].edges) {
+      const cost = current.cost + edge.cost;
+      if (cost >= (costs.get(edge.index) ?? Infinity)) continue;
+      costs.set(edge.index, cost); previous.set(edge.index, current.index);
+      push(heap, { index: edge.index, cost, score: cost + distance(graph.nodes[edge.index], target) });
+    }
+  }
+  if (best === null) return null;
+  const route = [{ x: target.x, z: target.z }];
+  for (let index = best; index !== -1; index = previous.get(index)) route.push({ x: graph.nodes[index].x, z: graph.nodes[index].z });
+  route.reverse();
+  // Remove unnecessary street corners only when the complete shortcut is supported.
+  const compact = []; let anchor = from;
+  for (let index = 0; index < route.length;) {
+    let end = route.length - 1;
+    while (end > index && !riverSegmentWalkable(anchor, route[end], graph.crossings)) end--;
+    compact.push(route[end]); anchor = route[end]; index = end + 1;
+  }
+  return compact;
+}
+function effectiveGeometry(from, points, crossings) {
+  const supplied = Array.isArray(crossings) ? crossings.map(bridgeSpan).filter(Boolean) : null;
+  const explicitHalf = supplied?.find(span => Number.isFinite(span.islandHalf))?.islandHalf;
+  const extent = Math.max(16, ...[from, ...points].flatMap(p => [Math.abs(p.x), Math.abs(p.z)]), ...(supplied || []).flatMap(b => [Math.abs(b.x0), Math.abs(b.x1), Math.abs(b.z0), Math.abs(b.z1)]));
+  const half = explicitHalf || Math.ceil((extent + RIVER_GRID_PITCH) / RIVER_GRID_PITCH) * RIVER_GRID_PITCH;
+  return { half, crossings: supplied || bridgeCrossings(half) };
+}
+/** Valid endpoints are preserved. Water targets clamp to a bank; an unreachable
+ * target leaves the walker at its last supported point rather than crossing water. */
 export function riverRoute(from, points, crossings = null) {
   if (!points.length) return [];
-  const last = points.at(-1), target = riverWalkable(last.x, last.z, crossings) ? last : bankPoint(last.x, sideOf(last), crossings);
-  const goals = [...points.slice(0, -1).filter(p => riverWalkable(p.x, p.z, crossings)), target];
-  const output = []; let a = from;
-  for (const b of goals) {
-    if (riverSegmentWalkable(a, b, crossings)) output.push({ x: b.x, z: b.z });
-    else {
-      const sa = sideOf(a), sb = sideOf(b);
-      if (sa !== sb && Array.isArray(crossings) && crossings.length === 0) {
-        const end = bankPoint(b.x, sa, crossings);
-        output.push(...bankRoute(a, end, sa, crossings)); a = end; continue;
-      }
-      const aBridge = bridgeAt(a.x, a.z, crossings), bBridge = bridgeAt(b.x, b.z, crossings);
-      const ap = aBridge ? { x: aBridge.x, z: sa < 0 ? aBridge.minZ - 0.35 : aBridge.maxZ + 0.35 } : a;
-      const bp = bBridge ? { x: bBridge.x, z: sb < 0 ? bBridge.minZ - 0.35 : bBridge.maxZ + 0.35 } : b;
-      if (aBridge) output.push({ x: a.x, z: ap.z }, ap);
-      if (sa === sb) output.push(...bankRoute(ap, bp, sa, crossings));
-      else {
-        const mid = (ap.x + bp.x) / 2;
-        const bx = crossings?.length ? crossings.reduce((best, x) => Math.abs(x - mid) < Math.abs(best - mid) ? x : best) : nearestCrossing(mid);
-        const bridge = { x: bx, z: riverZ(bx) };
-        output.push(...bankRoute(ap, bridge, sa, crossings), bankPoint(bx, sb, crossings), ...bankRoute(bridge, bp, sb, crossings));
-      }
-      if (bBridge) output.push(bp, { x: b.x, z: bp.z });
-      output.push({ x: b.x, z: b.z });
-    }
-    a = b;
+  const geometry = effectiveGeometry(from, points, crossings), bridges = geometry.crossings;
+  const onIsland = p => Math.abs(p.x) <= geometry.half - 0.5 && Math.abs(p.z) <= geometry.half - 0.5;
+  const goals = points.slice(0, -1).filter(p => onIsland(p) && riverWalkable(p.x, p.z, bridges));
+  const last = points.at(-1), side = !bridges.length ? riverSide(from.x, from.z) : riverSide(last.x, last.z);
+  const target = riverWalkable(last.x, last.z, bridges) && (bridges.length || side === riverSide(last.x, last.z)) ? last : riverBankPoint(last.x, side);
+  // At a river outlet the nearest bank can lie beyond the island rim. Keep the
+  // last supported waypoint instead of connecting a dry but unsupported shore.
+  if (onIsland(target)) goals.push(target);
+  const output = []; let at = { x: from.x, z: from.z }, graph;
+  for (const goal of goals) {
+    if (riverSegmentWalkable(at, goal, bridges)) { output.push({ x: goal.x, z: goal.z }); at = goal; continue; }
+    graph ||= navigationGraph(geometry.half, bridges);
+    const route = supportedRoute(at, goal, graph);
+    if (route) { output.push(...route); at = route.at(-1); }
   }
-  return output.filter((p, i) => i === 0 || Math.hypot(p.x - output[i - 1].x, p.z - output[i - 1].z) > 0.01);
+  if (!output.length) return [{ x: from.x, z: from.z }];
+  return output.filter((point, index) => index === 0 || distance(point, output[index - 1]) > 0.01);
 }
-
-/** Axis sliding prevents street controls and crowd separation entering the water. */
+/** Axis sliding prevents street controls and crowd separation entering water. */
 export function riverStep(from, to, crossings = null) {
   if (riverSegmentWalkable(from, to, crossings)) return to;
   const xOnly = { x: to.x, z: from.z };

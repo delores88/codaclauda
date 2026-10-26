@@ -1,205 +1,369 @@
-/* Original City river. Its path is fixed in island coordinates, so expanding the
- * island extends the banks without moving bridges, boats or established lots. */
-import { THREE, toonMaterial } from './toon.js';
-import { disposeAll, mergeParts, placed } from './fx.js';
-import { PITCH } from './layout.js';
-import { riverZ, riverSlope, RIVER_HALF_WIDTH, RIVER_BANK_WIDTH, WATER_Y, bridgeSpan, bridgeHeight } from './river-path.js';
-import { nextBoatAt, selectBoatManifest, boatPass, BOAT_TYPES, chooseBoatTypes, boatFleet } from './boats.js';
-import { createBoat } from './boat-models.js';
+/* Original City river. Fixed shoreline and walking queries are shared with
+ * terrain and placement; hulls follow a continuous circuit around both faces. */
+import { THREE, toonMaterial, addOutline, INK } from './toon.js';
+import { disposeAll, mergeParts, placed, instancedOutline } from './fx.js';
+import { riverSection, riverRoadIntervals, sampleRiver, RIVER_HALF_WIDTH, WATER_Y,
+  bridgeSpan, bridgeHeight, bridgeAt, bridgeCrossings } from './river-path.js';
+import { selectBoatManifest, chooseBoatTypes, boatFleet, loopTiming, loopPhase } from './boats.js';
+import { createBoat, updateBoat } from './boat-models.js';
+import { createRiverLoop, riverLoopPose, riverFrame, RIVER_DECK_Y } from './river-loop.js';
 
+const SLAB = .18, RIPPLE_COUNT = 26;
 const box = (w, h, d, x, y, z) => placed(new THREE.BoxGeometry(w, h, d), { x, y, z });
-const SLAB = 0.18;
-function add(group, geometry, material, shadow = false, pickable = false) {
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.castShadow = shadow; mesh.receiveShadow = shadow;
+const vector = p => new THREE.Vector3(p.x, p.y, p.z);
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+function add(group, geometry, material, shadow = false, pickable = false, outline = true) {
+  const mesh = new THREE.Mesh(geometry, material); mesh.castShadow = shadow; mesh.receiveShadow = shadow;
   if (!pickable) mesh.raycast = () => {};
+  if (outline) addOutline(mesh, { thickness: .012 });
   group.add(mesh); return mesh;
 }
-const solid = (group, geometry, tint, shadow = false) => add(group, geometry, toonMaterial(tint), shadow);
-
-/** A ribbon samples the stable path, with no shared geometries to retain on resize. */
-function ribbon(half, a, b, y, step = 1.5) {
-  const count = Math.max(2, Math.ceil(half * 2 / step)), positions = [], uv = [], indices = [];
-  for (let i = 0; i <= count; i++) {
-    const x = -half + i / count * half * 2, z = riverZ(x);
-    positions.push(x, y, z + a, x, y, z + b); uv.push(x, 0, x, 1);
-    if (i < count) { const n = i * 2; indices.push(n, n + 1, n + 2, n + 1, n + 3, n + 2); }
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-  geometry.setIndex(indices); geometry.computeVertexNormals(); return geometry;
+function solid(group, parts, color, name, low) {
+  if (!parts.length) return null;
+  const mesh = add(group, mergeParts(parts), toonMaterial(color), !low); mesh.name = name; return mesh;
 }
-
-function bankGeometry(half, side, step) {
-  const count = Math.max(2, Math.ceil(half * 2 / step)), positions = [], indices = [];
-  for (let i = 0; i <= count; i++) {
-    const x = -half + i / count * half * 2, z = riverZ(x), a = z + side * RIVER_HALF_WIDTH, b = z + side * (RIVER_HALF_WIDTH + RIVER_BANK_WIDTH);
-    positions.push(x, WATER_Y + 0.10, a, x, 0.14, b, x, 0, a, x, 0, b);
-    if (i < count) {
-      const n = i * 4;
-      const faces = [n, n + 1, n + 4, n + 1, n + 5, n + 4, n, n + 4, n + 2, n + 2, n + 4, n + 6, n + 1, n + 3, n + 5, n + 3, n + 7, n + 5];
-      if (side < 0) for (let k = 0; k < faces.length; k += 3) [faces[k + 1], faces[k + 2]] = [faces[k + 2], faces[k + 1]];
-      indices.push(...faces);
+function geometry(positions, indices, normals, uv) {
+  const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3)); geo.setIndex(indices);
+  if (normals) geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3)); else geo.computeVertexNormals();
+  if (uv) geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.computeBoundingBox(); geo.computeBoundingSphere(); return geo;
+}
+function beam(a, b, width = .1, depth = width) {
+  const start = vector(a), end = vector(b), direction = end.clone().sub(start);
+  const geo = new THREE.BoxGeometry(width, direction.length(), depth);
+  geo.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize()));
+  geo.translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2); return geo;
+}
+function frameMatrix(pose, scale = 1) {
+  return new THREE.Matrix4().makeBasis(vector(pose.forward), vector(pose.up), vector(pose.right))
+    .scale(new THREE.Vector3(scale, scale, scale)).setPosition(vector(pose.position));
+}
+function waterfallRibbon(loop, start, end, step) {
+  const count = Math.max(16, Math.ceil((end - start) / step)), positions = [], normals = [], uv = [], indices = [], across = 4;
+  // The square island rim and the tangent-normal waterfall lip are different
+  // lines. A flat collar joins them explicitly on each face, including Z exits.
+  function rim(pose, fraction) {
+    const p = pose.position, xEdge = Math.abs(loop.half - Math.abs(p.x)) <= Math.abs(loop.half - Math.abs(p.z));
+    if (xEdge) {
+      const x = Math.sign(p.x) * loop.half, section = riverSection(x), low = clamp(section.waterMinZ, -loop.half, loop.half), high = clamp(section.waterMaxZ, -loop.half, loop.half);
+      const center = clamp(p.z, low, high), z = fraction <= .5 ? low + (center - low) * fraction * 2 : center + (high - center) * (fraction - .5) * 2;
+      return { x, y: p.y, z };
+    }
+    const z = Math.sign(p.z) * loop.half, intervals = riverRoadIntervals('x', z, 0);
+    const interval = intervals.find(span => p.x >= span.min - .02 && p.x <= span.max + .02);
+    const low = clamp(interval?.min ?? p.x - RIVER_HALF_WIDTH, -loop.half, loop.half), high = clamp(interval?.max ?? p.x + RIVER_HALF_WIDTH, -loop.half, loop.half);
+    const center = clamp(p.x, low, high), across = pose.right.x >= 0 ? fraction : 1 - fraction;
+    const x = across <= .5 ? low + (center - low) * across * 2 : center + (high - center) * (across - .5) * 2;
+    return { x, y: p.y, z };
+  }
+  for (let i = -1; i <= count + 1; i++) {
+    const distance = start + (end - start) * clamp(i, 0, count) / count, pose = riverLoopPose(loop, distance / loop.length);
+    for (let j = 0; j <= across; j++) {
+      const offset = (j / across * 2 - 1) * RIVER_HALF_WIDTH;
+      const point = i === -1 || i === count + 1 ? rim(pose, j / across) : { x: pose.position.x + pose.right.x * offset, y: pose.position.y + pose.right.y * offset, z: pose.position.z + pose.right.z * offset };
+      positions.push(point.x, point.y, point.z);
+      normals.push(pose.up.x, pose.up.y, pose.up.z); uv.push(distance, j / across);
+      if (i <= count && j < across) { const n = (i + 1) * (across + 1) + j; indices.push(n, n + 1, n + across + 1, n + 1, n + across + 2, n + across + 1); }
     }
   }
-  const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3)); geo.setIndex(indices); geo.computeVertexNormals(); return geo;
+  // The rim connector folds in opposite directions on the two channel halves.
+  // Keep each face winding aligned with its supplied outward normal so the
+  // double-sided toon shader does not invert the lighting on one collar half.
+  for (let n = 0; n < indices.length; n += 3) {
+    const [a, b, c] = indices.slice(n, n + 3).map(index => index * 3);
+    const ab = new THREE.Vector3(positions[b] - positions[a], positions[b + 1] - positions[a + 1], positions[b + 2] - positions[a + 2]);
+    const ac = new THREE.Vector3(positions[c] - positions[a], positions[c + 1] - positions[a + 1], positions[c + 2] - positions[a + 2]);
+    const outward = new THREE.Vector3(normals[a] + normals[b] + normals[c], normals[a + 1] + normals[b + 1] + normals[c + 1], normals[a + 2] + normals[b + 2] + normals[c + 2]);
+    if (ab.cross(ac).dot(outward) < 0) [indices[n + 1], indices[n + 2]] = [indices[n + 2], indices[n + 1]];
+  }
+  return geometry(positions, indices, normals, uv);
+}
+function waterMaterial(low, half) {
+  const material = toonMaterial('#ffffff', { cache: false, side: THREE.DoubleSide }); material.vertexColors = true;
+  if (!low) {
+    const uniforms = { riverTime: { value: 0 }, riverNight: { value: 0 }, riverMotion: { value: 1 }, riverHalf: { value: half } }; material.userData.waterUniforms = uniforms;
+    material.onBeforeCompile = shader => {
+      Object.assign(shader.uniforms, uniforms);
+      shader.vertexShader = 'uniform float riverTime; uniform float riverNight; uniform float riverMotion; uniform float riverHalf;\n' + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
+        float rimCalm=smoothstep(0.0,.8,riverHalf-max(abs(position.x),abs(position.z)));
+        transformed += normal * sin(position.x*.3+position.z*.2-riverTime*.7)*.03*sin(uv.y*3.14159265)*riverMotion*(1.0-riverNight*.8)*rimCalm;`);
+    };
+    material.customProgramCacheKey = () => 'city-river-toon-wave';
+  }
+  return material;
+}
+/** Water is an open, double-sided sheet. An inflated BackSide hull can become
+ * a large black face at a folded rim collar. Trace only its open boundary. */
+function outlineWater(mesh) {
+  const geo = mesh.geometry, position = geo.getAttribute('position'), normal = geo.getAttribute('normal'), index = geo.index;
+  const edges = new Map();
+  for (let n = 0; n < index.count; n += 3) {
+    const corners = [index.getX(n), index.getX(n + 1), index.getX(n + 2)];
+    for (let k = 0; k < 3; k++) {
+      const a = corners[k], b = corners[(k + 1) % 3], id = a < b ? `${a}:${b}` : `${b}:${a}`;
+      if (edges.has(id)) edges.get(id).count++; else edges.set(id, { a, b, count: 1 });
+    }
+  }
+  const vertices = [];
+  for (const { a, b, count } of edges.values()) if (count === 1) {
+    const pa = new THREE.Vector3().fromBufferAttribute(position, a), pb = new THREE.Vector3().fromBufferAttribute(position, b);
+    if (pa.distanceToSquared(pb) < 1e-8) continue;
+    for (const vertex of [a, b]) vertices.push(position.getX(vertex) + normal.getX(vertex) * .002,
+      position.getY(vertex) + normal.getY(vertex) * .002, position.getZ(vertex) + normal.getZ(vertex) * .002);
+  }
+  const outlineGeometry = new THREE.BufferGeometry(); outlineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+  const line = new THREE.LineSegments(outlineGeometry, new THREE.LineBasicMaterial({ color: INK, transparent: true, opacity: .8, depthWrite: false }));
+  line.name = 'water-boundary-ink'; line.userData.outline = true; line.raycast = () => {}; mesh.add(line);
+}
+function waterColors(mesh, night) {
+  const geo = mesh.geometry, uv = geo.getAttribute('uv'), fall = mesh.userData.riverSection % 2;
+  let colors = geo.getAttribute('color'); if (!colors) { colors = new THREE.Float32BufferAttribute(new Float32Array(uv.count * 3), 3); geo.setAttribute('color', colors); }
+  const underside = mesh.userData.riverSection === 2;
+  const edge = new THREE.Color(underside ? '#64c1d0' : '#6cc0de'), center = new THREE.Color(underside ? '#358eac' : '#3f8fc0'), dusk = new THREE.Color('#1f3f66'), white = new THREE.Color('#e6f6f4'), tint = new THREE.Color();
+  for (let n = 0; n < uv.count; n++) {
+    tint.copy(fall ? white : edge).lerp(fall ? white : center, Math.sin(uv.getY(n) * Math.PI)).lerp(dusk, night * (fall ? .5 : 1));
+    colors.setXYZ(n, tint.r, tint.g, tint.b);
+  }
+  colors.needsUpdate = true;
 }
 
-function waterMaterial(low) {
-  if (low) return new THREE.MeshBasicMaterial({ color: '#72bdc8' });
-  return new THREE.ShaderMaterial({
-    uniforms: { time: { value: 0 }, night: { value: 0 } },
-    vertexShader: 'varying vec2 waterUv; void main(){waterUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
-    fragmentShader: `varying vec2 waterUv; uniform float time; uniform float night;
-      void main(){
-        float shore = smoothstep(0.0,0.17,waterUv.y)*smoothstep(0.0,0.17,1.0-waterUv.y);
-        float ripple = sin(waterUv.x*1.6-time*.4+waterUv.y*9.0)*sin(waterUv.x*.7+waterUv.y*18.0+time*.2);
-        vec3 day=mix(vec3(.56,.79,.78),vec3(.28,.62,.70),shore);
-        vec3 dusk=mix(vec3(.28,.43,.49),vec3(.13,.30,.42),shore);
-        vec3 tint=mix(day,dusk,night)+ripple*.024*(1.0-night*.8);
-        gl_FragColor=vec4(tint,1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }`,
-  });
+// All bank seams use the terrain's exact x-section envelope. The outer edge is
+// y=0; quay parapets sit .35 above it and grassy banks descend to the water.
+function bankGeometry(xs, side, half) {
+  const positions = [], indices = [], columns = side < 0 ? 5 : 3;
+  for (let i = 0; i < xs.length; i++) {
+    const x = xs[i], s = riverSection(x), inner = side < 0 ? s.waterMinZ : s.waterMaxZ, outer = side < 0 ? s.bankMinZ : s.bankMaxZ;
+    const profile = side < 0 ? [[inner, WATER_Y - .1], [inner, .35], [inner + (outer - inner) * .28, .35], [inner + (outer - inner) * .28, .02], [outer, 0]]
+      : [[inner, WATER_Y - .1], [inner + (outer - inner) * .35, WATER_Y + .18], [outer, 0]];
+    for (const [z, y] of profile) positions.push(x, y, clamp(z, -half, half));
+    if (i + 1 < xs.length) for (let j = 0; j + 1 < columns; j++) { const n = i * columns + j, next = n + columns;
+      if (side > 0) indices.push(n, n + 1, next, n + 1, next + 1, next); else indices.push(n, next, n + 1, n + 1, next, next + 1);
+    }
+  }
+  return geometry(positions, indices);
 }
-
-/** Triangular-prism ramp from the ground to the deck, so the rendered walking
- * surface and the pure bridgeHeight query use exactly the same linear slope. */
-function rampGeometry(span, near, far, nearY, farY) {
-  const positions = [], indices = [], left = span.x - span.halfWidth, right = span.x + span.halfWidth;
-  positions.push(left, nearY, near, right, nearY, near, left, farY, far, right, farY, far);
-  positions.push(left, 0, near, right, 0, near, left, 0, far, right, 0, far);
-  indices.push(0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5, 0, 1, 4, 1, 5, 4, 2, 6, 3, 3, 6, 7);
-  const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3)); geo.setIndex(indices); geo.computeVertexNormals();
-  return geo;
+function riverWaterGeometry(xs, underside, half) {
+  const positions = [], normals = [], uv = [], indices = [], across = 4, direction = underside ? -1 : 1;
+  for (let i = 0; i < xs.length; i++) {
+    const x = xs[i], section = riverSection(x);
+    for (let j = 0; j <= across; j++) {
+      positions.push(x, underside ? RIVER_DECK_Y - WATER_Y : WATER_Y, clamp(section.waterMinZ + (section.waterMaxZ - section.waterMinZ) * j / across, -half, half));
+      normals.push(0, direction, 0); uv.push(x, j / across);
+      if (i + 1 < xs.length && j < across) { const n = i * (across + 1) + j, next = n + across + 1;
+        const face = [n, n + 1, next, n + 1, next + 1, next];
+        if (underside) for (let k = 0; k < face.length; k += 3) [face[k + 1], face[k + 2]] = [face[k + 2], face[k + 1]];
+        indices.push(...face);
+      }
+    }
+  }
+  return geometry(positions, indices, normals, uv);
 }
-
-function beamBetween(a, b, width = 0.10) {
-  const start = new THREE.Vector3(...a), end = new THREE.Vector3(...b), middle = start.clone().add(end).multiplyScalar(0.5);
-  const geometry = new THREE.BoxGeometry(width, start.distanceTo(end), width);
-  geometry.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), end.sub(start).normalize()));
-  geometry.translate(middle.x, middle.y, middle.z); return geometry;
+function bridgePoint(span, along, lateral) { return span.axis === 'x' ? { x: along, z: span.z + lateral } : { x: span.x + lateral, z: along }; }
+function bridgeSurface(span, crossings, left, right, offset = 0, bottom = false) {
+  const rows = Math.max(4, Math.ceil((span.max - span.min) / .4)), cols = Math.max(1, Math.ceil((right - left) / .4)), positions = [], indices = [];
+  for (let i = 0; i <= rows; i++) for (let j = 0; j <= cols; j++) {
+    const p = bridgePoint(span, span.min + (span.max - span.min) * i / rows, left + (right - left) * j / cols);
+    positions.push(p.x, (bridgeHeight(p.x, p.z, crossings) ?? span.groundY) + offset, p.z);
+    if (i < rows && j < cols) { const n = i * (cols + 1) + j, next = n + cols + 1;
+      const face = span.axis === 'x' ? [n, n + 1, next, n + 1, next + 1, next] : [n, next, n + 1, n + 1, next, next + 1];
+      if (bottom) for (let k = 0; k < face.length; k += 3) [face[k + 1], face[k + 2]] = [face[k + 2], face[k + 1]];
+      indices.push(...face);
+    }
+  }
+  return geometry(positions, indices);
+}
+function mirrorLandscape(top) {
+  const result = top.clone(true); result.name = 'river-underside-banks-bridges-docks'; result.position.y = RIVER_DECK_Y; result.scale.y = -1;
+  result.traverse(node => { if (node.geometry) node.geometry = node.geometry.clone();
+    if (node.material && !node.material.userData.shared) node.material = node.material.clone();
+    node.raycast = () => {}; if (node.userData.riverBridge) node.userData.riverBridge = false;
+  }); return result;
 }
 
 export class River {
   constructor(world, { random = Math.random, now = Date.now } = {}) {
     this.world = world; this.random = random; this.now = now; this.quality = world.quality || 'high';
     this.group = new THREE.Group(); this.group.name = 'district-river'; world.land.add(this.group);
-    this.projects = []; this.boats = []; this.bridges = []; this.elapsed = world.elapsed || 0; this.waterTime = 0;
-    this.typeBag = []; this.lastBoatType = null; this.fleetTypes = [];
-    this.nextAt = nextBoatAt(this.elapsed, this.random()); this.startedAt = null;
-    this.setBounds({ half: world.half || 29.5 }); this.buildBoats(selectBoatManifest([], this.now()));
+    this.projects = []; this.boats = []; this.slots = []; this.bridges = []; this.waterMeshes = []; this.phase = 0; this.waterTime = 0;
+    this.elapsed = world.elapsed || 0; this.typeBag = []; this.lastBoatType = null; this.timingSample = this.random();
+    this.fleetCount = this.quality === 'low' ? 2 : 3;
+    this.setBounds({ half: world.half || 29.5 }); this.initFleet(); this.renderBoats(); this.placeBoats();
   }
-
   setBounds({ half, crossings } = {}) {
     if (!Number.isFinite(half) || half < 12) return;
-    const first = Math.ceil((-half + 3) / PITCH - 0.5), last = Math.floor((half - 3) / PITCH - 0.5);
-    const xs = crossings || Array.from({ length: Math.max(0, last - first + 1) }, (_, n) => (first + n + 0.5) * PITCH);
-    const signature = JSON.stringify([half, xs, this.quality]); if (signature === this.boundsSignature) return;
-    this.boundsSignature = signature; this.half = half; this.crossings = xs;
+    const spans = (crossings || bridgeCrossings(half)).map(bridgeSpan).filter(Boolean);
+    const signature = JSON.stringify([half, spans, this.quality]); if (signature === this.boundsSignature) return;
+    this.boundsSignature = signature; this.half = half; this.crossings = spans; this.loop = createRiverLoop(half);
     if (this.landscape) { this.landscape.removeFromParent(); disposeAll(this.landscape); }
-    this.landscape = new THREE.Group(); this.landscape.name = 'river-banks-bridges-dock'; this.group.add(this.landscape); this.bridges = [];
-    const low = this.quality === 'low', edge = half - 0.5, step = low ? 3 : 1.2;
-    this.water = add(this.landscape, ribbon(edge, -RIVER_HALF_WIDTH, RIVER_HALF_WIDTH, WATER_Y, step), waterMaterial(low)); this.water.name = 'river-water';
-    const stones = [];
-    for (const side of [-1, 1]) {
-      solid(this.landscape, bankGeometry(edge, side, step), '#9abd89');
-      for (let x = -edge + 1; x < edge - 0.5; x += low ? 4.2 : 2.7) stones.push(placed(new THREE.IcosahedronGeometry(0.25, 0), { x, y: 0.15, z: riverZ(x) + side * (RIVER_HALF_WIDTH + 0.2), sy: 0.65, sx: 1.35 }));
+    this.landscape = new THREE.Group(); this.landscape.name = 'river-landscape'; this.group.add(this.landscape);
+    this.bridges = []; this.waterMeshes = []; this.lastNight = undefined;
+    const low = this.quality === 'low', points = sampleRiver(half, low ? 1.6 : .55), count = Math.ceil(half * 2 / (low ? 1.6 : .55));
+    const all = Array.from({ length: count + 1 }, (_, n) => -half + n / count * half * 2);
+    const inside = x => { const section = riverSection(x); return section.bankMinZ < half && section.bankMaxZ > -half; };
+    const xs = all.filter((x, n) => inside(x) || (n && inside(all[n - 1])) || (n < count && inside(all[n + 1]))), top = new THREE.Group(); top.name = 'river-top-banks-bridges-docks';
+    this.landscape.add(top);
+    add(top, bankGeometry(xs, -1, half), toonMaterial('#c9c2b0'), !low).name = 'downtown-stone-quay';
+    add(top, bankGeometry(xs, 1, half), toonMaterial('#7cc56a'), !low).name = 'suburbs-grassy-bank';
+    this.buildBanks(top, points, low); this.buildBridges(top, low); this.buildDocks(top, low); this.landscape.add(mirrorLandscape(top));
+    for (let i = 0; i < 4; i++) {
+      const fall = i % 2 === 1, geo = fall ? waterfallRibbon(this.loop, this.loop.joins[i], this.loop.joins[i + 1], low ? 1 : .4) : riverWaterGeometry(xs, i === 2, half);
+      const water = add(this.landscape, geo, waterMaterial(low, half), false, false, false); outlineWater(water);
+      water.name = ['river-water-top', 'river-waterfall-downstream', 'river-water-underside', 'river-waterfall-upstream'][i]; water.userData.riverSection = i; waterColors(water, 0); this.waterMeshes.push(water);
     }
-    if (stones.length) solid(this.landscape, mergeParts(stones), '#a8afa1');
-    const supports = [], rails = [], posts = [];
-    for (const x of xs) {
-      const span = bridgeSpan(x), deckLength = span.deckMaxZ - span.deckMinZ;
-      const bridge = new THREE.Group(); bridge.name = `river-bridge:${x}`; this.landscape.add(bridge);
-      // A two-millimetre seam overlap prevents Float32 rounding from opening a
-      // ray-picking crack where the exact ramp end meets the flat deck.
-      const surfaces = [box(span.halfWidth * 2, SLAB, deckLength + 0.004, x, span.deckY - SLAB / 2, (span.deckMinZ + span.deckMaxZ) / 2),
-        rampGeometry(span, span.minZ, span.deckMinZ, span.groundY, span.deckY), rampGeometry(span, span.deckMaxZ, span.maxZ, span.deckY, span.groundY)];
-      const deck = add(bridge, mergeParts(surfaces), toonMaterial('#c8c9b7'), !low, true);
-      deck.userData.riverBridge = true; deck.userData.crossingX = x; this.bridges.push(deck);
-      for (const z of [span.deckMinZ - 0.18, span.deckMaxZ + 0.18]) supports.push(box(span.halfWidth * 2, span.deckY - SLAB, 0.35, x, (span.deckY - SLAB) / 2, z));
-      for (const side of [-1, 1]) {
-        const sx = x + side * (span.halfWidth - 0.10), zs = [span.minZ, span.deckMinZ, span.deckMaxZ, span.maxZ], ys = [span.groundY, span.deckY, span.deckY, span.groundY];
-        for (let n = 0; n < 3; n++) {
-          rails.push(beamBetween([sx, ys[n] + 0.55, zs[n]], [sx, ys[n + 1] + 0.55, zs[n + 1]], 0.10));
-          const segments = Math.ceil((zs[n + 1] - zs[n]) / 1.5);
-          for (let k = 0; k < segments; k++) {
-            const t = k / segments, z = zs[n] + (zs[n + 1] - zs[n]) * t, y = ys[n] + (ys[n + 1] - ys[n]) * t;
-            posts.push(box(0.10, 0.55, 0.10, sx, y + 0.275, z));
-          }
+    this.water = this.waterMeshes[0]; this.buildWaterDetails(low); this.refreshTiming(); this.placeBoats();
+  }
+  buildBanks(top, points, low) {
+    const railing = [], posts = [], rocks = [], reeds = [], lamps = [], panels = [], streaks = [];
+    const urban = x => ({ x, y: .35, z: riverSection(x).waterMinZ - .10 });
+    for (let n = 1; n < points.length; n++) { const a = urban(points[n - 1].x), b = urban(points[n].x);
+      if (Math.abs(a.z) < this.half && Math.abs(b.z) < this.half && !bridgeAt(a.x, a.z, this.crossings) && !bridgeAt(b.x, b.z, this.crossings)) railing.push(beam({ ...a, y: .88 }, { ...b, y: .88 }, .065));
+    }
+    for (let distance = 2; distance < this.loop.riverLength - 2; distance += low ? 5.5 : 3.3) {
+      const x = riverLoopPose(this.loop, distance / this.loop.length).position.x, p = urban(x), section = riverSection(x);
+      if (Math.abs(p.z) < this.half && !bridgeAt(p.x, p.z, this.crossings)) {
+        posts.push(box(.08, .55, .08, p.x, .625, p.z));
+        if (Math.floor(distance / (low ? 5.5 : 3.3)) % 4 === 0) {
+          lamps.push(box(.08, 2.1, .08, p.x, 1.4, p.z), box(.35, .12, .24, p.x, 2.48, p.z));
+          panels.push(box(.25, .025, .16, p.x, 2.4075, p.z));
+          for (let k = 0; k < 3; k++) streaks.push(box(.65 - k * .14, .006, .06, p.x + k * .13, WATER_Y + .034, section.waterMinZ + .35 + k * .24));
         }
-        posts.push(box(0.10, 0.55, 0.10, sx, span.groundY + 0.275, span.maxZ));
+      }
+      const z = section.waterMaxZ + (section.bankMaxZ - section.waterMaxZ) * .46;
+      if (!bridgeAt(x, z, this.crossings)) {
+        rocks.push(placed(new THREE.IcosahedronGeometry(.22, 0), { x, y: WATER_Y + .23, z, sy: .7, sx: 1.3 }));
+        if (!low) for (let k = 0; k < 3; k++) reeds.push(box(.025, .32 + k * .04, .025, x + (k - 1) * .055, WATER_Y + .37, z + k * .035));
       }
     }
-    if (supports.length) solid(this.landscape, mergeParts(supports), '#9aab9f', !low);
-    if (rails.length) solid(this.landscape, mergeParts(rails), '#526f69', !low);
-    if (posts.length) solid(this.landscape, mergeParts(posts), '#7b8d80', !low);
-    // A dock on each bank at x=0 keeps moored boats between the two nearest bridges.
-    const docks = [], piles = [];
-    for (const side of [-1, 1]) {
-      const z = riverZ(0) + side * (RIVER_HALF_WIDTH + 0.03);
-      docks.push(box(5.2, 0.12, 0.74, 0, WATER_Y + 0.20, z));
-      for (const x of [-2.2, 2.2]) piles.push(box(0.18, WATER_Y + 0.55, 0.18, x, (WATER_Y + 0.55) / 2, z));
-    }
-    solid(this.landscape, mergeParts(docks), '#b79873', !low); solid(this.landscape, mergeParts(piles), '#776451', !low);
+    solid(top, railing, '#53605d', 'quay-railing', low); solid(top, posts, '#67736a', 'quay-posts', low);
+    solid(top, rocks, '#a6aea0', 'bank-rocks', low); solid(top, reeds, '#72924b', 'bank-reeds', low);
+    solid(top, lamps, '#566361', 'quay-lamps', low);
+    if (panels.length) add(top, mergeParts(panels), toonMaterial('#fff0c2', { emissive: '#ffdc91', emissiveIntensity: .3, cache: false })).name = 'bridge-lamp-panels';
+    if (streaks.length) add(top, mergeParts(streaks), new THREE.MeshBasicMaterial({ color: '#ffdb8c', transparent: true, opacity: 0, depthWrite: false }), false, false, false).name = 'quay-light-streaks';
   }
-
+  buildBridges(top, low) {
+    const arches = [], rails = [], posts = [], lamps = [], bulbs = [], walks = [];
+    for (const span of this.crossings) {
+      const deck = add(top, bridgeSurface(span, this.crossings, -span.halfWidth, span.halfWidth), toonMaterial('#a7aaa2'), !low, true);
+      deck.name = `river-bridge:${span.id}`; deck.userData.riverBridge = true; deck.userData.crossing = span; this.bridges.push(deck);
+      add(top, bridgeSurface(span, this.crossings, -span.halfWidth, span.halfWidth, -SLAB, true), toonMaterial('#aaa28e'), !low).name = 'bridge-arch-underside';
+      for (const side of [-1, 1]) {
+        const lateral = side * (span.halfWidth - .10);
+        walks.push(bridgeSurface(span, this.crossings, side < 0 ? -span.halfWidth : span.halfWidth - .48, side < 0 ? -span.halfWidth + .48 : span.halfWidth, .008));
+        const segments = Math.ceil((span.max - span.min) / .6);
+        for (let i = 0; i < segments; i++) {
+          const a = bridgePoint(span, span.min + (span.max - span.min) * i / segments, lateral), b = bridgePoint(span, span.min + (span.max - span.min) * (i + 1) / segments, lateral);
+          a.y = bridgeHeight(a.x, a.z, this.crossings) ?? span.groundY; b.y = bridgeHeight(b.x, b.z, this.crossings) ?? span.groundY;
+          arches.push(beam({ ...a, y: a.y - SLAB / 2 }, { ...b, y: b.y - SLAB / 2 }, SLAB, .23));
+          const junction = p => {
+            const along = span.axis === 'x' ? p.x : p.z, street = (Math.round(along / 16 - .5) + .5) * 16;
+            return Math.abs(along - street) < 3.1 || this.crossings.some(other => other.id !== span.id && p.x >= other.x0 - .2 && p.x <= other.x1 + .2 && p.z >= other.z0 - .2 && p.z <= other.z1 + .2);
+          };
+          if (a.y > .55 && b.y > .55 && !junction(a) && !junction(b)) rails.push(beam({ ...a, y: a.y + .65 }, { ...b, y: b.y + .65 }, .075));
+          if (i % 3 === 0 && a.y > .55 && !junction(a)) posts.push(box(.08, .65, .08, a.x, a.y + .325, a.z));
+        }
+        for (const along of [span.min + .35, span.max - .35]) { const p = bridgePoint(span, along, lateral), y = bridgeHeight(p.x, p.z, this.crossings) ?? span.groundY;
+          lamps.push(box(.10, 2, .10, p.x, y + 1, p.z), box(.38, .13, .30, p.x, y + 2.02, p.z)); bulbs.push(box(.28, .025, .20, p.x, y + 1.9475, p.z));
+        }
+      }
+    }
+    solid(top, arches, '#c9c2b0', 'stone-bridge-arches', low); solid(top, walks, '#ede2c8', 'cream-bridge-walks', low);
+    solid(top, rails, '#586260', 'bridge-rails', low); solid(top, posts, '#727a70', 'bridge-posts', low); solid(top, lamps, '#566361', 'bridge-end-lamps', low);
+    if (bulbs.length) add(top, mergeParts(bulbs), toonMaterial('#fff0c2', { emissive: '#ffdc91', emissiveIntensity: .3, cache: false })).name = 'bridge-lamp-panels';
+  }
+  buildDocks(top, low) {
+    const start = this.loop.start.x + 4, end = this.loop.end.x - 4, center = clamp(0, start, end);
+    const candidates = Array.from({ length: Math.max(2, Math.ceil((end - start) / .4) + 1) }, (_, n) => start + (end - start) * n / Math.max(1, Math.ceil((end - start) / .4))).sort((a, b) => Math.abs(a - center) - Math.abs(b - center));
+    const footprint = (pose, length, z0, z1) => {
+      const corners = [-length / 2, length / 2].flatMap(x => [z0, z1].map(z => ({ x: pose.position.x + pose.forward.x * x + pose.right.x * z, z: pose.position.z + pose.forward.z * x + pose.right.z * z })));
+      return { x0: Math.min(...corners.map(p => p.x)), x1: Math.max(...corners.map(p => p.x)), z0: Math.min(...corners.map(p => p.z)), z1: Math.max(...corners.map(p => p.z)) };
+    };
+    const clear = rect => rect.x0 > -this.half && rect.x1 < this.half && rect.z0 > -this.half && rect.z1 < this.half
+      && !this.crossings.some(span => rect.x0 < span.x1 + .15 && rect.x1 > span.x0 - .15 && rect.z0 < span.z1 + .15 && rect.z1 > span.z0 - .15);
+    this.moorings = []; this.dockXs = [];
+    for (const side of [-1, 1]) {
+      const dockX = candidates.find(x => clear(footprint(riverFrame(x, side * (RIVER_HALF_WIDTH + .04)), 6.9, side < 0 ? -1.3 : -.55, side > 0 ? 1.3 : .55))
+        && clear(footprint(riverFrame(x, side * (RIVER_HALF_WIDTH - 1.18)), 3.8, -.92, .92))) ?? center;
+      this.dockXs.push(dockX); this.dockX = this.dockXs[0];
+      const dock = new THREE.Group(); dock.name = side < 0 ? 'downtown-stone-dock' : 'suburbs-wood-dock'; top.add(dock);
+      const pose = riverFrame(dockX, side * (RIVER_HALF_WIDTH + .04), WATER_Y + .22); dock.position.copy(vector(pose.position)); dock.quaternion.setFromRotationMatrix(frameMatrix({ ...pose, position: { x: 0, y: 0, z: 0 } }));
+      const deck = [], piles = [], stairs = [], color = side < 0 ? '#c9c2b0' : '#b77a45';
+      if (low || side < 0) deck.push(box(6.7, .13, 1.05, 0, 0, 0)); else for (let x = -3.15; x <= 3.16; x += .45) deck.push(box(.43, .13, 1.05, x, 0, 0));
+      for (const x of [-2.8, 2.8]) for (const z of [-.35, .35]) piles.push(box(.16, .80, .16, x, -.31, z));
+      for (let k = 0; k < 4; k++) { const height = .13 + k * .14; stairs.push(box(1.05, height, .26, 0, height / 2 - .065, side * (.43 + k * .23))); }
+      solid(dock, deck, color, 'dock-planks', low); solid(dock, piles, side < 0 ? '#a19a89' : '#806750', 'dock-piles', low); solid(dock, stairs, color, 'dock-steps', low);
+      this.moorings.push(riverFrame(dockX, side * (RIVER_HALF_WIDTH - 1.18)));
+    }
+  }
+  buildWaterDetails(low) {
+    this.ripples = null; this.foam = null; this.rippleOutline = null; this.foamOutline = null; if (low) return;
+    const dash = new THREE.BoxGeometry(.55, .008, .055);
+    this.ripples = new THREE.InstancedMesh(dash, new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: .35, side: THREE.DoubleSide, depthWrite: false }), RIPPLE_COUNT);
+    this.ripples.name = 'river-ripples'; this.ripples.raycast = () => {}; this.ripples.frustumCulled = false; this.landscape.add(this.ripples);
+    this.rippleOutline = instancedOutline(this.ripples, .004); this.rippleOutline.name = 'river-ripple-outlines'; this.landscape.add(this.rippleOutline);
+    this.foam = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(.11, 0), new THREE.MeshBasicMaterial({ color: '#e5f8f5' }), 36);
+    this.foam.name = 'waterfall-foam'; this.foam.raycast = () => {}; this.foam.frustumCulled = false; this.landscape.add(this.foam);
+    this.foamOutline = instancedOutline(this.foam, .007); this.foamOutline.name = 'waterfall-foam-outlines'; this.landscape.add(this.foamOutline);
+  }
   pickables() { return this.group.visible ? this.bridges : []; }
   groundAt(x, z) { return this.group.visible ? bridgeHeight(x, z, this.crossings) : null; }
-
+  refreshTiming() { if (this.loop) this.timing = loopTiming(this.loop.length, { sample: this.timingSample, types: this.slots.map(s => s.type) }); }
+  nextType() { const choice = chooseBoatTypes(1, { bag: this.typeBag, previous: this.lastBoatType, random: this.random }); this.typeBag = choice.bag; this.lastBoatType = choice.lastType; return choice.types[0]; }
+  entry(type, index) { const manifest = selectBoatManifest(this.projects, this.now()), pivot = index % Math.max(1, manifest.length); return boatFleet([...manifest.slice(pivot), ...manifest.slice(0, pivot)], [type], { random: this.random })[0]; }
+  initFleet() { this.slots = Array.from({ length: this.fleetCount }, (_, index) => { const type = this.nextType(); return { type, entry: this.entry(type, index), lap: 0 }; }); this.refreshTiming(); }
   setProjects(projects = []) {
     this.projects = projects;
-    if (this.wasReduced) {
-      const manifest = selectBoatManifest(projects, this.now());
-      if (JSON.stringify(manifest) !== JSON.stringify(this.manifest)) this.buildBoats(manifest);
-    }
+    if (this.wasReduced) { const signature = JSON.stringify(selectBoatManifest(projects, this.now())); if (signature !== this.mooredManifest) { this.mooredManifest = signature; this.mooredEntries = null; this.renderBoats(); this.placeBoats(); } }
+    else if (this.phase === 0) { this.slots.forEach((slot, index) => { slot.entry = this.entry(slot.type, index); }); this.renderBoats(); this.placeBoats(); }
   }
-  setQuality(quality) {
-    if (quality === this.quality) return; this.quality = quality;
-    this.setBounds({ half: this.half, crossings: this.crossings }); this.buildBoats(this.manifest || selectBoatManifest(this.projects, this.now()));
-  }
-  buildBoats(manifest, { departure = false, moored = false } = {}) {
-    const count = this.wasReduced || moored ? 2 : Math.max(2, Math.min(6, manifest.length));
-    if (departure) {
-      const choice = chooseBoatTypes(count, { bag: this.typeBag, previous: this.lastBoatType, random: this.random });
-      this.typeBag = choice.bag; this.lastBoatType = choice.lastType; this.fleetTypes = choice.types;
-    } else {
-      // Quality changes and refreshed commit labels keep the same hulls. Only a
-      // new voyage or moored fleet consumes the bag; unused preview hulls do not.
-      this.fleetTypes = this.fleetTypes.slice(0, count);
-      for (const type of BOAT_TYPES) if (this.fleetTypes.length < count && !this.fleetTypes.includes(type)) this.fleetTypes.push(type);
-    }
-    const poses = this.boats.map(boat => ({ position: boat.position.clone(), rotation: boat.rotation.clone(), visible: boat.visible }));
+  setQuality(quality) { if (quality === this.quality) return; this.quality = quality; this.setBounds({ half: this.half, crossings: this.crossings }); this.renderBoats(); this.placeBoats(); }
+  renderBoats() {
     for (const boat of this.boats) { boat.removeFromParent(); disposeAll(boat); }
-    this.manifest = manifest; this.fleet = boatFleet(manifest, this.fleetTypes);
-    this.boats = this.fleet.map(entry => createBoat(entry, { low: this.quality === 'low' }));
-    this.boats.forEach((boat, index) => {
-      const pose = !departure && poses[index];
-      if (pose) { boat.position.copy(pose.position); boat.rotation.copy(pose.rotation); }
-      boat.visible = pose ? pose.visible : false; this.group.add(boat);
+    if (this.wasReduced && !this.mooredEntries) { const pair = ['barge', 'sailboat'].map((type, n) => this.entry(type, n)); this.mooredEntries = [...pair, ...pair]; }
+    const entries = this.wasReduced ? this.mooredEntries : this.slots.map(slot => slot.entry);
+    this.boats = entries.map(entry => { const boat = createBoat(entry, { low: this.quality === 'low' }); this.group.add(boat); return boat; }); this.fleet = entries; this.fleetTypes = entries.map(e => e.type);
+  }
+  placeBoats() {
+    if (!this.loop) return;
+    this.boats.forEach((boat, index) => { let pose;
+      if (this.wasReduced) { pose = this.moorings[index % 2]; if (!pose) return;
+        if (index >= 2) pose = { ...pose, position: { ...pose.position, y: RIVER_DECK_Y - WATER_Y }, forward: { x: -pose.forward.x, y: 0, z: -pose.forward.z }, up: { x: 0, y: -1, z: 0 } };
+      } else pose = riverLoopPose(this.loop, loopPhase(this.phase, 1, index, this.fleetCount).phase);
+      boat.position.copy(vector(pose.position)); boat.quaternion.setFromRotationMatrix(frameMatrix({ ...pose, position: { x: 0, y: 0, z: 0 } })); boat.visible = true; boat.userData.loopSection = pose.section || (index >= 2 ? 'moored-underside' : 'moored-top');
     });
   }
-
   update(dt, elapsed, env = {}) {
     this.elapsed = elapsed; if (env.quality && env.quality !== this.quality) this.setQuality(env.quality);
-    const reduced = env.reducedMotion ?? this.world.reducedMotion?.() ?? false, night = Math.max(0, Math.min(1, env.night ?? this.world.current?.night ?? 0));
-    if (reduced !== this.wasReduced) { this.startedAt = null; this.nextAt = nextBoatAt(elapsed, this.random()); if (reduced) this.buildBoats(selectBoatManifest(this.projects, this.now()), { departure: true, moored: true }); this.wasReduced = reduced; }
-    if (!reduced && this.startedAt === null && elapsed >= this.nextAt) { this.startedAt = elapsed; this.nextAt = nextBoatAt(elapsed, this.random()); this.buildBoats(selectBoatManifest(this.projects, this.now()), { departure: true }); }
-    if (!reduced) this.waterTime += Math.max(0, dt) * (1 - night * 0.85);
-    if (this.water.material.uniforms) { this.water.material.uniforms.time.value = this.waterTime; this.water.material.uniforms.night.value = night; }
-    else this.water.material.color.setRGB(0.45 - night * 0.27, 0.74 - night * 0.39, 0.78 - night * 0.35);
-    let allDone = this.startedAt !== null;
-    this.boats.forEach((boat, index) => {
-      let x, offset = 0;
-      if (reduced) { x = 0; offset = (index ? -1 : 1) * 1.05; boat.visible = index < 2; }
-      else if (this.startedAt !== null) { const pass = boatPass(elapsed, this.startedAt, this.half, index); x = pass.x; boat.visible = pass.visible; if (!pass.done) allDone = false; }
-      else { boat.visible = false; return; }
-      boat.position.set(x, WATER_Y, riverZ(x) + offset); boat.rotation.y = -Math.atan(riverSlope(x));
-    });
-    if (allDone) this.startedAt = null;
+    const reduced = Boolean(env.reducedMotion ?? this.world.reducedMotion?.()), night = clamp(env.night ?? this.world.current?.night ?? 0, 0, 1), low = this.quality === 'low';
+    if (reduced !== Boolean(this.wasReduced)) { this.wasReduced = reduced; this.mooredManifest = JSON.stringify(selectBoatManifest(this.projects, this.now())); this.mooredEntries = null; this.renderBoats(); }
+    if (!reduced) {
+      this.phase += Math.max(0, dt) * this.timing.speed / this.loop.length; this.waterTime += Math.max(0, dt) * (1 - night * .85);
+      this.slots.forEach((slot, index) => { const { lap } = loopPhase(this.phase, 1, index, this.fleetCount);
+        if (lap > slot.lap) { for (let turn = slot.lap; turn < lap; turn++) slot.type = this.nextType(); slot.lap = lap; slot.entry = this.entry(slot.type, index);
+          const old = this.boats[index]; old.removeFromParent(); disposeAll(old); this.boats[index] = createBoat(slot.entry, { low }); this.group.add(this.boats[index]); this.refreshTiming(); }
+      }); this.fleet = this.slots.map(s => s.entry); this.fleetTypes = this.slots.map(s => s.type);
+    }
+    this.placeBoats(); this.boats.forEach(boat => updateBoat(boat, reduced ? 0 : dt, this.waterTime, { night, reducedMotion: reduced, low }));
+    for (const water of this.waterMeshes) { const uniforms = water.material.userData.waterUniforms;
+      if (uniforms) { uniforms.riverTime.value = this.waterTime; uniforms.riverNight.value = night; uniforms.riverMotion.value = Number(!reduced); }
+      if (this.lastNight === undefined || Math.abs(this.lastNight - night) > .004) waterColors(water, night);
+    }
+    if (this.lastNight === undefined || Math.abs(this.lastNight - night) > .004) this.lastNight = night;
+    this.landscape.traverse(node => { if (node.name === 'bridge-lamp-panels') node.material.emissiveIntensity = .2 + night * .8; if (node.name === 'quay-light-streaks') node.material.opacity = night * .35; });
+    if (this.ripples) { this.ripples.visible = !reduced; this.rippleOutline.visible = !reduced; this.ripples.material.opacity = .32 - night * .20;
+      for (let n = 0; n < RIPPLE_COUNT; n++) { const distance = ((n * .6180339 + this.waterTime * .002) % 1) * (this.loop.riverLength - 4) + 2;
+        const pose = riverLoopPose(this.loop, (n % 2 ? this.loop.riverLength + this.loop.arcLength + distance : distance) / this.loop.length), offset = Math.sin(n * 2.7) * (RIVER_HALF_WIDTH - 1);
+        pose.position.x += pose.right.x * offset; pose.position.z += pose.right.z * offset; pose.position.y += pose.up.y * .045;
+        this.ripples.setMatrixAt(n, frameMatrix(pose, .55 + (n % 4) * .22));
+      } this.ripples.instanceMatrix.needsUpdate = true;
+    }
+    if (this.foam) { this.foam.visible = !reduced; this.foamOutline.visible = !reduced;
+      for (let n = 0; n < 36; n++) { const start = n < 18 ? this.loop.riverLength : this.loop.riverLength * 2 + this.loop.arcLength, within = ((n % 18) / 18 + this.waterTime * .08) % 1;
+        const pose = riverLoopPose(this.loop, (start + within * this.loop.arcLength) / this.loop.length), across = Math.sin(n * 7.2) * (RIVER_HALF_WIDTH - .25);
+        pose.position.x += pose.right.x * across + pose.up.x * .035; pose.position.z += pose.right.z * across + pose.up.z * .035; pose.position.y += pose.up.y * .035;
+        this.foam.setMatrixAt(n, frameMatrix(pose, .7 + (n % 3) * .25));
+      } this.foam.instanceMatrix.needsUpdate = true;
+    }
   }
-
-  dispose() { this.group.removeFromParent(); disposeAll(this.group); this.boats = []; this.bridges = []; this.projects = []; }
+  dispose() { this.group.removeFromParent(); disposeAll(this.group); this.boats = []; this.bridges = []; this.slots = []; this.projects = []; }
 }

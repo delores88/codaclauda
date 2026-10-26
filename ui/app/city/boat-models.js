@@ -1,129 +1,211 @@
-/* Original low-poly river craft. Every model faces +x; local y=0 is the fixed
- * waterline. Compact sails, oars and wheels fit the same channel/bridge envelope. */
-import { THREE, toonMaterial } from './toon.js';
+/* Original low-poly river craft, facing +x with local y=0 at the waterline.
+ * Static parts batch by material; moving parts pivot on physical supports. */
+import { THREE, toonMaterial, addOutline } from './toon.js';
 import { mergeParts, placed, plaqueTexture } from './fx.js';
 import { BOAT_TYPES } from './boats.js';
 
 export { BOAT_TYPES };
+export const MODEL_MAX_TOP = 1.84; // mast + ink + maximum .03 local bob
+export const BOAT_DIMENSIONS = Object.freeze({
+  sailboat: { length: 2.2, width: 0.7 }, rowboat: { length: 1.4, width: 0.6 },
+  tugboat: { length: 1.8, width: 0.78 }, barge: { length: 3.6, width: 1.2 },
+  'paddle-steamer': { length: 3, width: 0.94 }, canoe: { length: 1.6, width: 0.45 },
+});
+const INK = 0.012;
+const COLORS = { sailboat: '#f5f3e9', rowboat: '#a8774c', tugboat: '#bc4947', barge: '#638a61', 'paddle-steamer': '#eee4c9', canoe: '#e5bc4d' };
 const box = (w, h, d, x = 0, y = 0, z = 0, rz = 0) => placed(new THREE.BoxGeometry(w, h, d), { x, y, z, rz });
-const cylinder = (r, h, x, y, z, low, rx = 0) => placed(new THREE.CylinderGeometry(r, r, h, low ? 5 : 10), { x, y, z, rx });
+const cylinder = (r, h, x, y, z, low, rx = 0) => placed(new THREE.CylinderGeometry(r, r, h, low ? 6 : 12), { x, y, z, rx });
+const sphere = (r, x, y, z, low) => placed(new THREE.SphereGeometry(r, low ? 6 : 10, low ? 4 : 6), { x, y, z });
 
-function mesh(group, geometry, material, low) {
-  const part = new THREE.Mesh(geometry, material);
-  part.castShadow = !low; part.receiveShadow = !low; part.raycast = () => {};
-  group.add(part); return part;
+function mesh(parent, geometry, material, low, outline = true) {
+  const node = new THREE.Mesh(geometry, material);
+  node.castShadow = !low; node.receiveShadow = !low; node.raycast = () => {};
+  if (outline) addOutline(node, { thickness: INK });
+  parent.add(node); return node;
 }
-
+class Parts {
+  constructor() { this.groups = new Map(); }
+  add(tint, geometry) {
+    const material = typeof tint === 'string' ? toonMaterial(tint) : tint;
+    if (!this.groups.has(material)) this.groups.set(material, []);
+    this.groups.get(material).push(geometry);
+  }
+  build(parent, low) { for (const [material, parts] of this.groups) mesh(parent, mergeParts(parts), material, low); }
+}
+function beam(a, b, width = 0.045) {
+  const from = new THREE.Vector3(...a), to = new THREE.Vector3(...b), direction = to.clone().sub(from);
+  const geometry = new THREE.BoxGeometry(width, direction.length(), width);
+  geometry.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize()));
+  geometry.translate(...from.add(to).multiplyScalar(0.5).toArray()); return geometry;
+}
 function hullGeometry(length, width, { pointed = false, low = false } = {}) {
-  const tail = -length / 2, bow = length / 2, shoulder = bow - 0.48, half = width / 2;
-  const shape = new THREE.Shape(); shape.moveTo(tail, pointed ? 0 : -half * 0.78);
-  if (pointed) shape.lineTo(tail + 0.5, -half);
-  else if (!low) shape.lineTo(tail + 0.18, -half);
+  const tail = -length / 2, bow = length / 2, shoulder = bow - Math.min(0.36, length * 0.2), half = width / 2;
+  const shape = new THREE.Shape(); shape.moveTo(tail, pointed ? 0 : -half * 0.8);
+  if (pointed) shape.lineTo(tail + length * 0.22, -half);
+  else if (!low) shape.lineTo(tail + 0.12, -half);
   shape.lineTo(shoulder, -half); shape.lineTo(bow, 0); shape.lineTo(shoulder, half);
-  if (pointed) shape.lineTo(tail + 0.5, half);
-  else { if (!low) shape.lineTo(tail + 0.18, half); shape.lineTo(tail, half * 0.78); }
+  if (pointed) shape.lineTo(tail + length * 0.22, half);
+  else { if (!low) shape.lineTo(tail + 0.12, half); shape.lineTo(tail, half * 0.8); }
   shape.closePath();
-  const geometry = new THREE.ExtrudeGeometry(shape, { depth: 0.34, bevelEnabled: false, curveSegments: 1 });
-  geometry.rotateX(-Math.PI / 2); geometry.translate(0, -0.17, 0); return geometry;
+  const geometry = new THREE.ExtrudeGeometry(shape, { depth: 0.26, bevelEnabled: false, curveSegments: 1 });
+  geometry.rotateX(-Math.PI / 2); geometry.translate(0, -0.13, 0); return geometry;
+}
+function sailTriangle(vertices) {
+  const shape = new THREE.Shape(); shape.moveTo(...vertices[0]); shape.lineTo(...vertices[1]); shape.lineTo(...vertices[2]); shape.closePath();
+  const geometry = new THREE.ExtrudeGeometry(shape, { depth: 0.012, bevelEnabled: false, curveSegments: 1 });
+  geometry.translate(0, 0, -0.006); return geometry;
 }
 
-/** Plaques sit on backing boards whose inner edges overlap the hull. The face is
- * a child of that physical mount, never a detached sprite or floating label. */
-function labels(group, projects, halfWidth, low, accent) {
-  const steamer = group.userData.boatType === 'paddle-steamer';
-  const count = Math.min(3, projects.length), width = steamer ? 0.70 : count === 1 ? 1.65 : count === 2 ? 0.95 : 0.69;
-  const spacing = count === 2 ? 1.06 : 0.82;
-  for (let index = 0; index < count; index++) {
-    // The steamer's bow has clear hull beyond the paddle wheel. Extra plaques
-    // stack there on backing boards extended down to the same hull contact.
-    const item = projects[index], x = steamer ? 0.72 : (index - (count - 1) / 2) * spacing, lift = steamer ? index * 0.25 : 0;
-    for (const side of [-1, 1]) {
-      const mount = new THREE.Group(); mount.name = 'hull-label-board'; mount.userData.labelMount = true; mount.userData.projectId = item.projectId;
-      mount.position.set(x, 0.255 + lift, side * (halfWidth - 0.015)); group.add(mount);
-      mesh(mount, box(width + 0.07, 0.28 + lift, 0.07, 0, -lift / 2), toonMaterial('#eadcc3'), low);
-      const material = new THREE.MeshBasicMaterial({ map: plaqueTexture(item.label, { accent }), transparent: true, side: THREE.DoubleSide, toneMapped: false });
-      const face = mesh(mount, new THREE.PlaneGeometry(width, 0.24), material, low);
-      face.position.z = side * 0.036; if (side < 0) face.rotation.y = Math.PI;
-      face.userData.mountedLabel = true; face.userData.projectId = item.projectId; face.castShadow = false;
-    }
+/** Labels always have a real board touching hull or cargo. Text is the only mesh
+ * without ink: outlining a transparent text plane would cover its own glyphs. */
+function labelBoards(parent, project, { x, y, z, width, height = 0.20, kind = 'hull', crate = null }, low, accent) {
+  const depth = kind === 'crate' ? 0.035 : 0.06;
+  for (const side of [-1, 1]) {
+    const mount = new THREE.Group(); mount.name = `${kind}-label-board`;
+    mount.userData = { labelMount: true, mountKind: kind, projectId: project.projectId, ...(crate ? { crate } : {}) };
+    mount.position.set(x, y, side * z); parent.add(mount);
+    mesh(mount, box(width + 0.03, height + 0.03, depth), toonMaterial('#eee1c4'), low);
+    const face = mesh(mount, new THREE.PlaneGeometry(width, height), new THREE.MeshBasicMaterial({ map: plaqueTexture(project.label, { accent }), transparent: true, side: THREE.DoubleSide, toneMapped: false }), low, false);
+    face.position.z = side * (depth / 2 + 0.001); if (side < 0) face.rotation.y = Math.PI;
+    face.userData = { mountedLabel: true, projectId: project.projectId }; face.castShadow = false;
   }
 }
+function person(parts, low, x, shirt) {
+  parts.add('#526377', box(0.27, 0.07, 0.21, x + 0.09, 0.275));
+  parts.add(shirt, box(0.19, 0.30, 0.23, x, 0.45));
+  parts.add('#d5aa7a', sphere(0.105, x, 0.70, 0, low));
+  if (!low) parts.add('#54596e', box(0.20, 0.035, 0.22, x + 0.015, 0.78));
+}
 
-/** entry: { type, projectId, label, projects:[{projectId,label}] }. Empty boats
- * carry no project label. At most three mounted project plaques per side. */
+/** Entries are frozen policy choices: quality changes rebuild the same entry,
+ * with no random draws or label/type decisions inside the model. */
 export function createBoat(entry = {}, { low = false } = {}) {
   const type = BOAT_TYPES.includes(entry.type) ? entry.type : 'rowboat';
-  const source = entry.projects?.length ? entry.projects : entry.projectId ? [{ projectId: entry.projectId, label: entry.label || entry.projectId }] : [];
-  const seen = new Set(), projects = source.filter(item => item?.projectId && !seen.has(item.projectId) && seen.add(item.projectId)).slice(0, 3).map(item => ({ projectId: item.projectId, label: String(item.label || item.projectId).slice(0, 40) }));
+  const source = Array.isArray(entry.projects) && entry.projects.length ? entry.projects : entry.projectId ? [{ projectId: entry.projectId, label: entry.label || entry.projectId }] : [];
+  const crateCount = type === 'barge' ? Math.max(2, Math.min(4, Math.round(Number(entry.crateCount) || Math.max(2, source.length)))) : 0;
+  const seen = new Set(), projects = source.filter(item => item?.projectId && !seen.has(item.projectId) && seen.add(item.projectId)).slice(0, crateCount || 1).map(item => ({ projectId: item.projectId, label: String(item.label || item.projectId).slice(0, 40) }));
   const group = new THREE.Group(); group.name = `${type}:${projects[0]?.projectId || 'empty'}`;
-  group.userData.boatType = type; group.userData.type = type; group.userData.projectIds = projects.map(item => item.projectId); group.userData.projectId = projects[0]?.projectId || null;
-  const batches = new Map();
-  const part = (tint, geometry) => { if (!batches.has(tint)) batches.set(tint, []); batches.get(tint).push(geometry); };
-  const colors = { sailboat: '#79aaa8', rowboat: '#bb805a', tugboat: '#d19056', barge: '#5e8293', 'paddle-steamer': '#d3e0d5', canoe: '#bd6559' };
-  const widths = { sailboat: 0.94, rowboat: 0.9, tugboat: 1.1, barge: 1.22, 'paddle-steamer': 0.96, canoe: 0.62 };
-  const lengths = { sailboat: 2.85, rowboat: 2.6, tugboat: 2.8, barge: 3.15, 'paddle-steamer': 2.95, canoe: 3.0 };
-  const hull = mesh(group, hullGeometry(lengths[type], widths[type], { pointed: type === 'canoe', low }), toonMaterial(colors[type]), low);
+  group.userData = { boatType: type, type, projectIds: projects.map(item => item.projectId), projectId: projects[0]?.projectId || null };
+  const model = new THREE.Group(); model.name = 'boat-model'; group.add(model);
+  const motion = { model, oars: [], paddles: [], wheel: null, smoke: [], lights: [], low }; group.motion = motion;
+  const parts = new Parts(), { length, width } = BOAT_DIMENSIONS[type];
+  const hull = mesh(model, hullGeometry(length, width, { pointed: type === 'canoe', low }), toonMaterial(COLORS[type]), low);
   hull.name = 'waterline-hull'; hull.userData.hull = true;
-  const timber = '#d9b98a', dark = '#385461', cream = '#f3e7cc';
+  const wood = '#c99b6a', dark = '#37434d', cream = '#eee4c9';
 
   if (type === 'sailboat') {
-    part(cream, box(1.9, 0.07, 0.73, -0.08, 0.205));
-    part(timber, cylinder(0.042, 1.14, -0.12, 0.78, 0, low)); // mast enters deck, top 1.35
-    part(timber, box(1.1, 0.05, 0.05, 0.39, 0.47));
-    const sail = new THREE.BufferGeometry(); sail.setAttribute('position', new THREE.Float32BufferAttribute([-0.10, 1.30, 0, -0.10, 0.49, 0, 0.90, 0.49, 0], 3)); sail.computeVertexNormals();
-    mesh(group, sail, toonMaterial('#fff0c6', { side: THREE.DoubleSide }), low).name = 'triangular-sail';
-    if (!low) {
-      const stripe = new THREE.BufferGeometry(); stripe.setAttribute('position', new THREE.Float32BufferAttribute([-0.09, 0.78, 0.002, -0.09, 0.66, 0.002, 0.67, 0.66, 0.002, 0.52, 0.78, 0.002], 3)); stripe.setIndex([0, 1, 2, 0, 2, 3]); stripe.computeVertexNormals();
-      mesh(group, stripe, toonMaterial('#dc9d6b', { side: THREE.DoubleSide }), low).name = 'sail-stripe';
-      part(dark, box(0.22, 0.21, 0.05, -1.18, 0.18));
-    }
+    parts.add(cream, box(1.55, 0.05, 0.52, -0.10, 0.155));
+    parts.add(wood, cylinder(0.027, 1.6, -0.12, 0.98, 0, low));
+    parts.add(wood, box(0.96, 0.04, 0.04, 0.34, 0.54));
+    parts.add('#f3e8ca', sailTriangle([[-0.12, 1.72], [-0.12, 0.54], [0.81, 0.54]]));
+    const violet = sailTriangle([[-0.12, 1.72], [-0.12, 1.15], [0.33, 1.15]]); violet.translate(0, 0, 0.008);
+    parts.add('#9a87b8', violet);
+    if (!low) { parts.add(dark, box(0.24, 0.06, 0.28, -0.60, 0.21)); parts.add(wood, box(0.06, 0.22, 0.06, -0.81, 0.20)); }
   } else if (type === 'rowboat') {
-    part('#765948', box(1.82, 0.035, 0.68, -0.08, 0.181));
-    for (const x of [-0.57, 0.4]) part(timber, box(0.20, 0.10, 0.86, x, 0.245));
-    // Oars rest across inboard rowlocks, clear of both hull-side name boards.
+    parts.add('#79583e', box(0.98, 0.03, 0.43, -0.04, 0.145));
+    for (const x of [-0.16, 0.34]) parts.add(wood, box(0.17, 0.10, 0.56, x, 0.20));
+    person(parts, low, -0.16, '#728a9d');
     for (const side of [-1, 1]) {
-      part(timber, box(0.72, 0.055, 0.055, 0.14, 0.30, side * 0.25));
-      part(timber, box(0.31, 0.045, 0.17, 0.50, 0.30, side * 0.25));
-      part(dark, box(0.08, 0.16, 0.08, -0.04, 0.24, side * 0.25));
-      if (!low) part('#eee0bd', box(2.05, 0.055, 0.045, -0.08, 0.22, side * 0.42));
+      const pivot = [0.05, 0.31, side * 0.28];
+      parts.add(dark, cylinder(0.035, 0.18, pivot[0], 0.22, pivot[2], low));
+      parts.add('#d5aa7a', beam([-0.16, 0.53, side * 0.12], pivot));
+      const oar = new THREE.Group(); oar.name = `rowing-oar:${side}`; oar.position.set(...pivot); model.add(oar);
+      const oarParts = new Parts(); oarParts.add(wood, box(0.045, 0.045, 0.63, 0, 0, side * 0.18));
+      oarParts.add(wood, box(0.13, 0.035, 0.23, 0, 0, side * 0.47)); oarParts.build(oar, low); motion.oars.push({ group: oar, side });
+      if (!low) parts.add(cream, box(0.98, 0.04, 0.035, -0.06, 0.16, side * 0.29));
     }
   } else if (type === 'tugboat') {
-    part(cream, box(1.95, 0.07, 0.94, -0.08, 0.205));
-    part(cream, box(0.88, 0.59, 0.82, -0.55, 0.51));
-    part(dark, box(1.04, 0.09, 0.97, -0.55, 0.85));
-    part(dark, cylinder(0.12, 0.66, 0.48, 0.56, 0, low));
-    part('#c56349', cylinder(0.16, 0.13, 0.48, 0.91, 0, low));
-    for (const side of [-1, 1]) part('#8fc9d2', box(0.55, 0.23, 0.025, -0.55, 0.63, side * 0.42));
-    if (!low) for (const side of [-1, 1]) for (const x of [-0.9, 0.8]) part(dark, placed(new THREE.TorusGeometry(0.13, 0.055, 5, 8), { x, y: 0.16, z: side * 0.55 }));
+    parts.add(cream, box(1.30, 0.05, 0.65, -0.05, 0.155));
+    parts.add('#f0eee5', box(0.62, 0.50, 0.56, -0.28, 0.43));
+    parts.add(dark, box(0.75, 0.06, 0.67, -0.28, 0.71));
+    parts.add('#272d31', cylinder(0.095, 0.55, 0.42, 0.455, 0, low));
+    parts.add('#272d31', cylinder(0.125, 0.07, 0.42, 0.765, 0, low));
+    for (const side of [-1, 1]) parts.add('#92bcc5', box(0.42, 0.19, 0.022, -0.28, 0.52, side * 0.29));
+    if (!low) {
+      for (const side of [-1, 1]) for (const x of [-0.65, 0.54]) parts.add(dark, placed(new THREE.TorusGeometry(0.10, 0.035, 5, 8), { x, y: 0.10, z: side * 0.38 }));
+      for (let n = 0; n < 3; n++) {
+        const material = toonMaterial('#aab0ad', { transparent: true, opacity: 0.45, cache: false }); material.depthWrite = false;
+        const puff = mesh(model, sphere(0.075, 0, 0, 0, false), material, true); puff.name = 'funnel-smoke'; puff.castShadow = false;
+        motion.smoke.push(puff);
+      }
+    }
   } else if (type === 'barge') {
-    part(timber, box(2.45, 0.045, 1.06, -0.08, 0.19));
-    for (const side of [-1, 1]) part('#8da0a3', box(2.5, 0.23, 0.08, -0.08, 0.295, side * 0.57));
-    for (const x of [-1.28, 1.08]) part('#8da0a3', box(0.08, 0.23, 1.14, x, 0.295));
-    for (let n = 0; n < Math.max(1, projects.length); n++) {
-      const x = -0.82 + n * 0.80;
-      part(n % 2 ? '#ac8d65' : '#98a975', box(0.64, 0.42, 0.85, x, 0.42));
-      if (!low) part('#ded0a3', box(0.065, 0.43, 0.87, x, 0.425));
+    parts.add(wood, box(3.04, 0.05, 1.08, -0.05, 0.155));
+    for (const side of [-1, 1]) parts.add('#8da179', box(3.04, 0.15, 0.06, -0.05, 0.205, side * 0.56));
+    const count = crateCount;
+    group.userData.crateCount = count;
+    for (let n = 0; n < count; n++) {
+      const w = 2.8 / count - 0.08, x = (n - (count - 1) / 2) * (2.8 / count), crate = { x, y: 0.43, z: 0, w, h: 0.50, d: 0.94 };
+      parts.add(n % 2 ? '#b68d5d' : '#c89b6c', box(w, crate.h, crate.d, x, crate.y));
+      if (!low) for (const dx of [-w * 0.32, w * 0.32]) parts.add('#e2c394', box(0.035, 0.51, 0.95, x + dx, 0.43));
+      if (projects[n]) labelBoards(model, projects[n], { x, y: 0.44, z: 0.477, width: w - 0.08, height: 0.22, kind: 'crate', crate }, low, COLORS[type]);
     }
   } else if (type === 'paddle-steamer') {
-    part(cream, box(2.25, 0.07, 0.84, -0.08, 0.205));
-    part(cream, box(1.28, 0.48, 0.72, -0.25, 0.48));
-    part('#bd7866', box(1.55, 0.08, 0.91, -0.25, 0.76));
-    for (const x of [0.22, 0.54]) { part(dark, cylinder(0.10, 0.54, x, 0.91, 0, low)); part('#c17654', cylinder(0.13, 0.09, x, 1.21, 0, low)); }
+    parts.add(cream, box(2.45, 0.05, 0.86, -0.02, 0.155));
+    parts.add(cream, box(1.80, 0.40, 0.75, 0.05, 0.38));
+    parts.add('#c0aa87', box(2.10, 0.08, 0.92, 0.05, 0.62));
+    parts.add(cream, box(1.23, 0.35, 0.61, 0.14, 0.835));
+    parts.add('#c0aa87', box(1.52, 0.06, 0.78, 0.14, 1.04));
+    for (const x of [-0.20, 0.33]) { parts.add('#34383c', cylinder(0.075, 0.43, x, 1.28, 0, low)); parts.add('#b95147', cylinder(0.10, 0.06, x, 1.51, 0, low)); }
     for (const side of [-1, 1]) {
-      part('#bf8056', cylinder(0.35, 0.16, -0.20, 0.33, side * 0.56, low, Math.PI / 2));
-      part(dark, cylinder(0.09, 0.19, -0.20, 0.33, side * 0.56, low, Math.PI / 2));
-      const blades = low ? 4 : 8;
-      for (let n = 0; n < blades; n++) { const a = n / blades * Math.PI * 2; part(timber, box(0.13, 0.11, 0.18, -0.2 + Math.cos(a) * 0.32, 0.33 + Math.sin(a) * 0.32, side * 0.56, a)); }
-      if (!low) for (const x of [-0.63, -0.14, 0.35]) part('#7faeb7', box(0.19, 0.17, 0.025, x, 0.53, side * 0.37));
+      for (const x of [-0.55, 0.05, 0.65]) parts.add('#88b0ba', box(0.20, 0.18, 0.025, x, 0.43, side * 0.385));
+      parts.add('#88b0ba', box(0.70, 0.17, 0.025, 0.14, 0.84, side * 0.316));
+      parts.add(dark, box(0.74, 0.08, 0.06, -1.14, 0.24, side * 0.35));
+      if (!low) { parts.add(cream, box(1.90, 0.035, 0.035, 0.05, 0.83, side * 0.44)); for (const x of [-0.85, 0.95]) parts.add(cream, box(0.035, 0.20, 0.035, x, 0.73, side * 0.44)); }
     }
+    const wheel = new THREE.Group(); wheel.name = 'stern-paddle-wheel'; wheel.position.set(-1.42, 0.24, 0); model.add(wheel); motion.wheel = wheel;
+    const wheelParts = new Parts();
+    for (const side of [-1, 1]) wheelParts.add('#b95147', cylinder(0.29, 0.045, 0, 0, side * 0.29, low, Math.PI / 2));
+    wheelParts.add(dark, cylinder(0.05, 0.74, 0, 0, 0, low, Math.PI / 2));
+    const blades = low ? 4 : 8;
+    for (let n = 0; n < blades; n++) { const a = n / blades * Math.PI * 2; wheelParts.add('#bf5749', box(0.08, 0.10, 0.66, Math.cos(a) * 0.29, Math.sin(a) * 0.29, 0, a)); }
+    wheelParts.build(wheel, low);
   } else {
-    part('#785548', box(1.78, 0.025, 0.40, -0.02, 0.18));
-    for (const x of [-0.55, 0.5]) part(timber, box(0.15, 0.10, 0.56, x, 0.235));
-    part(timber, box(1.45, 0.045, 0.055, -0.02, 0.30, 0.08));
-    part(timber, box(0.32, 0.045, 0.15, 0.78, 0.30, 0.08));
-    if (!low) for (const side of [-1, 1]) part(cream, box(1.95, 0.05, 0.04, -0.03, 0.205, side * 0.29));
+    parts.add('#9b753f', box(1.10, 0.03, 0.29, -0.03, 0.145));
+    parts.add(wood, box(0.17, 0.10, 0.41, -0.16, 0.20));
+    person(parts, low, -0.16, '#748f76');
+    for (const side of [-1, 1]) {
+      const stroke = new THREE.Group(); stroke.name = `canoe-stroke:${side}`; model.add(stroke);
+      const armParts = new Parts(), grip = [0.14, 0.44, side * 0.21];
+      for (const shoulder of [-1, 1]) armParts.add('#d5aa7a', beam([-0.16, 0.53, shoulder * 0.12], grip));
+      armParts.build(stroke, low);
+      const paddle = new THREE.Group(); paddle.position.set(...grip); stroke.add(paddle);
+      const paddleParts = new Parts(); paddleParts.add(wood, beam([0, 0.06, 0], [0.02, -0.40, side * 0.27], 0.035));
+      paddleParts.add(wood, box(0.13, 0.20, 0.04, 0.02, -0.38, side * 0.26)); paddleParts.build(paddle, low);
+      motion.paddles.push({ group: stroke, paddle, side });
+    }
+    if (!low) for (const side of [-1, 1]) parts.add(cream, box(0.96, 0.035, 0.025, -0.04, 0.15, side * 0.215));
   }
-  for (const [tint, parts] of batches) mesh(group, mergeParts(parts), toonMaterial(tint), low);
-  labels(group, projects, widths[type] / 2, low, colors[type]);
+  const light = toonMaterial('#f4d697', { emissive: '#efbd6c', emissiveIntensity: 0.05, cache: false });
+  parts.add(dark, cylinder(0.04, 0.10, length / 2 - 0.27, 0.17, 0, low));
+  parts.add(light, sphere(0.04, length / 2 - 0.27, 0.24, 0, low)); motion.lights.push(light);
+  parts.build(model, low);
+  if (type !== 'barge' && projects[0]) {
+    const labelX = type === 'rowboat' || type === 'canoe' ? -0.40 : type === 'paddle-steamer' ? 0.62 : -0.18;
+    const labelW = type === 'rowboat' || type === 'canoe' ? 0.42 : type === 'paddle-steamer' ? 0.64 : 0.80;
+    labelBoards(model, projects[0], { x: labelX, y: 0.16, z: width / 2 + 0.005, width: labelW, height: 0.18 }, low, COLORS[type]);
+  }
+  updateBoat(group, 0, 0, { low, reducedMotion: false, night: 0 });
+  group.userData.maxTop = MODEL_MAX_TOP;
   return group;
+}
+
+/** No allocations or random state during animation. Reduced motion freezes all
+ * rigs/smoke/bob; night lighting is an environmental appearance change. */
+export function updateBoat(boat, dt, elapsed, { night = 0, reducedMotion = false, low = false } = {}) {
+  const motion = boat.motion; if (!motion) return;
+  const still = Boolean(reducedMotion), time = !still && Number.isFinite(elapsed) ? elapsed : 0;
+  motion.model.position.y = still || low ? 0 : Math.sin(time * 0.8) * 0.03;
+  for (const { group, side } of motion.oars) group.rotation.y = still ? 0 : Math.sin(time * 1.5) * side * 0.32;
+  if (motion.wheel) motion.wheel.rotation.z = still ? 0 : -time * 1.2;
+  for (const { group, paddle, side } of motion.paddles) {
+    group.visible = still ? side === 1 : (Math.sin(time * 1.4) >= 0 ? 1 : -1) === side;
+    paddle.rotation.z = still ? 0 : Math.sin(time * 2.8) * 0.16;
+  }
+  for (let n = 0; n < motion.smoke.length; n++) {
+    const puff = motion.smoke[n], phase = ((time * 0.45 + n / motion.smoke.length) % 1 + 1) % 1;
+    puff.visible = !still && !low; puff.position.set(0.42 - phase * 0.14, 0.83 + phase * 0.50, 0);
+    puff.scale.setScalar(0.6 + phase * 0.6); puff.material.opacity = 0.35 * (1 - phase);
+  }
+  for (const light of motion.lights) light.emissiveIntensity = 0.05 + Math.max(0, Math.min(1, Number(night) || 0)) * 1.3;
 }

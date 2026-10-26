@@ -224,7 +224,7 @@ export class World {
     const grew = rings > this.rings;
     for (const key of ['island', 'roads', 'clouds']) if (this[key]) { this[key].group.removeFromParent(); disposeAll(this[key].group); }
     this.rings = rings; this.half = islandHalf(rings); this.districts = districts;
-    this.island = buildIsland(rings); this.roads = buildRoads(rings, { districts });
+    this.island = buildIsland(rings, { districts }); this.roads = buildRoads(rings, { districts });
     // Clouds stay in world space, outside the sphere the island sweeps when it turns over.
     this.clouds = buildClouds(this.half, this.quality, { center: PIVOT_Y, clear: this.sweepRadius() + CLOUD_MARGIN, island: this.half * 1.3 });
     this.land.add(this.island.group, this.roads.group);
@@ -264,7 +264,7 @@ export class World {
   }
   applyTaper() {
     for (const child of this.island?.group.children || []) {
-      if (child.userData.taper) child.visible = !this.underside;
+      if (child.userData.taper) child.visible = !this.underside && !this.districts;
       if (child.userData.sideSign) child.visible = this.underside;
     }
   }
@@ -727,9 +727,9 @@ export class World {
     if (this.islandAnim) {
       const a = this.islandAnim; a.t = Math.min(1, a.t + dt / 0.9);
       const s = 1 + (a.from - 1) * Math.exp(-5 * a.t) * Math.cos(8 * a.t);
-      // Keep river banks, bridges, roads and pinned buildings aligned throughout
-      // growth. Stretch only the rock depth below ground in the home city.
-      if (this.districts) this.island.group.scale.set(1, s, 1);
+      // Both recessed river faces and the waterfall rims must retain exact
+      // contact. Home expansion uses dust and the new buildings' rise animation.
+      if (this.districts) this.island.group.scale.set(1, 1, 1);
       else for (const g of [this.island.group, this.roads.group, this.decor]) g.scale.set(s, 1, s);
       if (a.t >= 1) { for (const g of [this.island.group, this.roads.group, this.decor]) g.scale.set(1, 1, 1); this.islandAnim = null; }
     }

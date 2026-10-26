@@ -6,7 +6,7 @@ import { HOME_VARIANTS, HOME_BODY_COLORS, HOME_LOT_SIZE, suburbPlan } from '../a
 import { tickerSegments } from '../app/city/ticker.js';
 import { CiBeacon } from '../app/city/ci.js';
 import { NpcManager, groundY } from '../app/city/npc.js';
-import { bridgeSpan } from '../app/city/river-path.js';
+import { bridgeSpan, riverZ } from '../app/city/river-path.js';
 
 const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-5, `${a} != ${b}`);
 const local = (floors = 1) => ({ id: 'local:home', path: 'C:/home', name: 'Garden Notes', primaryLanguage: 'Python', metrics: { floors, footprint: 1 } });
@@ -37,7 +37,7 @@ test('people stand on rendered home surfaces and retain bridge, street and HQ he
     const surface = ray.intersectObject(b.padGroup, true)[0];
     assert.ok(surface); near(people.surfaceY(px, pz), surface.point.y);
   }
-  const span = bridgeSpan(8); near(people.surfaceY(8, span.centerZ), span.deckY);
+  const span = bridgeSpan(8); near(people.surfaceY(8, riverZ(8)), span.deckY);
   near(people.surfaceY(0, 0), groundY(0, 0)); near(people.surfaceY(8, 16), groundY(8, 16));
   people.dispose(); buildings.dispose();
 });

@@ -1,19 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { boatInterval, nextBoatAt, selectBoatManifest, boatPass, BOAT_TYPES, chooseBoatTypes, boatFleet } from '../app/city/boats.js';
+import { lapDuration, loopTiming, loopPhase, selectBoatManifest, BOAT_TYPES, chooseBoatTypes, boatFleet } from '../app/city/boats.js';
 
 const now = Date.parse('2026-10-25T12:00:00Z');
 const project = (id, git) => ({ id, name: `Project ${id}`, stats: { git } });
 
-test('boat schedule samples the entire 90 to 180 second range deterministically', () => {
-  assert.equal(boatInterval(0), 90);
-  assert.equal(boatInterval(0.5), 135);
-  assert.equal(boatInterval(1), 180);
-  assert.equal(boatInterval(-1), 90);
-  assert.equal(boatInterval(2), 180);
-  assert.equal(boatInterval(NaN), 135);
-  assert.equal(nextBoatAt(50, 0), 140);
-  assert.equal(nextBoatAt(50, 1), 230);
+test('continuous laps target 240–360 seconds with explicit physical speed limits', () => {
+  assert.equal(lapDuration(0), 240); assert.equal(lapDuration(.5), 300); assert.equal(lapDuration(1), 360);
+  assert.equal(lapDuration(-1), 240); assert.equal(lapDuration(2), 360); assert.equal(lapDuration(NaN), 300);
+  for (const length of [20, 100, 240, 500, 900, 3000]) for (const sample of [0, .5, 1]) {
+    const result = loopTiming(length, { sample });
+    assert.ok(result.speed >= .8 && result.speed <= 3);
+    assert.equal(result.duration * result.speed, length);
+    assert.ok(result.desiredDuration >= 240 && result.desiredDuration <= 360);
+    if (length / result.desiredDuration >= .8 && length / result.desiredDuration <= 3) assert.ok(Math.abs(result.duration - result.desiredDuration) < 1e-10);
+  }
+  assert.ok(loopTiming(500, { types: ['barge', 'paddle-steamer'] }).speed < loopTiming(500, { types: ['canoe', 'canoe'] }).speed);
 });
 
 test('boats prefer fresh dated commits and fall back only when a commit date is unavailable', () => {
@@ -44,25 +46,25 @@ test('no activity sends unlabelled boats and does not imply commits', () => {
   assert.deepEqual(selectBoatManifest([], now, 1), [{ projectId: null, label: '' }]);
 });
 
-test('independent boats have spatial separation and stay inside the island', () => {
-  assert.deepEqual(boatPass(100, 100, 30), { x: -27.5, visible: true, done: false });
-  const first = boatPass(108, 100, 30, 0), second = boatPass(108, 100, 30, 1);
-  assert.equal(first.x - second.x, 7);
-  assert.equal(boatPass(100, 100, 30, 1).visible, false);
-  assert.equal(boatPass(120, 100, 30).done, true);
-  assert.equal(boatPass(120, 100, 30).visible, false);
+test('two or three loop slots remain evenly spaced with no absent midriver phase', () => {
+  for (const count of [2, 3]) for (let elapsed = 0; elapsed <= 3600; elapsed += 17) {
+    const slots = Array.from({ length: count }, (_, slot) => loopPhase(elapsed, 300, slot, count));
+    const phases = slots.map(slot => slot.phase).sort((a, b) => a - b);
+    for (let index = 0; index < count; index++) {
+      assert.ok(phases[index] >= 0 && phases[index] < 1);
+      const gap = (phases[(index + 1) % count] - phases[index] + 1) % 1;
+      assert.ok(Math.abs(gap - 1 / count) < 1e-12);
+    }
+  }
 });
 
-test('all six boats clear the maximum pinned island before the next departure, preserving ordinary speed', () => {
-  const startedAt = 100, maximumHalf = (24 + 0.5) * 16 + 5.5;
-  for (let index = 0; index < 6; index++) {
-    const pass = boatPass(startedAt + 80, startedAt, maximumHalf, index);
-    assert.equal(pass.done, true, `boat ${index} clears before the 90-second minimum interval`);
-    assert.equal(pass.visible, false);
-  }
-  for (const half of [29.5, 45.5, 61.5, 93.5]) {
-    assert.equal(boatPass(startedAt + 10, startedAt, half).x - boatPass(startedAt, startedAt, half).x, 30, `preview half ${half} retains speed 3`);
-  }
+test('lap changes happen only at an upstream edge and phase survives route or quality refresh', () => {
+  assert.deepEqual(loopPhase(299.999, 300), { phase: 299.999 / 300, lap: 0 });
+  assert.deepEqual(loopPhase(300, 300), { phase: 0, lap: 1 });
+  assert.deepEqual(loopPhase(200, 300, 1, 3), { phase: 0, lap: 1 });
+  const cycles = 2.45, before = loopPhase(cycles, 1, 2, 3);
+  loopTiming(100, { types: ['canoe'] }); loopTiming(1000, { types: ['barge'] });
+  assert.deepEqual(loopPhase(cycles, 1, 2, 3), before, 'timing selection cannot alter stored cycles');
 });
 
 test('a hundred shuffled choices cover every six-type bag with no immediate boundary repeats', () => {
@@ -109,28 +111,30 @@ test('injected random bounds and malformed tails still return bounded valid type
   }
 });
 
-test('each hull may carry recent activity and barges carry three distinct existing labels', () => {
+test('ordinary boats label at most one recent project; barges mount two to four distinct cargo labels', () => {
   const manifest = Array.from({ length: 6 }, (_, n) => Object.freeze({ projectId: `project-${n}`, label: `Recent ${n}` }));
   Object.freeze(manifest);
-  const types = Object.freeze([...BOAT_TYPES]), fleet = boatFleet(manifest, types);
+  const types = Object.freeze([...BOAT_TYPES]), fleet = boatFleet(manifest, types, { random: () => .1 });
   assert.equal(fleet.length, types.length);
   for (const [index, boat] of fleet.entries()) {
     assert.equal(boat.type, types[index]); assert.equal(boat.projectId, manifest[index].projectId); assert.equal(boat.label, manifest[index].label);
-    assert.equal(boat.projects.length, boat.type === 'barge' ? 3 : 1);
+    assert.equal(boat.projects.length, boat.type === 'barge' ? 2 : 1);
     assert.equal(boat.projects[0].projectId, boat.projectId);
     for (const p of boat.projects) assert.ok(manifest.some(m => m.projectId === p.projectId && m.label === p.label));
   }
-  const barge = fleet.find(b => b.type === 'barge'); assert.equal(new Set(barge.projects.map(p => p.projectId)).size, 3);
-  barge.projects[0].label = 'Edited copy'; assert.equal(manifest[3].label, 'Recent 3');
+  const barge = boatFleet(manifest, ['barge'], { random: () => 1 })[0]; assert.equal(new Set(barge.projects.map(p => p.projectId)).size, 4); assert.equal(barge.crateCount, 4);
+  barge.projects[0].label = 'Edited copy'; assert.equal(manifest[0].label, 'Recent 0');
+  for (const sample of [.5, .9, 1]) assert.equal(boatFleet(manifest, ['canoe'], { random: () => sample })[0].projects.length, 0);
+  assert.equal(boatFleet(manifest, ['canoe'], { random: () => .499999 })[0].projects.length, 1);
 });
 
 test('fleet labels omit no-activity placeholders and preserve recent-manifest filtering', () => {
   const recent = selectBoatManifest([project('fresh', { last_commit_at: '2026-10-25T11:00:00Z' }), project('stale', { last_commit_at: '2026-10-20T11:00:00Z', commits_7d: 8 })], now);
-  const fleet = boatFleet(recent, ['rowboat', 'canoe']);
+  let draw = 0; const fleet = boatFleet(recent, ['rowboat', 'canoe'], { random: () => draw++ ? .9 : .1 });
   assert.equal(fleet[0].projectId, 'fresh'); assert.deepEqual(fleet[1], { type: 'canoe', projectId: null, label: '', projects: [] });
   assert.ok(fleet.every(b => b.projects.every(p => p.projectId === 'fresh')));
   for (const boat of boatFleet(selectBoatManifest([], now), BOAT_TYPES)) assert.deepEqual(boat.projects, []);
-  const barge = boatFleet([{ projectId: null, label: 'Empty' }, { projectId: 'a', label: 'First' }, { projectId: 'a', label: 'Duplicate' }, { projectId: 'b', label: 'Second' }, { projectId: 'c', label: 'Third' }, { projectId: 'd', label: 'Fourth' }], ['barge'])[0];
-  assert.deepEqual(barge.projects.map(p => p.projectId), ['a', 'b', 'c']);
+  const barge = boatFleet([{ projectId: null, label: 'Empty' }, { projectId: 'a', label: 'First' }, { projectId: 'a', label: 'Duplicate' }, { projectId: 'b', label: 'Second' }, { projectId: 'c', label: 'Third' }, { projectId: 'd', label: 'Fourth' }], ['barge'], { random: () => 1 })[0];
+  assert.deepEqual(barge.projects.map(p => p.projectId), ['a', 'b', 'c', 'd']);
   assert.deepEqual(boatFleet([null, {}, { projectId: 'missing', label: '' }], ['sailboat'])[0].projects, []);
 });
