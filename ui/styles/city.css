@@ -432,6 +432,20 @@ button.city-label:focus-visible { outline: 2px solid var(--accent); outline-offs
 .city-access-chip { padding: 2px 9px; border-radius: var(--radius-pill); font-size: 11.5px; font-weight: 700; }
 .city-access-chip.is-full { background: rgba(255, 107, 61, .16); color: #ff6b3d; }
 .city-access-chip.is-read { background: rgba(79, 140, 255, .16); color: #4f8cff; }
+
+/* Building session controls share the project's existing access and start path. */
+.city-new-session { display: grid; gap: 9px; padding: 12px; background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: var(--radius); }
+.city-session-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.city-session-provider { flex: 1; justify-content: center; }
+.city-session-provider.is-claude { background: var(--claude-soft); color: var(--claude); border-color: var(--claude); }
+.city-session-provider.is-codex { background: var(--codex-soft); color: var(--codex); border-color: var(--codex); }
+.city-session-provider:disabled { opacity: .5; }
+.city-session-buttons .city-access-chip { margin-left: auto; white-space: nowrap; }
+.city-session-prompt { width: 100%; min-width: 0; font-size: 12px; }
+.city-session-help { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--muted); }
+.city-session-help .city-link { font-size: inherit; white-space: nowrap; }
+.city-session-error { margin: 0; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.city-session-recovery { display: flex; flex-wrap: wrap; gap: 6px; }
 .city-ci-row { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12.5px; }
 .city-ci-text { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .city-ci-text strong { color: var(--text); }

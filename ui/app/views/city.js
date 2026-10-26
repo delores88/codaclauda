@@ -26,6 +26,8 @@ import { buildingStreetBoxes, buildingSolidAt } from '../city/street-collision.j
 import { JumpToPicker } from '../city/jumpto.js';
 import { largestFreeRect, buildingFocusDistance, boxFitDistance } from '../city/camera.js';
 import { AGENT_PROJECT_PREF, AGENT_PROJECT_TIME_PREF, locateAgents } from '../city/agent-location.js';
+import { BuildingSessionActions } from '../city/building-actions.js';
+import { mountChatSheet } from '../city/chat-sheet.js';
 
 registerIcons({
   'city-pan': '<path d="M12 3v18M3 12h18M8 7l4-4 4 4M8 17l4 4 4-4M7 8l-4 4 4 4M17 8l4 4-4 4"/>',
@@ -401,6 +403,20 @@ export class CityView {
     this.dragGhost = h('div.city-drag-ghost', { hidden: true, 'aria-hidden': 'true' });
     this.cityRoot = h('div.city-root', this.stage, ...this.bars, this.overlay, this.hud, this.legend, this.machinesCard, this.streetHint, this.zoomHint, this.toolbar, this.help, this.panel, this.empty, this.leaveBtn, this.talkPanel.node, this.fallback, this.dragGhost);
     this.root.append(this.cityRoot);
+    this.chatSheet = mountChatSheet(this.cityRoot, this.ctx, { onChange: () => {
+      this.panelSig = '';
+      this.refreshPanel();
+      this.declutterAt = 0;
+      this.updateCameraFrame();
+    } });
+    this.buildingSessions = new BuildingSessionActions({ store: this.store, sessions,
+      onStarted: (session, { sendError } = {}) => {
+        // An owner-started arrival walks to its project even in a previously empty city.
+        if (this.npcs) this.npcs.first = false;
+        this.openCityChat({ sessionId: session.id });
+        if (sendError) toast(sendError, { kind: 'error', timeout: 9000 });
+      },
+    });
     if (!storage.get(HELP_KEY)) this.help.hidden = false;
   }
 
@@ -431,7 +447,7 @@ export class CityView {
     this.world.onKeyPan = () => { if (this.following) this.toggleFollow(false); };
     this.world.onResize = () => this.updateCameraFrame();
     this.cameraFrameObserver = new ResizeObserver(() => this.updateCameraFrame());
-    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.stage]) this.cameraFrameObserver.observe(node);
+    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.stage, this.chatSheet.node]) this.cameraFrameObserver.observe(node);
     this.world.collide = p => this.solidAt(p);
     this.buildings = new BuildingManager(this.world.city, { particles: this.world.particles, reducedMotion: () => this.reduced() });
     this.river = new River(this.world);
@@ -488,7 +504,7 @@ export class CityView {
     this.root.style.setProperty('--city-visible-width', `${bounds.right - bounds.left}px`);
     this.root.style.setProperty('--city-visible-height', `${bounds.bottom - bounds.top}px`);
     const blockers = [];
-    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel]) {
+    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.chatSheet?.node].filter(Boolean)) {
       if (node.hidden || !node.getClientRects().length) continue;
       const r = node.getBoundingClientRect();
       if (r.width < 1 || r.height < 1) continue;
@@ -759,7 +775,7 @@ export class CityView {
     const { w: W, h: H } = this.world.size;
     const base = this.overlay.getBoundingClientRect();
     const blockers = [];
-    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.help, this.empty, this.tag, this.bubble, this.clusterPop, this.streetHint, this.zoomHint, this.sparkTag, this.talkPanel.node, this.leaveBtn]) {
+    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.help, this.empty, this.tag, this.bubble, this.clusterPop, this.streetHint, this.zoomHint, this.sparkTag, this.talkPanel.node, this.leaveBtn, this.chatSheet?.node].filter(Boolean)) {
       if (node.hidden) continue;
       const r = node.getBoundingClientRect();
       if (r.width > 0 && r.height > 0) blockers.push({ left: r.left - base.left, top: r.top - base.top, right: r.right - base.left, bottom: r.bottom - base.top });
@@ -1332,6 +1348,7 @@ export class CityView {
     this.bubbleUntil = performance.now() + 6500;
   }
   select(target) {
+    if (this.chatSheet && !this.chatSheet.node.hidden) this.chatSheet.close(false);
     const prev = this.selection;
     const person = t => t?.kind === 'agent' || t?.kind === 'owner';
     if (person(prev) && !(this.hover?.kind === prev.kind && this.hover.id === prev.id)) this.npcs.setHighlight(prev, false);
@@ -1441,8 +1458,19 @@ export class CityView {
   }
 
   /* ---------------- panels ---------------- */
+  openCityChat(target) {
+    if (!this.visible) { this.pendingCityChat = target; return; }
+    if (this.talk) this.exitTalk({ instant: true });
+    this.chatSheet.open(target);
+  }
+  openAgentChat(agent) {
+    // External discovery carries metadata only; retain its existing detail/continue flow.
+    if (agent.kind === 'external') { this.select({ kind: 'agent', id: agent.id }); this.focusSelection(); return; }
+    this.openCityChat({ agentId: agent.id, ...(agent.sessionId ? { sessionId: agent.sessionId } : {}) });
+  }
   refreshPanel() {
     const s = this.selection;
+    if (this.chatSheet && !this.chatSheet.node.hidden) { this.panel.hidden = true; this.root.classList.remove('city-has-panel'); return; }
     if (!s || s.kind === 'boat') { this.panel.hidden = true; this.root.classList.remove('city-has-panel'); this.panelSig = ''; return; }
     let sig, render;
     const island = this.islands?.panelFor(s);   // contributor island: repo and town-hall cards
@@ -1460,7 +1488,7 @@ export class CityView {
       const ci = this.ci?.status(project.id);
       let access = '';
       try { access = this.islands?.current ? '' : this.store.projectAccess(project).level; } catch { /* islands */ }
-      sig = JSON.stringify(['building', project.id, project.name, project.description, project.metrics, project.languages, project.source, project.private, project.path, project.url, here, compute, ci ? [ci.at, ci.error] : null, access, Math.floor(Date.now() / 60000)]);
+      sig = JSON.stringify(['building', project.id, project.name, project.description, project.metrics, project.languages, project.source, project.private, project.path, project.url, here, compute, ci ? [ci.at, ci.error] : null, access, this.world.restSide, Math.floor(Date.now() / 60000)]);
       render = () => this.renderBuildingPanel(project);
     } else if (s.kind === 'owner') {
       sig = JSON.stringify(['owner', this.store.avatar, Boolean(this.following), Boolean(this.street || this.streetPending)]);
@@ -1623,7 +1651,7 @@ export class CityView {
     const stat = (label, value, hint) => h('div.city-stat', h('div.city-stat-value', value), h('div.city-stat-label', label), hint ? h('div.city-stat-hint', hint) : null);
     const building = this.buildings.get(project.id);
     const here = this.agentsAt(project.id);
-    const actions = [h('button.btn.small.primary', { type: 'button', onclick: () => this.ctx.navigate('tasks', { project: project.id }) }, icon('tasks'), 'Open tasks')];
+    const actions = [h('button.btn.small', { type: 'button', onclick: () => this.ctx.navigate('tasks', { project: project.id }) }, icon('tasks'), 'Open tasks')];
     if (project.path) actions.push(h('button.btn.small', { type: 'button', onclick: () => this.open(project.path) }, icon('folder'), 'Open folder'));
     if (isUnbuilt(project)) actions.unshift(h('button.btn.small.primary', { type: 'button', onclick: () => this.cloneOutline(project) }, icon('folder'), 'Clone to this PC'));
     if (project.url) actions.push(h('button.btn.small', { type: 'button', onclick: () => this.open(project.url) }, icon('github'), 'Open on GitHub'));
@@ -1642,11 +1670,15 @@ export class CityView {
         h('span.muted', level === 'full' ? 'Agents work without permission prompts' : 'Agents can read and explain, not change files'),
         h('button.city-link', { type: 'button', onclick: () => this.ctx.navigate('projects', { project: project.id }) }, 'Change'));
     }
+    this.buildingSessions.setProject(project, { side: this.world.restSide, remote: Boolean(this.islands?.current) });
+    const newSession = this.buildingSessions.node.hidden ? null : this.buildingSessions.node;
     clear(this.panel,
       this.panelHead(swatch, project.name, project.primaryLanguage ? `${project.primaryLanguage} · ${building?.size.floors || m.floors} floor${(building?.size.floors || m.floors) === 1 ? '' : 's'}` : null,
         iconButton('crosshair', 'Center view (F)', () => this.focusSelection())),
       sources.length ? h('div.city-panel-pills', sources) : null,
-      accessRow,
+      newSession,
+      newSession ? null : accessRow,
+      h('div.city-actions.wrap', actions),
       project.description ? h('p.city-desc', project.description) : null,
       h('section.city-panel-section', h('div.city-section-label', 'Languages'), langBar, langLegend),
       h('div.city-stats',
@@ -1655,12 +1687,11 @@ export class CityView {
         stat('Commits', m.commits ? formatNumber(m.commits) : '—', m.commits7d ? `+${m.commits7d} in 7 days` : null),
         stat('Last activity', m.lastActivityAt ? timeAgo(m.lastActivityAt) : '—', m.sizeBytes ? formatBytes(m.sizeBytes) : null)),
       h('section.city-panel-section', h('div.city-section-label', 'Agents here'),
-        here.length ? h('div.city-people', ...here.map(a => h('button.city-person', { type: 'button', title: `${a.name} · ${statusText(a)}${extraKind(a) ? '' : a.homeProjectId === project.id ? ' · lives here' : ' · visiting'}`, onclick: () => this.enterTalk(a.id) },
+        here.length ? h('div.city-people', ...here.map(a => h('button.city-person', { type: 'button', title: `Open chat · ${a.name} · ${statusText(a)}${extraKind(a) ? '' : a.homeProjectId === project.id ? ' · lives here' : ' · visiting'}`, onclick: () => this.openAgentChat(a) },
           portrait(a.look, { size: 34, provider: a.provider, status: a.status }), h('span', a.name))))
-          : h('p.muted', 'Nobody is here right now. Drag an agent onto this building to give it a task.')),
+          : h('p.muted', newSession ? 'Nobody is here right now. Start a session above, or drag an agent here to give it a task.' : 'Nobody is here right now. Drag an agent onto this building to give it a task.')),
       ci,
-      compute,
-      h('div.city-actions.wrap', actions));
+      compute);
   }
   /** CI card section from the last ci_status poll (city/ci.js); null when there is nothing to say. */
   ciSection(project) {
@@ -1964,6 +1995,7 @@ export class CityView {
     const sig = `${on}|${rest}|${up}|${offline}`;
     if (!force && sig === this.flipSig) return;
     this.flipSig = sig;
+    if (this.selection?.kind === 'building') this.refreshPanel();
     const toSpark = rest === 'pc';
     this.flipLabel.textContent = toSpark ? 'Spark side' : 'This PC side';
     this.flipBtn.replaceChildren(icon(toSpark ? 'city-chip' : 'city-laptop'), this.flipLabel);
@@ -2509,6 +2541,8 @@ export class CityView {
     this.sync();
     this.world.resize();
     this.world.start();
+    if (this.pendingCityChat) { const target = this.pendingCityChat; this.pendingCityChat = null; this.openCityChat(target); }
+    else this.chatSheet?.show();
     this.weather?.show();
     // Zero-config agents and ambient CI refresh only while the City is on screen.
     if (sessions.available === null) sessions.refresh().catch(() => {});
@@ -2536,6 +2570,8 @@ export class CityView {
     this.runnerLabels.clear();
     clearTimeout(this.checkTimer);
     this.offSessions?.();
+    this.chatSheet?.destroy();
+    this.buildingSessions?.destroy();
     this.ci?.dispose();
     this.river?.dispose();
     this.islands?.dispose();
@@ -2545,6 +2581,7 @@ export class CityView {
   }
   hide() {
     this.visible = false;
+    this.chatSheet?.hide();
     this.jumpPicker?.close();
     clearInterval(this.externalTimer); this.externalTimer = 0;
     this.ci?.stop();
