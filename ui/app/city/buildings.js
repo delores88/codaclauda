@@ -6,10 +6,11 @@
 import { THREE, toonMaterial, addOutline, shade, pastel } from './toon.js';
 import { RoundedBoxGeometry } from '../../vendor/three/addons/RoundedBoxGeometry.js';
 import { mergeParts, placed, plaqueTexture, githubFlagTexture, lockTexture, disposeAll as disposeObject } from './fx.js';
-import { cellCenter, cellKey } from './layout.js';
-import { GROUND_Y, seeded, lotSeats } from './scenery.js';
+import { cellCenter, cellKey, LOT_HALF } from './layout.js';
+import { GROUND_Y, seeded, lotSeats, riverSceneryClear } from './scenery.js';
 import { Ticker, TICKER } from './ticker.js';
 import { districtOf, isUnbuilt } from './districts.js';
+import { suburbPlan, buildSuburbHome, buildSuburbYard, buildContractor, HOME_BODY_COLORS, HOME_WOOD, HOME_ROOF, HOME_LOT_SIZE } from './suburbs.js';
 
 export const GF = 2.6;           // ground floor height
 export const FH = 1.3;           // upper floor height
@@ -45,10 +46,7 @@ export function styleFor(project, district = null) {
     key: 'downtown', body: '#92bbd4', trim: '#d6e6ef', plinth: '#526a7b', door: '#314b61', roof: '#b9ccd9',
     window: { w: 0.94, h: 0.98, spacing: 1.08 }, glass: true,
   };
-  if (district === 'oldtown') {
-    const warm = seeded(project.id)() > 0.5;
-    return { key: 'oldtown', body: warm ? '#c58161' : '#d7b087', trim: '#744d39', plinth: '#8c6650', door: '#66452e', roof: warm ? '#a65340' : '#795443', window: { w: 0.58, h: 0.76, spacing: 1.32 } };
-  }
+  if (district === 'suburbs') return { key: 'suburbs', body: HOME_BODY_COLORS[0], trim: HOME_WOOD, plinth: '#c7c9c5', door: HOME_ROOF, roof: HOME_ROOF };
   const key = LANG_STYLE[lang] || 'generic';
   const base = { key, window: { w: 0.55, h: 0.72, spacing: 1.2 }, door: '#6b4a8f', trim: null };
   switch (key) {
@@ -81,7 +79,8 @@ export const MATERIALS = {
   windowDark: sharedMat(toonMaterial('#5d6f9c', { emissive: '#1b2240', emissiveIntensity: 0.2, cache: false })),
   glassLit: sharedMat(toonMaterial('#c4ebfa', { emissive: '#91d5f5', emissiveIntensity: 0.2, cache: false })),
   glassDark: sharedMat(toonMaterial('#4c7c9a', { emissive: '#1e455e', emissiveIntensity: 0.08, cache: false })),
-  lantern: sharedMat(toonMaterial('#ffe1a4', { emissive: '#ffc168', emissiveIntensity: 0.1, cache: false })),
+  wallLight: sharedMat(toonMaterial('#ffe1a4', { emissive: '#ffc168', emissiveIntensity: 0.1, cache: false })),
+  homeGlass: sharedMat(toonMaterial('#7d9da8', { emissive: '#f3d5a1', emissiveIntensity: 0.04, cache: false })),
   shop: sharedMat(toonMaterial('#fff2c9', { emissive: '#ffcf7a', emissiveIntensity: 0.4, cache: false })),
   pad: sharedMat(toonMaterial('#e9dfcb', { cache: false })),
   scaffold: sharedMat(toonMaterial('#ffc94d', { cache: false })),
@@ -95,7 +94,8 @@ export function setBuildingNight(night) {
   MATERIALS.shop.emissiveIntensity = 0.35 + night * 1.1;
   MATERIALS.glassLit.emissiveIntensity = 0.18 + night * 1.1;
   MATERIALS.glassDark.emissiveIntensity = 0.05 + night * 0.2;
-  MATERIALS.lantern.emissiveIntensity = 0.08 + night * 1.9;
+  MATERIALS.wallLight.emissiveIntensity = 0.08 + night * 1.9;
+  MATERIALS.homeGlass.emissiveIntensity = 0.04 + night * 0.55;
 }
 
 /* ---------- Spark side palette ----------
@@ -244,6 +244,63 @@ class Batch {
   }
 }
 
+/** Downtown landscaping uses building-local coordinates: the tower's unchanged
+ * CZ offset means the lawn itself is centred at -CZ. Fit only the landscaping
+ * beside bridge approaches; never move or resize a placed tower. */
+export function downtownBasePlan(size, cell, unbuilt = false) {
+  const c = cellCenter(cell.i, cell.j);
+  const halfX = riverSceneryClear(c.x, c.z, 5.55, 5.55) ? 5.5 : 5.17;
+  const lawn = { w: halfX * 2, d: 11, z: -CZ, top: unbuilt ? PAD_TOP : GROUND_Y + 0.04 };
+  const paving = unbuilt ? null : { w: Math.min(size.W + 1.8, halfX * 2 - 0.16), d: size.D + 1.8, z: 0, top: PAD_TOP };
+  const start = unbuilt ? size.D / 2 : paving.d / 2;
+  const end = LOT_HALF - CZ - 0.005; // float-safe inset at the sidewalk seam
+  const entry = { w: 1.1, d: end - start, z: (end + start) / 2, top: PAD_TOP + (unbuilt ? 0.008 : 0) };
+  const plants = [];
+  if (!unbuilt) {
+    // The front pair leaves the existing scenery bench at (4,4.85) and the
+    // entry path clear. Smaller towers also have a pair of rear garden beds.
+    for (const [x, cellZ] of [[-3.7, 5.08], [1.9, 5.08], [-4.3, -4.95], [4.3, -4.95]]) {
+      const z = cellZ - CZ, w = 1.05, d = cellZ > 0 ? 0.55 : 0.65, radius = cellZ > 0 ? 0.34 : 0.42;
+      const hx = w / 2 + 0.04, hz = radius + 0.04;
+      if (Math.abs(x) + hx > halfX || Math.abs(cellZ) + hz > 5.5) continue;
+      if (Math.abs(x) - hx < paving.w / 2 + 0.03 && Math.abs(z) - hz < paving.d / 2 + 0.03) continue;
+      if (!riverSceneryClear(c.x + x, c.z + cellZ, hx, hz)) continue;
+      plants.push({ x, z, w, d, radius });
+    }
+  }
+  return { lawn, paving, entry, plants, unbuilt };
+}
+
+/** Owned geometry, shared toon materials, and a few merged planting draws per
+ * lot. Existing building picking remains on the tower/sign meshes. */
+export function buildDowntownBase(plan, { tag = {} } = {}) {
+  const group = new THREE.Group(); group.name = 'downtown-base'; group.userData.plan = plan;
+  const surface = (name, rect, color, thickness, outline = 0) => {
+    const geometry = placed(new THREE.BoxGeometry(rect.w, thickness, rect.d), { y: rect.top - thickness / 2, z: rect.z });
+    const mesh = new THREE.Mesh(geometry, toonMaterial(color)); mesh.name = name;
+    mesh.receiveShadow = true; Object.assign(mesh.userData, tag);
+    if (outline) addOutline(mesh, { thickness: outline });
+    group.add(mesh); return mesh;
+  };
+  surface('downtown-lawn', plan.lawn, '#8aca70', plan.unbuilt ? 0.12 : 0.04);
+  if (plan.paving) surface('downtown-paving', plan.paving, '#e5d7bc', 0.12, 0.02);
+  surface('downtown-entry-walk', plan.entry, '#f1e6ce', 0.08);
+  if (plan.plants.length) {
+    const planting = new THREE.Group(); planting.name = 'downtown-planters';
+    planting.userData.count = plan.plants.length; group.add(planting);
+    const batch = new Batch(), soilTop = plan.lawn.top + 0.26;
+    for (const p of plan.plants) {
+      batch.add('#d7c3a2', placed(new THREE.BoxGeometry(p.w, 0.26, p.d), { x: p.x, y: plan.lawn.top + 0.13, z: p.z }));
+      batch.add('#5b9f66', placed(new THREE.BoxGeometry(p.w - 0.14, 0.035, p.d - 0.14), { x: p.x, y: soilTop + 0.005, z: p.z }));
+      batch.add('#b77c4e', placed(new THREE.CylinderGeometry(0.07, 0.1, 1.18, 6), { x: p.x, y: soilTop + 0.59, z: p.z }));
+      batch.add('#5b9f66', placed(new THREE.IcosahedronGeometry(p.radius, 1), { x: p.x, y: soilTop + 1.48, z: p.z, sy: 1.8 }));
+    }
+    batch.build(planting, { tag, outline: 0.025 });
+  }
+  group.traverse(node => { if (node.isMesh) node.raycast = () => {}; });
+  return group;
+}
+
 const easeOutBack = t => { const c = 1.6; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); };
 const easeIn = t => t * t * t;
 
@@ -251,15 +308,15 @@ const easeIn = t => t * t * t;
 function unbuiltSignTexture(name) {
   const canvas = document.createElement('canvas'); canvas.width = 768; canvas.height = 192;
   const context = canvas.getContext('2d');
-  context.fillStyle = '#e7edf0'; context.fillRect(0, 0, 768, 192);
-  context.strokeStyle = '#91a7b3'; context.lineWidth = 6; context.strokeRect(3, 3, 762, 186);
+  context.fillStyle = '#fff5df'; context.fillRect(0, 0, 768, 192);
+  context.strokeStyle = '#b59a7e'; context.lineWidth = 6; context.strokeRect(3, 3, 762, 186);
   context.textAlign = 'center'; context.textBaseline = 'middle';
   const label = String(name || 'Repository').replace(/\s+/g, ' ').trim();
   let fontSize = 48;
   do { context.font = `600 ${fontSize}px "Segoe UI", system-ui, sans-serif`; fontSize -= 2; } while (context.measureText(label).width > 704 && fontSize > 22);
-  context.fillStyle = '#425967'; context.fillText(label, 384, 66, 704);
-  context.font = '30px "Segoe UI", system-ui, sans-serif'; context.fillStyle = '#586d79';
-  context.fillText('Not on this PC · click to clone', 384, 132, 704);
+  context.fillStyle = '#60513f'; context.fillText(label, 384, 66, 704);
+  context.font = '40px "Segoe UI", system-ui, sans-serif'; context.fillStyle = '#625343';
+  context.fillText('Clone to build', 384, 132, 704);
   const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
   return texture;
 }
@@ -295,24 +352,32 @@ export class Building {
     this.project = project;
     const district = !this.mirror && this.env.districts ? districtOf(project) : null;
     const unbuilt = Boolean(district && isUnbuilt(project));
-    const size = buildingSize(project);
+    const homePlan = district === 'suburbs' ? suburbPlan(project, this.cell) : null;
+    const size = homePlan ? { W: homePlan.W, D: homePlan.D, H: homePlan.H, floors: homePlan.floors, footprint: homePlan.footprint, variant: homePlan.variant, variantName: homePlan.variantName } : buildingSize(project);
     const style = this.mirror ? sparkStyle(styleFor(project)) : styleFor(project, district);
+    if (homePlan) style.body = homePlan.body;
     const m = project.metrics || {};
     const litFrac = Math.max(0.08, Math.min(0.92, 0.12 + (m.glow || 0) * 0.55 + Math.min(m.commits7d || 0, 30) / 60));
     const sig = JSON.stringify([size.floors, size.footprint, style.key, style.body, project.name, Math.round(litFrac * 20), (m.commits7d || 0) > 0, project.source, !!project.private, unbuilt]);
     if (sig === this.sig) return false;
     const previous = this.size;
     const footprintChanged = !previous || previous.footprint !== size.footprint || this.district !== district || this.unbuilt !== unbuilt;
-    this.sig = sig; this.size = size; this.style = style; this.litFrac = litFrac; this.district = district; this.unbuilt = unbuilt;
+    this.sig = sig; this.size = size; this.style = style; this.litFrac = litFrac; this.district = district; this.unbuilt = unbuilt; this.suburbs = homePlan;
     this.clearTower();
     this.buildTower();
     if (footprintChanged) this.buildPad();
-    if (this.active && !this.unbuilt) this.buildScaffold();
+    if (this.active && !this.unbuilt) { if (homePlan) this.buildHomeActivity(); else this.buildScaffold(); }
     const reduced = this.env.reducedMotion();
     if (!previous && animate && !reduced) {
       this.anim = { kind: 'rise', t: 0, delay: this.env.stagger?.() || 0 };
       this.tower.scale.y = 0.02; this.padGroup.scale.setScalar(0.6);
+    } else if (previous && homePlan && (previous.W !== size.W || previous.D !== size.D) && !reduced) {
+      this.anim = { kind: 'widen', t: 0, fromX: previous.W / size.W, fromZ: previous.D / size.D };
+      this.tower.scale.set(this.anim.fromX, 1, this.anim.fromZ);
     } else if (previous && previous.floors !== size.floors && !reduced) {
+      // Initial metrics can replace a still-running arrival with floor growth.
+      // The new animation scales only the tower; finish its Downtown lawn first.
+      if (this.district === 'downtown') this.padGroup.scale.setScalar(1);
       this.anim = { kind: 'grow', t: 0, from: previous.H / size.H, up: size.floors > previous.floors };
       this.tower.scale.y = previous.H / size.H;
       if (this.anim.up && !this.mirror) this.env.particles.emit('sparkle', this.topPoint(), 26, { spread: size.W * 0.8 });
@@ -325,7 +390,7 @@ export class Building {
     if (this.unbuiltSign) { this.unbuiltSign.removeFromParent(); disposeObject(this.unbuiltSign); this.unbuiltSign = null; }
     for (const child of [...this.tower.children]) { this.tower.remove(child); disposeObject(child); }
     this.pickables = []; this.gear = null; this.flag = null; this.beaconLight = null; this.jib = null; this.chimneyTop = null; this.scaffold = null;
-    this.paintMeshes = []; this.litWindows = null; this.litPanes = []; this.rigTip = null; this.plaque = null; this.roofSurface = null; this.scaffoldFront = null;
+    this.paintMeshes = []; this.litWindows = null; this.litPanes = []; this.rigTip = null; this.plaque = null; this.roofSurface = null; this.scaffoldFront = null; this.home = null; this.contractor = null;
     for (const m of this.signs || []) SPARK_SIGNS.delete(m);
     this.signs = [];
   }
@@ -338,6 +403,7 @@ export class Building {
 
   buildTower() {
     if (this.unbuilt) { this.buildUnbuilt(); return; }
+    if (this.suburbs) { this.buildHome(); return; }
     const { W, D, H, floors } = this.size, s = this.style, mirror = this.mirror;
     const tag = mirror ? { sparkBuildingId: this.id } : { buildingId: this.id };
     const top = PAD_TOP + H;
@@ -372,23 +438,6 @@ export class Building {
       batch.add('#b9ccd9', placed(new THREE.BoxGeometry(0.65, 0.1, 0.1), { x: W * 0.23, y: top + 1.1, z: -D * 0.2 }));
       roofTop = top + 1.55;
       this.roofSurface = top + 0.2;
-    } else if (s.key === 'oldtown') {
-      const rise = Math.min(2.2, 0.9 + D * 0.18);
-      const shape = new THREE.Shape([new THREE.Vector2(-D / 2 - 0.25, 0), new THREE.Vector2(D / 2 + 0.25, 0), new THREE.Vector2(0, rise)]);
-      const roof = new THREE.ExtrudeGeometry(shape, { depth: W + 0.4, bevelEnabled: false });
-      roof.translate(0, 0, -(W + 0.4) / 2); roof.rotateY(Math.PI / 2); roof.translate(0, top, 0);
-      batch.add(s.roof, roof);
-      // Timber posts and shallow brick courses read at both street and island scale.
-      for (const x of [-W / 2 + 0.12, W / 2 - 0.12]) for (const z of [-D / 2 - 0.035, D / 2 + 0.035]) batch.add(s.trim, placed(new THREE.BoxGeometry(0.18, H, 0.12), { x, y: PAD_TOP + H / 2, z }));
-      for (let y = PAD_TOP + 0.65; y < top - 0.5; y += 0.65) batch.add(shade(s.body, -0.05), placed(new THREE.BoxGeometry(W - 0.3, 0.045, D + 0.05), { y }));
-      const lx = -W / 2 + 0.65, lz = D / 2 + 0.22;
-      batch.add('#553f31', placed(new THREE.BoxGeometry(0.1, 0.45, 0.1), { x: lx, y: PAD_TOP + 1.95, z: lz - 0.12 }));
-      batch.add('#553f31', placed(new THREE.BoxGeometry(0.32, 0.1, 0.32), { x: lx, y: PAD_TOP + 1.75, z: lz }));
-      batch.add('#553f31', placed(new THREE.ConeGeometry(0.25, 0.2, 4), { x: lx, y: PAD_TOP + 2.2, z: lz, ry: Math.PI / 4 }));
-      const lantern = new THREE.Mesh(placed(new THREE.BoxGeometry(0.25, 0.34, 0.25), { x: lx, y: PAD_TOP + 1.97, z: lz }), MATERIALS.lantern);
-      lantern.userData = { ...tag }; this.tower.add(lantern);
-      roofTop = top + rise;
-      this.roofSurface = roofTop;
     } else if (s.key === 'foundry') {
       const cx = W / 2 - 0.85, cz = -D / 2 + 0.85;
       batch.add(s.plinth, placed(new THREE.CylinderGeometry(0.42, 0.5, 2.9, 12), { x: cx, y: top + 1.45, z: cz }));
@@ -496,6 +545,25 @@ export class Building {
     this.mountTicker();
   }
 
+  buildHome() {
+    const tag = { buildingId: this.id };
+    this.bodyMaterial = toonMaterial(this.suburbs.body, { cache: false });
+    this.home = buildSuburbHome(this.suburbs, { baseY: PAD_TOP, bodyMaterial: this.bodyMaterial, glassMaterial: MATERIALS.homeGlass, wallLightMaterial: MATERIALS.wallLight, tag });
+    this.tower.add(this.home.group); this.body = this.home.body; this.pickables.push(...this.home.meshes);
+    this.roofTop = this.home.roofY + 0.15; this.roofSurface = this.home.roofY;
+    const width = Math.min(1.65, this.suburbs.entry.w * 0.65);
+    const plaque = new THREE.Mesh(new THREE.PlaneGeometry(width, width / 4), new THREE.MeshBasicMaterial({ map: plaqueTexture(this.project.name, { accent: HOME_WOOD }), transparent: true }));
+    plaque.position.copy(this.home.plaque); plaque.userData = tag;
+    this.tower.add(plaque); this.pickables.push(plaque); this.plaque = plaque;
+    this.mountTicker();
+  }
+
+  buildHomeActivity() {
+    if (this.contractor) { this.contractor.group.removeFromParent(); disposeObject(this.contractor.group); }
+    this.contractor = buildContractor(this.suburbs, { baseY: PAD_TOP, tag: { buildingId: this.id } });
+    this.tower.add(this.contractor.group);
+  }
+
   /** Remote-only repositories are clickable plans, with no working construction rig. */
   buildUnbuilt() {
     const { W, D, H } = this.size, tag = { buildingId: this.id };
@@ -510,15 +578,13 @@ export class Building {
     this.tower.add(body, frame); this.body = body; this.pickables.push(body);
     const sign = new THREE.Group(); sign.name = `unbuilt-sign:${this.id}`;
     sign.position.set(0, PAD_TOP, D / 2 + 0.33);
-    const plaqueW = Math.min(W * 0.8, 4.6), plaqueH = plaqueW / 4;
-    for (const x of [-plaqueW * 0.35, plaqueW * 0.35]) {
-      const post = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1, 0.12), toonMaterial('#788d99'));
-      post.position.set(x, 0.5, 0); sign.add(post);
-    }
-    const backing = new THREE.Mesh(new THREE.BoxGeometry(plaqueW + 0.1, plaqueH + 0.1, 0.1), toonMaterial('#91a7b3'));
-    backing.position.y = 1.1; backing.userData = { ...tag }; sign.add(backing);
+    const plaqueW = Math.min(W * 0.65, 2.6), plaqueH = plaqueW / 4;
+    const posts = new THREE.Mesh(mergeParts([-plaqueW * 0.35, plaqueW * 0.35].map(x => placed(new THREE.BoxGeometry(0.1, 0.8, 0.1), { x, y: 0.4 }))), toonMaterial('#b58c62'));
+    addOutline(posts, { thickness: 0.02 }); sign.add(posts);
+    const backing = new THREE.Mesh(new THREE.BoxGeometry(plaqueW + 0.1, plaqueH + 0.1, 0.1), toonMaterial('#c5a17b'));
+    backing.position.y = 0.88; backing.userData = { ...tag }; addOutline(backing, { thickness: 0.02 }); sign.add(backing);
     const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueH), new THREE.MeshBasicMaterial({ map: unbuiltSignTexture(this.project.name) }));
-    plaque.position.set(0, 1.1, 0.056); plaque.userData = { ...tag };
+    plaque.position.set(0, 0.88, 0.056); plaque.userData = { ...tag };
     sign.add(plaque); this.group.add(sign); this.unbuiltSign = sign;
     this.pickables.push(backing, plaque); this.plaque = plaque;
     this.roofTop = this.roofSurface = PAD_TOP + ghostHeight;
@@ -530,13 +596,15 @@ export class Building {
     this.tickerInfo = segments ? { segments, paused: Boolean(paused) } : null;
     if (!segments || this.unbuilt) { this.dropTicker(); return; }
     if (this.ticker) this.ticker.set(segments, { grey: Boolean(paused) }); else this.mountTicker();
-    if (!had && this.size?.floors === 1 && this.plaque) this.plaque.position.z = this.size.D / 2 + TICKER.off + 0.05;
+    if (!had && !this.suburbs && this.size?.floors === 1 && this.plaque) this.plaque.position.z = this.size.D / 2 + TICKER.off + 0.05;
   }
   mountTicker() {
     if (this.unbuilt || !this.tickerInfo || this.ticker || !this.size) return;
     const { W, D, H } = this.size;
     // Picking the band picks the building (same tag as its walls).
-    this.ticker = new Ticker({ W, D, top: PAD_TOP + H, tag: this.mirror ? { sparkBuildingId: this.id } : { buildingId: this.id } });
+    const home = this.home?.ticker;
+    this.ticker = new Ticker({ W: home?.W || W, D: home?.D || D, top: home ? 0 : PAD_TOP + H, tag: this.mirror ? { sparkBuildingId: this.id } : { buildingId: this.id } });
+    if (home) { this.ticker.mesh.position.set(home.x, home.y, home.z); this.ticker.mesh.scale.y = home.scaleY; }
     this.ticker.set(this.tickerInfo.segments, { grey: this.tickerInfo.paused });
     this.tower.add(this.ticker.mesh); this.pickables.push(this.ticker.mesh);
   }
@@ -630,27 +698,23 @@ export class Building {
 
   buildPad() {
     for (const child of [...this.padGroup.children]) { this.padGroup.remove(child); disposeObject(child); }
+    this.downtownBase = null;
+    if (this.suburbs) {
+      const yard = buildSuburbYard(this.suburbs, { baseY: PAD_TOP, tag: { buildingId: this.id }, centerZ: -CZ });
+      this.padGroup.add(yard); this.pad = yard; return;
+    }
+    if (this.district === 'downtown') {
+      this.downtownBase = downtownBasePlan(this.size, this.cell, this.unbuilt);
+      const landscape = buildDowntownBase(this.downtownBase, { tag: { buildingId: this.id } });
+      this.padGroup.add(landscape); this.pad = landscape; return;
+    }
     const { W, D } = this.size;
-    const padMaterial = this.mirror ? SPARK_MATERIALS.pad : this.district === 'downtown' ? toonMaterial('#9daeb9') : this.district === 'oldtown' ? toonMaterial('#c6b98b') : MATERIALS.pad;
+    const padMaterial = this.mirror ? SPARK_MATERIALS.pad : MATERIALS.pad;
     const pad = new THREE.Mesh(placed(new RoundedBoxGeometry(W + 1.2, 0.14, D + 1.2, 1, 0.12), { y: GROUND_Y + 0.05 }), padMaterial);
     pad.receiveShadow = true; pad.userData = this.mirror ? { sparkBuildingId: this.id } : { buildingId: this.id };
     addOutline(pad, { thickness: 0.03 });
     this.padGroup.add(pad);
     this.pad = pad;
-    if (this.district === 'oldtown') {
-      const garden = new Batch();
-      const z = D / 2 + 0.28;
-      // Low garden beds and two small trees stay within the reserved lot footprint.
-      for (const side of [-1, 1]) {
-        const x = side * (W / 2 - 0.75);
-        garden.add('#846344', placed(new THREE.BoxGeometry(1.25, 0.22, 0.46), { x, y: PAD_TOP + 0.11, z }));
-        garden.add('#5c964f', placed(new THREE.BoxGeometry(1.1, 0.16, 0.35), { x, y: PAD_TOP + 0.3, z }));
-        garden.add('#765138', placed(new THREE.CylinderGeometry(0.07, 0.1, 0.85, 5), { x, y: PAD_TOP + 0.68, z }));
-        garden.add(side < 0 ? '#78a45c' : '#508354', placed(new THREE.IcosahedronGeometry(0.52, 0), { x, y: PAD_TOP + 1.23, z, sy: 1.2 }));
-        garden.add('#e8ae79', placed(new THREE.IcosahedronGeometry(0.12, 0), { x: x + side * 0.42, y: PAD_TOP + 0.42, z }));
-      }
-      garden.build(this.padGroup, { outline: 0.02 });
-    }
   }
 
   setActive(on) {
@@ -658,10 +722,16 @@ export class Building {
     if (on === this.active) return;
     this.active = on;
     if (this.mirror) this.paintSpark();
+    if (this.suburbs) {
+      if (on) this.buildHomeActivity();
+      else if (this.contractor) { this.contractor.group.removeFromParent(); disposeObject(this.contractor.group); this.contractor = null; }
+      return;
+    }
     if (on) this.buildScaffold();
     else if (this.scaffold) { this.tower.remove(this.scaffold); disposeObject(this.scaffold); this.scaffold = null; this.jib = null; this.rigTip = null; }
   }
   buildScaffold() {
+    if (this.suburbs) { if (this.active) this.buildHomeActivity(); return; }
     if (this.mirror) { this.buildRig(); return; }
     if (this.scaffold) { this.tower.remove(this.scaffold); disposeObject(this.scaffold); }
     const { W, D, H } = this.size;
@@ -719,23 +789,58 @@ export class Building {
   topPoint() { return this.worldPoint(0, (this.roofTop || PAD_TOP + this.size.H) * this.tower.scale.y + 0.6, 0); }
   /** Local roof contact for attached indicators. It scales with the tower during rise/grow/sink. */
   rooftopPoint() {
-    // Stay clear of the central crane. Old Town's roof ridge runs along x.
-    return new THREE.Vector3(-this.size.W * 0.25, this.roofSurface || PAD_TOP + this.size.H + 0.12, this.district === 'oldtown' ? 0 : this.size.D * 0.2);
+    if (this.home) return this.home.roofPoint.clone();
+    return new THREE.Vector3(-this.size.W * 0.25, this.roofSurface || PAD_TOP + this.size.H + 0.12, this.size.D * 0.2);
   }
   get center() { return { x: this.origin.x, z: this.origin.z }; }
-  get door() { return { x: this.origin.x, z: this.origin.z + this.size.D / 2 + 0.3 }; }
+  get door() { return this.home ? { x: this.origin.x + this.home.door.x, z: this.origin.z + this.home.door.z + 0.2 } : { x: this.origin.x, z: this.origin.z + this.size.D / 2 + 0.3 }; }
   /** Work spot k in front of the facade, facing the building. */
   workSpot(k) {
+    if (this.home) return { x: this.door.x + ((k % 3) - 1) * 0.4, z: this.door.z + 0.6 + Math.floor(k / 3) * 0.5, fx: 0, fz: -1 };
     const offsets = [0, -1.3, 1.3, -2.6, 2.6, -0.65, 0.65, -1.95, 1.95];
     const limit = this.size.W / 2 - 0.25;
     const x = Math.max(-limit, Math.min(limit, offsets[k % offsets.length]));
     return { x: this.origin.x + x, z: this.origin.z + this.size.D / 2 + 0.95 + Math.floor(k / offsets.length) * 0.8, fx: 0, fz: -1 };
   }
-  get seats() { return lotSeats(this.cell.i, this.cell.j); }
-  get lot() { return { i: this.cell.i, j: this.cell.j, padW: this.size.W + 1.2, padD: this.size.D + 1.2, cz: CZ }; }
+  get seats() { return this.suburbs ? [] : lotSeats(this.cell.i, this.cell.j); }
+  get lot() { return { i: this.cell.i, j: this.cell.j, padW: this.suburbs ? HOME_LOT_SIZE : this.size.W + 1.2, padD: this.suburbs ? HOME_LOT_SIZE : this.size.D + 1.2, cz: this.suburbs ? 0 : CZ, district: this.district, ...(this.suburbs ? { driveway: { ...this.suburbs.driveway } } : {}) }; }
+  /** Surface height in island coordinates, including the animated yard scale. */
+  groundAt(x, z) {
+    if ((!this.suburbs && !this.downtownBase) || !this.padGroup) return null;
+    const scale = this.padGroup.scale;
+    if (scale.x <= 0 || scale.z <= 0) return null;
+    const localX = (x - this.origin.x) / scale.x, localZ = (z - this.origin.z) / scale.z;
+    if (this.downtownBase) {
+      let top = null;
+      for (const surface of [this.downtownBase.lawn, this.downtownBase.paving, this.downtownBase.entry]) {
+        if (!surface || Math.abs(localX) > surface.w / 2 || Math.abs(localZ - surface.z) > surface.d / 2) continue;
+        top = top === null ? surface.top : Math.max(top, surface.top);
+      }
+      return top === null ? null : top * scale.y;
+    }
+    if (Math.abs(localX) > HOME_LOT_SIZE / 2 || Math.abs(localZ + CZ) > HOME_LOT_SIZE / 2) return null;
+    const { driveway: drive, door } = this.suburbs;
+    let top = PAD_TOP;
+    if (Math.abs(localX - door.x) <= 0.45 && localZ >= door.z && localZ <= drive.maxZ) top = PAD_TOP + 0.0265;
+    if (Math.abs(localX - drive.x) <= drive.width / 2 && localZ >= drive.minZ && localZ <= drive.maxZ) top = PAD_TOP + 0.03;
+    return top * scale.y;
+  }
+  /** Actual home wings in island coordinates for walking and wheel-zoom collision. */
+  get collisionBoxes() {
+    if (!this.suburbs) return null;
+    const boxes = this.suburbs.blocks.map(b => ({ x0: this.origin.x + b.x - b.w / 2 - 0.14, x1: this.origin.x + b.x + b.w / 2 + 0.14,
+      z0: this.origin.z + b.z - b.d / 2 - 0.14, z1: this.origin.z + b.z + b.d / 2 + 0.14, y0: PAD_TOP + b.bottom, y1: PAD_TOP + b.bottom + b.h + 0.2 }));
+    if (this.contractor) { const drive = this.suburbs.driveway, z = Math.min(4.2, drive.minZ + 1.25); boxes.push({ x0: this.origin.x + drive.x - 0.65, x1: this.origin.x + drive.x + 0.65,
+      z0: this.origin.z + z - 0.98, z1: this.origin.z + z + 0.98, y0: PAD_TOP, y1: PAD_TOP + 1.45 }); }
+    return boxes;
+  }
 
   /** Returns false when a sink animation has finished and the building can be disposed. */
   update(dt, elapsed, env) {
+    if ((this.suburbs || this.district === 'downtown') && env.reducedMotion && this.anim) {
+      if (this.anim.kind === 'sink') return false;
+      this.anim = null; this.tower.scale.set(1, 1, 1); this.padGroup.scale.setScalar(1);
+    }
     if (this.anim) {
       const a = this.anim;
       if (a.delay > 0) { a.delay -= dt; return true; }
@@ -745,6 +850,11 @@ export class Building {
         this.tower.scale.y = Math.max(0.02, easeOutBack(a.t));
         this.padGroup.scale.setScalar(0.6 + 0.4 * Math.min(1, a.t * 2.5));
         if (a.t >= 1) { this.tower.scale.y = 1; this.padGroup.scale.setScalar(1); this.anim = null; }
+      } else if (a.kind === 'widen') {
+        a.t = Math.min(1, a.t + dt / 0.8);
+        const k = 1 - Math.pow(1 - a.t, 3);
+        this.tower.scale.set(a.fromX + (1 - a.fromX) * k, 1, a.fromZ + (1 - a.fromZ) * k);
+        if (a.t >= 1) { this.tower.scale.set(1, 1, 1); this.anim = null; }
       } else if (a.kind === 'grow') {
         a.t += dt;
         this.tower.scale.y = 1 + (a.from - 1) * Math.exp(-4.5 * a.t) * Math.cos(10 * a.t);
@@ -758,6 +868,12 @@ export class Building {
         if (this.unbuiltSign) this.unbuiltSign.scale.copy(this.padGroup.scale);
         if (a.t >= 1) return false;
       }
+    }
+    if (this.home) {
+      // "Busy" means this project's existing active-agent state. No invented work
+      // signal; reduced motion leaves panels and the contractor beacon steady.
+      this.home.solarMaterial.emissiveIntensity = this.active ? env.reducedMotion ? 0.12 : 0.08 + Math.max(0, Math.sin(elapsed * 0.7 + this.suburbs.variant) - 0.82) * 1.5 : 0.08;
+      if (this.contractor) this.contractor.amberMaterial.emissiveIntensity = env.reducedMotion ? 0.7 : (elapsed * 1.4) % 1 < 0.5 ? 1.1 : 0.2;
     }
     if (env.reducedMotion) return true;
     if (this.mirror && env.offline) return true;   // Spark offline: its twins stand still (no gear, flag, beacon or sparks)
@@ -801,6 +917,10 @@ export class BuildingManager {
   }
   get(id) { const b = this.items.get(id); return b && !b.removing ? b : null; }
   get list() { return [...this.items.values()].filter(b => !b.removing); }
+  groundAt(x, z) {
+    for (const b of this.items.values()) { if (!b.removing) { const y = b.groundAt(x, z); if (y !== null) return y; } }
+    return null;
+  }
 
   /** projects + their cells (Map id → cell) + Set of project ids with active agents.
    * tickers: Map project id → access ticker segments (omitted: leave tickers as they are); paused:

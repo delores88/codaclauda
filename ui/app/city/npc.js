@@ -8,6 +8,8 @@ import { planPath, perimeterPoint, perimeterParam, perimeterRoute, cellOf } from
 import { HQ, GROUND_Y } from './scenery.js';
 import { hash, defaultAvatar, normalizeAvatar } from '../avatar/spec.js';
 import { disposeAll } from './fx.js';
+import { bridgeHeight } from './river-path.js';
+import { riverRoute, riverStep } from './river-navigation.js';
 
 const SPEED = { work: 2.2, stroll: 1.05, roam: 1.6, sit: 1.4, rest: 1.4, owner: 3.0 };
 const SIDEWALK_Y = GROUND_Y + 0.06;
@@ -55,11 +57,12 @@ export async function loadPeople() {
 }
 
 class Npc {
-  constructor(agent, person, quality) {
+  constructor(agent, person, quality, surfaceY = groundY) {
     this.id = agent.id;
     this.agent = agent;
     this.person = person;
     this.quality = quality;
+    this.surfaceY = surfaceY;
     this.lookSig = JSON.stringify(agent.look);
     this.status = undefined;
     const h = hash(agent.id);
@@ -74,17 +77,18 @@ class Npc {
   }
   get pos() { return this.person.object.position; }
   setAction(action) { if (this.action !== action) { this.action = action; this.person.setAction(action); } }
-  place(x, z) { this.pos.set(x, groundY(x, z), z); }
+  place(x, z) { this.pos.set(x, this.surfaceY(x, z), z); }
   get moving() { return this.path.length > 0 && this.pause <= 0 && !this.held; }
   get anchored() { return this.held || (!this.path.length && this.goal && (this.goal.type === 'sit' || this.goal.type === 'work')); }
 }
 
 export class NpcManager {
-  constructor(parent, { buildings, particles, reducedMotion }) {
+  constructor(parent, { buildings, particles, reducedMotion, river = () => null }) {
     this.parent = parent;
     this.buildings = buildings;
     this.particles = particles;
     this.reducedMotion = reducedMotion;
+    this.river = river;
     this.npcs = new Map();
     this.owner = null;
     this.ownerSig = '';
@@ -96,6 +100,11 @@ export class NpcManager {
     parent.add(this.marker);
   }
   setCreate(fn) { this.create = fn || createStandIn; }
+  surfaceY(x, z) {
+    const river = this.river(), bridge = river ? bridgeHeight(x, z, river.crossings) : null;
+    return bridge ?? this.buildings.groundAt?.(x, z) ?? groundY(x, z);
+  }
+  route(from, points) { return this.river() ? riverRoute(from, points, this.river().crossings) : points; }
   /** createPerson with a per-person fallback so one bad spec can't empty the city. */
   makePerson(spec, options) {
     let person;
@@ -115,7 +124,7 @@ export class NpcManager {
       if (npc && npc.quality !== quality) { this.removeNpc(npc, false); npc = null; }
       if (!npc) {
         const person = this.makePerson(agent.look, { role: 'agent', provider: agent.provider || 'other', quality });
-        npc = new Npc(agent, person, quality);
+        npc = new Npc(agent, person, quality, (x, z) => this.surfaceY(x, z));
         this.tagPickables(person, { kind: 'agent', id: agent.id });
         this.parent.add(person.object);
         this.npcs.set(agent.id, npc);
@@ -195,7 +204,7 @@ export class NpcManager {
       if (this.first) { npc.place(goal.point.x, goal.point.z); this.arrive(npc); }
       else {
         if (npc.fresh) npc.place(HQ.door.x + (Math.random() - 0.5), HQ.door.z + 0.4);
-        npc.path = planPath({ x: npc.pos.x, z: npc.pos.z }, goal.point, npc.lane);
+        npc.path = this.route(npc.pos, planPath({ x: npc.pos.x, z: npc.pos.z }, goal.point, npc.lane));
         npc.roaming = goal.type === 'stroll';
         npc.wait = 0;
         if (npc.pause <= 0 && !npc.held) npc.setAction('walk');
@@ -229,11 +238,11 @@ export class NpcManager {
         if (npc.wait <= 0) {
           const { i, j } = npc.goal.cell;
           const here = cellOf(npc.pos.x, npc.pos.z);
-          if (here.i !== i || here.j !== j) { npc.roaming = true; npc.path = planPath({ x: npc.pos.x, z: npc.pos.z }, perimeterPoint(i, j, Math.random() * 4), npc.lane); }
+          if (here.i !== i || here.j !== j) { npc.roaming = true; npc.path = this.route(npc.pos, planPath({ x: npc.pos.x, z: npc.pos.z }, perimeterPoint(i, j, Math.random() * 4), npc.lane)); }
           else {
             const t0 = perimeterParam(i, j, npc.pos);
             const t1 = t0 + (Math.random() < 0.5 ? -1 : 1) * (0.35 + Math.random() * 1.2);
-            npc.path = [perimeterPoint(i, j, t0), ...perimeterRoute(i, j, t0, t1)];
+            npc.path = this.route(npc.pos, [perimeterPoint(i, j, t0), ...perimeterRoute(i, j, t0, t1)]);
           }
           npc.setAction('walk');
         }
@@ -270,7 +279,7 @@ export class NpcManager {
       npc.setAction('walk');
     }
     if ('walkCadence' in npc.person) npc.person.walkCadence = Math.max(0.6, Math.min(3, speed / walkSpeed()));
-    pos.y = groundY(pos.x, pos.z);
+    pos.y = this.surfaceY(pos.x, pos.z);
   }
   /** Soft separation so walkers don't overlap; seated/working agents act as fixed posts. */
   separate() {
@@ -285,8 +294,12 @@ export class NpcManager {
       const sx = bx - bz * 0.9, sz = bz + bx * 0.9, sl = Math.hypot(sx, sz);
       const nx = sx / sl, nz = sz / sl, push = (min - d);
       const wp = p.anchored ? 0 : q.anchored ? 1 : 0.5, wq = 1 - wp;
-      if (!p.anchored) { p.pos.x -= nx * push * wp; p.pos.z -= nz * push * wp; }
-      if (!q.anchored) { q.pos.x += nx * push * wq; q.pos.z += nz * push * wq; }
+      for (const [person, weight, direction] of [[p, wp, -1], [q, wq, 1]]) {
+        if (person.anchored) continue;
+        const next = { x: person.pos.x + direction * nx * push * weight, z: person.pos.z + direction * nz * push * weight };
+        const safe = this.river() ? riverStep(person.pos, next, this.river().crossings) : next;
+        person.pos.set(safe.x, this.surfaceY(safe.x, safe.z), safe.z);
+      }
     }
   }
   /** Idle agents who bump into each other stop for a wave and a chat. */
@@ -339,12 +352,13 @@ export class NpcManager {
     if (!this.owner) return;
     const pos = this.owner.person.object.position;
     direct ||= Math.hypot(x - pos.x, z - pos.z) < 7;
-    this.owner.path = direct ? [{ x, z }] : planPath({ x: pos.x, z: pos.z }, { x, z }, { x: 1, z: 1 });
+    this.owner.path = this.route(pos, direct ? [{ x, z }] : planPath({ x: pos.x, z: pos.z }, { x, z }, { x: 1, z: 1 }));
     this.owner.speed = speed;
     this.owner.person.lookAt(this.owner.path[0].x, this.owner.path[0].z);
     this.ownerAction('walk');
     if (!marker) return;
-    this.marker.position.set(x, groundY(x, z) + 0.03, z);
+    const end = this.owner.path.at(-1);
+    this.marker.position.set(end.x, this.surfaceY(end.x, end.z) + 0.03, end.z);
     this.marker.material.opacity = 0.9; this.marker.scale.setScalar(1);
   }
   /** Talk mode: an agent stops where it is (no wandering, no chats with passers-by) until released;
@@ -387,7 +401,9 @@ export class NpcManager {
     if (!o) return;
     o.path = [];
     const person = o.person, pos = person.object.position;
-    pos.x = x; pos.z = z; pos.y = groundY(x, z);
+    const safe = this.river() ? moving ? riverStep(pos, { x, z }, this.river().crossings)
+      : riverRoute(pos, [{ x, z }], this.river().crossings).at(-1) : { x, z };
+    pos.x = safe.x; pos.z = safe.z; pos.y = this.surfaceY(safe.x, safe.z);
     if ('_yawTarget' in person) person._yawTarget = heading;   // people.js: parent-space yaw (island space here)
     else person.lookAt(x + Math.sin(heading) * 4, z + Math.cos(heading) * 4);
     if (moving && 'walkCadence' in person) person.walkCadence = Math.max(0.6, Math.min(3, speed / walkSpeed()));

@@ -6,12 +6,12 @@ import { PROVIDER_COLORS, defaultAvatar } from '../avatar/spec.js';
 import { THREE } from '../city/toon.js';
 import { World, webglAvailable, wheelZoomLog } from '../city/world.js';
 import { BuildingManager } from '../city/buildings.js';
-import { NpcManager, loadPeople, setPeopleReducedMotion, streetMove, groundY } from '../city/npc.js';
+import { NpcManager, loadPeople, setPeopleReducedMotion, streetMove } from '../city/npc.js';
 import { SlotMap, cellCenter, cellOf, cellKey, LOT_HALF, PITCH } from '../city/layout.js';
-import { districtOf, districtForCell, isUnbuilt, TRACK_Z } from '../city/districts.js';
-import { Railway } from '../city/railway.js';
+import { DOWNTOWN, SUBURBS, districtOf, districtForCell, districtBanks, chooseLargerDistrict, isUnbuilt } from '../city/districts.js';
+import { River } from '../city/river.js';
 import { buildPlotMarker, GROUND_Y } from '../city/scenery.js';
-import { SparkCity, FOUNDRY, jobLabel } from '../city/spark.js';
+import { SparkCity, FOUNDRY, DECK_Y, jobLabel } from '../city/spark.js';
 import { TalkPanel, talkSpot, talkShot, sayLine, STAGE } from '../city/talk.js';
 import { IslandMode } from '../city/portal.js';
 import { CityWeather } from '../city/weather-hud.js';
@@ -20,6 +20,9 @@ import { sessionAgents, externalAgents, SESSION_STATUS_LABEL, PROVIDER_NAME } fr
 import { openAssignDialog } from '../city/assign.js';
 import { CityCi } from '../city/ci.js';
 import { tickerBank, tickerSegments } from '../city/ticker.js';
+import { buildingStreetBoxes, buildingSolidAt } from '../city/street-collision.js';
+import { JumpToPicker } from '../city/jumpto.js';
+import { largestFreeRect, buildingFocusDistance, boxFitDistance } from '../city/camera.js';
 
 registerIcons({
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.6 2.4c-.8.4-1.2.9-1.2 1.7v.4M12 17h.01"/>',
@@ -32,6 +35,8 @@ registerIcons({
   'city-chevron-down': '<path d="m6 9 6 6 6-6"/>',
   'city-street': '<path d="M9.5 3 5 21M14.5 3 19 21"/><path d="M12 5v2.5M12 11v2.5M12 17v3"/>',
   'city-leave': '<path d="M19 12H5M11 6l-6 6 6 6"/>',
+  'city-boat': '<path d="M3 14h18l-3 5H6ZM12 3v11M12 4l6 7h-6M3 22l3-1 3 1 3-1 3 1 3-1 3 1"/>',
+  'city-van': '<path d="M3 7h11v10H3ZM14 10h4l3 4v3h-7"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/>',
 });
 
 const HELP_KEY = 'codaclauda.city.help-dismissed';
@@ -39,6 +44,7 @@ const TIME_MODES = ['auto', 'day', 'night'];
 const TIME_LABEL = { auto: 'Auto (your clock)', day: 'Always day', night: 'Always night' };
 const PROVIDER_LABEL = { claude: 'Claude', codex: 'Codex', other: 'Agent' };
 const MACHINES_KEY = 'codaclauda.city.machines-collapsed';
+const LEGEND_STORAGE = 'codaclauda.city.legend-expanded';
 const SPARK_KINDS = new Set(['spark', 'runner', 'foundry']);   // targets on the Spark face (everything else is This PC's face)
 const PLOT_HOLD_MS = 10 * 60e3;
 const EMPTY_MACHINES = { enabled: false, online: false, offlineSince: null, configured: false, error: '', local: { running: 0, cpuReserved: 0, cpuHours24h: 0 }, spark: { running: 0, cpuReserved: 0, cpuHours24h: 0 }, jobs: [] };
@@ -151,7 +157,37 @@ export function mount(root, ctx) {
   return { show: params => view.show(params), hide: () => view.hide(), destroy: () => view.destroy() };
 }
 
-class CityView {
+/** Visible geometry in the island's resting world frame. A new building is framed at its
+ * settled size while its rise animation plays; no live transforms are changed. */
+export function focusBounds(object, world, settled = []) {
+  if (!object) return null;
+  object.updateWorldMatrix(true, true);
+  const bounds = new THREE.Box3(), point = new THREE.Vector3(), matrices = new Map();
+  const fullScale = new Set(settled), one = new THREE.Vector3(1, 1, 1);
+  const matrixFor = node => {
+    if (!node) return new THREE.Matrix4();
+    if (!matrices.has(node)) {
+      const local = fullScale.has(node) ? new THREE.Matrix4().compose(node.position, node.quaternion, one) : node.matrix;
+      matrices.set(node, matrixFor(node.parent).clone().multiply(local));
+    }
+    return matrices.get(node);
+  };
+  object.traverseVisible(node => {
+    if (!node.geometry) return;
+    if (node.isInstancedMesh) node.computeBoundingBox();
+    else if (!node.geometry.boundingBox) node.geometry.computeBoundingBox();
+    const box = node.isInstancedMesh ? node.boundingBox : node.geometry.boundingBox;
+    if (!box || box.isEmpty()) return;
+    const matrix = matrixFor(node);
+    for (const x of [box.min.x, box.max.x]) for (const y of [box.min.y, box.max.y]) for (const z of [box.min.z, box.max.z]) {
+      point.set(x, y, z).applyMatrix4(matrix);
+      bounds.expandByPoint(world.toWorld(world.toLocal(point), { atRest: true }));
+    }
+  });
+  return bounds.isEmpty() ? null : bounds;
+}
+
+export class CityView {
   constructor(root, ctx) {
     this.root = root;
     this.ctx = ctx;
@@ -171,6 +207,7 @@ class CityView {
     this.cells = new Map(); this.occupied = new Set(); this.reserved = new Map(); this.rings = 1;
     this.machines = EMPTY_MACHINES;
     this.machinesCollapsed = storage.get(MACHINES_KEY) === '1';
+    this.legendExpanded = storage.get(LEGEND_STORAGE) === '1';
     this.street = null;              // street view state { heading, back, moving, turned } while it runs
     this.streetPending = false;      // waiting for the island to turn back to This PC side first
     this.streetKeys = new Set();
@@ -255,33 +292,39 @@ class CityView {
 
     this.stats = h('div.city-hud-stats');
     this.timeChip = h('span.city-chip');
-    this.jump = h('select.select.city-jump', { 'aria-label': 'Jump to a building or agent', onchange: () => this.onJump() });
+    this.jumpPicker = new JumpToPicker({ onSelect: target => this.onJump(target), onYou: () => this.findMe(), onHQ: () => this.onJump({ kind: 'hq' }) });
+    this.jump = this.jumpPicker.root;
     // Which face of the island is up (shown while the Spark side exists).
     this.sideChip = h('span.city-side.is-pc', { hidden: true, role: 'status' });
     this.hud = h('header.city-hud',
       h('div.city-hud-title', h('span.eyebrow', 'Project city'), this.sideChip, this.stats),
       h('div.city-hud-row', this.timeChip, this.weatherSlot = h('div.city-weather-slot'), this.jump));   // weather chip: city/weather-hud.js
 
-    this.legendSideText = h('span', 'Other side = DGX Spark');
-    this.legendOffline = h('div.city-legend-row', { hidden: true }, h('span.city-gem.offline'), 'Grey Spark side = Spark offline');
-    this.legendSpark = h('div.city-legend-extra', { hidden: true }, h('div.city-legend-sep'), h('div.city-legend-row', h('span.city-gem.spark'), this.legendSideText), this.legendOffline);
-    this.legendGear = h('div.city-legend-note', { hidden: true }, 'Spinning gear = a job running on this PC');
-    this.legend = h('div.city-legend', { 'aria-label': 'Legend' },
-      h('div.city-legend-row', h('span.city-gem.active'), 'Working'),
-      h('div.city-legend-row', h('span.city-gem.idle'), 'Awake'),
-      h('div.city-legend-row', h('span.city-gem.offline'), 'Powered down'),
-      h('div.city-legend-row', h('span.city-gem.error'), 'Session error'),
-      h('div.city-legend-sep'),
-      h('div.city-legend-note', 'Taller = more code & commits'),
-      h('div.city-legend-note', 'Drag an agent onto a building to give it a task'),
-      this.legendDistricts = h('div.city-legend-extra',
-        h('div.city-legend-note', 'Downtown: glass towers and GitHub repos'),
-        h('div.city-legend-note', 'Old Town: local folders, brick and gardens'),
-        h('div.city-legend-note', 'Pale ghost = repo waiting to be cloned'),
-        h('div.city-legend-note', 'Train labels = projects with recent commits')),
-      this.legendCi = h('div.city-legend-note', { hidden: true }, 'Red rooftop beacon = CI failing'),
-      h('div.city-legend-note', 'Scaffolding = an agent is working there'),
-      this.legendGear, this.legendSpark);
+    const legendItem = (glyph, label, title = '') => h('div.city-legend-item', { title }, icon(glyph), typeof label === 'string' ? h('span', label) : label);
+    this.legendSideText = h('span', 'Flip: DGX Spark');
+    this.legendOffline = legendItem('power', 'Spark offline'); this.legendOffline.hidden = true;
+    this.legendSpark = h('div.city-legend-extra', { hidden: true }, legendItem('city-flip', this.legendSideText), this.legendOffline);
+    this.legendGear = legendItem('settings', 'Gear: PC job'); this.legendGear.hidden = true;
+    this.legendLegacySize = legendItem('city', 'Height: activity'); this.legendLegacySize.hidden = true;
+    this.legendCi = legendItem('alert', 'Red beacon: CI failing'); this.legendCi.hidden = true;
+    this.legendScaffolding = h('span', 'Scaffold: working');
+    this.legendContent = h('div.city-legend-content', { id: 'city-legend-content', hidden: !this.legendExpanded },
+      h('div.city-legend-statuses',
+        h('div.city-legend-row', h('span.city-gem.active'), 'Working'),
+        h('div.city-legend-row', h('span.city-gem.idle'), 'Awake'),
+        h('div.city-legend-row', { title: 'Powered down' }, h('span.city-gem.offline'), 'Off'),
+        h('div.city-legend-row', h('span.city-gem.error'), 'Error')),
+      h('div.city-legend-grid', this.legendLegacySize,
+        this.legendDistricts = h('div.city-legend-extra',
+          legendItem('city', 'Downtown', 'GitHub projects; taller towers reflect activity'),
+          legendItem('home', 'Suburbs', 'Local folders; homes grow outward'),
+          legendItem('download', 'Ghost: clone'),
+          legendItem('city-boat', 'Boats: commits', 'Projects with recent commits'),
+          legendItem('city-van', 'Van: working home')),
+        this.legendCi, legendItem('agents', this.legendScaffolding), this.legendGear, this.legendSpark));
+    this.legendToggle = h('button.city-legend-toggle', { type: 'button', 'aria-expanded': String(this.legendExpanded), 'aria-controls': 'city-legend-content', onclick: () => this.toggleLegend() }, icon('help'), 'Legend', icon('city-chevron-up'));
+    this.legend = h('div.city-legend', { 'aria-label': 'Legend' }, this.legendContent, this.legendToggle);
+    this.legend.classList.toggle('is-collapsed', !this.legendExpanded);
 
     this.followBtn = iconButton('crosshair', 'Follow my avatar', () => this.toggleFollow(), 'city-tool');
     this.timeBtn = iconButton('clock', 'Time of day', () => this.cycleTime(), 'city-tool');
@@ -310,10 +353,11 @@ class CityView {
     this.help = h('div.city-help.card', { hidden: true, role: 'dialog', 'aria-label': 'City controls' },
       h('div.city-help-head', h('strong', 'Getting around'), iconButton('close', 'Close help', () => this.toggleHelp(false))),
       h('dl.city-help-list',
-        ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Drag an agent', 'Drop it on a building to give it a task there'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
+        ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Drag an agent', 'Drop it on a building to give it a task there'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click a building', 'Center it on either face'], ['Double-click ground', 'Walk your avatar there'], ['Click a boat label', 'Center that boat'], ['F / Focus', 'Center the selected building, agent or boat'], ['Jump', 'Select and center a building or agent'], ['H', 'Fit the whole island'], ['Esc', 'Deselect']]
           .flatMap(([k, v]) => [h('dt', h('kbd', k)), h('dd', v)])),
-      h('p.city-note', 'Railroad tracks separate Downtown (GitHub projects) from Old Town (local folders without a repo). Pale Downtown ghosts have a ground sign and open a panel where you can clone the repo. Tickers sit on real buildings only. Both districts keep at least three empty plots and grow without moving placed buildings.'),
-      h('p.city-note', 'A train carries recent project names every 90–180 seconds; crossing lights blink before it arrives. Reduced motion parks it at the station. A red rooftop beacon and “CI failing” ticker mark failed builds; weather is independent.'),
+      h('p.city-note', 'A winding river connects Downtown (GitHub projects) and Suburbs (local folders without a repo). Road bridges link the districts. Pale Downtown ghosts have a ground sign and open a panel where you can clone the repo. Tickers sit on real buildings only. Both districts keep at least three empty plots and grow without moving placed buildings.'),
+      h('p.city-note', 'Suburbs have low modern homes with at most two storeys. Larger projects add wings and a wider footprint; Downtown towers grow taller. A contractor van and ladder show an agent working at a home, and a solar-panel glint marks a busy home.'),
+      h('p.city-note', 'Sailboats, rowboats, tugboats, barges, paddle steamers and canoes travel a continuous river loop, over the waterfalls and along the Spark face. Boat labels show projects with recent commits; barges carry several names on their crates. Reduced motion moors boats at the docks on both faces. Click a bridge to walk there. A red rooftop beacon and CI failing ticker mark failed builds; weather is independent.'),
       h('button.btn.small.primary', { type: 'button', onclick: () => this.toggleHelp(false) }, 'Got it'));
 
     this.machinesCard = h('section.city-machines', { hidden: true, 'aria-label': 'Machine load' });
@@ -360,11 +404,15 @@ class CityView {
     this.world = new World(this.stage, { quality: prefs.cityQuality || 'high', reducedMotion: () => this.reduced(), timeMode: prefs.cityTime || 'auto' });
     this.world.onContextLost = () => this.fail('The graphics context was lost (the GPU may have been reset). Reload the window to bring the city back.');
     this.world.onKeyPan = () => { if (this.following) this.toggleFollow(false); };
+    this.world.onResize = () => this.updateCameraFrame();
+    this.cameraFrameObserver = new ResizeObserver(() => this.updateCameraFrame());
+    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.stage]) this.cameraFrameObserver.observe(node);
     this.world.collide = p => this.solidAt(p);
     this.buildings = new BuildingManager(this.world.city, { particles: this.world.particles, reducedMotion: () => this.reduced() });
-    this.railway = new Railway(this.world);
-    this.npcs = new NpcManager(this.world.city, { buildings: this.buildings, particles: this.world.particles, reducedMotion: () => this.reduced() });
+    this.river = new River(this.world);
+    this.npcs = new NpcManager(this.world.city, { buildings: this.buildings, particles: this.world.particles, reducedMotion: () => this.reduced(), river: () => this.islands?.current ? null : this.river });
     this.spark = new SparkCity(this.world, { makePerson: (spec, options) => this.npcs.makePerson(spec, options), reducedMotion: () => this.reduced(), topBuildings: this.buildings });
+    this.world.boundsPoints = () => this.cameraBounds();
     this.plotMarker = buildPlotMarker();
     this.world.city.add(this.plotMarker.group);
     this.world.onFrame((dt, elapsed, env) => this.frame(dt, elapsed, env));
@@ -379,6 +427,59 @@ class CityView {
     });
     this.legendCi.hidden = !this.ci.available;
     this.bindInput();
+  }
+
+  toggleLegend() {
+    this.legendExpanded = !this.legendExpanded;
+    storage.set(LEGEND_STORAGE, this.legendExpanded ? '1' : '0');
+    this.legendContent.hidden = !this.legendExpanded;
+    this.legend.classList.toggle('is-collapsed', !this.legendExpanded);
+    this.legendToggle.setAttribute('aria-expanded', String(this.legendExpanded));
+    this.updateCameraFrame();
+  }
+  /** Overview bounds use real roof locations instead of tall empty space at every corner. */
+  cameraBounds() {
+    const world = this.world, half = world.half, points = [];
+    const add = p => points.push(world.toWorld(p, { atRest: true }));
+    for (const x of [-half, half]) for (const z of [-half, half]) for (const y of [DECK_Y, GROUND_Y]) add(new THREE.Vector3(x, y, z));
+    if (!world.underside && !world.districts) for (const x of [-half * 0.7, half * 0.7]) for (const z of [-half * 0.7, half * 0.7]) add(new THREE.Vector3(x, -13, z));
+    const spark = world.restSide === 'spark';
+    const buildings = spark ? this.spark.buildings.list : this.buildings.list;
+    for (const b of buildings) {
+      const height = Math.max(b.size.H + 1, b.roofTop || 0) + (b.jib ? 6 : 0);
+      for (const x of [-b.size.W / 2 - 0.6, b.size.W / 2 + 0.6]) for (const z of [-b.size.D / 2 - 0.6, b.size.D / 2 + 0.6]) for (const y of [0, height]) add(b.worldPoint(x, y, z));
+    }
+    // The central HQ/foundry is present even with no project buildings.
+    for (const x of [-5, 5]) for (const z of [-5, 5]) add(new THREE.Vector3(x, spark ? DECK_Y - 12 : 12, z));
+    return points;
+  }
+  /** Read overlay bounds on layout/state changes, not on every animation frame. */
+  updateCameraFrame() {
+    const world = this.world;
+    if (!world?.size || !this.visible) return;
+    this.syncCameraFramingMode();
+    const base = this.stage.getBoundingClientRect();
+    const bounds = { left: Math.max(0, -base.left), top: Math.max(0, -base.top), right: Math.min(base.width, window.innerWidth - base.left), bottom: Math.min(base.height, window.innerHeight - base.top) };
+    this.root.style.setProperty('--city-visible-width', `${bounds.right - bounds.left}px`);
+    const blockers = [];
+    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel]) {
+      if (node.hidden || !node.getClientRects().length) continue;
+      const r = node.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      // Use layout coordinates for the panel: its opening animation translates it temporarily.
+      const left = node === this.panel ? node.offsetLeft : r.left - base.left;
+      const top = node === this.panel ? node.offsetTop : r.top - base.top;
+      blockers.push({ left: left - 8, top: top - 8, right: left + r.width + 8, bottom: top + r.height + 8 });
+    }
+    this.cameraFreeRect = largestFreeRect(bounds, { blockers });
+    world.setFramingRect(this.cameraFreeRect);
+  }
+  syncCameraFramingMode() {
+    const enabled = !this.talk && !this.street && !this.streetPending;
+    if (this.world && this.world.framingEnabled !== enabled) {
+      this.world.framingEnabled = enabled;
+      this.world.updateProjectionFrame();
+    }
   }
 
   /** 'auto' (Spark side shown whenever DGXBridge is configured) or 'off'; an old stored 'on' counts as 'auto'. */
@@ -404,6 +505,19 @@ class CityView {
     }, 0);
   }
 
+  /** Decide home banks once, after inventory hydration, before writing migrated pins. */
+  ensureDistrictBanks(projects) {
+    if (this.islands?.current || this.homeBanks) return true;
+    const store = this.store, saved = store.prefs.cityLargerDistrictV1;
+    if (![DOWNTOWN, SUBURBS].includes(saved) && store.cityProjectsReady === false) return false;
+    const choice = chooseLargerDistrict(projects, saved);
+    this.homeBanks = districtBanks(choice);
+    this.slots = new SlotMap({ banks: this.homeBanks });
+    if (this.islands?.homeSlots) this.islands.homeSlots = this.slots;
+    if (saved !== choice) store.setPref('cityLargerDistrictV1', choice);
+    return true;
+  }
+
   sync() {
     if (this.failed || !this.world) return;
     this.dirty = false;
@@ -411,15 +525,22 @@ class CityView {
     const store = this.store;
     const projects = store.visibleProjects('city');
     const districts = !this.islands?.current;
+    if (!this.ensureDistrictBanks(store.projects)) return;
+    // Even with saved banks, transient unmerged identities must not grow the
+    // island during startup: expansion deliberately never shrinks afterward.
+    if (districts && store.cityProjectsReady === false) return;
     const hold = Boolean(this.plotDialog && performance.now() - this.plotDialog.at < PLOT_HOLD_MS);
     const { cells, rings, fresh = [], reserved = new Map(), emptyPlots, pinRepairs } = this.slots.assign(projects, { pins: store.cityLots || {}, reserve: store.projects.filter(p => !p.visible.city), hold, districts });
     this.emptyPlots = emptyPlots;
     this.cells = cells; this.rings = rings; this.reserved = reserved;
     this.occupied = new Set([...cells.values()].map(c => cellKey(c.i, c.j)));
     this.persistLots(fresh, pinRepairs);
-    const ringsChanged = this.world.setRings(rings, { animate: Boolean(this.firstSyncDone), districts });
-    // Until the owner moves the camera, keep the whole (growing) island framed.
-    if (ringsChanged && !this.world.userMoved && !this.pendingFocus && !this.talk) this.world.resetView({ instant: !this.firstSyncDone, auto: true });
+    const ringsChanged = this.world.setRings(rings, { animate: Boolean(this.firstSyncDone), districts, banks: this.homeBanks });
+    // A skipped expansion holds its old pose, including through later HUD resize
+    // callbacks. It becomes an overview again when the owner explicitly asks.
+    if (ringsChanged && this.firstSyncDone && (!this.world.canAutoRefit() || this.pendingFocus || this.talk || this.street || this.streetPending || this.following)) this.world.overview = false;
+    // Expansion follows the island again once the owner's last camera input is 30 seconds old.
+    const initialFit = !this.firstSyncDone;
     const agents = this.allAgents();   // the board's agents + CodaClauda sessions + desktop sessions (zero-config)
     const active = new Set(agents.filter(a => a.status === 'active' && a.currentProjectId).map(a => store.project(a.currentProjectId)?.id || a.currentProjectId));
     const lotsChanged = this.buildings.sync(projects, cells, active, { animate: true, tickers: this.tickerMap(projects, agents), districts });
@@ -427,12 +548,14 @@ class CityView {
     this.ci?.sync();
     const quality = store.prefs.cityQuality === 'low' ? 'low' : 'high';
     if (this.world.quality !== quality) this.world.setQuality(quality);
-    this.railway.group.visible = districts;
+    this.river.group.visible = districts;
     this.legendDistricts.hidden = !districts;
+    this.legendLegacySize.hidden = districts;
+    this.legendScaffolding.textContent = 'Scaffold: working';
     if (districts) {
-      this.railway.setQuality(quality);
-      this.railway.setBounds({ half: this.world.half, trackZ: TRACK_Z, crossings: Array.from({ length: rings * 2 + 2 }, (_, i) => (i - rings - 0.5) * PITCH) });
-      this.railway.setProjects(projects);
+      this.river.setQuality(quality);
+      this.river.setBounds({ half: this.world.half, banks: this.homeBanks });
+      this.river.setProjects(projects);
     }
     const timeMode = TIME_MODES.includes(store.prefs.cityTime) ? store.prefs.cityTime : 'auto';
     if (this.world.timeMode !== timeMode) { this.world.setTimeMode(timeMode); }
@@ -460,15 +583,24 @@ class CityView {
     this.legendGear.hidden = !this.spark.gears.size;
     this.syncRunnerLabels();
     this.renderMachines(machines, mode);
-    this.firstSyncDone = true;
     this.syncLabels(agents);
     this.weather?.setHome(!this.islands?.current);   // contributor islands (city/portal.js) have no weather; IslandMode.apply syncs after each switch
     this.renderHud(projects, agents);
     this.renderEmpty(projects);
     this.renderToolbarState();
     this.refreshPanel();
+    this.updateCameraFrame();
+    this.world.limits();
+    this.refitForGrowth(initialFit || ringsChanged);
+    this.firstSyncDone = true;
     if (this.talk) this.talkPanel.refresh();
     this.tryPendingFocus();
+  }
+
+  refitForGrowth(changed) {
+    if (changed && !this.pendingFocus && !this.talk && !this.street && !this.streetPending && !this.following && this.world.canAutoRefit()) {
+      this.world.resetView({ instant: !this.firstSyncDone, auto: true });
+    }
   }
 
   /* ---------------- per-frame ---------------- */
@@ -477,7 +609,8 @@ class CityView {
     this.buildings.update(dt, elapsed, env);
     tickerBank.update(dt, env.reducedMotion);
     this.ci?.update(dt, elapsed);
-    if (!this.islands?.current) this.railway?.update(dt, elapsed, env);
+    if (!this.islands?.current) this.river?.update(dt, elapsed, env);
+    this.updateBoatFocus();
     try { this.npcs.update(dt, elapsed, env); }
     catch (error) { if (!this.npcError) { this.npcError = true; console.error('City: agent animation failed', error); } }
     try { this.spark.update(dt, elapsed, env); }
@@ -507,7 +640,10 @@ class CityView {
   /** Is this target on the face that's up, with the island still? (Overlays only show then.) */
   facesUp(target) {
     const world = this.world;
-    return world.settled && world.side === (SPARK_KINDS.has(target?.kind) ? 'spark' : 'pc');
+    const boat = target?.kind === 'boat' ? this.river.getBoat(target.id) : null;
+    if (target?.kind === 'boat' && !boat) return false;
+    const side = boat ? (boat.position.y < -3.6 ? 'spark' : 'pc') : SPARK_KINDS.has(target?.kind) ? 'spark' : 'pc';
+    return world.settled && world.side === side;
   }
   updateOverlays() {
     const world = this.world, cam = world.camera;
@@ -729,6 +865,8 @@ class CityView {
     if (target.kind === 'foundry') { const p = this.spark.foundryPoint(); return at(p.x, p.y - lift, p.z); }
     if (target.kind === 'gear') { const p = this.spark.gearPoint(target.id); return p ? at(p.x, p.y + lift, p.z) : null; }
     if (target.kind === 'plot') { const c = cellCenter(target.i, target.j); return at(c.x, GROUND_Y + 1.4 + lift, c.z); }
+    if (target.kind === 'bridge') return at(target.x, this.npcs.surfaceY(target.x, target.z) + 0.5 + lift, target.z);
+    if (target.kind === 'boat') { const boat = this.river.getBoat(target.id); return boat ? boat.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0, 1.4 + lift, 0)) : null; }
     return null;
   }
   /** The camera in island space (people turn to face it). */
@@ -763,20 +901,25 @@ class CityView {
       this.onClick(this.pick(event.clientX, event.clientY));
     });
     canvas.addEventListener('dblclick', event => {
-      clearTimeout(this.plotClickTimer); this.plotClickTimer = 0;   // a double-click on an empty plot walks, it doesn't open the dialog
-      if (this.talk) return;   // talk mode: the camera is staged; clicks pick who to talk to
-      const target = this.pick(event.clientX, event.clientY);
-      if (target?.kind === 'runner' || target?.kind === 'foundry' || target?.kind === 'gear') return;
-      if (target?.kind === 'spark') { if (!this.sparkOffline) this.select({ kind: 'building', id: target.id }); return; }
-      if (this.street) return;   // street view: you walk with the keys
-      if (target && target.kind !== 'owner' && target.kind !== 'plot') { this.select(target); this.focusSelection(); return; }
-      const ground = this.world.groundAt(this.world.ndc(event.clientX, event.clientY));
-      if (ground) this.npcs.walkOwner(ground.x, ground.z);
+      this.onDoubleClick(this.pick(event.clientX, event.clientY), event.clientX, event.clientY);
     });
     canvas.addEventListener('contextmenu', event => event.preventDefault());
     this.onKeyDown = event => this.keyDown(event);
     this.onKeyUp = event => { this.world.keyUp(event.code); this.streetKeys.delete(event.code); };
     this.onBlur = () => { this.world.clearKeys(); this.streetKeys.clear(); this.world.releaseTilt?.(); };   // a held drag lets go: the island settles flat
+  }
+  onDoubleClick(target, clientX, clientY) {
+    clearTimeout(this.plotClickTimer); this.plotClickTimer = 0;
+    if (this.talk || !this.world.settled) return;
+    if (target?.kind === 'foundry' || target?.kind === 'gear') return;
+    if (target && !['owner', 'plot', 'bridge'].includes(target.kind)) {
+      this.select(target.kind === 'spark' ? { kind: 'building', id: target.id } : target);
+      this.focusSelection(); return;
+    }
+    if (this.street) return;
+    if (target?.kind === 'bridge') { this.npcs.walkOwner(target.x, target.z); return; }
+    const ground = this.world.groundAt(this.world.ndc(clientX, clientY));
+    if (ground) this.npcs.walkOwner(ground.x, ground.z);
   }
   /** Drag to assign: a left press on an agent (This PC side up, island still, no talk / street view)
    *  is caught in the capture phase on the stage, before the orbit controls and the island tilt see
@@ -852,7 +995,7 @@ class CityView {
     const root = this.cityRoot;
     root.addEventListener('wheel', event => {
       if (!this.visible || this.failed || !this.world || this.islands?.blocking) return;
-      const scroller = event.target instanceof Element ? event.target.closest('.city-panel, .city-help, .city-cluster-pop, .city-talk') : null;
+      const scroller = event.target instanceof Element ? event.target.closest('.city-panel, .city-help, .city-cluster-pop, .city-talk, .city-jumpto-panel, .city-legend-content') : null;
       if (scroller && !event.ctrlKey) return;
       event.preventDefault(); event.stopPropagation();
       this.wheelZoom(wheelZoomLog(event), event.clientX, event.clientY);
@@ -905,13 +1048,18 @@ class CityView {
   pickAny(clientX, clientY) {
     const ndc = this.world.ndc(clientX, clientY);
     // Island slabs and the Spark deck are occluders: a ray never reaches through to the other side.
-    const hit = this.world.raycast(ndc, [...this.npcs.pickables(), ...this.buildings.pickables(), ...this.world.hq.pickables, ...this.spark.pickables(), ...this.world.occluders(), ...this.spark.occluders()]);
+    const hit = this.world.raycast(ndc, [...this.npcs.pickables(), ...this.buildings.pickables(), ...this.world.hq.pickables, ...this.spark.pickables(), ...(!this.islands?.current ? [...this.river.pickables(), ...this.river.labelPickables(), ...this.river.occluders()] : []), ...this.world.occluders(), ...this.spark.occluders()]);
     if (!hit || hit.object.userData?.occluder) return this.plotAt(clientX, clientY);
     const object = hit.object;
     const person = this.npcs.targetOf(object);
     if (person) return person;
     for (let node = object; node; node = node.parent) {
       const data = node.userData || {};
+      if (data.boatId) return this.river.getBoat(data.boatId) ? { kind: 'boat', id: data.boatId } : null;
+      if (data.riverBridge) {
+        const point = this.world.toLocal(hit.point.clone());
+        return { kind: 'bridge', id: `bridge:${data.crossing?.id || data.crossingId || data.crossingX}`, x: point.x, z: point.z };
+      }
       if (data.buildingId) return this.buildings.get(data.buildingId) ? { kind: 'building', id: data.buildingId } : null;
       if (data.sparkBuildingId) return this.spark.buildings.get(data.sparkBuildingId) ? { kind: 'spark', id: data.sparkBuildingId } : null;
       if (data.sparkFoundry) return { kind: 'foundry' };
@@ -927,6 +1075,7 @@ class CityView {
     const ground = this.world.groundAt(this.world.ndc(clientX, clientY));
     if (!ground) return null;
     const { i, j } = cellOf(ground.x, ground.z);
+    if (!districtForCell({ i, j }, this.homeBanks)) return null;
     if ((!i && !j) || Math.max(Math.abs(i), Math.abs(j)) > this.rings) return null;
     const c = cellCenter(i, j);
     if (Math.abs(ground.x - c.x) > LOT_HALF - 0.15 || Math.abs(ground.z - c.z) > LOT_HALF - 0.15) return null;
@@ -970,6 +1119,8 @@ class CityView {
   }
   describe(target) {
     if (!target) return null;
+    if (target.kind === 'bridge') return { title: 'River bridge', sub: 'Click to walk across the river' };
+    if (target.kind === 'boat') return { title: 'River boat', sub: 'Click its label to center the boat' };
     if (target.kind === 'agent') {
       const agent = this.agentById(target.id);
       if (!agent) return null;
@@ -1083,6 +1234,8 @@ class CityView {
     const extra = target?.kind === 'agent' && extraKind(this.agentById(target.id));
     if (this.talk) { if (target?.kind === 'agent' && !extra) this.enterTalk(target.id); else if (target?.kind !== 'owner') this.exitTalk(); return; }
     if (!target) { this.select(null); return; }
+    if (target.kind === 'boat') { this.select(target); this.focusSelection(); return; }
+    if (target.kind === 'bridge') { this.select(null); if (!this.street) this.npcs.walkOwner(target.x, target.z); return; }
     // A CodaClauda session or a desktop session: its card (talk mode is for board agents).
     if (extra) { const agent = this.agentById(target.id); this.select(target); this.showBubble(target, this.bubbleText(agent)); return; }
     if (target.kind === 'plot') {
@@ -1138,32 +1291,68 @@ class CityView {
     this.taskFormFor = null;
     this.taskDraft = null;
     this.refreshPanel();
+    this.updateCameraFrame();
   }
   /** Fly to the selection. People, the HQ and your avatar live on This PC's face: if the Spark side
    *  is up, the island turns back over first. A building is framed on whichever face is up. */
   focusSelection() {
     const world = this.world, s = this.selection;
+    this.boatFocus = null;
+    if (this.talk) this.exitTalk({ instant: true });
     if (this.street || this.streetPending) this.exitStreet({ fly: false });   // any framing flight leaves street view
-    const fly = (x, y, z, distance, polar) => world.flyAfterTurn({ target: world.toWorld(new THREE.Vector3(x, y, z), { atRest: true }), distance, polar });
+    if (this.following) this.toggleFollow(false);
+    this.updateCameraFrame();
+    const fly = (x, y, z, distance, polar) => world.flyAfterTurn({ target: world.toWorld(new THREE.Vector3(x, y, z), { atRest: true }), distance, polar }, { center: true });
+    const frame = (object, minimum = 12, settled = [], polar = 1, building = false, focusObject = object) => {
+      const bounds = focusBounds(object, world, settled);
+      if (!bounds) return false;
+      const azimuth = world.azimuth;
+      const size = bounds.getSize(new THREE.Vector3()), lens = world.framingLens?.() || { fov: world.camera.fov, aspect: world.camera.aspect };
+      const focusSize = building ? (focusBounds(focusObject, world, settled)?.getSize(new THREE.Vector3()) || size) : size;
+      const distance = building
+        ? Math.max(buildingFocusDistance({ width: focusSize.x, height: focusSize.y, depth: focusSize.z }, lens.fov, lens.aspect, { polar, azimuth, minDistance: 32 }), boxFitDistance(size, { ...lens, polar, azimuth, margin: .25 }))
+        : Math.max(minimum, boxFitDistance(size, { ...lens, polar, azimuth, margin: .25 }));
+      world.flyAfterTurn({ target: bounds.getCenter(new THREE.Vector3()), distance, polar, azimuth }, { center: true });
+      return true;
+    };
     const pcFirst = () => { if (world.underside) world.flipTo('pc'); };
-    if (!s || s.kind === 'owner') { const owner = this.npcs.ownerPosition; if (owner) { pcFirst(); fly(owner.x, 1, owner.z, s ? 11 : 16, s ? 1.1 : 1.0); } return; }
+    if (!s || s.kind === 'owner') { const owner = this.npcs.ownerPosition; if (owner) { pcFirst(); if (!frame(this.npcs.owner?.person.object, s ? 11 : 16)) fly(owner.x, owner.y + 1, owner.z, s ? 11 : 16, s ? 1.1 : 1.0); } return; }
     if (s.kind === 'agent') {
       const p = this.npcs.position(s);
-      if (p) { pcFirst(); fly(p.x, 1, p.z, 15, 1.02); }
-    } else if (s.kind === 'building') {
+      if (p) { pcFirst(); if (!frame(this.npcs.npcs?.get(s.id)?.person.object, 13)) fly(p.x, p.y + 1, p.z, 13, 1.02); }
+    } else if (s.kind === 'building' || s.kind === 'spark') {
+      if (s.kind === 'spark' && world.underside) world.flipTo('spark');
       const spark = world.restSide === 'spark' && this.spark.shown ? this.spark.buildings.get(s.id) : null;
       const b = spark || this.buildings.get(s.id);
-      if (b) { const height = b.size.H, p = b.worldPoint(0, Math.min(14, height * 0.42), 0); fly(p.x, p.y, p.z, Math.max(20, height * 1.45 + b.size.W * 2.2), 1.0); }
-    } else if (s.kind === 'hq') { pcFirst(); fly(0, 3, -0.5, 26, 1.0); }
+      if (b) frame(b.group, 32, [b.tower, b.padGroup], .82, true, b.tower);
+    } else if (s.kind === 'boat') {
+      const boat = this.river.getBoat(s.id);
+      if (boat) {
+        if (world.underside) world.flipTo(boat.position.y < -3.6 ? 'spark' : 'pc');
+        // Water sits below the quay: look down past its rail instead of through it.
+        frame(boat, 10, [], .62);
+        if (world.settled && world.tween) this.boatFocus = { id: s.id, tween: world.tween };
+      }
+    } else if (s.kind === 'hq') { pcFirst(); if (!frame(world.hq.group, 26)) fly(0, 3, -.5, 26, 1); }
     else if (s.kind === 'runner') {
       // Spark runners and crew live on the Spark face: roll it up first, then fly to where they'll be.
       const r = this.spark.runner(s.id);
       if (r) {
-        const local = world.toLocal(r.person.object.getWorldPosition(new THREE.Vector3()));
         if (world.underside && world.restSide !== 'spark') world.flipTo('spark');
-        world.flyAfterTurn({ target: world.toWorld(local, { atRest: true }), distance: 15, polar: 1.02 });
+        frame(r.person.object, 13);
       }
     }
+  }
+  updateBoatFocus() {
+    const focus = this.boatFocus, world = this.world;
+    if (!focus) return;
+    const tween = focus.tween, finished = !world.tween && tween.t >= 1;
+    if ((!finished && world.tween !== tween) || !world.centerTarget || !world.settled || this.selection?.kind !== 'boat' || this.selection.id !== focus.id) { this.boatFocus = null; return; }
+    const bounds = focusBounds(this.river.getBoat(focus.id), world);
+    if (!bounds) { this.boatFocus = null; return; }
+    tween.toTarget.copy(bounds.getCenter(new THREE.Vector3()));
+    world.applyTween(tween, tween.t);
+    if (finished) this.boatFocus = null;
   }
   /** show({ focusProject }) / show({ focusAgent }) once those exist in the scene. */
   tryPendingFocus() {
@@ -1178,14 +1367,19 @@ class CityView {
     this.select(target);
     this.focusSelection();
   }
-  onJump() {
-    const value = this.jump.value;
-    this.jump.value = '';
-    if (!value) return;
-    if (value === 'me') { this.findMe(); this.stage.focus({ preventScroll: true }); return; }
-    const [kind, ...rest] = value.split(':');
-    const id = rest.join(':');
-    const target = kind === 'hq' ? { kind: 'hq' } : { kind, id };
+  onJump(target) {
+    if (!target) return;
+    if (this.talk) this.exitTalk({ instant: true });
+    const { kind, id } = target;
+    if (kind === 'spark' && !id) {
+      if (this.street || this.streetPending) this.exitStreet({ fly: false });
+      if (this.following) this.toggleFollow(false);
+      this.select(null);
+      this.world.flipTo('spark');
+      this.world.resetView();
+      this.stage.focus({ preventScroll: true });
+      return;
+    }
     this.select(target);
     this.focusSelection();
     if (kind === 'agent') { const agent = this.agentById(id); if (agent) this.showBubble(target, this.bubbleText(agent)); }
@@ -1195,7 +1389,7 @@ class CityView {
   /* ---------------- panels ---------------- */
   refreshPanel() {
     const s = this.selection;
-    if (!s) { this.panel.hidden = true; this.root.classList.remove('city-has-panel'); this.panelSig = ''; return; }
+    if (!s || s.kind === 'boat') { this.panel.hidden = true; this.root.classList.remove('city-has-panel'); this.panelSig = ''; return; }
     let sig, render;
     const island = this.islands?.panelFor(s);   // contributor island: repo and town-hall cards
     if (island) ({ sig, render } = island);
@@ -1238,7 +1432,8 @@ class CityView {
     this.panel.scrollTop = scroll;
   }
   agentsAt(projectId) {
-    return this.allAgents().filter(a => (a.currentProjectId === projectId && a.status !== 'offline') || a.homeProjectId === projectId);
+    const project = this.store.project(projectId), ids = new Set([projectId, ...(project?.ids || [])]);
+    return this.allAgents().filter(a => (ids.has(a.currentProjectId) && a.status !== 'offline') || ids.has(a.homeProjectId));
   }
   panelHead(art, title, sub, extra) {
     return h('header.city-panel-head', art, h('div.city-panel-title', h('h2', title), sub ? h('p', sub) : null),
@@ -1364,7 +1559,7 @@ class CityView {
     if (project.source === 'github' || project.source === 'both') sources.push(h('span.pill.neutral', icon('github'), 'GitHub'));
     if (project.private) sources.push(pill('Private', 'warning'));
     if (m.commits7d) sources.push(pill('Active this week', 'success'));
-    sources.push(pill(districtOf(project) === 'downtown' ? 'Downtown' : 'Old Town', 'neutral'));
+    sources.push(pill(districtOf(project) === DOWNTOWN ? 'Downtown' : 'Suburbs', 'neutral'));
     if (isUnbuilt(project)) sources.push(pill('Unbuilt · not on this PC', 'neutral'));
     const total = (project.languages || []).reduce((n, l) => n + (l.bytes || 0), 0);
     const langs = total ? [...project.languages].sort((a, b) => b.bytes - a.bytes) : [];
@@ -1652,7 +1847,7 @@ class CityView {
   renderHud(projects, agents) {
     const working = agents.filter(a => a.status === 'active').length;
     const sparkPeople = this.spark?.shown ? this.spark.runnerList : [];
-    const sig = JSON.stringify([projects.length, agents.length, working, projects.map(p => [p.id, p.name]), agents.map(a => [a.id, a.name, a.status]), sparkPeople.map(r => [r.id, r.agent?.name || '', r.crew ? 1 : 0]), this.store.avatar?.name || '']);
+    const sig = JSON.stringify([projects.length, agents.length, working, projects.map(p => [p.id, p.name, p.path, p.source, p.ids]), agents.map(a => [a.id, a.name, a.status, a.provider, a.currentProjectId, a.homeProjectId, a.lastSeenAt]), sparkPeople.map(r => [r.id, r.agent?.name || '', r.crew ? 1 : 0]), this.store.avatar?.name || '', this.spark?.shown]);
     if (sig === this.hudSig) return;
     this.hudSig = sig;
     clear(this.stats,
@@ -1660,15 +1855,7 @@ class CityView {
       h('span.city-dot-sep', '·'),
       h('span', h('strong', String(agents.length)), ` agent${agents.length === 1 ? '' : 's'}`),
       working ? [h('span.city-dot-sep', '·'), h('span.city-working', h('span.city-gem.active'), `${working} working`)] : null);
-    const sparkLabel = r => r.crew ? 'Spark crew — resting' : `${r.agent?.name || 'Spark runner'} — ${jobLabel(r.job)}`;
-    clear(this.jump,
-      h('option', { value: '' }, 'Jump to…'),
-      h('option', { value: 'me' }, `📌 You (${this.store.avatar?.name || 'me'})`),
-      h('option', { value: 'hq' }, 'CodaClauda HQ'),
-      agents.length ? h('optgroup', { label: 'This PC — agents' }, ...agents.map(a => h('option', { value: `agent:${a.id}` }, `${a.name} — ${statusText(a)}`))) : null,
-      sparkPeople.length ? h('optgroup', { label: 'DGX Spark — agents & crew' }, ...sparkPeople.map(r => h('option', { value: `runner:${r.id}` }, sparkLabel(r)))) : null,
-      projects.length ? h('optgroup', { label: 'Buildings' }, ...[...projects].sort((a, b) => a.name.localeCompare(b.name)).map(p => h('option', { value: `building:${p.id}` }, p.name))) : null);
-    this.jump.value = '';
+    this.jumpPicker.update({ projects, agents, runners: sparkPeople, sparkEnabled: Boolean(this.spark?.shown) });
   }
   renderTimeChip() {
     if (!this.world) return;
@@ -1677,6 +1864,7 @@ class CityView {
     if (this.timeChip.textContent !== text) clear(this.timeChip, icon(info.phase === 'Night' ? 'moon' : 'sun'), text);
   }
   renderToolbarState() {
+    this.syncCameraFramingMode();
     const mode = this.world.timeMode;
     this.timeBtn.replaceChildren(icon(mode === 'day' ? 'sun' : mode === 'night' ? 'moon' : 'clock'));
     const timeLabel = `Time of day: ${TIME_LABEL[mode]} — click to change`;
@@ -1727,7 +1915,7 @@ class CityView {
     this.sideChip.classList.toggle('is-offline', Boolean(offline));
     clear(this.sideChip, icon(spark ? 'city-chip' : 'city-laptop'), spark ? 'DGX Spark' : 'This PC', offline ? h('span.city-side-badge', spark ? offline : offline.replace(/^Offline/, 'Spark offline')) : null);
     this.sideChip.title = `${spark ? 'The DGX Spark side of the island is up' : 'This PC side of the island is up'}${offline ? ` · DGX Spark ${offline.replace(/^O/, 'o')}` : ''}`;
-    this.legendSideText.textContent = spark ? 'Other side = This PC' : 'Other side = DGX Spark';
+    this.legendSideText.textContent = spark ? 'Flip: This PC' : 'Flip: DGX Spark';
   }
   renderEmpty(projects) {
     const hiddenCount = this.store.projects.length - projects.length;
@@ -1742,7 +1930,7 @@ class CityView {
     clear(this.empty,
       h('div.empty-art', icon('city')),
       h('h3', allHidden ? 'Every project is hidden from the city' : 'Your city is empty'),
-      h('p', allHidden ? `${hiddenCount} linked project${hiddenCount === 1 ? ' is' : 's are'} hidden. Show them again from Projects.` : 'Link Desktop folders or GitHub repos and each project becomes a building here — or click an empty plot to start a brand-new project. Taller buildings mean more code and commits.'),
+      h('p', allHidden ? `${hiddenCount} linked project${hiddenCount === 1 ? ' is' : 's are'} hidden. Show them again from Projects.` : 'Link Desktop folders or GitHub repos and each project becomes a building here — or click an empty plot to start a brand-new project. More code and commits make Downtown towers taller and Suburbs homes grow outward.'),
       h('button.btn.gradient', { type: 'button', onclick: () => this.ctx.navigate('projects') }, icon('projects'), allHidden ? 'Manage projects' : 'Link projects'));
   }
 
@@ -1781,13 +1969,13 @@ class CityView {
     if (!open) storage.set(HELP_KEY, '1');
     this.renderToolbarState();
   }
-  /** Home / H: back to the framed overview, and let auto-framing follow the island again. */
+  /** Home / H: fit the visible overview and start the camera-input grace period. */
   resetCamera() {
     if (!this.world) return;
     if (this.street || this.streetPending) this.exitStreet({ fly: false });
     if (this.following) this.toggleFollow(false);
-    this.world.resetView({ auto: true });
-    this.world.userMoved = false;
+    this.updateCameraFrame();
+    this.world.resetView();
   }
   /** Show / Hide the DGX Spark side (only offered while DGXBridge is configured). */
   toggleSpark() {
@@ -1855,7 +2043,8 @@ class CityView {
     if (owner) this.npcs.driveOwner(owner.pos.x, owner.pos.z, st.heading, false);
     if (fly && back) {
       const s = new THREE.Spherical().setFromVector3(back.position.clone().sub(back.target));
-      world.flyTo({ target: back.target, distance: s.radius, polar: s.phi, azimuth: s.theta }, { duration: 0.85, instant });
+      world.flyTo({ target: back.target, distance: s.radius, polar: s.phi, azimuth: s.theta }, { duration: 0.85, instant, center: back.center });
+      world.overview = Boolean(back.overview);
     }
     this.renderToolbarState();
     this.refreshPanel();
@@ -1864,10 +2053,7 @@ class CityView {
    *  standing on its lot plus the HQ town hall, fountain and planters. */
   streetBoxes() {
     const r = STREET.radius, out = HQ_BOXES.map(b => ({ x0: b.x0 - r, x1: b.x1 + r, z0: b.z0 - r, z1: b.z1 + r, low: Boolean(b.low) }));
-    for (const b of this.buildings.list) {
-      const hw = b.size.W / 2 + 0.14 + r, hd = b.size.D / 2 + 0.14 + r;
-      out.push({ x0: b.origin.x - hw, x1: b.origin.x + hw, z0: b.origin.z - hd, z1: b.origin.z + hd });
-    }
+    for (const b of this.buildings.list) out.push(...buildingStreetBoxes(b, r, GROUND_Y));
     return out;
   }
   /** Is an island-space point inside a building or the town hall (This PC side up)? Wheel zoom stops at walls. */
@@ -1875,7 +2061,7 @@ class CityView {
     if (this.world.side !== 'pc') return false;
     const r = STREET.radius, hall = HQ_BOXES[0];
     if (p.y < 11.5 && p.x > hall.x0 - r && p.x < hall.x1 + r && p.z > hall.z0 - r && p.z < hall.z1 + r) return true;
-    return this.buildings.list.some(b => p.y < GROUND_Y + b.size.H + 0.6 && Math.abs(p.x - b.origin.x) < b.size.W / 2 + 0.14 + r && Math.abs(p.z - b.origin.z) < b.size.D / 2 + 0.14 + r);
+    return this.buildings.list.some(b => buildingSolidAt(b, p, r, GROUND_Y));
   }
   /** Called by the world every frame in street view: walk / turn the avatar, return the camera pose. */
   streetPose(dt) {
@@ -1908,16 +2094,17 @@ class CityView {
   flipSide() {
     if (!this.world?.underside || this.street) return;
     if (this.following) this.toggleFollow(false);
+    this.world.markCameraMoved();
     this.world.flip();
     this.stage.focus({ preventScroll: true });
   }
 
-  /** Where the camera is (or where a flight under way is heading): { target, position }, world space. */
+  /** Save the actual pose and framing mode, including an in-progress flight's destination. */
   cameraPose() {
     const world = this.world, tw = world.tween;
     return tw && !tw.free
-      ? { target: tw.toTarget.clone(), position: new THREE.Vector3().setFromSpherical(tw.to).add(tw.toTarget) }
-      : { target: world.controls.target.clone(), position: world.camera.position.clone() };
+      ? { target: tw.toTarget.clone(), position: new THREE.Vector3().setFromSpherical(tw.to).add(tw.toTarget), center: Boolean(tw.center), overview: Boolean(world.overview) }
+      : { target: world.controls.target.clone(), position: world.camera.position.clone(), center: Boolean(world.centerTarget), overview: Boolean(world.overview) };
   }
 
   /* ---------------- talk mode ---------------- */
@@ -1939,6 +2126,7 @@ class CityView {
     this.bubble.hidden = true; this.bubbleTarget = null; this.bubbleUntil = 0;
     for (const b of Object.values(this.talkBubbles)) b.node.hidden = true;
     this.talk = { id, back, phase: 'wait', at: performance.now() };
+    this.syncCameraFramingMode();
     this.npcs.hold(id, true);
     if (world.underside && world.restSide !== 'pc') world.flipTo('pc');
     this.cityRoot.classList.add('is-talk');
@@ -1956,9 +2144,11 @@ class CityView {
     this.cityRoot.classList.remove('is-talk');
     for (const b of Object.values(this.talkBubbles)) b.node.hidden = true;
     world.setShot(null);
+    this.updateCameraFrame();
     if (t.back) {
       const s = new THREE.Spherical().setFromVector3(t.back.position.clone().sub(t.back.target));
-      world.flyAfterTurn({ target: t.back.target, distance: s.radius, polar: s.phi, azimuth: s.theta }, { duration: 1, instant });
+      world.flyAfterTurn({ target: t.back.target, distance: s.radius, polar: s.phi, azimuth: s.theta }, { duration: 1, instant, center: t.back.center });
+      world.overview = Boolean(t.back.overview);
     }
     this.declutterAt = 0;
     this.renderToolbarState();
@@ -2040,7 +2230,7 @@ class CityView {
     if (!spot) return;
     const frame = this.talkFraming();
     const face = { x: t.a.x, y: t.a.y + this.npcs.faceHeight({ kind: 'agent', id: t.id }), z: t.a.z };
-    const shot = talkShot(spot, face, { eyeY: groundY(spot.x, spot.z) + this.npcs.topHeight(OWNER_TARGET) * 0.86, nx: frame.nx, ny: frame.ny, vfov: world.camera.fov, aspect: world.size.w / Math.max(1, world.size.h) });
+    const shot = talkShot(spot, face, { eyeY: this.npcs.surfaceY(spot.x, spot.z) + this.npcs.topHeight(OWNER_TARGET) * 0.86, nx: frame.nx, ny: frame.ny, vfov: world.camera.fov, aspect: world.size.w / Math.max(1, world.size.h) });
     const v = p => world.toWorld(new THREE.Vector3(p.x, p.y, p.z), { atRest: true });
     world.setShot({ eye: v(shot.eye), look: v(shot.look) }, { duration, instant: !duration });
     t.frameSig = this.talkFrameSig(); t.vis = frame.vis;
@@ -2135,7 +2325,7 @@ class CityView {
     let result = null;
     try {
       const { openNewProjectDialog } = await import('../newproject.js');
-      result = await openNewProjectDialog(this.ctx, { lot, tab: districtForCell(lot) === 'oldtown' ? 'link' : 'create' });
+      result = await openNewProjectDialog(this.ctx, { lot, tab: districtForCell(lot, this.homeBanks) === SUBURBS ? 'link' : 'create' });
     } catch (error) {
       console.error('City: New Project dialog failed', error);
       toast(`Could not start a project here: ${error?.message || error}`, { kind: 'error' });
@@ -2189,12 +2379,14 @@ class CityView {
   }
   destroy() {
     this.hide();
+    this.cameraFrameObserver?.disconnect();
+    this.jumpPicker?.destroy();
     for (const label of this.runnerLabels.values()) label.node.remove();
     this.runnerLabels.clear();
     clearTimeout(this.checkTimer);
     this.offSessions?.();
     this.ci?.dispose();
-    this.railway?.dispose();
+    this.river?.dispose();
     this.islands?.dispose();
     this.weather?.dispose();
     this.spark?.dispose(); this.npcs?.dispose(); this.buildings?.dispose(); this.world?.dispose();
@@ -2202,6 +2394,7 @@ class CityView {
   }
   hide() {
     this.visible = false;
+    this.jumpPicker?.close();
     clearInterval(this.externalTimer); this.externalTimer = 0;
     this.ci?.stop();
     if (this.failed || !this.world) return;

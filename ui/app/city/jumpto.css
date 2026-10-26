@@ -1,0 +1,46 @@
+/* City navigation card. Mounted alongside the HUD so mobile sheets span the stage. */
+.city-jumpto { min-width: 0; }
+.city-jumpto-trigger { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface-2); color: var(--text-2); font-size: 12.5px; white-space: nowrap; cursor: pointer; }
+.city-jumpto-trigger:hover, .city-jumpto-trigger[aria-expanded="true"] { background: var(--surface-hover); border-color: var(--accent); color: var(--text); }
+.city-jumpto-trigger .icon { width: 14px; height: 14px; }
+.city-jumpto-trigger .city-jumpto-chevron { width: 11px; margin-left: 3px; }
+.city-jumpto-panel { position: absolute; z-index: 12; display: flex; flex-direction: column; gap: 9px; width: min(360px, calc(100% - 24px)); padding: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: color-mix(in srgb, var(--surface) 96%, transparent); backdrop-filter: blur(12px) saturate(1.2); -webkit-backdrop-filter: blur(12px) saturate(1.2); box-shadow: var(--shadow-lg); color: var(--text); box-sizing: border-box; }
+.city-jumpto-panel[hidden] { display: none; }
+.city-jumpto-search-row { display: flex; flex: none; align-items: center; gap: 6px; }
+.city-jumpto-search.input { width: 100%; min-width: 0; min-height: 34px; height: 34px; border-radius: 9px; font-size: 12.5px; }
+.city-jumpto-close.icon-btn { flex: none; width: 28px; height: 28px; }
+.city-jumpto-shortcuts { display: flex; flex: none; gap: 6px; padding-bottom: 9px; border-bottom: 1px solid var(--border); }
+.city-jumpto-shortcut { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 30px; padding: 4px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-2); color: var(--text-2); font-size: 12px; font-weight: 650; cursor: pointer; }
+.city-jumpto-shortcut[hidden] { display: none; }
+.city-jumpto-shortcut:hover { background: var(--surface-hover); color: var(--text); }
+.city-jumpto-shortcut .icon { width: 14px; height: 14px; }
+.city-jumpto-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.city-jumpto-group + .city-jumpto-group { margin-top: 12px; }
+.city-jumpto-heading { display: flex; align-items: center; justify-content: space-between; width: 100%; margin: 0; padding: 2px 6px 6px; color: var(--text-2); font-size: 12px; font-weight: 700; }
+.city-jumpto-heading-text { display: inline-flex; align-items: center; gap: 7px; }
+.city-jumpto-count { color: var(--muted); font-size: 10.5px; font-weight: 500; }
+.city-jumpto-toggle { border: 0; background: none; text-align: left; cursor: pointer; border-radius: 7px; }
+.city-jumpto-toggle:hover { background: var(--surface-hover); }
+.city-jumpto-toggle .icon { width: 13px; height: 13px; }
+.city-jumpto-subgroup + .city-jumpto-subgroup { margin-top: 7px; }
+.city-jumpto-subheading { display: flex; align-items: center; gap: 7px; padding: 3px 6px; color: var(--muted); font-size: 10.5px; font-weight: 650; }
+.city-jumpto-item { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 35px; padding: 6px; border: 0; border-radius: 9px; background: none; color: var(--text); text-align: left; cursor: pointer; }
+.city-jumpto-item:hover, .city-jumpto-item:focus-visible { background: var(--surface-hover); }
+.city-jumpto-item > .icon { flex: none; width: 17px; height: 17px; color: var(--muted); }
+.city-jumpto-provider { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 7px; background: var(--surface-2); color: var(--muted); }
+.city-jumpto-provider .icon { width: 15px; height: 15px; }
+.city-jumpto-provider.claude { color: var(--claude); }
+.city-jumpto-provider.codex { color: var(--codex); }
+.city-jumpto-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--status-idle); }
+.city-jumpto-dot.active { background: var(--status-active); box-shadow: 0 0 5px color-mix(in srgb, var(--status-active) 45%, transparent); }
+.city-jumpto-dot.offline { background: var(--status-offline); }
+.city-jumpto-text { display: grid; flex: 1; min-width: 0; gap: 2px; }
+.city-jumpto-name { overflow: hidden; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.city-jumpto-location { overflow: hidden; color: var(--muted); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.city-jumpto-badge { display: inline-flex; align-items: center; gap: 4px; flex: none; padding: 2px 5px; border-radius: var(--radius-pill); background: var(--surface-2); color: var(--muted); font-size: 10.5px; }
+.city-jumpto-badge .icon { width: 12px; height: 12px; }
+.city-jumpto-badge.is-working { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
+.city-jumpto-empty { margin: 12px 6px; color: var(--muted); font-size: 12px; }
+.city-jumpto-panel.is-sheet { position: fixed; z-index: 80; inset: auto 0 0; width: 100vw; border-radius: 16px 16px 0 0; padding: 14px 14px max(14px, env(safe-area-inset-bottom)); }
+.city-jumpto-panel.is-sheet .city-jumpto-item { min-height: 44px; }
+.city-jumpto-panel.is-sheet .city-jumpto-search { min-height: 40px; font-size: 16px; }
