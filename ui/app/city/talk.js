@@ -1,7 +1,7 @@
 /* City conversations: one transcript and composer. Managed sessions use the same owner send
  * and display-log path as Chat; board agents keep their existing thread. A message is information, not permission. Message text is untrusted: it is only rendered
  * through markdown.js (or as plain text). */
-import { h, icon, iconButton, toast, portrait, pill, clockTime, fullTime, formatBytes, STATUS_LABEL, modal } from '../ui.js';
+import { h, icon, iconButton, toast, portrait, pill, clockTime, fullTime, timeAgo, formatBytes, STATUS_LABEL, modal } from '../ui.js';
 import { renderMarkdown, plainText } from '../markdown.js';
 import { agentAvatar } from '../avatar/spec.js';
 import { sessions } from '../sessions.js';
@@ -167,8 +167,10 @@ export class TalkPanel {
     const status = STATUS_LABEL[info.status] || (info.status === 'error' ? 'Needs attention' : 'Powered down');
     const sub = this.pendingStart
       ? (this.pendingStart.error ? 'Could not start ' : 'Starting ') + providerName(info.provider) + (info.project ? ' in ' + info.project.name : '') + (this.pendingStart.error ? '' : '...')
+      : info.kind === 'external' ? info.project?.name || 'Project unknown'
       : status + (info.project ? ' - ' + info.project.name : '');
-    const sig = JSON.stringify([info.name, info.provider, status, sub, info.look, info.id, info.kind, info.project?.id, Boolean(this.onNewSessionHere)]);
+    const activity = info.kind === 'external' ? 'Last activity: ' + (info.agent.lastSeenAt ? timeAgo(info.agent.lastSeenAt) : 'unknown') : '';
+    const sig = JSON.stringify([info.name, info.provider, status, sub, activity, info.agent.lastSeenAt, info.look, info.id, info.kind, info.project?.id, Boolean(this.onNewSessionHere)]);
     if (sig === this.sigs.head) return;
     this.sigs.head = sig;
     const chatParams = info.kind === 'session' ? { thread: info.session?.sharedId ? 'pair:' + info.session.sharedId : info.id }
@@ -183,7 +185,8 @@ export class TalkPanel {
       type: 'button', onclick: () => this.onNewSessionHere(info.project.id),
     }, icon('plus'), 'New session here') : null;
     this.head.replaceChildren(portrait(info.look, { size: 46, provider: info.provider, status: info.status }),
-      h('div.city-talk-title', h('h2', { title: info.agent.label || info.name }, info.name), h('p', sub)),
+      h('div.city-talk-title', h('h2', { title: info.agent.label || info.name }, info.name), h('p', sub),
+        activity ? h('p', { title: info.agent.lastSeenAt ? 'Session file modified ' + fullTime(info.agent.lastSeenAt) : 'No activity timestamp available' }, activity) : null),
       h('div.city-talk-actions', detail, newHere, chat, iconButton('close', 'Leave conversation (Esc)', () => this.onLeave?.())));
   }
   renderMessages(info, all) {
@@ -227,7 +230,7 @@ export class TalkPanel {
       : transcript?.state === 'error' ? "Couldn't load the conversation: " + transcript.error
       : transcript && ['none', 'loading'].includes(transcript.state) ? 'Loading conversation...'
       : running ? info.name + ' is working...'
-      : info.kind === 'external' && !msgs.length ? 'Conversation history is in its desktop app. Continue in a new session to bring its context here.'
+      : info.kind === 'external' && !msgs.length ? `This conversation lives in the ${info.provider === 'codex' ? 'Codex' : info.provider === 'claude' ? 'Claude' : 'desktop'} app. Send to continue it here as a new session.`
       : info.kind === 'mailbox' && last?.role === 'owner' ? (last.status === 'seen' ? 'Seen. Waiting for a reply...' : 'Sent. Waiting for a reply...') : '';
     const sig = message + '|' + Boolean(this.pendingStart?.error);
     if (sig === this.sigs.status) return;

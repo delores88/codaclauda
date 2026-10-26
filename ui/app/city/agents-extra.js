@@ -83,7 +83,7 @@ export function externalAgents(list, projects, { own = [], now = Date.now() } = 
     const prev = byKey.get(key);
     if (prev && prev.lastSeenAt >= at) { prev.count++; continue; }
     const project = projectForCwd(projects, e.cwd, e.projectHint);
-    const name = `${PROVIDER_NAME[provider]} (desktop)`;
+    const name = String(e.title || '').replace(/\s+/g, ' ').trim().slice(0, 80) || `${PROVIDER_NAME[provider]} (desktop)`;
     const id = `ext:${key}`;
     byKey.set(key, {
       id, kind: 'external', provider, name, label: `${PROVIDER_NAME[provider]} session on this PC, outside CodaClauda`,

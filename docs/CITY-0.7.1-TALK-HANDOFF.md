@@ -38,13 +38,17 @@ panel while a command is in flight cannot clear another draft or reopen it.
 
 Desktop sessions expose metadata through the current backend, including their
 provider session ID. The UI has no command to read their original transcript.
-Talk therefore states that the history is in the desktop app, keeps the composer,
-and offers **Continue in a new session**. The explicit confirmation uses the
+Talk shows the title when supplied (otherwise the known provider label), project
+and last activity from session-file metadata. Its timestamp tooltip identifies
+that source. The plain note is `This conversation lives in the Codex app. Send to
+continue it here as a new session.` (Claude uses its own name).
+Talk keeps the composer and offers **Continue in a new session**. The explicit confirmation uses the
 existing `session_adopt` path with `mode: 'fork'`, then sends the draft into the
 returned managed session. The provider copy carries context; old desktop lines
 are not fabricated or imported into the new display log. Any transcript already
 supplied on an agent record is rendered. Original desktop-history viewing remains
-a backend limitation, not verified acceptance.
+a backend limitation, not verified acceptance. A desktop transcript read command
+is deferred to a later item; this follow-up remains UI-only.
 
 ## Hooks for the building-menu integration
 
@@ -117,3 +121,7 @@ console/page errors. Actual pointer checks covered figures and name labels;
 cluster checks used deliberately co-located synthetic agents. `review.md` and
 `source-review.json` record the preview review and source identities. Local
 screenshots and fixture data remain untracked.
+
+The subsequent desktop metadata/text clarification was independently reviewed
+and reran the complete UI suite: **408 passed, 0 failed**. The browser artifacts
+above cover the main talk candidate; this text follow-up adds no native acceptance.
