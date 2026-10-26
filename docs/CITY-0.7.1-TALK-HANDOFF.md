@@ -161,3 +161,13 @@ tests cover both label decluttering and the recovered workspace metadata paths.
 Review milestone `cd ui; node --test`: **427 passed, 0 failed**. The pending hook,
 header contract, placement paths, head separation, off-center scenery obstruction
 and bubble layout have independent source review and focused regression coverage.
+
+The refreshed `browser.json`, `routing.json`, `clicks.json`, `idle.json` and
+`shot-qc.json` all pass with zero page/console errors. The required captures are
+`talk-enter.png`, `talk-bubbles.png` and `real-agents-idle-at-projects.png` in that
+review evidence folder, plus mobile bubbles and a real HQ cluster picker.
+An interrupted local asset-loading run produced connection refusals; its report
+and unstyled supplemental capture are retained under `interrupted/`. Sequential
+reruns with an explicit stylesheet-readiness check passed. `source-review.json`
+records the tested UI commit and screenshot hashes. These remain headless mock
+checks; installed rendering and real provider sends/copy context are not claimed.
