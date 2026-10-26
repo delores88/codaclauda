@@ -80,12 +80,14 @@ test('focus anticipates rise/growth without changing live scales or including hi
   close(before.min, after.min); close(before.max, after.max); b.dispose();
 });
 
-test('Jump and F focus people at their actual bridge height and retain full IDs', t => {
+test('Jump starts talk with the full id; F still focuses an independently selected person at bridge height', t => {
   canvas(t);
   const f = fixture(), position = new THREE.Vector3(18, 1.7, -8);
   f.view.npcs.position = () => position;
-  f.view.agentById = () => null;
-  f.view.onJump({ kind: 'agent', id: 'agent:with:colons' }); assert.deepEqual(f.view.selection, { kind: 'agent', id: 'agent:with:colons' });
+  const talks = []; f.view.enterTalk = id => talks.push(id);
+  f.view.onJump({ kind: 'agent', id: 'agent:with:colons' }); assert.deepEqual(talks, ['agent:with:colons']);
+  assert.equal(f.flights.length, 0);
+  f.view.select({ kind: 'agent', id: 'agent:with:colons' }); f.view.focusSelection();
   close(f.flights.at(-1).target, f.world.toWorld(position.clone().add(new THREE.Vector3(0, 1, 0)), { atRest: true }));
   assert.equal(f.flights.at(-1).options.center, true);
   f.view.visible = true; f.view.keyDown({ code: 'KeyF', preventDefault() {} }); assert.equal(f.flights.length, 2);

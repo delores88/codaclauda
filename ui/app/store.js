@@ -474,7 +474,7 @@ class Store extends EventTarget {
     const manifestHome = projects.find(p => p.homeAgents.includes(id));
     const home = pref.home === 'hq' ? null : (pref.home && projects.find(p => p.ids.includes(pref.home))) || manifestHome || workspaceProject || this.matchProject(name, projects) || null;
     // Current project: most recent signal (claims, own messages, running requests) within the window.
-    let current = null, activity = '';
+    let current = null, activity = '', projectObservedAt = 0;
     const signals = [
       ...claims.map(c => ({ at: toMs(c.created_at), text: `${c.resource} ${c.purpose || ''}`, label: `Holding ${c.resource}` })),
       ...sent.slice(-8).map(m => ({ at: toMs(m.created_at), text: `${m.subject}\n${m.body}`, label: m.subject })),
@@ -482,7 +482,7 @@ class Store extends EventTarget {
     ].filter(s => now - s.at < PROJECT_SIGNAL_WINDOW).sort((a, b) => b.at - a.at);
     for (const signal of signals) {
       const project = signal.project || this.matchProject(signal.text, projects, home?.id);
-      if (project) { current = project; activity = signal.label; break; }
+      if (project) { current = project; projectObservedAt = signal.at; activity = signal.label; break; }
     }
     if (!activity) activity = signals[0]?.label || (sent.at(-1)?.subject ?? '');
     const look = pref.look ? normalizeAvatar(pref.look) : agentAvatar(id, provider, pref.nickname || name);
@@ -492,6 +492,8 @@ class Store extends EventTarget {
       status, lastSeenAt: lastAt || 0,
       homeProjectId: home?.id || null,
       currentProjectId: (status !== 'offline' && current?.id) || home?.id || null,
+      // City remembers real work separately from the legacy status/home fallback.
+      observedProjectId: current?.id || null, projectObservedAt,
       visiting: Boolean(current && home && current.id !== home.id && status !== 'offline'),
       activity,
       claims, requests,

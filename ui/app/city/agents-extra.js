@@ -89,6 +89,7 @@ export function externalAgents(list, projects, { own = [], now = Date.now() } = 
       id, kind: 'external', provider, name, label: `${PROVIDER_NAME[provider]} session on this PC, outside CodaClauda`,
       status: 'active', activity: `Active in ${project?.name || String(e.projectHint || '').slice(0, 60) || 'a folder'} (file changed in the last 15 min)`,
       currentProjectId: project?.id || null, homeProjectId: project?.id || null, cwd: String(e.cwd || ''), projectHint: String(e.projectHint || ''),
+      providerSessionId: String(e.providerSessionId || ''),
       visiting: false, lastSeenAt: at, unreadForOwner: 0, look: agentAvatar(id, provider, name), count: (prev?.count || 0) + 1,
     });
   }

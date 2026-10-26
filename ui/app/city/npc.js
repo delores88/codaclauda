@@ -79,7 +79,7 @@ class Npc {
   setAction(action) { if (this.action !== action) { this.action = action; this.person.setAction(action); } }
   place(x, z) { this.pos.set(x, this.surfaceY(x, z), z); }
   get moving() { return this.path.length > 0 && this.pause <= 0 && !this.held; }
-  get anchored() { return this.held || (!this.path.length && this.goal && (this.goal.type === 'sit' || this.goal.type === 'work')); }
+  get anchored() { return this.held || Boolean(this.drop) || (!this.path.length && this.goal && (this.goal.type === 'sit' || this.goal.type === 'work')); }
 }
 
 export class NpcManager {
@@ -135,16 +135,18 @@ export class NpcManager {
       const sig = JSON.stringify(agent.look);
       if (sig !== npc.lookSig) { npc.lookSig = sig; npc.person.setSpec(agent.look); this.tagPickables(npc.person, { kind: 'agent', id: agent.id }); }
       if (npc.status !== agent.status) { npc.status = agent.status; npc.person.setStatus(agent.status || 'idle'); }
+      this.syncClipboard(npc);
     }
     for (const npc of [...this.npcs.values()]) if (!seen.has(npc.id)) this.removeNpc(npc, true);
     this.assignGoals();
     this.syncOwner(avatar, quality);
-    // Agents present when the board first loads appear in place; later arrivals walk out of HQ.
-    if (agents.length) this.first = false;
+    // Later arrivals drop into their project too; talk can hold them there immediately.
+    this.first = false;
   }
   tagPickables(person, tag) { for (const m of person.pickable || []) { m.userData.person = person; m.userData.cityTarget = tag; } }
   removeNpc(npc, poof) {
     if (poof && this.particles && !this.reducedMotion()) this.particles.emit('sparkle', { x: npc.pos.x, y: npc.pos.y + 1, z: npc.pos.z }, 14, { spread: 0.6 });
+    if (npc.clipboard) { npc.clipboard.removeFromParent(); disposeAll(npc.clipboard); npc.clipboard = null; }
     npc.person.object.removeFromParent();
     npc.person.dispose();
     this.npcs.delete(npc.id);
@@ -168,13 +170,114 @@ export class NpcManager {
   }
   ownerAction(action) { if (this.owner && this.owner.action !== action) { this.owner.action = action; this.owner.person.setAction(action); } }
 
+  /** Choose one clear arrival spot on a project's lot before its session exists.
+   * The reservation keeps later goal allocation from putting another person there. */
+  reserveTalkSpot(projectId) {
+    const id = this.resolveProjectId(projectId) || projectId;
+    const building = this.buildings.get(id) || this.buildings.get(projectId);
+    if (!building) return null;
+    const center = cellCenter(building.cell.i, building.cell.j);
+    const points = [...this.npcs.values()].flatMap(npc => [npc.pos, ...(npc.path.length && npc.goal?.point ? [npc.goal.point] : [])]);
+    if (this.owner) points.push(this.owner.pos);
+    const clear = point => point && Number.isFinite(point.x) && Number.isFinite(point.z)
+      && Math.abs(point.x - center.x) <= WALK_HALF + 1e-8 && Math.abs(point.z - center.z) <= WALK_HALF + 1e-8
+      && points.every(p => Math.hypot(p.x - point.x, p.z - point.z) >= .8);
+    let point;
+    for (let slot = 0; slot < 64 && !point; slot++) { const candidate = building.workSpot(slot); if (clear(candidate)) point = candidate; }
+    for (let slot = 0; slot < 256 && !point; slot++) {
+      const candidate = perimeterPoint(building.cell.i, building.cell.j, (slot + .5) * 4 / 256);
+      if (clear(candidate)) point = candidate;
+    }
+    if (!point) return null;
+    return this.talkReservation = { x: point.x, z: point.z, projectId: building.id };
+  }
+  /** A caller leaving/cancelling its pending start releases only its own reservation. */
+  releaseTalkSpot(point) {
+    if (point && this.talkReservation === point) this.talkReservation = null;
+  }
+  /** Replace the pending marker in place. Preserve any in-progress drop and original
+   * project goal; holding it cancels the route, and Leave resumes life on this lot. */
+  stageTalkAgent(id, point) {
+    const npc = this.npcs.get(id);
+    if (!npc || !Number.isFinite(point?.x) || !Number.isFinite(point?.z)) return false;
+    const lift = npc.drop ? Math.max(0, npc.pos.y - this.surfaceY(npc.pos.x, npc.pos.z)) : 0;
+    this.hold(id, true);
+    npc.path = []; npc.place(point.x, point.z); npc.pos.y += lift;
+    npc.talkStaged = true;
+    this.releaseTalkSpot(point);
+    return true;
+  }
+
+  /** Original toon clipboard: the visual cue for passive message-board agents only. */
+  syncClipboard(npc) {
+    const carries = npc.agent.kind === 'mailbox' && !npc.agent.sessionId;
+    if (!carries && npc.clipboard) { npc.clipboard.removeFromParent(); disposeAll(npc.clipboard); npc.clipboard = null; }
+    if (!carries || npc.clipboard) return;
+    const prop = new THREE.Group(); prop.name = 'board-agent-clipboard';
+    const box = (w, h, d, color, x, y, z) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), toonMaterial(color, { cache: false }));
+      mesh.position.set(x, y, z); prop.add(mesh); return mesh;
+    };
+    box(.38, .5, .055, '#b68150', 0, 0, 0);
+    box(.31, .4, .012, '#fff4d9', 0, -.014, .038);
+    box(.16, .065, .045, '#626d83', 0, .225, .045);
+    for (let n = 0; n < 3; n++) box(.2 - n * .025, .012, .007, '#707384', -.02, .09 - n * .075, .047);
+    addOutline(prop, { thickness: .012 });
+    prop.position.set(.39, .78, .23); prop.rotation.set(-.15, -.35, -.12);
+    prop.userData.cityTarget = { kind: 'agent', id: npc.id };
+    npc.person.object.add(prop); npc.clipboard = prop;
+  }
+
+  /** Short vertical arrival with one dust puff at landing; no route from HQ is needed. */
+  drop(person, { height = 1.8, duration = .42 } = {}) {
+    person.path = [];
+    if (this.reducedMotion?.()) { person.drop = null; person.pos.y = this.surfaceY(person.pos.x, person.pos.z); return; }
+    person.drop = { elapsed: 0, duration, height };
+    person.pos.y = this.surfaceY(person.pos.x, person.pos.z) + height;
+  }
+  updateDrop(person, dt) {
+    const drop = person.drop;
+    if (!drop) return;
+    drop.elapsed += dt;
+    const t = this.reducedMotion?.() ? 1 : Math.min(1, drop.elapsed / drop.duration);
+    person.pos.y = this.surfaceY(person.pos.x, person.pos.z) + drop.height * (1 - t * t);
+    if (t === 1) {
+      person.drop = null;
+      if (!this.reducedMotion?.()) this.particles?.emit('dust', { x: person.pos.x, y: person.pos.y + .05, z: person.pos.z }, 12, { spread: .5, scale: .35, speed: .6 });
+    }
+  }
+  dropOwner(x, z, heading = 0) {
+    if (!this.owner) this.syncOwner(null, 'high');
+    this.driveOwner(x, z, heading, false);
+    this.drop(this.owner);
+  }
+  /** Briefly read the clipboard after the owner sends; the main talking animation continues. */
+  glance(id) { const npc = this.npcs.get(id); if (npc?.clipboard && !this.reducedMotion?.()) npc.glanceLeft = .9; }
+  nodOwner() { if (this.owner && !this.reducedMotion?.()) this.owner.nodLeft = .65; }
+  updateGesture(person, dt) {
+    const head = person.person.body?.j?.head;
+    if (person.glanceLeft > 0) {
+      person.glanceLeft = Math.max(0, person.glanceLeft - dt);
+      const lift = Math.sin(Math.PI * person.glanceLeft / .9);
+      if (head) { head.rotation.x += lift * .32; head.rotation.y -= lift * .2; }
+      if (person.clipboard) { person.clipboard.position.y = .78 + lift * .12; person.clipboard.rotation.x = -.15 - lift * .28; }
+    }
+    if (person.nodLeft > 0) {
+      person.nodLeft = Math.max(0, person.nodLeft - dt);
+      const nod = Math.sin((1 - person.nodLeft / .65) * Math.PI * 2) * .13;
+      if (head) head.rotation.x += nod;
+      else person.person.object.rotation.x = nod;
+    }
+  }
+
   /** Decide where every agent wants to be. Stable: same inputs → same seat/slot. */
   assignGoals() {
     const list = [...this.npcs.values()].sort((a, b) => a.id.localeCompare(b.id));
     const building = id => id ? this.buildings.get(this.resolveProjectId(id) || id) || this.buildings.get(id) : null;
     const locations = new Map(list.map(npc => {
-      const current = building(npc.agent.currentProjectId), home = building(npc.agent.homeProjectId);
-      return [npc.id, npc.agent.status === 'offline' ? home || current : current || home];
+      if ('cityProjectId' in npc.agent) return [npc.id, building(npc.agent.cityProjectId)];
+      const current = building(npc.agent.currentProjectId), last = building(npc.agent.lastKnownProjectId), home = building(npc.agent.homeProjectId);
+      return [npc.id, current || last || home];
     }));
     const unassigned = list.filter(npc => !locations.get(npc.id));
     // Allocate the whole HQ sidewalk ring across statuses, so equal hashes and
@@ -183,16 +286,27 @@ export class NpcManager {
       slot, point: perimeterPoint(0, 0, (slot + 0.5) * 4 / unassigned.length),
     }]));
     const usedSeats = new Set(), workSlots = new Map();
+    const occupied = where => {
+      if (!workSlots.has(where.id)) workSlots.set(where.id, []);
+      return workSlots.get(where.id);
+    };
+    if (this.talkReservation) {
+      const where = building(this.talkReservation.projectId);
+      if (where) occupied(where).push({ ...this.talkReservation, talkSpacing: .8 });
+    }
+    for (const npc of list) if (npc.held && npc.talkStaged) {
+      const where = locations.get(npc.id);
+      if (where) occupied(where).push({ x: npc.pos.x, z: npc.pos.z, talkSpacing: .8 });
+    }
     const workSpot = where => {
-      let points = workSlots.get(where.id);
-      if (!points) { points = []; workSlots.set(where.id, points); }
+      const points = occupied(where);
       const center = cellCenter(where.cell.i, where.cell.j);
       let point = null, best = null, clearance = -1;
       const consider = candidate => {
         if (Math.abs(candidate.x - center.x) > WALK_HALF + 1e-8 || Math.abs(candidate.z - center.z) > WALK_HALF + 1e-8) return false;
         const distance = points.reduce((nearest, p) => Math.min(nearest, Math.hypot(p.x - candidate.x, p.z - candidate.z)), Infinity);
         if (distance > clearance) { best = candidate; clearance = distance; }
-        if (distance < 0.72) return false;
+        if (points.some(p => Math.hypot(p.x - candidate.x, p.z - candidate.z) < (p.talkSpacing || .72))) return false;
         point = candidate; return true;
       };
       // Narrow models clamp multiple candidate columns onto the same point;
@@ -212,6 +326,7 @@ export class NpcManager {
     };
     for (const npc of list) {
       const a = npc.agent;
+      if (npc.held && npc.talkStaged) continue;
       const where = locations.get(npc.id), hq = fallback.get(npc.id);
       let goal;
       if (hq) {
@@ -219,8 +334,8 @@ export class NpcManager {
         goal = { type, key: `${type}:hq:${hq.slot}:${unassigned.length}`, point: hq.point, cell: { i: 0, j: 0 }, face: { x: 0, z: 0 } };
       } else if (a.status === 'offline') {
         const seats = (where.seats || []).map((s, k) => ({ ...s, key: `lot:${where.id}:${k}` }));
-        const seat = seats.find(s => !usedSeats.has(s.key));
-        if (seat) { usedSeats.add(seat.key); goal = { type: 'sit', key: `sit:${seat.key}`, point: seat, face: { x: seat.x + seat.fx * 4, z: seat.z + seat.fz * 4 } }; }
+        const seat = seats.find(s => !usedSeats.has(s.key) && occupied(where).every(p => Math.hypot(p.x - s.x, p.z - s.z) >= (p.talkSpacing || .72)));
+        if (seat) { usedSeats.add(seat.key); occupied(where).push(seat); goal = { type: 'sit', key: `sit:${seat.key}`, point: seat, face: { x: seat.x + seat.fx * 4, z: seat.z + seat.fz * 4 } }; }
         else {
           const { point, slot } = workSpot(where);
           goal = { type: 'rest', key: `rest:${where.id}:${slot}`, point, face: { x: point.x + point.fx * 4, z: point.z + point.fz * 4 } };
@@ -230,15 +345,25 @@ export class NpcManager {
         goal = { type: 'work', key: `work:${where.id}:${slot}`, point, face: { x: point.x + point.fx * 4, z: point.z + point.fz * 4 } };
       } else {
         const cell = where.cell;
-        goal = { type: 'stroll', key: `stroll:${cell.i},${cell.j}`, cell };
+        const points = occupied(where), start = (hash(npc.id) % 400) / 100;
+        let point;
+        for (let k = 0; k < 128; k++) {
+          const candidate = perimeterPoint(cell.i, cell.j, start + k * 4 / 128);
+          if (points.every(p => Math.hypot(p.x - candidate.x, p.z - candidate.z) >= (p.talkSpacing || .72))) { point = candidate; break; }
+        }
+        if (point) points.push(point);
+        else point = workSpot(where).point;
+        goal = { type: 'stroll', key: `stroll:${cell.i},${cell.j}:${points.length - 1}`, cell, point };
       }
       if (goal.type === 'stroll' && !goal.point) goal.point = perimeterPoint(goal.cell.i, goal.cell.j, (hash(npc.id) % 400) / 100);
       if (goal.key === npc.goalKey) { npc.goal = goal; continue; }
       const previous = npc.goal;
       npc.goal = goal; npc.goalKey = goal.key;
-      if (this.first || (hq && npc.fresh)) { npc.place(goal.point.x, goal.point.z); this.arrive(npc); }
+      if (this.first || npc.fresh) {
+        npc.place(goal.point.x, goal.point.z); this.arrive(npc);
+        if (!this.first) this.drop(npc);
+      }
       else {
-        if (npc.fresh) npc.place(HQ.door.x + (Math.random() - 0.5), HQ.door.z + 0.4);
         npc.path = this.route(npc.pos, planPath({ x: npc.pos.x, z: npc.pos.z }, goal.point, npc.lane));
         npc.roaming = goal.type === 'stroll';
         npc.wait = 0;
@@ -261,7 +386,9 @@ export class NpcManager {
   /* ---------- per-frame ---------- */
   update(dt, elapsed, env) {
     for (const npc of this.npcs.values()) {
-      if (npc.held) { npc.person.update(dt, elapsed); continue; }   // talk mode: stays put (see hold)
+      if (npc.held || npc.drop) {
+        npc.person.update(dt, elapsed); this.updateDrop(npc, dt); this.updateGesture(npc, dt); continue;
+      }   // talk mode and arrivals stay put (see hold/drop)
       if (npc.pause > 0) {
         npc.pause -= dt;
         if (npc.pause <= 0) { npc.pause = 0; if (npc.path.length) npc.setAction('walk'); else this.arrive(npc); }
@@ -283,6 +410,7 @@ export class NpcManager {
         }
       }
       npc.person.update(dt, elapsed);
+      this.updateGesture(npc, dt);
     }
     this.separate();
     this.socialTimer -= dt;
@@ -295,6 +423,7 @@ export class NpcManager {
         if (!o.path.length) { o.speed = 0; this.ownerAction('stand'); }
       }
       o.person.update(dt, elapsed);
+      this.updateDrop(o, dt); this.updateGesture(o, dt);
     }
     if (this.marker.material.opacity > 0) {
       this.marker.material.opacity = Math.max(0, this.marker.material.opacity - dt * 0.7);
@@ -354,7 +483,10 @@ export class NpcManager {
   /* ---------- interaction ---------- */
   pickables() {
     const out = [];
-    for (const npc of this.npcs.values()) out.push(...(npc.person.pickable || []));
+    for (const npc of this.npcs.values()) {
+      out.push(...(npc.person.pickable || []));
+      npc.clipboard?.traverse(mesh => { if (mesh.isMesh && !mesh.userData.outline) out.push(mesh); });
+    }
     if (this.owner) out.push(...(this.owner.person.pickable || []));
     return out;
   }
@@ -403,6 +535,7 @@ export class NpcManager {
     if (!npc || Boolean(npc.held) === Boolean(on)) return;
     npc.held = Boolean(on);
     if (on) { if (npc.action === 'walk' || npc.action === 'wave') npc.setAction('stand'); return; }
+    npc.talkStaged = false;
     npc.pause = 0;
     if (npc.path.length) npc.setAction('walk');
     else if (npc.goal?.type === 'stroll') { npc.setAction('stand'); npc.wait = Math.min(npc.wait || 0, 1.2); }

@@ -19,6 +19,8 @@
 /* Overlay layer (never intercepts the mouse) */
 .city-overlay { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 2; }
 .city-labels { position: absolute; inset: 0; }
+button.city-label { pointer-events: auto; cursor: pointer; font-family: inherit; }
+button.city-label:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .city-label, .city-tag, .city-bubble { position: absolute; left: 0; top: 0; will-change: transform; }
 .city-label { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 9px 0 7px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); color: var(--text); font-size: 11.5px; font-weight: 650; line-height: 1; white-space: nowrap; box-shadow: var(--shadow-sm); margin-top: -4px; }
 .city-label.provider-claude { border-color: color-mix(in srgb, var(--claude) 55%, transparent); }
@@ -336,6 +338,10 @@
 .city-talk-actions { display: flex; align-items: center; gap: 4px; align-self: flex-start; }
 .city-talk-open { white-space: nowrap; }
 .city-talk-mode { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 16px 12px; border-bottom: 1px solid var(--border); }
+.city-talk-mode[hidden] { display: none; }
+.city-talk-actions { flex-wrap: wrap; justify-content: flex-end; max-width: 48%; }
+.city-talk-routing { display: inline-grid; place-items: center; width: 24px; height: 28px; color: var(--muted); font-size: 14px; cursor: help; }
+.city-talk-routing:focus-visible { outline: 2px solid var(--accent); border-radius: 50%; }
 .city-talk-pill { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 10px; border-radius: var(--radius-pill); background: var(--surface-2); color: var(--text-2); font-size: 11.5px; white-space: nowrap; }
 .city-talk-pill .icon { width: 13px; height: 13px; }
 .city-talk-pill.live { background: var(--accent-soft); }
@@ -402,7 +408,7 @@
 @keyframes city-rise { from { opacity: 0; transform: translateY(18px); } }
 @media (max-width: 760px) {
   /* Narrow: the conversation is a bottom sheet; the agent is framed above it. */
-  .city-talk { top: auto; left: 0; width: auto; height: min(56%, 520px); border-top: 1px solid var(--border); border-left: 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0; animation-name: city-rise; }
+  .city-talk { top: auto; left: 0; right: auto; width: min(100%, var(--city-visible-width, 100%)); height: min(56%, 520px); border-top: 1px solid var(--border); border-left: 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0; animation-name: city-rise; }
 }
 @media (prefers-reduced-motion: reduce) {
   .city-bar, .city-talk-leave, .city-talk-chip, .city-talk-box { transition: none; }
