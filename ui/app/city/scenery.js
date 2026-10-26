@@ -173,13 +173,18 @@ export function buildRoads(rings, { districts = false } = {}) {
   dashMesh.receiveShadow = true; dashMesh.userData.noOutline = true;
   group.add(dashMesh);
 
-  // Lamp posts: two per block along the curb; heads glow at night.
-  const lampSpots = [];
+  // Downtown keeps its round street lights. Suburbs use slim poles with a
+  // compact horizontal LED housing; both use the existing warm night lighting.
+  const lampSpots = [], suburbanSpots = [];
   for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
     const { x, z } = cellCenter(i, j);
     if (districts && !riverCellUsable(i, j)) continue;
     const curb = districts ? 6.32 : 6.42; // the entire pole base, including its outline, rests on the sidewalk
-    for (const spot of [[x - 3.2, z + curb], [x + curb, z + 2.8]]) if (!districts || riverSceneryClear(...spot, 0.28, 0.28)) lampSpots.push(spot);
+    for (const [sx, sz, ry] of [[x - 3.2, z + curb, -Math.PI / 2], [x + curb, z + 2.8, 0]]) {
+      const suburban = districts && j >= 0, reach = suburban ? 0.38 : 0.28;
+      if (districts && !riverSceneryClear(sx, sz, reach, reach)) continue;
+      if (suburban) suburbanSpots.push([sx, sz, ry]); else lampSpots.push([sx, sz]);
+    }
   }
   const poles = new THREE.InstancedMesh(placed(new THREE.CylinderGeometry(0.07, 0.1, 2.6, 6), { y: 1.3 }), toonMaterial('#3f4560', { cache: false }), lampSpots.length);
   const heads = new THREE.InstancedMesh(placed(new THREE.SphereGeometry(0.24, 12, 8), { y: 2.75 }), lampMaterial(), lampSpots.length);
@@ -192,6 +197,20 @@ export function buildRoads(rings, { districts = false } = {}) {
   });
   poles.castShadow = true; poles.userData.noOutline = true; heads.userData.noOutline = true;
   group.add(poles, instancedOutline(poles, 0.03), heads);
+  if (suburbanSpots.length) {
+    const modernPoles = new THREE.InstancedMesh(placed(new THREE.CylinderGeometry(0.055, 0.075, 2.75, 6), { y: 1.375 }), toonMaterial('#59676e', { cache: false }), suburbanSpots.length);
+    const housings = new THREE.InstancedMesh(placed(new THREE.BoxGeometry(0.48, 0.12, 0.22), { x: 0.12, y: 2.78 }), toonMaterial('#59676e', { cache: false }), suburbanSpots.length);
+    const panels = new THREE.InstancedMesh(placed(new THREE.BoxGeometry(0.38, 0.026, 0.16), { x: 0.12, y: 2.715 }), lampMaterial(), suburbanSpots.length);
+    modernPoles.name = 'suburbs-lamp-poles'; housings.name = 'suburbs-lamp-housings'; panels.name = 'suburbs-lamp-panels';
+    suburbanSpots.forEach(([x, z, ry], index) => {
+      m4.compose(v.set(x, SIDEWALK_TOP, z), q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), ry), one);
+      for (const inst of [modernPoles, housings, panels]) inst.setMatrixAt(index, m4);
+      glow.push(x + Math.cos(ry) * 0.12, SIDEWALK_TOP + 2.715, z - Math.sin(ry) * 0.12);
+    });
+    modernPoles.castShadow = true;
+    for (const inst of [modernPoles, housings, panels]) { inst.userData.noOutline = true; inst.userData.district = 'suburbs'; }
+    group.add(modernPoles, instancedOutline(modernPoles, 0.025), housings, panels);
+  }
   const glowGeometry = new THREE.BufferGeometry();
   glowGeometry.setAttribute('position', new THREE.Float32BufferAttribute(glow, 3));
   const glowPoints = new THREE.Points(glowGeometry, glowMaterial());
@@ -336,6 +355,9 @@ export function buildDecor(rings, lots, half, { districts = false } = {}) {
       }
       continue;
     }
+    // Each suburban home owns its lawn, driveway, small trees and fence. Keep
+    // this shared decor layer out of the entire occupied plot, including benches.
+    if (districts && occupied.has(`${i},${j}`)) continue;
     if (!occupied.has(`${i},${j}`)) {
       // Park: a pond sometimes, trees, flowers.
       const spots = [];

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SlotMap, cellKey, pinOf, slotCell } from '../app/city/layout.js';
-import { DISTRICTS, districtOf, districtForCell, districtCells, isUnbuilt } from '../app/city/districts.js';
+import { DOWNTOWN, SUBURBS, DISTRICTS, districtOf, districtForCell, districtCells, isUnbuilt } from '../app/city/districts.js';
 import { riverCellUsable } from '../app/city/river-path.js';
 
 const local = (name, extra = {}) => ({ id: `local:${name}`, path: `C:/projects/${name}`, ...extra });
@@ -23,7 +23,9 @@ function checkFree(result) {
 }
 
 test('districts distinguish local-only, linked GitHub, and unbuilt GitHub projects', () => {
-  assert.equal(districtOf(local('garden')), 'oldtown');
+  assert.equal(SUBURBS, 'suburbs');
+  assert.deepEqual(DISTRICTS, [DOWNTOWN, SUBURBS]);
+  assert.equal(districtOf(local('garden')), 'suburbs');
   assert.equal(districtOf(both('tower')), 'downtown');
   assert.equal(districtOf(repo('outline')), 'downtown');
   assert.equal(districtOf(repo('canonical', { ids: ['local:alias'] })), 'downtown');
@@ -32,7 +34,7 @@ test('districts distinguish local-only, linked GitHub, and unbuilt GitHub projec
   assert.equal(isUnbuilt(both('tower')), false);
   assert.equal(isUnbuilt(local('garden')), false);
   assert.equal(districtForCell({ i: 0, j: 0 }), null);
-  assert.equal(districtForCell({ i: 1, j: 1 }), 'oldtown');
+  assert.equal(districtForCell({ i: 1, j: 1 }), 'suburbs');
   assert.equal(districtForCell({ i: 1, j: -2 }), 'downtown');
   assert.equal(districtForCell({ i: 1, j: -1 }), null);
   assert.equal(districtForCell({ i: 1, j: 0 }), null);
@@ -43,7 +45,31 @@ test('the empty city has at least three safe free plots in each river district',
   assert.equal(result.rings, 2);
   checkFree(result);
   assert.equal(result.emptyPlots.downtown.length, 5);
-  assert.equal(result.emptyPlots.oldtown.length, 10);
+  assert.equal(result.emptyPlots.suburbs.length, 10);
+});
+
+test('the Suburbs name preserves existing coordinate pins through reload and expansion', () => {
+  // Saved desktop lots contain project IDs and coordinates, with no district names.
+  const projects = [local('saved-home'), local('saved-home-alias', { ids: ['local:older-home-name'] }), both('saved-tower')];
+  const pins = JSON.parse('{"local:saved-home":{"i":0,"j":1},"local:older-home-name":{"i":-2,"j":1},"local:saved-tower":{"i":1,"j":-2}}');
+  const originalPins = structuredClone(pins), slots = new SlotMap();
+  for (const project of projects) slots.memo.set(project.id, pinOf(project, pins));
+  const current = slots.assign(projects, { pins });
+  const reopened = new SlotMap().assign(projects, { pins });
+  for (const result of [current, reopened]) {
+    assert.deepEqual(result.fresh, []);
+    assert.deepEqual(result.migrated, []);
+    for (const project of projects) assert.deepEqual(coordinates(result.cells.get(project.id)), pinOf(project, pins));
+    assert.equal(result.districts.get(projects[0].id), SUBURBS);
+    assert.equal(result.districts.get(projects[1].id), SUBURBS);
+    assert.equal(result.districts.get(projects[2].id), DOWNTOWN);
+    checkFree(result);
+  }
+  const expanded = slots.assign([...projects, ...Array.from({ length: 24 }, (_, n) => local(`new-home-${n}`))], { pins });
+  assert.deepEqual(expanded.migrated, []);
+  for (const project of projects) assert.deepEqual(expanded.cells.get(project.id), current.cells.get(project.id));
+  assert.deepEqual(pins, originalPins);
+  checkFree(expanded);
 });
 
 test('growth leaves every standing and pinned project in place and keeps spare plots', () => {

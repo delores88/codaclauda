@@ -100,7 +100,10 @@ export class NpcManager {
     parent.add(this.marker);
   }
   setCreate(fn) { this.create = fn || createStandIn; }
-  surfaceY(x, z) { return this.river() ? bridgeHeight(x, z, this.river().crossings) ?? groundY(x, z) : groundY(x, z); }
+  surfaceY(x, z) {
+    const river = this.river(), bridge = river ? bridgeHeight(x, z, river.crossings) : null;
+    return bridge ?? this.buildings.groundAt?.(x, z) ?? groundY(x, z);
+  }
   route(from, points) { return this.river() ? riverRoute(from, points, this.river().crossings) : points; }
   /** createPerson with a per-person fallback so one bad spec can't empty the city. */
   makePerson(spec, options) {

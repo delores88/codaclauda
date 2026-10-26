@@ -4,12 +4,13 @@ Prepared 2026-10-25 (local time) on `codex/codaclauda-0.7-city`. The river
 refinement follows `53e721dc3f7fdfc43c9b24ddd30acb3f1c726939`. The six-boat follow-up
 builds on river commit `9ff9a0068a6e9319df14d844745aca10601c0218`; the branch is based
 on `v0.6.2` (`ae5ddfadae2fa7d28655163a89b0e1fc1c204339`). This is UI source and
-headless preview evidence. No Rust, installation, publication or external project
-changes are included.
+headless preview evidence. The Suburbs refinement below builds on
+`663623ad21fd66c1a500d08ebc95638d65753ffb`. No Rust, installation, publication or
+external project changes are included.
 
 ## Implemented behavior
 
-- A gently winding river connects Downtown and Old Town. Its curve uses fixed
+- A gently winding river connects Downtown and Suburbs. Its curve uses fixed
   world coordinates, so expansion extends the water without shifting existing
   banks, bridges or safe pins. Water has subtle surface animation, calmer at
   night; low quality uses a simple material. Banks have grass and stones.
@@ -40,8 +41,9 @@ changes are included.
   supports and docks form connected structures. Low quality has no river shadows.
 - Downtown retains cool glass towers, planted plazas and pale ghost volumes for
   uncloned repositories. Ghosts are 83% of nominal height at 23% opacity, with
-  supported ground signs and no ticker bands or rooftop CI effects. Old Town
-  retains warm brick/timber, pitched roofs, gardens and lanterns.
+  supported ground signs and no ticker bands or rooftop CI effects. Suburbs use
+  low modern homes, lawns, driveways and slim street lights; their refinement is
+  recorded separately below.
 - Real buildings retain roof tickers and the red CI beacon. CI creates no weather.
   Compact cranes have no suspended loads; growth effects follow building scale.
   Clone selection and new-project dialogs on both district sides remain available.
@@ -51,6 +53,7 @@ changes are included.
 
 ## Automated tests and independent review
 
+At the six-boat checkpoint,
 `node --test --test-reporter=spec ui/tests/*.test.mjs`: **184 passed, 0 failed**.
 `git diff --check` passed. Tests cover river extrema and full-footprint clearance,
 220-project expansion, safe-pin preservation and migration, bridge surfaces and
@@ -89,10 +92,10 @@ or real-owner workflow acceptance.
   quality disabled renderer shadows and all river shadow flags, and used no
   water shader.
 - Adding 24 synthetic repos expanded ring 3 to ring 5. Every existing cell stayed
-  unchanged; all new cells were dry; free counts were 18 Downtown and 53 Old Town.
+  unchanged; all new cells were dry; free counts were 18 Downtown and 53 Suburbs.
   River and island bounds both reached 93.5. Roads/decor/river stayed unscaled
   during growth, and the final capture settled the building rise animations.
-- Actual empty-plot clicks opened Create in Downtown and Link in Old Town. An
+- Actual empty-plot clicks opened Create in Downtown and Link in Suburbs. An
   uncloned repo's ground sign opened the existing Clone dialog with the correct
   repo selected. No repository was cloned. Water returned no project plot.
 - Spark flipped PC to Spark to PC. Contributor round trips starting on a bridge
@@ -130,6 +133,67 @@ The current scene used 1,033 / 901 draw calls versus baseline 999 / 873
 (high / low). This is a short headless preview sample, not sustained or installed
 performance acceptance.
 
+## Suburbs refinement and acceptance
+
+Local-only projects now use four lot-hash-selected modern home shapes:
+cantilever, L-shaped ranch, split-level and townhouse pair. Light stucco volumes,
+dark-framed windows, charcoal roofs and a wood entry accent replace the earlier
+architecture. Every home has a garage, driveway, lawn, one or two trees and a low
+fence. Homes stay at one or two storeys; larger project metrics widen their wings
+and garages without adding height. The active-agent state adds a contractor van
+with an amber beacon, a wall ladder and solar-panel glints. Wall lights and slim
+modern street lamps glow warmly at night. Empty grass parks, Downtown plazas and
+towers retain their existing behavior. Help, legend and panel pills say Suburbs.
+
+`node --test` from `ui`: **203 passed, 0 failed**. `git diff --check` passed.
+New coverage includes all four shapes across three size tiers, fixed height and
+outward growth, pin/alias preservation through district renaming and expansion,
+rendered lawn/path/driveway heights, offset-wing and contractor collision,
+courtyard access, physical attachments, roof markers, resource disposal and
+reduced motion enabled during growth. Existing Downtown, contributor and Spark
+architecture tests remain green.
+
+Independent source and geometry review checked twelve variant/tier combinations.
+It found and prompted fixes for entry-tree clearance, yard/sidewalk alignment,
+small attachment gaps, raised-yard walking heights and offset-wing collision.
+The final home geometry review passed. Independent collision and surface-height
+integration review also passed, with 16 focused tests rerun and no blocking
+findings.
+
+Observed headless Chrome acceptance, with synthetic mock data:
+
+- Inspected all four home variants, day/night close-ups, overview, growth,
+  reduced-motion and Low-quality captures. No detached home elements were visible
+  in the inspected frames. Growth retained its roof height and exact lot/pins.
+- An actual canvas click opened a home's Suburbs panel. Empty plots opened Create
+  Downtown and Link in Suburbs. A ghost's ground sign opened Clone with the correct
+  repo selected; the dialog was cancelled. Water remained unselectable as a plot.
+- Owner placement on the entry path matched its rendered top at y = 0.2865.
+  Both camera zoom and street walking recognized the rear wall of the offset wing.
+- Reduced motion froze the contractor beacon and solar glints, and settled an
+  in-progress home expansion. Low quality disabled renderer shadows.
+- Spark flipped to its underside and back. Contributor trips from the bridge and
+  Downtown returned to HQ, preserving exact home pins and cells. No browser errors
+  occurred in the completed runs.
+
+Sequential 3.5-second rAF samples used the same ten-project fixture (four homes,
+one active contractor), camera, 1600x1000 viewport, device scale 1 and RTX 4090
+Laptop GPU with ANGLE D3D11:
+
+| Preview | High quality | Low quality | p95 frame time | Draw calls (High / Low) |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline 663623a | 59.94 FPS | 59.94 FPS | 16.8 ms | 1,090 / 951 |
+| Modern Suburbs | 59.94 FPS | 59.94 FPS | 16.8 ms | 1,102 / 963 |
+
+These short samples establish headless preview behavior on this machine, not
+installed/native acceptance or sustained performance on larger cities.
+
+The separate proposed diagonal S-bend river, asymmetric quay, waterfalls and
+continuous boat circuit through the Spark side are **not implemented by this
+refinement**. Bridge/mast clearance and preserving dry pins across a new diagonal
+district boundary still need design resolution. The current river behavior above
+describes the existing checkpoint, not acceptance of that later design.
+
 ## Local evidence
 
 River evidence lives in `local/city-river-evidence/` in the original checkout,
@@ -156,6 +220,18 @@ The latest boat-variety evidence is in `local/city-boat-variety-evidence/`:
   `after-expansion.png`, `after-reduced-motion.png`, `after-low-quality.png`
 - Receipts and reproduction: `tests.txt`, `river-check.json`, `variety-check.json`,
   `river-check.cjs`, `variety-check.cjs`
+
+Suburbs evidence is in `local/city-suburbs-evidence/` in the original checkout:
+
+- `before-{overview,day,night}.png`, `after-{overview,day,night}.png`
+- `after-{cantilever,l-ranch,split-level,townhouse-pair}.png`,
+  `after-reduced-motion.png`, `after-low-quality.png`, `home-growth.png`,
+  `home-panel.png`, `after-clone-dialog.png` and the `workflow-*.png` captures
+- Receipts: `tests.txt`, `before-preview.json`, `after-preview.json`,
+  `home-workflow.json`, `interaction-check.json`, `workflow.json`
+- Reproduction: `preview.cjs`, `home-workflow.cjs`, `interaction-check.cjs`,
+  `workflow-check.cjs`
+- Review copies: `local/city-07-evidence/suburbs-{overview,day,night}.png`
 
 No release tag or installer was produced by this UI change. Source integration,
 publication, installation and real-project acceptance remain separate steps.

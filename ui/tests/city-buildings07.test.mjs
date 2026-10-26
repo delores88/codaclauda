@@ -86,7 +86,7 @@ test('an outline expands translated rooftop geometry about its own centre', () =
 
 test('district architecture ignores language while contributor architecture remains unchanged', () => {
   assert.equal(styleFor({ id: 'a', primaryLanguage: 'Rust' }, 'downtown').key, 'downtown');
-  assert.equal(styleFor({ id: 'a', primaryLanguage: 'TypeScript' }, 'oldtown').key, 'oldtown');
+  assert.equal(styleFor({ id: 'a', primaryLanguage: 'TypeScript' }, 'suburbs').key, 'suburbs');
   assert.equal(styleFor({ id: 'a', primaryLanguage: 'Rust' }).key, 'foundry');
 });
 
@@ -216,7 +216,7 @@ test('delayed CI celebrations stop if a linked building becomes unbuilt before t
 test('crane meshes and outlines stay inside the roof footprint during rotation and growth', t => {
   fakeCanvas(t);
   for (const mirror of [false, true]) {
-    const building = fixture({ id: 'local:demo', name: 'Demo', path: 'C:/demo', metrics: { floors: 2, footprint: 1 } }, { mirror });
+    const building = fixture({ id: 'local:demo', ids: ['local:demo', 'gh:owner/demo'], name: 'Demo', path: 'C:/demo', metrics: { floors: 2, footprint: 1 } }, { mirror });
     building.setActive(true);
     const crane = building.jib.parent;
     for (const angle of [-1.2, 0, 1.2]) for (const scale of [0.02, 0.6, 1.12]) {
@@ -237,7 +237,7 @@ test('crane meshes and outlines stay inside the roof footprint during rotation a
 
 test('scaffold sparks follow the scaled tower instead of appearing at its finished height', t => {
   fakeCanvas(t);
-  const building = fixture({ id: 'local:scaffold', name: 'Scaffold', path: 'C:/scaffold', metrics: { floors: 12, footprint: 1 } });
+  const building = fixture({ id: 'local:scaffold', ids: ['local:scaffold', 'gh:owner/scaffold'], name: 'Scaffold', path: 'C:/scaffold', metrics: { floors: 12, footprint: 1 } });
   building.setActive(true); building.tower.scale.y = 0.2; building.elapsedEmit = 1;
   t.mock.method(Math, 'random', () => 0.5);
   const emissions = [];

@@ -106,7 +106,7 @@ test('river roads and sidewalks end at bridge approaches with no submerged aspha
   for (const rings of [2, 4]) {
     const { group } = buildRoads(rings, { districts: true });
     renderedBounds(group, (box, node) => assert.ok(riverFootprintClear(...footprint(box)), `${node.name || node.type} intersects river banks: ${JSON.stringify(footprint(box))}`));
-    for (const name of ['street-lamp-poles', 'street-lamp-heads']) {
+    for (const name of ['street-lamp-poles', 'street-lamp-heads', 'suburbs-lamp-poles', 'suburbs-lamp-housings', 'suburbs-lamp-panels']) {
       const lamps = group.getObjectByName(name);
       assert.ok(lamps.count > 0);
       renderedBounds(lamps, box => assert.ok(riverSceneryClear(...footprint(box)), 'street lamp overlaps a bridge approach'));
@@ -114,11 +114,14 @@ test('river roads and sidewalks end at bridge approaches with no submerged aspha
     const asphalt = group.getObjectByName('road-asphalt');
     const vertical = new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3(0, -1, 0));
     const hit = (x, z, mesh = asphalt) => { vertical.ray.origin.set(x, 10, z); return vertical.intersectObject(mesh, false).length > 0; };
-    const poles = group.getObjectByName('street-lamp-poles'), matrix = new THREE.Matrix4(), at = new THREE.Vector3();
+    const matrix = new THREE.Matrix4(), at = new THREE.Vector3();
     const sidewalk = group.getObjectByName('road-sidewalks');
-    for (let index = 0; index < poles.count; index++) {
-      poles.getMatrixAt(index, matrix); at.setFromMatrixPosition(matrix);
-      for (const dx of [-0.13, 0.13]) for (const dz of [-0.13, 0.13]) assert.ok(hit(at.x + dx, at.z + dz, sidewalk), 'entire lamp base rests on a sidewalk');
+    for (const name of ['street-lamp-poles', 'suburbs-lamp-poles']) {
+      const poles = group.getObjectByName(name);
+      for (let index = 0; index < poles.count; index++) {
+        poles.getMatrixAt(index, matrix); at.setFromMatrixPosition(matrix);
+        for (const dx of [-0.13, 0.13]) for (const dz of [-0.13, 0.13]) assert.ok(hit(at.x + dx, at.z + dz, sidewalk), 'entire lamp base rests on a sidewalk');
+      }
     }
     for (let k = -rings - 1; k <= rings; k++) {
       const x = (k + 0.5) * 16, span = bridgeSpan(x);
@@ -160,4 +163,39 @@ test('contributor islands retain the existing park scenery', () => {
   const decor = buildDecor(1, new Map(), islandHalf(1));
   assert.equal(decor.getObjectByName('downtown-plazas'), undefined);
   disposeAll(decor);
+});
+
+test('occupied Suburbs plots contain no shared decor while vacant parks and Downtown plazas survive', () => {
+  const rings = 3, occupied = new Map();
+  for (let i = -rings; i <= rings; i++) for (let j = 0; j <= rings; j++) if ((i || j) && riverCellUsable(i, j)) occupied.set(`${i},${j}`, { i, j, district: 'suburbs', padW: 11.2, padD: 11.2, cz: -0.3 });
+  const homes = buildDecor(rings, occupied, islandHalf(rings), { districts: true });
+  const parks = buildDecor(rings, new Map(), islandHalf(rings), { districts: true });
+  let vacantParkParts = 0;
+  for (const lot of occupied.values()) {
+    const area = new THREE.Box3(new THREE.Vector3(lot.i * 16 - 5.6, -0.01, lot.j * 16 - 5.6), new THREE.Vector3(lot.i * 16 + 5.6, 10, lot.j * 16 + 5.6));
+    renderedBounds(homes, box => assert.ok(!box.intersectsBox(area), `shared decor intrudes into home lot ${lot.i},${lot.j}`));
+    renderedBounds(parks, box => { if (box.intersectsBox(area)) vacantParkParts++; });
+  }
+  assert.ok(vacantParkParts > 100, 'vacant Suburbs lots retain trees and grassy parks');
+  const before = parks.getObjectByName('downtown-plazas'), after = homes.getObjectByName('downtown-plazas');
+  assert.equal(before.children.length, after.children.length);
+  before.children.forEach((mesh, index) => assert.deepEqual(after.children[index].geometry.attributes.position.array, mesh.geometry.attributes.position.array, 'Downtown plaza geometry stays unchanged'));
+  disposeAll(homes); disposeAll(parks);
+});
+
+test('Suburbs lamps use grounded slim poles and attached flat warm panels', t => {
+  fakeCanvas(t);
+  const { group } = buildRoads(2, { districts: true }), poles = group.getObjectByName('suburbs-lamp-poles'), housings = group.getObjectByName('suburbs-lamp-housings'), panels = group.getObjectByName('suburbs-lamp-panels');
+  assert.ok(poles.count > 0); assert.equal(poles.count, housings.count); assert.equal(poles.count, panels.count);
+  for (const lamp of [poles, housings, panels]) lamp.geometry.computeBoundingBox();
+  assert.ok(Math.abs(poles.geometry.boundingBox.min.y) < 1e-6, 'pole starts at the supporting sidewalk');
+  assert.ok(poles.geometry.boundingBox.max.x - poles.geometry.boundingBox.min.x < 0.16, 'modern pole is slim');
+  assert.ok(poles.geometry.boundingBox.intersectsBox(housings.geometry.boundingBox), 'housing is attached to pole');
+  assert.ok(housings.geometry.boundingBox.intersectsBox(panels.geometry.boundingBox), 'light panel is mounted in housing');
+  assert.ok(panels.geometry.boundingBox.max.y - panels.geometry.boundingBox.min.y < 0.03, 'luminaire is a flat panel');
+  assert.equal(panels.material.emissive.getHexString(), 'ffcf6b');
+  const matrix = new THREE.Matrix4(), at = new THREE.Vector3();
+  for (let index = 0; index < poles.count; index++) { poles.getMatrixAt(index, matrix); at.setFromMatrixPosition(matrix); assert.ok(at.z > 0, 'modern lamps stay on the Suburbs side'); assert.ok(Math.abs(at.y - 0.2) < 1e-6); }
+  disposeAll(group);
+  const island = buildRoads(1).group; assert.equal(island.getObjectByName('suburbs-lamp-panels'), undefined); disposeAll(island);
 });

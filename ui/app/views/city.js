@@ -8,7 +8,7 @@ import { World, webglAvailable, wheelZoomLog } from '../city/world.js';
 import { BuildingManager } from '../city/buildings.js';
 import { NpcManager, loadPeople, setPeopleReducedMotion, streetMove } from '../city/npc.js';
 import { SlotMap, cellCenter, cellOf, cellKey, LOT_HALF, PITCH } from '../city/layout.js';
-import { districtOf, districtForCell, isUnbuilt } from '../city/districts.js';
+import { DOWNTOWN, SUBURBS, districtOf, districtForCell, isUnbuilt } from '../city/districts.js';
 import { River } from '../city/river.js';
 import { buildPlotMarker, GROUND_Y } from '../city/scenery.js';
 import { SparkCity, FOUNDRY, jobLabel } from '../city/spark.js';
@@ -20,6 +20,7 @@ import { sessionAgents, externalAgents, SESSION_STATUS_LABEL, PROVIDER_NAME } fr
 import { openAssignDialog } from '../city/assign.js';
 import { CityCi } from '../city/ci.js';
 import { tickerBank, tickerSegments } from '../city/ticker.js';
+import { buildingStreetBoxes, buildingSolidAt } from '../city/street-collision.js';
 
 registerIcons({
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.6 2.4c-.8.4-1.2.9-1.2 1.7v.4M12 17h.01"/>',
@@ -272,15 +273,19 @@ class CityView {
       h('div.city-legend-row', h('span.city-gem.offline'), 'Powered down'),
       h('div.city-legend-row', h('span.city-gem.error'), 'Session error'),
       h('div.city-legend-sep'),
-      h('div.city-legend-note', 'Taller = more code & commits'),
+      this.legendLegacySize = h('div.city-legend-note', { hidden: true }, 'Taller = more code & commits'),
       h('div.city-legend-note', 'Drag an agent onto a building to give it a task'),
       this.legendDistricts = h('div.city-legend-extra',
+        h('div.city-legend-note', 'Downtown: taller = more code & commits'),
+        h('div.city-legend-note', 'Suburbs: homes grow outward with more code & commits'),
         h('div.city-legend-note', 'Downtown: glass towers and GitHub repos'),
-        h('div.city-legend-note', 'Old Town: local folders, brick and gardens'),
+        h('div.city-legend-note', 'Suburbs: local folders without a repo'),
+        h('div.city-legend-note', 'Contractor van + ladder = an agent is working at home'),
+        h('div.city-legend-note', 'Solar-panel glint = a busy home'),
         h('div.city-legend-note', 'Pale ghost = repo waiting to be cloned'),
         h('div.city-legend-note', 'River boats = projects with recent commits')),
       this.legendCi = h('div.city-legend-note', { hidden: true }, 'Red rooftop beacon = CI failing'),
-      h('div.city-legend-note', 'Scaffolding = an agent is working there'),
+      this.legendScaffolding = h('div.city-legend-note', 'Downtown scaffolding = an agent is working there'),
       this.legendGear, this.legendSpark);
 
     this.followBtn = iconButton('crosshair', 'Follow my avatar', () => this.toggleFollow(), 'city-tool');
@@ -312,7 +317,8 @@ class CityView {
       h('dl.city-help-list',
         ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Drag an agent', 'Drop it on a building to give it a task there'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
           .flatMap(([k, v]) => [h('dt', h('kbd', k)), h('dd', v)])),
-      h('p.city-note', 'A winding river connects Downtown (GitHub projects) and Old Town (local folders without a repo). Road bridges link the districts. Pale Downtown ghosts have a ground sign and open a panel where you can clone the repo. Tickers sit on real buildings only. Both districts keep at least three empty plots and grow without moving placed buildings.'),
+      h('p.city-note', 'A winding river connects Downtown (GitHub projects) and Suburbs (local folders without a repo). Road bridges link the districts. Pale Downtown ghosts have a ground sign and open a panel where you can clone the repo. Tickers sit on real buildings only. Both districts keep at least three empty plots and grow without moving placed buildings.'),
+      h('p.city-note', 'Suburbs have low modern homes with at most two storeys. Larger projects add wings and a wider footprint; Downtown towers grow taller. A contractor van and ladder show an agent working at a home, and a solar-panel glint marks a busy home.'),
       h('p.city-note', 'Sailboats, rowboats, tugboats, barges, paddle steamers and canoes pass every 90–180 seconds with recent project names on their hulls. Barges carry up to three names. Reduced motion moors boats at the dock. Click a bridge to walk there. A red rooftop beacon and “CI failing” ticker mark failed builds; weather is independent.'),
       h('button.btn.small.primary', { type: 'button', onclick: () => this.toggleHelp(false) }, 'Got it'));
 
@@ -428,6 +434,8 @@ class CityView {
     if (this.world.quality !== quality) this.world.setQuality(quality);
     this.river.group.visible = districts;
     this.legendDistricts.hidden = !districts;
+    this.legendLegacySize.hidden = districts;
+    this.legendScaffolding.textContent = districts ? 'Downtown scaffolding = an agent is working there' : 'Scaffolding = an agent is working there';
     if (districts) {
       this.river.setQuality(quality);
       this.river.setBounds({ half: this.world.half, crossings: Array.from({ length: rings * 2 + 2 }, (_, i) => (i - rings - 0.5) * PITCH) });
@@ -1372,7 +1380,7 @@ class CityView {
     if (project.source === 'github' || project.source === 'both') sources.push(h('span.pill.neutral', icon('github'), 'GitHub'));
     if (project.private) sources.push(pill('Private', 'warning'));
     if (m.commits7d) sources.push(pill('Active this week', 'success'));
-    sources.push(pill(districtOf(project) === 'downtown' ? 'Downtown' : 'Old Town', 'neutral'));
+    sources.push(pill(districtOf(project) === DOWNTOWN ? 'Downtown' : 'Suburbs', 'neutral'));
     if (isUnbuilt(project)) sources.push(pill('Unbuilt · not on this PC', 'neutral'));
     const total = (project.languages || []).reduce((n, l) => n + (l.bytes || 0), 0);
     const langs = total ? [...project.languages].sort((a, b) => b.bytes - a.bytes) : [];
@@ -1750,7 +1758,7 @@ class CityView {
     clear(this.empty,
       h('div.empty-art', icon('city')),
       h('h3', allHidden ? 'Every project is hidden from the city' : 'Your city is empty'),
-      h('p', allHidden ? `${hiddenCount} linked project${hiddenCount === 1 ? ' is' : 's are'} hidden. Show them again from Projects.` : 'Link Desktop folders or GitHub repos and each project becomes a building here — or click an empty plot to start a brand-new project. Taller buildings mean more code and commits.'),
+      h('p', allHidden ? `${hiddenCount} linked project${hiddenCount === 1 ? ' is' : 's are'} hidden. Show them again from Projects.` : 'Link Desktop folders or GitHub repos and each project becomes a building here — or click an empty plot to start a brand-new project. More code and commits make Downtown towers taller and Suburbs homes grow outward.'),
       h('button.btn.gradient', { type: 'button', onclick: () => this.ctx.navigate('projects') }, icon('projects'), allHidden ? 'Manage projects' : 'Link projects'));
   }
 
@@ -1872,10 +1880,7 @@ class CityView {
    *  standing on its lot plus the HQ town hall, fountain and planters. */
   streetBoxes() {
     const r = STREET.radius, out = HQ_BOXES.map(b => ({ x0: b.x0 - r, x1: b.x1 + r, z0: b.z0 - r, z1: b.z1 + r, low: Boolean(b.low) }));
-    for (const b of this.buildings.list) {
-      const hw = b.size.W / 2 + 0.14 + r, hd = b.size.D / 2 + 0.14 + r;
-      out.push({ x0: b.origin.x - hw, x1: b.origin.x + hw, z0: b.origin.z - hd, z1: b.origin.z + hd });
-    }
+    for (const b of this.buildings.list) out.push(...buildingStreetBoxes(b, r, GROUND_Y));
     return out;
   }
   /** Is an island-space point inside a building or the town hall (This PC side up)? Wheel zoom stops at walls. */
@@ -1883,7 +1888,7 @@ class CityView {
     if (this.world.side !== 'pc') return false;
     const r = STREET.radius, hall = HQ_BOXES[0];
     if (p.y < 11.5 && p.x > hall.x0 - r && p.x < hall.x1 + r && p.z > hall.z0 - r && p.z < hall.z1 + r) return true;
-    return this.buildings.list.some(b => p.y < GROUND_Y + b.size.H + 0.6 && Math.abs(p.x - b.origin.x) < b.size.W / 2 + 0.14 + r && Math.abs(p.z - b.origin.z) < b.size.D / 2 + 0.14 + r);
+    return this.buildings.list.some(b => buildingSolidAt(b, p, r, GROUND_Y));
   }
   /** Called by the world every frame in street view: walk / turn the avatar, return the camera pose. */
   streetPose(dt) {
@@ -2143,7 +2148,7 @@ class CityView {
     let result = null;
     try {
       const { openNewProjectDialog } = await import('../newproject.js');
-      result = await openNewProjectDialog(this.ctx, { lot, tab: districtForCell(lot) === 'oldtown' ? 'link' : 'create' });
+      result = await openNewProjectDialog(this.ctx, { lot, tab: districtForCell(lot) === SUBURBS ? 'link' : 'create' });
     } catch (error) {
       console.error('City: New Project dialog failed', error);
       toast(`Could not start a project here: ${error?.message || error}`, { kind: 'error' });

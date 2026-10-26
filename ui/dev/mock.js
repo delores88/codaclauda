@@ -1059,7 +1059,7 @@ const desktopHandlers = {
     { name: 'DeloresAI Marketplace', github: 'delores88/deloresai-marketplace', aliases: ['marketplace'], agents: ['codex-marketplace'] },
     { name: 'DGXBridge', github: 'delores88/dgxbridge', aliases: ['spark dev bridge', 'sparkdev'], agents: ['codex-dgxbridge'] },
     // Three City states on first load: linked repos above, remote-only outlines,
-    // and these local folders with no GitHub identity in Old Town.
+    // and these local folders with no GitHub identity in Suburbs.
     { name: 'Garden Notes', local_path: 'C:\\Users\\Ben\\Desktop\\GardenNotes' },
     { name: 'Workshop', local_path: 'C:\\Users\\Ben\\Desktop\\Workshop' },
   ] } }),

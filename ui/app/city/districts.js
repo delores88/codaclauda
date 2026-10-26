@@ -1,8 +1,8 @@
 /* District rules and plot enumeration. Pure: shared by placement, scenery and tests. */
 import { riverZ, riverCellUsable, RIVER_GRID_PITCH } from './river-path.js';
 export const DOWNTOWN = 'downtown';
-export const OLD_TOWN = 'oldtown';
-export const DISTRICTS = [DOWNTOWN, OLD_TOWN];
+export const SUBURBS = 'suburbs';
+export const DISTRICTS = [DOWNTOWN, SUBURBS];
 export const MIN_EMPTY_PLOTS = 3;
 
 export function projectIds(project) {
@@ -11,7 +11,7 @@ export function projectIds(project) {
 
 /** A linked GitHub identity puts a project Downtown, including repos not cloned here. */
 export function districtOf(project) {
-  return projectIds(project).some(id => id.startsWith('gh:')) ? DOWNTOWN : OLD_TOWN;
+  return projectIds(project).some(id => id.startsWith('gh:')) ? DOWNTOWN : SUBURBS;
 }
 
 export function isUnbuilt(project) {
@@ -22,10 +22,10 @@ export function isUnbuilt(project) {
 export function districtForCell(cell) {
   if (!cell || !Number.isInteger(cell.i) || !Number.isInteger(cell.j) || (cell.i === 0 && cell.j === 0)) return null;
   if (!riverCellUsable(cell.i, cell.j)) return null;
-  return cell.j * RIVER_GRID_PITCH < riverZ(cell.i * RIVER_GRID_PITCH) ? DOWNTOWN : OLD_TOWN;
+  return cell.j * RIVER_GRID_PITCH < riverZ(cell.i * RIVER_GRID_PITCH) ? DOWNTOWN : SUBURBS;
 }
 
-const rings = { [DOWNTOWN]: [], [OLD_TOWN]: [] };
+const rings = { [DOWNTOWN]: [], [SUBURBS]: [] };
 let builtRings = 0;
 function growDistricts(count) {
   while (builtRings < count) {
