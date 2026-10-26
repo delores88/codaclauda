@@ -27,7 +27,6 @@ import { JumpToPicker } from '../city/jumpto.js';
 import { largestFreeRect, buildingFocusDistance, boxFitDistance } from '../city/camera.js';
 import { AGENT_PROJECT_PREF, AGENT_PROJECT_TIME_PREF, locateAgents } from '../city/agent-location.js';
 import { BuildingSessionActions } from '../city/building-actions.js';
-import { mountChatSheet } from '../city/chat-sheet.js';
 
 registerIcons({
   'city-pan': '<path d="M12 3v18M3 12h18M8 7l4-4 4 4M8 17l4 4 4-4M7 8l-4 4 4 4M17 8l4 4-4 4"/>',
@@ -403,17 +402,11 @@ export class CityView {
     this.dragGhost = h('div.city-drag-ghost', { hidden: true, 'aria-hidden': 'true' });
     this.cityRoot = h('div.city-root', this.stage, ...this.bars, this.overlay, this.hud, this.legend, this.machinesCard, this.streetHint, this.zoomHint, this.toolbar, this.help, this.panel, this.empty, this.leaveBtn, this.talkPanel.node, this.fallback, this.dragGhost);
     this.root.append(this.cityRoot);
-    this.chatSheet = mountChatSheet(this.cityRoot, this.ctx, { onChange: () => {
-      this.panelSig = '';
-      this.refreshPanel();
-      this.declutterAt = 0;
-      this.updateCameraFrame();
-    } });
     this.buildingSessions = new BuildingSessionActions({ store: this.store, sessions,
       onStarted: (session, { sendError } = {}) => {
         // An owner-started arrival walks to its project even in a previously empty city.
         if (this.npcs) this.npcs.first = false;
-        this.openCityChat({ sessionId: session.id });
+        this.openBuildingSession(session.id);
         if (sendError) toast(sendError, { kind: 'error', timeout: 9000 });
       },
     });
@@ -447,7 +440,7 @@ export class CityView {
     this.world.onKeyPan = () => { if (this.following) this.toggleFollow(false); };
     this.world.onResize = () => this.updateCameraFrame();
     this.cameraFrameObserver = new ResizeObserver(() => this.updateCameraFrame());
-    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.stage, this.chatSheet.node]) this.cameraFrameObserver.observe(node);
+    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.stage]) this.cameraFrameObserver.observe(node);
     this.world.collide = p => this.solidAt(p);
     this.buildings = new BuildingManager(this.world.city, { particles: this.world.particles, reducedMotion: () => this.reduced() });
     this.river = new River(this.world);
@@ -504,7 +497,7 @@ export class CityView {
     this.root.style.setProperty('--city-visible-width', `${bounds.right - bounds.left}px`);
     this.root.style.setProperty('--city-visible-height', `${bounds.bottom - bounds.top}px`);
     const blockers = [];
-    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.chatSheet?.node].filter(Boolean)) {
+    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel]) {
       if (node.hidden || !node.getClientRects().length) continue;
       const r = node.getBoundingClientRect();
       if (r.width < 1 || r.height < 1) continue;
@@ -775,7 +768,7 @@ export class CityView {
     const { w: W, h: H } = this.world.size;
     const base = this.overlay.getBoundingClientRect();
     const blockers = [];
-    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.help, this.empty, this.tag, this.bubble, this.clusterPop, this.streetHint, this.zoomHint, this.sparkTag, this.talkPanel.node, this.leaveBtn, this.chatSheet?.node].filter(Boolean)) {
+    for (const node of [this.hud, this.legend, this.toolbar, this.machinesCard, this.panel, this.help, this.empty, this.tag, this.bubble, this.clusterPop, this.streetHint, this.zoomHint, this.sparkTag, this.talkPanel.node, this.leaveBtn]) {
       if (node.hidden) continue;
       const r = node.getBoundingClientRect();
       if (r.width > 0 && r.height > 0) blockers.push({ left: r.left - base.left, top: r.top - base.top, right: r.right - base.left, bottom: r.bottom - base.top });
@@ -1348,7 +1341,6 @@ export class CityView {
     this.bubbleUntil = performance.now() + 6500;
   }
   select(target) {
-    if (this.chatSheet && !this.chatSheet.node.hidden) this.chatSheet.close(false);
     const prev = this.selection;
     const person = t => t?.kind === 'agent' || t?.kind === 'owner';
     if (person(prev) && !(this.hover?.kind === prev.kind && this.hover.id === prev.id)) this.npcs.setHighlight(prev, false);
@@ -1458,19 +1450,12 @@ export class CityView {
   }
 
   /* ---------------- panels ---------------- */
-  openCityChat(target) {
-    if (!this.visible) { this.pendingCityChat = target; return; }
-    if (this.talk) this.exitTalk({ instant: true });
-    this.chatSheet.open(target);
-  }
-  openAgentChat(agent) {
-    // External discovery carries metadata only; retain its existing detail/continue flow.
-    if (agent.kind === 'external') { this.select({ kind: 'agent', id: agent.id }); this.focusSelection(); return; }
-    this.openCityChat({ agentId: agent.id, ...(agent.sessionId ? { sessionId: agent.sessionId } : {}) });
+  openBuildingSession(id) {
+    // Pending the 0.7.1 managed-session enterTalk hook; see the acceptance note.
+    this.pendingBuildingSession = id;
   }
   refreshPanel() {
     const s = this.selection;
-    if (this.chatSheet && !this.chatSheet.node.hidden) { this.panel.hidden = true; this.root.classList.remove('city-has-panel'); return; }
     if (!s || s.kind === 'boat') { this.panel.hidden = true; this.root.classList.remove('city-has-panel'); this.panelSig = ''; return; }
     let sig, render;
     const island = this.islands?.panelFor(s);   // contributor island: repo and town-hall cards
@@ -1687,7 +1672,7 @@ export class CityView {
         stat('Commits', m.commits ? formatNumber(m.commits) : '—', m.commits7d ? `+${m.commits7d} in 7 days` : null),
         stat('Last activity', m.lastActivityAt ? timeAgo(m.lastActivityAt) : '—', m.sizeBytes ? formatBytes(m.sizeBytes) : null)),
       h('section.city-panel-section', h('div.city-section-label', 'Agents here'),
-        here.length ? h('div.city-people', ...here.map(a => h('button.city-person', { type: 'button', title: `Open chat · ${a.name} · ${statusText(a)}${extraKind(a) ? '' : a.homeProjectId === project.id ? ' · lives here' : ' · visiting'}`, onclick: () => this.openAgentChat(a) },
+        here.length ? h('div.city-people', ...here.map(a => h('button.city-person', { type: 'button', title: `Talk to ${a.name} · ${statusText(a)}${extraKind(a) ? '' : a.homeProjectId === project.id ? ' · lives here' : ' · visiting'}`, onclick: () => this.enterTalk(a.id) },
           portrait(a.look, { size: 34, provider: a.provider, status: a.status }), h('span', a.name))))
           : h('p.muted', newSession ? 'Nobody is here right now. Start a session above, or drag an agent here to give it a task.' : 'Nobody is here right now. Drag an agent onto this building to give it a task.')),
       ci,
@@ -2541,8 +2526,6 @@ export class CityView {
     this.sync();
     this.world.resize();
     this.world.start();
-    if (this.pendingCityChat) { const target = this.pendingCityChat; this.pendingCityChat = null; this.openCityChat(target); }
-    else this.chatSheet?.show();
     this.weather?.show();
     // Zero-config agents and ambient CI refresh only while the City is on screen.
     if (sessions.available === null) sessions.refresh().catch(() => {});
@@ -2570,7 +2553,6 @@ export class CityView {
     this.runnerLabels.clear();
     clearTimeout(this.checkTimer);
     this.offSessions?.();
-    this.chatSheet?.destroy();
     this.buildingSessions?.destroy();
     this.ci?.dispose();
     this.river?.dispose();
@@ -2581,7 +2563,6 @@ export class CityView {
   }
   hide() {
     this.visible = false;
-    this.chatSheet?.hide();
     this.jumpPicker?.close();
     clearInterval(this.externalTimer); this.externalTimer = 0;
     this.ci?.stop();

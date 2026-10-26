@@ -58,7 +58,7 @@ test('invalid local project, provider or access never reaches start', async () =
   await assert.rejects(startProjectSession({ projectAccess: () => ({}) }, sessions, 'codex', project), /access is unavailable/);
 });
 
-test('start opens the sheet before optional first prompt, and an empty prompt starts no turn', async () => {
+test('start opens the conversation before optional first prompt, and an empty prompt starts no turn', async () => {
   const events = [], sessions = { start: async () => { events.push('start'); return { id: 'a' }; }, send: async (id, text) => events.push(['send', id, text]) };
   const launch = new BuildingSessionLaunch({ store, sessions, onStarted: session => events.push(['open', session.id]) });
   await launch.start('codex', project, '  Work here  ');
@@ -111,4 +111,64 @@ test('native start refusal preserves no fictitious session and allows a later ex
   assert.equal(launch.pending, null); assert.equal(launch.recovery.size, 0);
   await assert.rejects(launch.start('claude', project), /Project revoked/);
   assert.equal(starts, 2);
+});
+
+test('starting callback receives project and provider immediately before native start, once per launch', async () => {
+  const events = [];
+  let finish, nested, launch;
+  launch = new BuildingSessionLaunch({
+    store,
+    sessions: { start: () => { events.push('native'); return new Promise(resolve => { finish = resolve; }); } },
+    onStarting: info => { events.push(info); nested = launch.start('claude', project); },
+  });
+  const first = launch.start('codex', project);
+  assert.equal(nested, first);
+  assert.deepEqual(events, [{ provider: 'codex', project }, 'native']);
+  finish({ id: 'a' }); await first;
+});
+
+test('presentation promises never delay native start or the first prompt', async () => {
+  let finishOpening;
+  const events = [];
+  const launch = new BuildingSessionLaunch({
+    store,
+    sessions: { start: async () => { events.push('native'); return { id: 'a' }; }, send: async () => events.push('send') },
+    onStarting: () => new Promise(() => {}),
+    onStarted: () => new Promise(resolve => { finishOpening = resolve; }),
+  });
+  const record = await launch.start('codex', project, 'Work');
+  assert.deepEqual(events, ['native', 'send']);
+  assert.equal(launch.pending, null);
+  assert.equal(record.opening, true);
+  finishOpening(); await Promise.resolve();
+  assert.equal(record.opening, false);
+  assert.equal(launch.recovery.size, 0);
+});
+
+test('failed start callback preserves the original native error despite presentation exceptions', async () => {
+  const refusal = new Error('Project revoked'), failures = [];
+  let starts = 0;
+  const launch = new BuildingSessionLaunch({
+    store, sessions: { start: async () => { starts++; throw refusal; } },
+    onStarting: () => { throw new Error('Pending UI unavailable'); },
+    onStartFailed: error => { failures.push(error); return Promise.reject(new Error('Error UI unavailable')); },
+  });
+  await assert.rejects(launch.start('claude', project), error => error === refusal);
+  assert.deepEqual(failures, [refusal]);
+  assert.equal(starts, 1); assert.equal(launch.recovery.size, 0); assert.equal(launch.pending, null);
+});
+
+test('late conversation failure recovers the created session without repeating native work', async () => {
+  let failOpening, starts = 0;
+  const failures = [];
+  const launch = new BuildingSessionLaunch({
+    store, sessions: { start: async () => { starts++; return { id: 'a' }; }, send: async () => {} },
+    onStarted: () => new Promise((_, reject) => { failOpening = reject; }), onStartFailed: error => failures.push(error),
+  });
+  const record = await launch.start('codex', project, 'Work');
+  failOpening(new Error('Conversation unavailable')); await Promise.resolve();
+  assert.match(record.openError, /Conversation unavailable/);
+  await launch.start('codex', project);
+  assert.equal(starts, 1); assert.deepEqual(failures, []);
+  assert.equal(launch.recovery.get(project.id).session.id, 'a');
 });

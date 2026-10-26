@@ -1,4 +1,33 @@
-# Building sessions and City chat sheet: source acceptance
+# Building sessions: talk-mode integration pending
+
+**Design correction, 2026-10-26:** the separate sheet described below was rejected
+in favor of the existing City `enterTalk()` / `TalkPanel` NPC conversation. Its
+component, CSS, embedded Chat refactor and sheet-specific tests have been removed.
+The building controls and existing owner start path remain. Agents here now calls
+`enterTalk(agent.id)`. New-session conversation integration and fresh acceptance
+await the final 0.7.1 talk-mode handoff from `codex-codaclauda-0513`.
+
+At the current `642fca9` base, managed sessions are not resolved by `enterTalk`,
+and TalkPanel lacks a session transcript/send mode and a pending-start API.
+Those internals are owned by the 0.7.1 work; this branch does not modify them.
+The designer has requested the public hook
+`enterTalk(id, { pending: { provider, projectId, label } })` from that owner.
+Its final handoff will define pending identity, cancellation and staging behavior
+before this branch wires the new-session callback to it.
+The designer also assigned new-agent drop-in at the project building and Ben's
+staging there to 0513; the caller must stay minimal and use that documented hook.
+Do not integrate this intermediate state or reuse its earlier screenshots as
+evidence for the corrected design. The earlier evidence below is historical.
+
+Checkpoint checks after sheet removal: `cd ui; node --test` passed **378/378**,
+including 14 building-control/start tests. `git diff --check` passed. The
+`onStarting` and `onStartFailed` presentation callbacks are ready for the pending
+panel hook and cannot delay first-prompt sending or cause duplicate session
+creation. `talk.js`, `enterTalk()` and the City layout/hydration/pan internals
+remain unchanged from `642fca9`. No corrected-flow browser or native acceptance
+has been performed while the upstream dependency is missing.
+
+## Superseded sheet implementation and historical evidence
 
 Date: 2026-10-26. Base: `642fca9` (`codex/codaclauda-0.7.1`).
 Prepared in `local/worktrees/072-session`, branch

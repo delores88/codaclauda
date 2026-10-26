@@ -25,11 +25,11 @@ export function buildingProviders(found, phase = 'ready', available = true) {
   });
 }
 
-/** Serialize one launch and retain its identity if opening the sheet or first send fails.
+/** Serialize one launch and retain its identity if opening the conversation or first send fails.
  * A retry is an explicit send to the existing session; it never repeats session_start. */
 export class BuildingSessionLaunch {
-  constructor({ store, sessions, onStarted = () => {}, onChange = () => {} }) {
-    Object.assign(this, { store, sessions, onStarted, onChange });
+  constructor({ store, sessions, onStarting = () => {}, onStarted = () => {}, onStartFailed = () => {}, onChange = () => {} }) {
+    Object.assign(this, { store, sessions, onStarting, onStarted, onStartFailed, onChange });
     this.pending = null;
     this.recovery = new Map();
   }
@@ -38,29 +38,59 @@ export class BuildingSessionLaunch {
     const existing = this.recovery.get(project.id);
     if (existing) { this.open(existing); return Promise.resolve(existing); }
     const record = { projectId: project.id, session: null, prompt: String(prompt).trim(), error: '', openError: '' };
-    this.pending = this.run(record, () => startProjectSession(this.store, this.sessions, provider, project));
+    return this.begin(record, () => {
+      this.present(this.onStarting, { provider, project });
+      return startProjectSession(this.store, this.sessions, provider, project);
+    });
+  }
+  /** Presentation is observational: it cannot delay or repeat native work. */
+  present(callback, ...args) {
+    try { Promise.resolve(callback(...args)).catch(() => {}); } catch { /* presentation only */ }
+  }
+  begin(record, create = null) {
+    // Reserve before calling any presentation callback, which may synchronously refresh UI.
+    let resolve, reject;
+    const pending = new Promise((yes, no) => { resolve = yes; reject = no; });
+    this.pending = pending;
+    this.run(record, create).then(resolve, reject);
     this.onChange();
-    return this.pending;
+    return pending;
   }
   async open(record) {
-    try { await this.onStarted(record.session, { prompt: record.prompt, sendError: record.error }); record.openError = ''; }
-    catch (error) { record.openError = `The session started, but its chat could not open: ${error?.message || error}`; }
+    const version = record.openVersion = (record.openVersion || 0) + 1;
+    record.opening = true;
+    try {
+      await this.onStarted(record.session, { prompt: record.prompt, sendError: record.error });
+      if (version === record.openVersion) record.openError = '';
+    } catch (error) {
+      if (version === record.openVersion) {
+        record.openError = `The session started, but its chat could not open: ${error?.message || error}`;
+        this.recovery.set(record.projectId, record);
+      }
+    } finally {
+      if (version === record.openVersion) {
+        record.opening = false;
+        if (!record.prompt && !record.error && !record.openError) this.recovery.delete(record.projectId);
+        this.onChange();
+      }
+    }
   }
   async run(record, create = null) {
     try {
       if (create) {
-        record.session = await create();
+        try { record.session = await create(); }
+        catch (error) { this.present(this.onStartFailed, error); throw error; }
         this.recovery.set(record.projectId, record);
-        await this.open(record);
+        this.open(record);
       }
       if (record.prompt) {
         try { await this.sessions.send(record.session.id, record.prompt); record.prompt = ''; record.error = ''; }
         catch (error) {
           record.error = `Session started. The prompt was not sent: ${error?.message || error}`;
-          await this.open(record); // the sheet also receives the failure and unsent draft
+          this.open(record); // the conversation also receives the failure and unsent draft
         }
       }
-      if (!record.error && !record.openError) this.recovery.delete(record.projectId);
+      if (!record.error && !record.openError && !record.opening) this.recovery.delete(record.projectId);
       return record;
     } finally { this.pending = null; this.onChange(); }
   }
@@ -68,19 +98,17 @@ export class BuildingSessionLaunch {
     if (this.pending) return this.pending;
     const record = this.recovery.get(projectId);
     if (!record) return Promise.resolve(null);
-    this.pending = this.run(record);
-    this.onChange();
-    return this.pending;
+    return this.begin(record);
   }
 }
 
 /** Keep one instance per CityView. Its node and per-project draft survive panel refreshes. */
 export class BuildingSessionActions {
-  constructor({ store, sessions, onStarted, onStateChange = () => {}, discover = () => rpc('discover') }) {
+  constructor({ store, sessions, onStarting, onStarted, onStartFailed, onStateChange = () => {}, discover = () => rpc('discover') }) {
     Object.assign(this, { store, sessions, discover, onStateChange });
     this.project = null; this.context = {}; this.phase = 'idle'; this.found = []; this.discovering = null;
     this.drafts = new Map(); this.selectedProvider = 'claude'; this.error = ''; this.destroyed = false;
-    this.launch = new BuildingSessionLaunch({ store, sessions, onStarted, onChange: () => this.refresh() });
+    this.launch = new BuildingSessionLaunch({ store, sessions, onStarting, onStarted, onStartFailed, onChange: () => this.refresh() });
     this.buttons = PROVIDERS.map(provider => h(`button.btn.small.primary.city-session-provider.is-${provider.id}`, {
       type: 'button', dataset: { provider: provider.id }, onclick: () => this.start(provider.id),
     }, icon(provider.icon), provider.label));

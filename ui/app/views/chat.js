@@ -168,30 +168,9 @@ function reconcile(container, items, cache) {
   for (const key of [...cache.keys()]) if (!keep.has(key)) cache.delete(key);
 }
 
-/** Moving from the City sheet must preserve an unsent draft already in full Chat. */
-export function mergeComposerDraft(current, incoming) {
-  if (!incoming || typeof incoming.text !== 'string' || !Array.isArray(incoming.files)) return current;
-  if (!current || (!current.text.trim() && !current.files.length)) return incoming;
-  if (current === incoming || (!incoming.text.trim() && !incoming.files.length)) return current;
-  const files = [...current.files];
-  for (const file of incoming.files) if (!files.some(existing => existing === file || (file.id && existing.id === file.id))) files.push(file);
-  return {
-    ...current, text: [current.text.trimEnd(), incoming.text.trim()].filter(Boolean).join('\n\n'), files,
-    subject: current.subject || incoming.subject || '',
-    replyTo: current.replyTo?.id === incoming.replyTo?.id ? current.replyTo : null,
-    error: null, pending: null, longFile: undefined, longSaved: undefined,
-  };
-}
-
-export function mount(root, ctx, { embedded = false } = {}) {
+export function mount(root, ctx) {
   const { store, ui, bridge, navigate } = ctx;
   const { h, icon, iconButton, toast, modal, copyText, portrait, timeAgo, clockTime, fullTime, pill, STATUS_LABEL, formatBytes } = ui;
-  const cleanup = [];
-  let destroyed = false;
-  const listen = (target, name, handler) => {
-    target.addEventListener(name, handler);
-    cleanup.push(() => target.removeEventListener(name, handler));
-  };
 
   ui.registerIcons({
     'chat-plain': '<path d="M4 6h16M4 11h16M4 16h10"/>',
@@ -329,20 +308,20 @@ export function mount(root, ctx, { embedded = false } = {}) {
   const main = h('div.chat-main', head, chatBody, composerWrap, dropOverlay);
   const scrim = h('div.side-scrim', { onclick: () => setSide(false) });
   const resPanel = h('aside.chat-resources', { 'aria-label': 'Connected resources', hidden: true });
-  const shell = embedded ? h('div.chat.chat-embedded', main) : h('div.chat', side, scrim, main, resPanel);
+  const shell = h('div.chat', side, scrim, main, resPanel);
   root.append(shell);
 
   /* ---------- global listeners ---------- */
-  cleanup.push(store.on('change', schedule), sessions.on('change', schedule), wake.on('change', () => { state.resSig = ''; schedule(); }));
-  listen(resNarrow, 'change', () => { state.resOverlay = false; renderHead(); renderResources(); });
-  const resizeObserver = new ResizeObserver(() => { if (state.visible && state.atBottom && state.threadId) scroller.scrollTop = scroller.scrollHeight; });
-  resizeObserver.observe(scroller);
-  cleanup.push(() => resizeObserver.disconnect());
-  listen(narrow, 'change', () => { if (!narrow.matches) state.sideOpen = false; applySide(); });
-  listen(window, 'focus', scheduleAck);
-  listen(document, 'visibilitychange', scheduleAck);
-  listen(document, 'keydown', event => {
-    if (embedded || !state.visible || root.hidden || document.querySelector('dialog[open]')) return;
+  store.on('change', schedule);
+  sessions.on('change', schedule);
+  wake.on('change', () => { state.resSig = ''; schedule(); });
+  resNarrow.addEventListener('change', () => { state.resOverlay = false; renderHead(true); renderResources(); });
+  new ResizeObserver(() => { if (state.visible && state.atBottom && state.threadId) scroller.scrollTop = scroller.scrollHeight; }).observe(scroller);
+  narrow.addEventListener('change', () => { if (!narrow.matches) state.sideOpen = false; applySide(); });
+  window.addEventListener('focus', scheduleAck);
+  document.addEventListener('visibilitychange', scheduleAck);
+  document.addEventListener('keydown', event => {
+    if (!state.visible || root.hidden || document.querySelector('dialog[open]')) return;
     if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k') {
       event.preventDefault();
       if (narrow.matches) setSide(true); else if (state.sideCollapsed) { state.sideCollapsed = false; applySide(); }
@@ -366,10 +345,9 @@ export function mount(root, ctx, { embedded = false } = {}) {
 
   /* ---------- rendering ---------- */
   function schedule() {
-    if (destroyed) return;
     if (!state.visible) { state.dirty = true; return; }
     if (state.raf) return;
-    state.raf = requestAnimationFrame(() => { state.raf = 0; if (state.visible && !destroyed) renderAll(); });
+    state.raf = requestAnimationFrame(() => { state.raf = 0; renderAll(); });
   }
 
   function renderAll({ load = false } = {}) {
@@ -377,7 +355,7 @@ export function mount(root, ctx, { embedded = false } = {}) {
     if (state.threadId?.startsWith('live:') && !store.desktop.chats.threads[state.threadId]) { state.threadId = null; load = true; }
     root.classList.toggle('reduce-motion', Boolean(store.prefs.reducedMotion));
     markViewing();
-    if (!embedded) renderSidebar();
+    renderSidebar();
     renderHead();
     renderThread();
     updateComposer({ load });
@@ -450,7 +428,6 @@ export function mount(root, ctx, { embedded = false } = {}) {
     const provider = agent?.provider || providerOfName(address);
     return {
       id, kind: 'mailbox', title: name, agentId: agent?.id || address, agent, provider, name, address,
-      project: store.project(agent?.currentProjectId || agent?.homeProjectId) || null,
       status: agent?.status || 'offline', lastSeenAt: agent?.lastSeenAt || 0, look: agent?.look || agentAvatar(address, provider, name),
     };
   }
@@ -759,21 +736,11 @@ export function mount(root, ctx, { embedded = false } = {}) {
     const info = threadInfo();
     const chatFirst = Boolean(store.prefs.chatFirst);
     const pinned = Boolean(info) && pins().has(info.id);
-    const sig = JSON.stringify(info ? [info.id, info.name, info.title, info.provider, info.status, statusText(info), info.project?.name, JSON.stringify(info.look), info.kind, info.access, info.running, pinned,
+    const sig = JSON.stringify(info ? [info.id, info.name, info.title, info.provider, info.status, statusText(info), JSON.stringify(info.look), info.kind, info.access, info.running, pinned,
       info.kind === 'session' ? info.sessions.map(s => [s.provider, s.usage || null, s.branch || '', Boolean(s.worktreePath)]) : 0] : 0) + sideVisible() + resVisible() + chatFirst;
     if (sig === state.headSig) return;
     state.headSig = sig;
     preserveFocus(head, () => {
-      if (embedded) {
-        if (!info) { head.replaceChildren(h('div.head-text', h('strong.head-name', 'Conversation unavailable'))); return; }
-        head.replaceChildren(
-          portrait(info.look, { size: 34, provider: info.provider, status: info.status }),
-          h('div.head-text',
-            h('div.head-title', h('strong.head-name', { title: info.title }, info.title), ...(info.shared ? info.sessions.map(s => providerPill(s.provider)) : [providerPill(info.provider)])),
-            h('div.head-sub', h('span.head-status', `${statusText(info)}${(info.kind !== 'session' || info.shared) && info.project ? ` · ${info.project.name}` : ''}`))),
-          info.kind === 'session' ? h(`span.mode-pill.access.${levelInfo(info.access).id}`, { title: levelInfo(info.access).rule }, levelInfo(info.access).long) : null);
-        return;
-      }
       const toggle = iconButton('chat-sidebar', 'Toggle chat list', toggleSide, 'side-toggle');
       toggle.setAttribute('aria-expanded', String(sideVisible()));
       const pinBtn = info && info.kind !== 'live' ? iconButton('pushpin', pinned ? 'Unpin this conversation' : 'Pin this conversation', () => { togglePin(info.id); renderHead(); renderSidebar(); }, `pin-toggle${pinned ? ' pinned' : ''}`) : null;
@@ -1072,7 +1039,6 @@ export function mount(root, ctx, { embedded = false } = {}) {
 
   /* ----- connected resources (sessions only): a right column, or a popover on narrow windows ----- */
   function renderResources() {
-    if (embedded) return;
     const info = threadInfo();
     const show = info?.kind === 'session' && resVisible();
     shell.classList.toggle('has-res', Boolean(show) && !resNarrow.matches);
@@ -1995,7 +1961,7 @@ export function mount(root, ctx, { embedded = false } = {}) {
   }
 
   function focusComposer(toEnd = false) {
-    if (!state.visible || destroyed || composerWrap.hidden) return;
+    if (composerWrap.hidden) return;
     textarea.focus({ preventScroll: true });
     if (toEnd) textarea.setSelectionRange(textarea.value.length, textarea.value.length);
   }
@@ -2344,7 +2310,6 @@ export function mount(root, ctx, { embedded = false } = {}) {
 
   /* ---------- view contract ---------- */
   function show(params = {}) {
-    if (destroyed) return;
     state.visible = true;
     state.restoreOnShow = true; // a hidden scroller can lose its offset; put it back from memory
     sessions.refresh();
@@ -2352,53 +2317,23 @@ export function mount(root, ctx, { embedded = false } = {}) {
     let target = null;
     if (params.thread) target = params.thread;
     else if (params.agentId || params.agent) target = threadForAgent(params.agentId || params.agent);
-    if (target && params.draft) {
-      // An admitted send still holds its old draft until completion; do not copy
-      // that sent text back into the incoming unsent draft.
-      const merged = mergeComposerDraft(state.sending.has(target) ? null : state.drafts.get(target), params.draft);
-      if (merged) state.drafts.set(target, merged);
-    }
     if (target && target !== state.threadId) select(target, { focus: false });
-    else renderAll({ load: Boolean(params.draft) || state.renderedThread === undefined });
-    if ((params.agentId || params.agent) && !target && !embedded) openNewChat();
+    else renderAll({ load: state.renderedThread === undefined });
+    if ((params.agentId || params.agent) && !target) openNewChat();
     autoGrow();
     if (typeof params.compose === 'string' && params.compose && state.threadId) prefill(params.compose);
     else if (state.threadId) requestAnimationFrame(() => { if (state.visible && !root.contains(document.activeElement)) focusComposer(); });
   }
   function hide() {
-    const wasVisible = state.visible;
     rememberScroll();
     state.visible = false;
-    cancelAnimationFrame(state.raf); state.raf = 0;
-    clearTimeout(state.ackTimer);
-    if (wasVisible) sessions.view([]);
+    sessions.view([]);
     stopDictation();
     syncTicker();
     state.dragDepth = 0;
     dropOverlay.hidden = true;
   }
 
-  function destroy() {
-    if (destroyed) return;
-    hide();
-    destroyed = true;
-    clearTimeout(state.ackTimer);
-    cancelAnimationFrame(state.raf);
-    for (const off of cleanup) off?.();
-    shell.remove();
-  }
-
-  function takeDraft() {
-    const id = state.threadId;
-    // A send in flight still owns its draft and clears it when admission finishes.
-    if (!id || state.sending.has(id)) return null;
-    const value = state.drafts.get(id);
-    if (!value || (!value.text.trim() && !value.files.length)) return null;
-    state.drafts.delete(id);
-    updateComposer({ load: true });
-    return value;
-  }
-
   applySide();
-  return { show, hide, destroy, takeDraft, get threadId() { return state.threadId; } };
+  return { show, hide };
 }
