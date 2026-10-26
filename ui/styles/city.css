@@ -324,6 +324,7 @@ button.city-label:focus-visible { outline: 2px solid var(--accent); outline-offs
 
 /* What you and the agent say (in the 3D view) */
 .city-talk-say { max-width: 280px; margin-top: 0; }
+.city-talk-say::after { left: var(--talk-tail-x, 50%); bottom: calc(-1 * var(--talk-tail-height, 10px)); height: var(--talk-tail-height, 10px); border: 0; transform: translateX(-50%); clip-path: polygon(0 0, 100% 0, 50% 100%); }
 .city-talk-line { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .city-talk-say.is-owner { border-color: transparent; background: var(--owner-bubble); color: var(--owner-text); }
 .city-talk-say.is-owner::after { border-color: transparent; background: #7b5cf0; }
