@@ -1,7 +1,8 @@
 # City 0.7 UI acceptance
 
 Prepared 2026-10-25 (local time) on `codex/codaclauda-0.7-city`. The river
-refinement follows `53e721dc3f7fdfc43c9b24ddd30acb3f1c726939`; the branch is based
+refinement follows `53e721dc3f7fdfc43c9b24ddd30acb3f1c726939`. The six-boat follow-up
+builds on river commit `9ff9a0068a6e9319df14d844745aca10601c0218`; the branch is based
 on `v0.6.2` (`ae5ddfadae2fa7d28655163a89b0e1fc1c204339`). This is UI source and
 headless preview evidence. No Rust, installation, publication or external project
 changes are included.
@@ -28,6 +29,12 @@ changes are included.
   recent project labels: commits within 24 hours, or weekly counts when a commit
   date is unavailable. With no activity, unlabelled boats pass. Reduced motion
   moors up to two boats at the dock and freezes the water. No sound is used.
+- Six original low-poly models distinguish sailboats, rowboats, tugboats, cargo
+  barges, paddle steamers and canoes. A shuffled bag visits every type before
+  refilling and prevents consecutive repeats across fleets. All types can carry
+  recent project names; barges carry up to three distinct names. Quality and label
+  refreshes preserve the chosen hulls and moored positions without consuming the
+  next type choices. Low quality reduces model detail and disables shadows.
 - Boat hulls cross the waterline, stay within the river and island, and fit under
   every bridge. Labels are mounted on the boats. Bridge decks, ramps, parapets,
   supports and docks form connected structures. Low quality has no river shadows.
@@ -44,7 +51,7 @@ changes are included.
 
 ## Automated tests and independent review
 
-`node --test --test-reporter=spec ui/tests/*.test.mjs`: **171 passed, 0 failed**.
+`node --test --test-reporter=spec ui/tests/*.test.mjs`: **184 passed, 0 failed**.
 `git diff --check` passed. Tests cover river extrema and full-footprint clearance,
 220-project expansion, safe-pin preservation and migration, bridge surfaces and
 ray picking, boat schedule/selection/containment/headroom, reduced motion, low
@@ -55,6 +62,14 @@ identified lateral entry through raised bridge walls, an empty-crossing-list
 fallback, portal relocation behavior, bridge target identity, and expansion
 alignment. These were corrected. Re-review found no blockers; 64,009 sampled
 routes between dry/bridge/approach endpoints had no unsupported segments.
+
+The boat follow-up received a separate independent source review. It checked
+all twelve model/quality combinations at 101 positions each (1,212 clearance
+samples), label backing-board contact with the hull, dock gaps, resource disposal,
+recent-commit filtering and stability through ten quality/label refresh cycles.
+No blocking findings remained. The visual pass also moved plaques clear of oars
+and paddle wheels before the final captures; 216 sightline rays verify these
+labels remain unobstructed from either side at both quality levels.
 
 ## Observed browser preview acceptance
 
@@ -67,7 +82,8 @@ or real-owner workflow acceptance.
 - An actual canvas click selected bridge 24 and walked the owner onto its deck.
   The final avatar height matched the bridge surface at y = 1.95.
 - Sampled boats sat at water y = 0.18, with hull bounds spanning the waterline;
-  independent geometry tests confirmed more than 0.5 units of bridge clearance.
+  all six current model types satisfy at least 0.18 units of bridge clearance.
+  The tallest model, the sailboat, measured 0.24 units below the bridge underside.
   Boat and night-water captures showed no detached river furniture or loads.
 - Reduced-motion snapshots had identical boat positions and water time. Low
   quality disabled renderer shadows and all river shadow flags, and used no
@@ -96,11 +112,28 @@ sustained performance guarantee for larger cities, other hardware or an installe
 WebView. The river sample used 951 high-quality / 825 low-quality draw calls,
 versus 948 / 822 in the matching baseline scene.
 
+The six-boat follow-up repeated the day/night, expansion, bridge click,
+reduced-motion and low-quality checks, and captured each model at both quality
+levels. Every hull crossed the waterline; all labels had physical mounts. The
+sailboat was also captured under a bridge. These runs had no browser errors.
+
+A separate sequential comparison against river commit `9ff9a00` kept all six
+boats visible throughout each 3.5-second sample, with the same eight-project
+fixture, viewport, camera and GPU described above:
+
+| Preview with six visible boats | High quality | Low quality | p95 frame time |
+| --- | ---: | ---: | ---: |
+| River baseline 9ff9a00 | 59.93 FPS | 59.94 FPS | 16.8 ms |
+| Six-model boat variety | 59.94 FPS | 59.94 FPS | 16.8 ms |
+
+The current scene used 1,033 / 901 draw calls versus baseline 999 / 873
+(high / low). This is a short headless preview sample, not sustained or installed
+performance acceptance.
+
 ## Local evidence
 
-Current evidence lives in `local/city-river-evidence/` in the original checkout,
-outside tracked files. The preceding visual evidence remains in
-`local/city-07-evidence/`.
+River evidence lives in `local/city-river-evidence/` in the original checkout,
+outside tracked files. Earlier City evidence remains in `local/city-07-evidence/`.
 
 - `after-day.png`, `after-night.png`, `after-grow.png`, `after-crane.png`
 - `after-boats.png`, `after-boats-night.png`, `after-bridge-click.png`,
@@ -112,6 +145,17 @@ outside tracked files. The preceding visual evidence remains in
   `interaction-check.json`, `workflow.json`
 - Reproduction scripts: `preview.cjs`, `river-check.cjs`, `interaction-check.cjs`,
   `workflow-check.cjs`
+
+The latest boat-variety evidence is in `local/city-boat-variety-evidence/`:
+
+- `high-{sailboat,rowboat,tugboat,barge,paddle-steamer,canoe}.png` and matching
+  `low-*.png` close-ups, `six-boats-day.png`, `six-boats-night.png`,
+  `sailboat-under-bridge.png`, `moored-boats-day.png`, `moored-boats-low.png`,
+  `baseline-six-boats.png`, `after-six-boats-default.png`
+- `after-boats.png`, `after-boats-night.png`, `after-bridge-click.png`,
+  `after-expansion.png`, `after-reduced-motion.png`, `after-low-quality.png`
+- Receipts and reproduction: `tests.txt`, `river-check.json`, `variety-check.json`,
+  `river-check.cjs`, `variety-check.cjs`
 
 No release tag or installer was produced by this UI change. Source integration,
 publication, installation and real-project acceptance remain separate steps.

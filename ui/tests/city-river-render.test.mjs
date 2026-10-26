@@ -42,7 +42,7 @@ test('boats stay on fixed water height, remain inside the water and clear all br
       assert.equal(boat.position.y, WATER_Y);
       const bounds = new THREE.Box3().setFromObject(boat);
       assert.ok(bounds.min.y < WATER_Y && bounds.max.y > WATER_Y, 'hull crosses the waterline');
-      assert.ok(bounds.max.y < 1.95 - 0.18 - 0.5, 'bridge underside clearance exceeds half a unit');
+      assert.ok(bounds.max.y < 1.95 - 0.18 - 0.18, 'every type clears the bridge underside by at least .18');
       assert.ok(bounds.min.x >= -river.half + 0.5 && bounds.max.x <= river.half - 0.5);
       for (const x of [bounds.min.x, bounds.max.x]) for (const z of [bounds.min.z, bounds.max.z]) assert.ok(riverContains(x, z), 'entire hull remains in water');
     }
@@ -76,5 +76,41 @@ test('growth extends water while preserving all existing bridge spans and height
   const { river } = makeRiver(); const previous = river.crossings.map(x => ({ x, span: bridgeSpan(x), y: river.groundAt(x, riverZ(x)) }));
   river.setBounds({ half: 61.5 });
   for (const before of previous) { assert.deepEqual(bridgeSpan(before.x), before.span); assert.equal(river.groundAt(before.x, riverZ(before.x)), before.y); }
+  river.dispose();
+});
+
+test('successive voyages rotate all six hull types without adjacent repeats', () => {
+  const { river } = makeRiver(); river.update(0, 0, { reducedMotion: false });
+  const history = [];
+  for (let voyage = 0; voyage < 10; voyage++) {
+    const departure = river.nextAt;
+    river.update(0, departure, { reducedMotion: false });
+    const types = river.boats.map(b => b.userData.boatType);
+    assert.equal(new Set(types).size, 6);
+    history.push(...types);
+    const barge = river.boats.find(b => b.userData.boatType === 'barge');
+    assert.equal(barge.userData.projectIds.length, 3);
+    river.update(0, departure + 80, { reducedMotion: false });
+    assert.equal(river.startedAt, null);
+  }
+  assert.ok(history.every((type, n) => n === 0 || type !== history[n - 1]));
+  river.dispose();
+});
+
+test('moored hull types and positions survive quality and project-label refreshes', () => {
+  const { river } = makeRiver(); river.update(1, 10, { reducedMotion: true });
+  const snapshot = () => river.boats.map(b => ({ type: b.userData.boatType, position: b.position.toArray(), visible: b.visible }));
+  const before = snapshot(), bag = [...river.typeBag], lastType = river.lastBoatType;
+  assert.equal(before.length, 2);
+  river.setQuality('low'); assert.deepEqual(snapshot(), before);
+  river.setProjects(river.projects.map(p => ({ ...p, name: `${p.name} updated` })));
+  river.update(30, 40, { reducedMotion: true, quality: 'low' });
+  assert.deepEqual(snapshot(), before); assert.deepEqual(river.typeBag, bag); assert.equal(river.lastBoatType, lastType);
+  river.group.updateMatrixWorld(true);
+  for (const boat of river.boats) {
+    const bounds = new THREE.Box3().setFromObject(boat);
+    for (const x of [bounds.min.x, bounds.max.x]) for (const z of [bounds.min.z, bounds.max.z]) assert.ok(riverContains(x, z));
+    assert.ok(bounds.min.y < WATER_Y && bounds.max.y > WATER_Y);
+  }
   river.dispose();
 });

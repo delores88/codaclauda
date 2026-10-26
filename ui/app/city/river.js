@@ -1,10 +1,11 @@
 /* Original City river. Its path is fixed in island coordinates, so expanding the
  * island extends the banks without moving bridges, boats or established lots. */
 import { THREE, toonMaterial } from './toon.js';
-import { disposeAll, mergeParts, placed, plaqueTexture } from './fx.js';
+import { disposeAll, mergeParts, placed } from './fx.js';
 import { PITCH } from './layout.js';
 import { riverZ, riverSlope, RIVER_HALF_WIDTH, RIVER_BANK_WIDTH, WATER_Y, bridgeSpan, bridgeHeight } from './river-path.js';
-import { nextBoatAt, selectBoatManifest, boatPass } from './boats.js';
+import { nextBoatAt, selectBoatManifest, boatPass, BOAT_TYPES, chooseBoatTypes, boatFleet } from './boats.js';
+import { createBoat } from './boat-models.js';
 
 const box = (w, h, d, x, y, z) => placed(new THREE.BoxGeometry(w, h, d), { x, y, z });
 const SLAB = 0.18;
@@ -82,31 +83,12 @@ function beamBetween(a, b, width = 0.10) {
   geometry.translate(middle.x, middle.y, middle.z); return geometry;
 }
 
-function makeBoat(manifest, low) {
-  const group = new THREE.Group(); group.name = manifest.projectId ? `project-boat:${manifest.projectId}` : 'river-boat';
-  group.userData.projectId = manifest.projectId;
-  // The keel is below y=0, the deck above it. Group y remains WATER_Y at all times.
-  const shape = new THREE.Shape(); shape.moveTo(-1.3, -0.51); shape.lineTo(0.9, -0.55); shape.lineTo(1.55, 0); shape.lineTo(0.9, 0.55); shape.lineTo(-1.3, 0.51); shape.closePath();
-  const hull = new THREE.ExtrudeGeometry(shape, { depth: 0.35, bevelEnabled: false, curveSegments: 1 }); hull.rotateX(-Math.PI / 2); hull.translate(0, -0.17, 0);
-  solid(group, hull, '#477b8a', !low);
-  solid(group, mergeParts([box(2.0, 0.07, 0.9, -0.1, 0.23, 0), box(0.65, 0.5, 0.72, -0.75, 0.51, 0)]), '#efe2c7', !low);
-  solid(group, mergeParts([box(0.85, 0.08, 0.88, -0.75, 0.80, 0), box(0.42, 0.22, 0.03, -0.75, 0.59, 0.37), box(0.42, 0.22, 0.03, -0.75, 0.59, -0.37)]), '#405e72', !low);
-  if (manifest.projectId) {
-    solid(group, box(0.9, 0.38, 0.72, 0.3, 0.46, 0), '#c79c69', !low);
-    for (const side of [-1, 1]) {
-      const material = new THREE.MeshBasicMaterial({ map: plaqueTexture(manifest.label, { accent: '#498697' }), transparent: true, side: THREE.DoubleSide, toneMapped: false });
-      const label = add(group, new THREE.PlaneGeometry(2.2, 0.55), material);
-      label.position.set(0, 0.5, side * 0.57); if (side < 0) label.rotation.y = Math.PI;
-    }
-  }
-  return group;
-}
-
 export class River {
   constructor(world, { random = Math.random, now = Date.now } = {}) {
     this.world = world; this.random = random; this.now = now; this.quality = world.quality || 'high';
     this.group = new THREE.Group(); this.group.name = 'district-river'; world.land.add(this.group);
     this.projects = []; this.boats = []; this.bridges = []; this.elapsed = world.elapsed || 0; this.waterTime = 0;
+    this.typeBag = []; this.lastBoatType = null; this.fleetTypes = [];
     this.nextAt = nextBoatAt(this.elapsed, this.random()); this.startedAt = null;
     this.setBounds({ half: world.half || 29.5 }); this.buildBoats(selectBoatManifest([], this.now()));
   }
@@ -178,24 +160,40 @@ export class River {
     if (quality === this.quality) return; this.quality = quality;
     this.setBounds({ half: this.half, crossings: this.crossings }); this.buildBoats(this.manifest || selectBoatManifest(this.projects, this.now()));
   }
-  buildBoats(manifest) {
+  buildBoats(manifest, { departure = false, moored = false } = {}) {
+    const count = this.wasReduced || moored ? 2 : Math.max(2, Math.min(6, manifest.length));
+    if (departure) {
+      const choice = chooseBoatTypes(count, { bag: this.typeBag, previous: this.lastBoatType, random: this.random });
+      this.typeBag = choice.bag; this.lastBoatType = choice.lastType; this.fleetTypes = choice.types;
+    } else {
+      // Quality changes and refreshed commit labels keep the same hulls. Only a
+      // new voyage or moored fleet consumes the bag; unused preview hulls do not.
+      this.fleetTypes = this.fleetTypes.slice(0, count);
+      for (const type of BOAT_TYPES) if (this.fleetTypes.length < count && !this.fleetTypes.includes(type)) this.fleetTypes.push(type);
+    }
+    const poses = this.boats.map(boat => ({ position: boat.position.clone(), rotation: boat.rotation.clone(), visible: boat.visible }));
     for (const boat of this.boats) { boat.removeFromParent(); disposeAll(boat); }
-    this.manifest = manifest; this.boats = manifest.map(item => makeBoat(item, this.quality === 'low'));
-    for (const boat of this.boats) { boat.visible = false; this.group.add(boat); }
+    this.manifest = manifest; this.fleet = boatFleet(manifest, this.fleetTypes);
+    this.boats = this.fleet.map(entry => createBoat(entry, { low: this.quality === 'low' }));
+    this.boats.forEach((boat, index) => {
+      const pose = !departure && poses[index];
+      if (pose) { boat.position.copy(pose.position); boat.rotation.copy(pose.rotation); }
+      boat.visible = pose ? pose.visible : false; this.group.add(boat);
+    });
   }
 
   update(dt, elapsed, env = {}) {
     this.elapsed = elapsed; if (env.quality && env.quality !== this.quality) this.setQuality(env.quality);
     const reduced = env.reducedMotion ?? this.world.reducedMotion?.() ?? false, night = Math.max(0, Math.min(1, env.night ?? this.world.current?.night ?? 0));
-    if (reduced !== this.wasReduced) { this.startedAt = null; this.nextAt = nextBoatAt(elapsed, this.random()); if (reduced) this.buildBoats(selectBoatManifest(this.projects, this.now())); this.wasReduced = reduced; }
-    if (!reduced && this.startedAt === null && elapsed >= this.nextAt) { this.startedAt = elapsed; this.nextAt = nextBoatAt(elapsed, this.random()); this.buildBoats(selectBoatManifest(this.projects, this.now())); }
+    if (reduced !== this.wasReduced) { this.startedAt = null; this.nextAt = nextBoatAt(elapsed, this.random()); if (reduced) this.buildBoats(selectBoatManifest(this.projects, this.now()), { departure: true, moored: true }); this.wasReduced = reduced; }
+    if (!reduced && this.startedAt === null && elapsed >= this.nextAt) { this.startedAt = elapsed; this.nextAt = nextBoatAt(elapsed, this.random()); this.buildBoats(selectBoatManifest(this.projects, this.now()), { departure: true }); }
     if (!reduced) this.waterTime += Math.max(0, dt) * (1 - night * 0.85);
     if (this.water.material.uniforms) { this.water.material.uniforms.time.value = this.waterTime; this.water.material.uniforms.night.value = night; }
     else this.water.material.color.setRGB(0.45 - night * 0.27, 0.74 - night * 0.39, 0.78 - night * 0.35);
     let allDone = this.startedAt !== null;
     this.boats.forEach((boat, index) => {
       let x, offset = 0;
-      if (reduced) { x = 0; offset = (index ? -1 : 1) * 1.35; boat.visible = index < 2; }
+      if (reduced) { x = 0; offset = (index ? -1 : 1) * 1.05; boat.visible = index < 2; }
       else if (this.startedAt !== null) { const pass = boatPass(elapsed, this.startedAt, this.half, index); x = pass.x; boat.visible = pass.visible; if (!pass.done) allDone = false; }
       else { boat.visible = false; return; }
       boat.position.set(x, WATER_Y, riverZ(x) + offset); boat.rotation.y = -Math.atan(riverSlope(x));
