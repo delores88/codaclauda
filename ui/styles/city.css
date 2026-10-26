@@ -1,3 +1,4 @@
+@import url('../app/city/jumpto.css');
 /* City view: WebGL stage + HTML overlays (labels, tags, bubbles, HUD, toolbar, panels). */
 .view.view-city { overflow: hidden; }
 .city-root { position: absolute; inset: 0; overflow: hidden; background: var(--bg); isolation: isolate; --spark-teal: #2de2c4; --spark-lime: #b6ff3a; --spark-ink: #13a58e; --spark-green: #76b900; --spark-green-ink: #9bd92c; }
@@ -82,8 +83,23 @@
 .city-jump.select { width: auto; min-width: 0; max-width: 230px; height: 30px; min-height: 30px; padding: 3px 10px; font-size: 12.5px; border-radius: var(--radius-pill); }
 
 /* Legend (bottom-left) */
-.city-legend { position: absolute; left: 14px; bottom: 14px; z-index: 3; display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); font-size: 12px; }
+.city-legend { position: absolute; left: 14px; bottom: 14px; z-index: 3; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 8px; width: min(300px, calc(100% - 28px)); max-width: 300px; max-height: 40vh; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); font-size: 12px; }
+.city-legend.is-collapsed { width: auto; grid-template-rows: auto; gap: 0; padding: 3px 8px; border-radius: var(--radius-pill); }
+.city-legend-content { display: grid; align-content: start; gap: 10px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.city-legend [hidden] { display: none; }
+.city-legend-toggle { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 28px; padding: 0 4px; border: 0; border-radius: var(--radius-pill); background: transparent; color: var(--text-2); font: inherit; font-weight: 650; cursor: pointer; }
+.city-legend-toggle:hover { color: var(--text); background: var(--surface-hover); }
+.city-legend-toggle .icon { width: 14px; height: 14px; }
+.city-legend:not(.is-collapsed) .city-legend-toggle .icon:last-child { transform: rotate(180deg); }
 .city-legend-row { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-weight: 600; }
+.city-legend-statuses { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: start; gap: 6px; }
+.city-legend-statuses .city-legend-row { flex-direction: column; gap: 5px; min-width: 0; text-align: center; font-size: 10.5px; line-height: 1.25; }
+.city-legend-statuses .city-gem { border-radius: 50%; transform: none; }
+.city-legend-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 9px 12px; padding-top: 9px; border-top: 1px solid var(--border); }
+.city-legend-item { display: flex; align-items: flex-start; gap: 6px; min-width: 0; color: var(--text-2); font-size: 11.5px; line-height: 1.35; }
+.city-legend-item > .icon { flex: none; width: 14px; height: 14px; margin-top: 1px; color: var(--muted); }
+.city-legend-item > span { min-width: 0; overflow-wrap: anywhere; }
+.city-legend-grid .city-legend-extra:not([hidden]) { display: contents; }
 .city-legend-sep { height: 1px; margin: 3px 0; background: var(--border); }
 .city-legend-note { color: var(--muted); font-size: 11.5px; }
 .city-legend-extra { display: grid; gap: 5px; }
@@ -263,6 +279,19 @@
   .city-machines { top: auto; bottom: 70px; }
   .city-street-btn > span { display: none; }
   .city-street-btn { padding: 0 8px; }
+}
+@media (max-width: 760px) {
+  /* The shell can be wider than a phone viewport. Keep City cards inside the
+     visible stage width, measured by the camera's existing layout observer. */
+  .city-hud, .city-has-panel .city-hud { width: min(430px, calc(var(--city-visible-width, 100%) - 28px)); max-width: calc(var(--city-visible-width, 100%) - 28px); }
+  .city-hud-row { flex-wrap: wrap; gap: 6px; }
+  .city-panel { top: auto; left: 8px; right: auto; bottom: 100px; width: calc(var(--city-visible-width, 100%) - 16px); height: min(38%, 300px); max-height: calc(100% - 250px); padding: 14px; border-radius: 16px; }
+  .city-toolbar, .city-has-panel .city-toolbar { left: 8px; right: auto; bottom: 8px; width: calc(var(--city-visible-width, 100%) - 16px); max-width: calc(var(--city-visible-width, 100%) - 16px); justify-content: center; transition: none; }
+  .city-toolbar > button { flex: 0 0 min(40px, calc((var(--city-visible-width, 100%) - 36px) / 6)); width: min(40px, calc((var(--city-visible-width, 100%) - 36px) / 6)); height: 36px; margin: 0; padding: 0; justify-content: center; }
+  .city-toolbar-sep, .city-flip > span { display: none; }
+  .city-legend { bottom: 100px; max-width: calc(var(--city-visible-width, 100%) - 28px); }
+  .city-machines { top: auto; left: 14px; right: auto; bottom: 150px; width: min(300px, calc(var(--city-visible-width, 100%) - 28px)); }
+  .city-root:has(.city-legend:not(.is-collapsed)) .city-machines { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .city-bubble, .city-help, .city-panel, .city-task-form, .city-cluster-pop, .city-zoom-hint { animation: none; }

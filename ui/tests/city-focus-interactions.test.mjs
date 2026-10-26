@@ -84,10 +84,10 @@ test('Jump and F focus people at their actual bridge height and retain full IDs'
   canvas(t);
   const f = fixture(), position = new THREE.Vector3(18, 1.7, -8);
   f.view.npcs.position = () => position;
-  f.view.agentById = () => null; f.view.jump = { value: 'agent:agent:with:colons' };
-  f.view.onJump(); assert.deepEqual(f.view.selection, { kind: 'agent', id: 'agent:with:colons' });
+  f.view.agentById = () => null;
+  f.view.onJump({ kind: 'agent', id: 'agent:with:colons' }); assert.deepEqual(f.view.selection, { kind: 'agent', id: 'agent:with:colons' });
   close(f.flights.at(-1).target, f.world.toWorld(position.clone().add(new THREE.Vector3(0, 1, 0)), { atRest: true }));
-  assert.equal(f.flights.at(-1).options.center, true); assert.equal(f.view.jump.value, '');
+  assert.equal(f.flights.at(-1).options.center, true);
   f.view.visible = true; f.view.keyDown({ code: 'KeyF', preventDefault() {} }); assert.equal(f.flights.length, 2);
 });
 
@@ -160,13 +160,22 @@ test('street and talk restore an exact centered boat pose through real controls 
   world.camera.position.set(0, 30, 50); world.controls = new OrbitControls(world.camera); world.controls.minDistance = 3; world.limits();
   Object.assign(view, { world, npcs: {}, streetKeys: new Set(), renderToolbarState() {}, refreshPanel() {}, releaseTalk() {}, talkPanel: { close() {} }, cityRoot: { classList: { remove() {} } }, talkBubbles: {} });
   const target = new THREE.Vector3(20, -.76, -8);
-  for (const mode of ['street', 'talk']) {
-    world.flyTo({ target, distance: 10, polar: 1 }, { instant: true, center: true });
+  for (const underside of [false, true]) for (const polar of [1, .62]) for (const mode of ['street', 'talk']) {
+    world.underside = underside;
+    world.flyTo({ target, distance: 10, polar }, { instant: true, center: true });
     const pose = view.cameraPose(); assert.equal(pose.center, true);
+    for (let n = 0; n < 120; n++) { world.updatePitch(1 / 60); world.controls.update(); }
+    close(world.controls.target, pose.target); close(world.camera.position, pose.position);
     world.flyTo({ target: new THREE.Vector3(1, 2, 3), distance: 20, polar: .8 }, { instant: true });
     if (mode === 'street') { view.street = {}; view.streetReturn = pose; view.exitStreet({ instant: true }); }
     else { view.talk = { back: pose }; view.exitTalk({ instant: true }); }
     for (let n = 0; n < 120; n++) { world.updatePitch(1 / 60); world.controls.update(); }
     close(world.controls.target, pose.target); close(world.camera.position, pose.position); assert.equal(world.centerTarget, true);
+    if (polar === .62) {
+      world.markCameraMoved();
+      for (let n = 0; n < 120; n++) { world.updatePitch(1 / 60); world.controls.update(); }
+      assert.equal(world.centerTarget, false);
+      assert.ok(world.camera.position.distanceTo(pose.position) > .01, 'owner input releases the explicit angle to normal pitch limits');
+    }
   }
 });
