@@ -24,9 +24,10 @@ preserves ordered durable cursors across ntfy control events. One owner-driven
 phone turn completed and outbound transport receipts advanced; physical iPhone
 reply display and actual provider cost were not established by that acceptance.
 
-This **0.7.0 source** adds City districts, a railway, grounded clone signs and
-rooftop CI markers, plus clearer team and desktop delivery status, longer mailbox
-waits, and scanned phone reply previews. See the [0.7.0 release scope](docs/RELEASE-0.7.0.md).
+This **0.7.0 source** adds a river City with Downtown towers, Suburbs homes, parks,
+commit boats, camera controls and searchable project navigation. It also adds
+clearer team and desktop delivery status, longer mailbox waits, and scanned phone
+reply previews. See the [0.7.0 release scope](docs/RELEASE-0.7.0.md).
 Source review and synthetic previews remain separate from installed acceptance,
 phone delivery and Marketplace admission. Native Marketplace UI and authenticated
 served bytes remain separate evidence limits.
