@@ -6,6 +6,7 @@ import { RoundedBoxGeometry } from '../../vendor/three/addons/RoundedBoxGeometry
 import { hash } from '../avatar/spec.js';
 import { mergeParts, placed, instancedOutline, plaqueTexture, clockTexture, sideTexture } from './fx.js';
 import { PITCH, ASPHALT, LOT_HALF, islandHalf, cellCenter } from './layout.js';
+import { riverZ, riverCellUsable, riverFootprintClear, bridgeSpan, RIVER_HALF_WIDTH, RIVER_BANK_WIDTH } from './river-path.js';
 
 export const PALETTE = {
   grass: '#93d46c', grassSide: '#7cc25a', lawn: '#9ddb74', dirt: '#bf8a5a', dirtDark: '#9c6b45', stone: '#a3aac6', stoneDark: '#858ca9',
@@ -85,24 +86,72 @@ export function buildSideSign(texture, { board = '#fff1de', post = '#8a6a4a', wi
 }
 
 /* ---------- roads, sidewalks, lawns, lamps ---------- */
+/** Conservative footprint clearance for scenery, including the bridge ramps and
+ * rails. Test the whole footprint, not only its centre; canopy outlines count. */
+export function riverSceneryClear(x, z, halfX, halfZ) {
+  if (!riverFootprintClear(x, z, halfX, halfZ)) return false;
+  const first = Math.floor((x - halfX) / PITCH - 0.5) - 1;
+  const last = Math.ceil((x + halfX) / PITCH - 0.5) + 1;
+  for (let k = first; k <= last; k++) {
+    const bridge = bridgeSpan((k + 0.5) * PITCH);
+    if (x + halfX >= bridge.x - bridge.halfWidth - 0.35 && x - halfX <= bridge.x + bridge.halfWidth + 0.35 && z + halfZ >= bridge.minZ - 0.2 && z - halfZ <= bridge.maxZ + 0.2) return false;
+  }
+  return true;
+}
+
+function outsideSpan(min, max, span) {
+  return [[min, Math.min(max, span.minZ)], [Math.max(min, span.maxZ), max]].filter(([a, b]) => b - a > 1e-4);
+}
+
+function horizontalWalkParts(x, z, half, band) {
+  let intervals = [[x - half, x + half]];
+  for (const crossing of [x - PITCH / 2, x + PITCH / 2]) {
+    const bridge = bridgeSpan(crossing);
+    if (z + band / 2 < bridge.minZ || z - band / 2 > bridge.maxZ) continue;
+    intervals = intervals.flatMap(([min, max]) => outsideSpan(min, max, { minZ: crossing - bridge.halfWidth - 0.02, maxZ: crossing + bridge.halfWidth + 0.02 }));
+  }
+  return intervals.map(([min, max]) => placed(new THREE.BoxGeometry(max - min, SIDEWALK_TOP, band), { x: (min + max) / 2, y: SIDEWALK_TOP / 2, z }));
+}
+
 export function buildRoads(rings, { districts = false } = {}) {
   const group = new THREE.Group(); group.name = 'roads';
   const extent = (rings + 0.5) * PITCH;
-  const asphalt = mesh(placed(rbox(extent * 2 + ASPHALT, 0.12, extent * 2 + ASPHALT, 1.2, 2), { y: ROAD_TOP - 0.06 }), toonMaterial(PALETTE.road), { cast: false, outline: 0.05 });
+  const strips = [];
+  if (districts) for (let k = -rings - 1; k <= rings; k++) {
+    const line = (k + 0.5) * PITCH;
+    for (const [min, max] of outsideSpan(-extent - ASPHALT / 2, extent + ASPHALT / 2, bridgeSpan(line))) strips.push(placed(new THREE.BoxGeometry(ASPHALT, 0.12, max - min), { x: line, y: ROAD_TOP - 0.06, z: (min + max) / 2 }));
+    if (k !== -1) strips.push(placed(new THREE.BoxGeometry(extent * 2 + ASPHALT, 0.12, ASPHALT), { y: ROAD_TOP - 0.06, z: line }));
+  }
+  const asphalt = mesh(districts ? mergeParts(strips) : placed(rbox(extent * 2 + ASPHALT, 0.12, extent * 2 + ASPHALT, 1.2, 2), { y: ROAD_TOP - 0.06 }), toonMaterial(PALETTE.road), { cast: false, outline: districts ? 0 : 0.05 });
+  asphalt.name = 'road-asphalt';
   group.add(asphalt);
   const walks = [], lawns = [], paved = [];
   const outer = PITCH / 2 - ASPHALT / 2, inner = LOT_HALF, band = outer - inner;
   for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
     const { x, z } = cellCenter(i, j);
+    if (districts && !riverCellUsable(i, j)) continue;
     const mid = (outer + inner) / 2;
-    walks.push(placed(new THREE.BoxGeometry(outer * 2, SIDEWALK_TOP, band), { x, y: SIDEWALK_TOP / 2, z: z + mid }));
-    walks.push(placed(new THREE.BoxGeometry(outer * 2, SIDEWALK_TOP, band), { x, y: SIDEWALK_TOP / 2, z: z - mid }));
-    walks.push(placed(new THREE.BoxGeometry(band, SIDEWALK_TOP, inner * 2), { x: x + mid, y: SIDEWALK_TOP / 2, z }));
-    walks.push(placed(new THREE.BoxGeometry(band, SIDEWALK_TOP, inner * 2), { x: x - mid, y: SIDEWALK_TOP / 2, z }));
+    if (districts) walks.push(...horizontalWalkParts(x, z + mid, outer, band), ...horizontalWalkParts(x, z - mid, outer, band));
+    else {
+      walks.push(placed(new THREE.BoxGeometry(outer * 2, SIDEWALK_TOP, band), { x, y: SIDEWALK_TOP / 2, z: z + mid }));
+      walks.push(placed(new THREE.BoxGeometry(outer * 2, SIDEWALK_TOP, band), { x, y: SIDEWALK_TOP / 2, z: z - mid }));
+    }
+    if (!districts) {
+      walks.push(placed(new THREE.BoxGeometry(band, SIDEWALK_TOP, inner * 2), { x: x + mid, y: SIDEWALK_TOP / 2, z }));
+      walks.push(placed(new THREE.BoxGeometry(band, SIDEWALK_TOP, inner * 2), { x: x - mid, y: SIDEWALK_TOP / 2, z }));
+    }
     (districts && j < 0 ? paved : lawns).push(placed(new THREE.BoxGeometry(inner * 2, LAWN_TOP, inner * 2), { x, y: LAWN_TOP / 2, z }));
   }
-  group.add(mesh(mergeParts(walks), toonMaterial(PALETTE.sidewalk), { cast: false, outline: 0 }));
-  group.add(mesh(mergeParts(lawns), toonMaterial(PALETTE.lawn), { cast: false, outline: 0 }));
+  if (districts) for (let k = -rings - 1; k <= rings; k++) {
+    const line = (k + 0.5) * PITCH, span = bridgeSpan(line);
+    // Continue the road's two sidewalks through clearings up to the supported
+    // ramps, while retaining gaps at the other horizontal road intersections.
+    for (let j = -rings; j <= rings; j++) for (const side of [-1, 1]) {
+      for (const [min, max] of outsideSpan(j * PITCH - outer, j * PITCH + outer, span)) walks.push(placed(new THREE.BoxGeometry(band, SIDEWALK_TOP, max - min), { x: line + side * (ASPHALT / 2 + band / 2), y: SIDEWALK_TOP / 2, z: (min + max) / 2 }));
+    }
+  }
+  if (walks.length) { const walk = mesh(mergeParts(walks), toonMaterial(PALETTE.sidewalk), { cast: false, outline: 0 }); walk.name = 'road-sidewalks'; group.add(walk); }
+  if (lawns.length) group.add(mesh(mergeParts(lawns), toonMaterial(PALETTE.lawn), { cast: false, outline: 0 }));
   if (paved.length) group.add(mesh(mergeParts(paved), toonMaterial('#d4dee0'), { cast: false, outline: 0 }));
 
   // Dashed centre lines between intersections.
@@ -113,7 +162,7 @@ export function buildRoads(rings, { districts = false } = {}) {
       const centre = seg * PITCH;
       for (let d = -3; d <= 3; d++) {
         const along = centre + d * 1.6;
-        dashes.push([line, along, true]);
+        if (!districts || riverSceneryClear(line, along, 0.08, 0.4)) dashes.push([line, along, true]);
         if (!districts || k !== -1) dashes.push([along, line, false]);
       }
     }
@@ -128,10 +177,13 @@ export function buildRoads(rings, { districts = false } = {}) {
   const lampSpots = [];
   for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
     const { x, z } = cellCenter(i, j);
-    lampSpots.push([x - 3.2, z + 6.42], [x + 6.42, z + 2.8]);
+    if (districts && !riverCellUsable(i, j)) continue;
+    const curb = districts ? 6.32 : 6.42; // the entire pole base, including its outline, rests on the sidewalk
+    for (const spot of [[x - 3.2, z + curb], [x + curb, z + 2.8]]) if (!districts || riverSceneryClear(...spot, 0.28, 0.28)) lampSpots.push(spot);
   }
   const poles = new THREE.InstancedMesh(placed(new THREE.CylinderGeometry(0.07, 0.1, 2.6, 6), { y: 1.3 }), toonMaterial('#3f4560', { cache: false }), lampSpots.length);
   const heads = new THREE.InstancedMesh(placed(new THREE.SphereGeometry(0.24, 12, 8), { y: 2.75 }), lampMaterial(), lampSpots.length);
+  poles.name = 'street-lamp-poles'; heads.name = 'street-lamp-heads';
   const glow = [];
   lampSpots.forEach(([x, z], index) => {
     m4.compose(v.set(x, SIDEWALK_TOP, z), q.identity(), one);
@@ -245,17 +297,36 @@ function addDowntownPlazas(group, plazas) {
   }
 }
 
+/** Bare riverside plots stay as low meadow clearings instead of raised lawns,
+ * paving or structures. Every patch clears the curved bank and bridge approach. */
+function addRiparianClearings(group, cells) {
+  if (!cells.length) return;
+  const patches = [];
+  for (const { x, z } of cells) for (let dx = -4.4; dx <= 4.4; dx += 2.2) for (let dz = -4.4; dz <= 4.4; dz += 2.2) {
+    const px = x + dx, pz = z + dz;
+    if (!riverSceneryClear(px, pz, 0.7, 0.7)) continue;
+    const distance = Math.abs(pz - riverZ(px));
+    if (distance > RIVER_HALF_WIDTH + RIVER_BANK_WIDTH + 5.5) continue;
+    patches.push(placed(new THREE.CylinderGeometry(0.62, 0.68, 0.012, 7), { x: px, y: 0.006, z: pz }));
+  }
+  if (!patches.length) return;
+  const clearings = mesh(mergeParts(patches), toonMaterial('#8fc77d'), { cast: false, outline: 0 });
+  clearings.name = 'riparian-clearings'; group.add(clearings);
+}
+
 /** lots: Map(cellKey → { i, j, padW, padD, cz }) for occupied lots. */
 export function buildDecor(rings, lots, half, { districts = false } = {}) {
   const group = new THREE.Group(); group.name = 'decor';
-  const trees = [], flowers = [], benches = [], ponds = [], plazas = [];
+  let trees = [], flowers = [], benches = [], ponds = [];
+  const plazas = [], clearings = [];
   const rnd = seeded(`decor:${rings}`);
   const occupied = new Set([...lots.values()].map(l => `${l.i},${l.j}`));
   for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
     if (i === 0 && j === 0) continue;
     const c = cellCenter(i, j), r = seeded(`lot:${i},${j}`);
+    if (districts && !riverCellUsable(i, j)) { clearings.push(c); continue; }
     // Downtown's empty plots are small paved plazas. Their planters stay well
-    // inside the lot, with clear crossings and no growth toward the railway.
+    // inside the lot, with clear bridge approaches and riverbanks.
     if (districts && j < 0) {
       const hasBuilding = occupied.has(`${i},${j}`), plan = downtownPlazaPlan(i, j, hasBuilding);
       for (const [x, z, ry] of plan.benches) benches.push([c.x + x, c.z + z, ry]);
@@ -293,10 +364,18 @@ export function buildDecor(rings, lots, half, { districts = false } = {}) {
       if (rnd() < 0.3) continue;
       const [x, z] = side === 0 ? [t, ring] : side === 1 ? [ring, -t] : side === 2 ? [-t, -ring] : [-ring, t];
       if (Math.abs(x) > half - 1.2 || Math.abs(z) > half - 1.2) continue;
-      if (districts && (z < -8 || Math.abs(z + 8) < 3.5)) continue;
+      if (districts && z < riverZ(x)) continue;
       if (side === 0 && Math.abs(t) < 5.6) continue;
       trees.push({ x: x + (rnd() - 0.5), y: 0, z: z + (rnd() - 0.5), kind: rnd() < 0.7 ? 'cone' : 'ball', scale: 0.8 + rnd() * 0.5, color: CANOPY[Math.floor(rnd() * 4)] });
     }
+  }
+  if (districts) {
+    // Include canopy/outline radii and the final rim jitter, not just trunk roots.
+    trees = trees.filter(t => riverSceneryClear(t.x, t.z, t.scale * 1.2, t.scale * 1.2) && Math.abs(t.x) + t.scale * 1.2 < half - 0.25 && Math.abs(t.z) + t.scale * 1.2 < half - 0.25);
+    flowers = flowers.filter(p => riverSceneryClear(p.x, p.z, 0.8, 0.8));
+    benches = benches.filter(([x, z, ry]) => riverSceneryClear(x, z, Math.abs(Math.cos(ry)) * 0.9 + Math.abs(Math.sin(ry)) * 0.4, Math.abs(Math.sin(ry)) * 0.9 + Math.abs(Math.cos(ry)) * 0.4));
+    ponds = ponds.filter(([x, z, radius]) => riverSceneryClear(x, z, radius + 0.4, radius + 0.4));
+    addRiparianClearings(group, clearings);
   }
   addDowntownPlazas(group, plazas);
   addTrees(group, trees);

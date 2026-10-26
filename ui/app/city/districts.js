@@ -1,10 +1,9 @@
 /* District rules and plot enumeration. Pure: shared by placement, scenery and tests. */
+import { riverZ, riverCellUsable, RIVER_GRID_PITCH } from './river-path.js';
 export const DOWNTOWN = 'downtown';
 export const OLD_TOWN = 'oldtown';
 export const DISTRICTS = [DOWNTOWN, OLD_TOWN];
 export const MIN_EMPTY_PLOTS = 3;
-// The railway follows the street immediately behind HQ, between lot rows -1 and 0.
-export const TRACK_Z = -8;
 
 export function projectIds(project) {
   return [...new Set([project?.id, ...(Array.isArray(project?.ids) ? project.ids : [])].filter(id => typeof id === 'string'))];
@@ -19,10 +18,11 @@ export function isUnbuilt(project) {
   return districtOf(project) === DOWNTOWN && !(typeof project?.path === 'string' && project.path.trim());
 }
 
-/** HQ has no district plot. Coordinates are lot indices, not world positions. */
+/** HQ and river corridor cells have no project plot. Coordinates are lot indices. */
 export function districtForCell(cell) {
   if (!cell || !Number.isInteger(cell.i) || !Number.isInteger(cell.j) || (cell.i === 0 && cell.j === 0)) return null;
-  return cell.j < 0 ? DOWNTOWN : OLD_TOWN;
+  if (!riverCellUsable(cell.i, cell.j)) return null;
+  return cell.j * RIVER_GRID_PITCH < riverZ(cell.i * RIVER_GRID_PITCH) ? DOWNTOWN : OLD_TOWN;
 }
 
 const rings = { [DOWNTOWN]: [], [OLD_TOWN]: [] };
@@ -31,11 +31,12 @@ function growDistricts(count) {
   while (builtRings < count) {
     const ring = ++builtRings;
     // Append each new perimeter without changing earlier plots. Each block extends
-    // both along the railway (x) and away from it (z).
+    // both along the river (x) and away from it (z).
     for (let i = -ring; i <= ring; i++) for (let j = -ring; j <= ring; j++) {
       if (Math.max(Math.abs(i), Math.abs(j)) !== ring) continue;
       const cell = { i, j, ring };
-      rings[districtForCell(cell)].push(cell);
+      const district = districtForCell(cell);
+      if (district) rings[district].push(cell);
     }
   }
 }

@@ -70,7 +70,7 @@ export class SlotMap {
   assign(projects, options = {}) {
     return options.districts === false ? this.assignLegacy(projects, options) : this.assignDistricts(projects, options);
   }
-  /** Home city: preserve correct-side pins and standing buildings, migrate other lots once.
+  /** Home city: preserve safe matching pins and standing buildings, migrate other lots once.
    * `fresh` includes replacement pins with migrated:true; persist these even if a pin already
    * exists. `emptyPlots` excludes hidden reservations, and always has at least three per side.
    * Contributor islands use districts:false to retain their established compact layout. */
@@ -112,7 +112,8 @@ export class SlotMap {
     }
     const rest = info.filter(x => !x.done && !(hold && !x.oldPin && !x.oldMem)).sort((a, b) => hash(a.p.id) - hash(b.p.id) || a.p.id.localeCompare(b.p.id));
     for (const x of rest) {
-      const initial = districtCells(1, x.district).length;
+      let firstRing = 1, initial = districtCells(firstRing, x.district).length;
+      while (!initial) initial = districtCells(++firstRing, x.district).length;
       const start = hash(x.p.id) % initial;
       let slot = 0;
       while (!claim(x, districtSlot(slot < initial ? (slot + start) % initial : slot, x.district))) slot++;

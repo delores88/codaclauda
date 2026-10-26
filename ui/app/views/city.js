@@ -6,10 +6,10 @@ import { PROVIDER_COLORS, defaultAvatar } from '../avatar/spec.js';
 import { THREE } from '../city/toon.js';
 import { World, webglAvailable, wheelZoomLog } from '../city/world.js';
 import { BuildingManager } from '../city/buildings.js';
-import { NpcManager, loadPeople, setPeopleReducedMotion, streetMove, groundY } from '../city/npc.js';
+import { NpcManager, loadPeople, setPeopleReducedMotion, streetMove } from '../city/npc.js';
 import { SlotMap, cellCenter, cellOf, cellKey, LOT_HALF, PITCH } from '../city/layout.js';
-import { districtOf, districtForCell, isUnbuilt, TRACK_Z } from '../city/districts.js';
-import { Railway } from '../city/railway.js';
+import { districtOf, districtForCell, isUnbuilt } from '../city/districts.js';
+import { River } from '../city/river.js';
 import { buildPlotMarker, GROUND_Y } from '../city/scenery.js';
 import { SparkCity, FOUNDRY, jobLabel } from '../city/spark.js';
 import { TalkPanel, talkSpot, talkShot, sayLine, STAGE } from '../city/talk.js';
@@ -278,7 +278,7 @@ class CityView {
         h('div.city-legend-note', 'Downtown: glass towers and GitHub repos'),
         h('div.city-legend-note', 'Old Town: local folders, brick and gardens'),
         h('div.city-legend-note', 'Pale ghost = repo waiting to be cloned'),
-        h('div.city-legend-note', 'Train labels = projects with recent commits')),
+        h('div.city-legend-note', 'River boats = projects with recent commits')),
       this.legendCi = h('div.city-legend-note', { hidden: true }, 'Red rooftop beacon = CI failing'),
       h('div.city-legend-note', 'Scaffolding = an agent is working there'),
       this.legendGear, this.legendSpark);
@@ -312,8 +312,8 @@ class CityView {
       h('dl.city-help-list',
         ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Drag an agent', 'Drop it on a building to give it a task there'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click ground', 'Walk your avatar there'], ['F', 'Focus selection'], ['H', 'Reset view'], ['Esc', 'Deselect']]
           .flatMap(([k, v]) => [h('dt', h('kbd', k)), h('dd', v)])),
-      h('p.city-note', 'Railroad tracks separate Downtown (GitHub projects) from Old Town (local folders without a repo). Pale Downtown ghosts have a ground sign and open a panel where you can clone the repo. Tickers sit on real buildings only. Both districts keep at least three empty plots and grow without moving placed buildings.'),
-      h('p.city-note', 'A train carries recent project names every 90–180 seconds; crossing lights blink before it arrives. Reduced motion parks it at the station. A red rooftop beacon and “CI failing” ticker mark failed builds; weather is independent.'),
+      h('p.city-note', 'A winding river connects Downtown (GitHub projects) and Old Town (local folders without a repo). Road bridges link the districts. Pale Downtown ghosts have a ground sign and open a panel where you can clone the repo. Tickers sit on real buildings only. Both districts keep at least three empty plots and grow without moving placed buildings.'),
+      h('p.city-note', 'Small river boats carry recent project names every 90–180 seconds. Reduced motion moors them at the dock. Click a bridge to walk there. A red rooftop beacon and “CI failing” ticker mark failed builds; weather is independent.'),
       h('button.btn.small.primary', { type: 'button', onclick: () => this.toggleHelp(false) }, 'Got it'));
 
     this.machinesCard = h('section.city-machines', { hidden: true, 'aria-label': 'Machine load' });
@@ -362,8 +362,8 @@ class CityView {
     this.world.onKeyPan = () => { if (this.following) this.toggleFollow(false); };
     this.world.collide = p => this.solidAt(p);
     this.buildings = new BuildingManager(this.world.city, { particles: this.world.particles, reducedMotion: () => this.reduced() });
-    this.railway = new Railway(this.world);
-    this.npcs = new NpcManager(this.world.city, { buildings: this.buildings, particles: this.world.particles, reducedMotion: () => this.reduced() });
+    this.river = new River(this.world);
+    this.npcs = new NpcManager(this.world.city, { buildings: this.buildings, particles: this.world.particles, reducedMotion: () => this.reduced(), river: () => this.islands?.current ? null : this.river });
     this.spark = new SparkCity(this.world, { makePerson: (spec, options) => this.npcs.makePerson(spec, options), reducedMotion: () => this.reduced(), topBuildings: this.buildings });
     this.plotMarker = buildPlotMarker();
     this.world.city.add(this.plotMarker.group);
@@ -426,12 +426,12 @@ class CityView {
     this.ci?.sync();
     const quality = store.prefs.cityQuality === 'low' ? 'low' : 'high';
     if (this.world.quality !== quality) this.world.setQuality(quality);
-    this.railway.group.visible = districts;
+    this.river.group.visible = districts;
     this.legendDistricts.hidden = !districts;
     if (districts) {
-      this.railway.setQuality(quality);
-      this.railway.setBounds({ half: this.world.half, trackZ: TRACK_Z, crossings: Array.from({ length: rings * 2 + 2 }, (_, i) => (i - rings - 0.5) * PITCH) });
-      this.railway.setProjects(projects);
+      this.river.setQuality(quality);
+      this.river.setBounds({ half: this.world.half, crossings: Array.from({ length: rings * 2 + 2 }, (_, i) => (i - rings - 0.5) * PITCH) });
+      this.river.setProjects(projects);
     }
     const timeMode = TIME_MODES.includes(store.prefs.cityTime) ? store.prefs.cityTime : 'auto';
     if (this.world.timeMode !== timeMode) { this.world.setTimeMode(timeMode); }
@@ -476,7 +476,7 @@ class CityView {
     this.buildings.update(dt, elapsed, env);
     tickerBank.update(dt, env.reducedMotion);
     this.ci?.update(dt, elapsed);
-    if (!this.islands?.current) this.railway?.update(dt, elapsed, env);
+    if (!this.islands?.current) this.river?.update(dt, elapsed, env);
     try { this.npcs.update(dt, elapsed, env); }
     catch (error) { if (!this.npcError) { this.npcError = true; console.error('City: agent animation failed', error); } }
     try { this.spark.update(dt, elapsed, env); }
@@ -728,6 +728,7 @@ class CityView {
     if (target.kind === 'foundry') { const p = this.spark.foundryPoint(); return at(p.x, p.y - lift, p.z); }
     if (target.kind === 'gear') { const p = this.spark.gearPoint(target.id); return p ? at(p.x, p.y + lift, p.z) : null; }
     if (target.kind === 'plot') { const c = cellCenter(target.i, target.j); return at(c.x, GROUND_Y + 1.4 + lift, c.z); }
+    if (target.kind === 'bridge') return at(target.x, this.npcs.surfaceY(target.x, target.z) + 0.5 + lift, target.z);
     return null;
   }
   /** The camera in island space (people turn to face it). */
@@ -768,6 +769,7 @@ class CityView {
       if (target?.kind === 'runner' || target?.kind === 'foundry' || target?.kind === 'gear') return;
       if (target?.kind === 'spark') { if (!this.sparkOffline) this.select({ kind: 'building', id: target.id }); return; }
       if (this.street) return;   // street view: you walk with the keys
+      if (target?.kind === 'bridge') { this.npcs.walkOwner(target.x, target.z); return; }
       if (target && target.kind !== 'owner' && target.kind !== 'plot') { this.select(target); this.focusSelection(); return; }
       const ground = this.world.groundAt(this.world.ndc(event.clientX, event.clientY));
       if (ground) this.npcs.walkOwner(ground.x, ground.z);
@@ -904,13 +906,17 @@ class CityView {
   pickAny(clientX, clientY) {
     const ndc = this.world.ndc(clientX, clientY);
     // Island slabs and the Spark deck are occluders: a ray never reaches through to the other side.
-    const hit = this.world.raycast(ndc, [...this.npcs.pickables(), ...this.buildings.pickables(), ...this.world.hq.pickables, ...this.spark.pickables(), ...this.world.occluders(), ...this.spark.occluders()]);
+    const hit = this.world.raycast(ndc, [...this.npcs.pickables(), ...this.buildings.pickables(), ...this.world.hq.pickables, ...this.spark.pickables(), ...(!this.islands?.current ? this.river.pickables() : []), ...this.world.occluders(), ...this.spark.occluders()]);
     if (!hit || hit.object.userData?.occluder) return this.plotAt(clientX, clientY);
     const object = hit.object;
     const person = this.npcs.targetOf(object);
     if (person) return person;
     for (let node = object; node; node = node.parent) {
       const data = node.userData || {};
+      if (data.riverBridge) {
+        const point = this.world.toLocal(hit.point.clone());
+        return { kind: 'bridge', id: `bridge:${data.crossingX}`, x: point.x, z: point.z };
+      }
       if (data.buildingId) return this.buildings.get(data.buildingId) ? { kind: 'building', id: data.buildingId } : null;
       if (data.sparkBuildingId) return this.spark.buildings.get(data.sparkBuildingId) ? { kind: 'spark', id: data.sparkBuildingId } : null;
       if (data.sparkFoundry) return { kind: 'foundry' };
@@ -926,6 +932,7 @@ class CityView {
     const ground = this.world.groundAt(this.world.ndc(clientX, clientY));
     if (!ground) return null;
     const { i, j } = cellOf(ground.x, ground.z);
+    if (!districtForCell({ i, j })) return null;
     if ((!i && !j) || Math.max(Math.abs(i), Math.abs(j)) > this.rings) return null;
     const c = cellCenter(i, j);
     if (Math.abs(ground.x - c.x) > LOT_HALF - 0.15 || Math.abs(ground.z - c.z) > LOT_HALF - 0.15) return null;
@@ -969,6 +976,7 @@ class CityView {
   }
   describe(target) {
     if (!target) return null;
+    if (target.kind === 'bridge') return { title: 'River bridge', sub: 'Click to walk across the river' };
     if (target.kind === 'agent') {
       const agent = this.agentById(target.id);
       if (!agent) return null;
@@ -1082,6 +1090,7 @@ class CityView {
     const extra = target?.kind === 'agent' && extraKind(this.agentById(target.id));
     if (this.talk) { if (target?.kind === 'agent' && !extra) this.enterTalk(target.id); else if (target?.kind !== 'owner') this.exitTalk(); return; }
     if (!target) { this.select(null); return; }
+    if (target.kind === 'bridge') { this.select(null); if (!this.street) this.npcs.walkOwner(target.x, target.z); return; }
     // A CodaClauda session or a desktop session: its card (talk mode is for board agents).
     if (extra) { const agent = this.agentById(target.id); this.select(target); this.showBubble(target, this.bubbleText(agent)); return; }
     if (target.kind === 'plot') {
@@ -2039,7 +2048,7 @@ class CityView {
     if (!spot) return;
     const frame = this.talkFraming();
     const face = { x: t.a.x, y: t.a.y + this.npcs.faceHeight({ kind: 'agent', id: t.id }), z: t.a.z };
-    const shot = talkShot(spot, face, { eyeY: groundY(spot.x, spot.z) + this.npcs.topHeight(OWNER_TARGET) * 0.86, nx: frame.nx, ny: frame.ny, vfov: world.camera.fov, aspect: world.size.w / Math.max(1, world.size.h) });
+    const shot = talkShot(spot, face, { eyeY: this.npcs.surfaceY(spot.x, spot.z) + this.npcs.topHeight(OWNER_TARGET) * 0.86, nx: frame.nx, ny: frame.ny, vfov: world.camera.fov, aspect: world.size.w / Math.max(1, world.size.h) });
     const v = p => world.toWorld(new THREE.Vector3(p.x, p.y, p.z), { atRest: true });
     world.setShot({ eye: v(shot.eye), look: v(shot.look) }, { duration, instant: !duration });
     t.frameSig = this.talkFrameSig(); t.vis = frame.vis;
@@ -2193,7 +2202,7 @@ class CityView {
     clearTimeout(this.checkTimer);
     this.offSessions?.();
     this.ci?.dispose();
-    this.railway?.dispose();
+    this.river?.dispose();
     this.islands?.dispose();
     this.weather?.dispose();
     this.spark?.dispose(); this.npcs?.dispose(); this.buildings?.dispose(); this.world?.dispose();

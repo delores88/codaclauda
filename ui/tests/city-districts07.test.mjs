@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SlotMap, cellKey, pinOf, slotCell } from '../app/city/layout.js';
-import { DISTRICTS, TRACK_Z, districtOf, districtForCell, districtCells, isUnbuilt } from '../app/city/districts.js';
+import { DISTRICTS, districtOf, districtForCell, districtCells, isUnbuilt } from '../app/city/districts.js';
+import { riverCellUsable } from '../app/city/river-path.js';
 
 const local = (name, extra = {}) => ({ id: `local:${name}`, path: `C:/projects/${name}`, ...extra });
 const repo = (name, extra = {}) => ({ id: `gh:owner/${name}`, path: '', ...extra });
@@ -14,6 +15,7 @@ function checkFree(result) {
     assert.ok(result.emptyPlots[district].length >= 3, `${district} has at least three free plots`);
     for (const c of result.emptyPlots[district]) {
       assert.equal(districtForCell(c), district);
+      assert.ok(riverCellUsable(c.i, c.j));
       assert.ok(!occupied.has(cellKey(c.i, c.j)));
       assert.ok(!result.reserved.has(cellKey(c.i, c.j)));
     }
@@ -30,22 +32,23 @@ test('districts distinguish local-only, linked GitHub, and unbuilt GitHub projec
   assert.equal(isUnbuilt(both('tower')), false);
   assert.equal(isUnbuilt(local('garden')), false);
   assert.equal(districtForCell({ i: 0, j: 0 }), null);
-  assert.equal(districtForCell({ i: 1, j: 0 }), 'oldtown');
-  assert.equal(districtForCell({ i: 1, j: -1 }), 'downtown');
-  assert.equal(TRACK_Z, -8);
+  assert.equal(districtForCell({ i: 1, j: 1 }), 'oldtown');
+  assert.equal(districtForCell({ i: 1, j: -2 }), 'downtown');
+  assert.equal(districtForCell({ i: 1, j: -1 }), null);
+  assert.equal(districtForCell({ i: 1, j: 0 }), null);
 });
 
-test('the empty city already has three free plots on both sides of the railway', () => {
+test('the empty city has at least three safe free plots in each river district', () => {
   const result = new SlotMap().assign([]);
-  assert.equal(result.rings, 1);
+  assert.equal(result.rings, 2);
   checkFree(result);
-  assert.equal(result.emptyPlots.downtown.length, 3);
-  assert.equal(result.emptyPlots.oldtown.length, 5);
+  assert.equal(result.emptyPlots.downtown.length, 5);
+  assert.equal(result.emptyPlots.oldtown.length, 10);
 });
 
 test('growth leaves every standing and pinned project in place and keeps spare plots', () => {
   const slots = new SlotMap(), projects = [both('pinned-tower'), local('pinned-house')];
-  const pins = { [projects[0].id]: { i: -1, j: -1 }, [projects[1].id]: { i: 1, j: 0 } };
+  const pins = { [projects[0].id]: { i: -1, j: -2 }, [projects[1].id]: { i: 1, j: 1 } };
   let result = slots.assign(projects, { pins });
   const standing = new Map(result.cells);
   checkFree(result);
@@ -64,7 +67,7 @@ test('growth leaves every standing and pinned project in place and keeps spare p
   assert.equal(slots.assign(projects.slice(0, 2), { pins }).rings, size, 'removals do not shrink established blocks');
 });
 
-test('growth extends the perimeter along and away from the railway without reordering old plots', () => {
+test('growth extends the perimeter along and away from the river without reordering old plots', () => {
   for (const district of DISTRICTS) {
     const small = districtCells(1, district), large = districtCells(2, district);
     assert.deepEqual(large.slice(0, small.length), small);
@@ -73,11 +76,11 @@ test('growth extends the perimeter along and away from the railway without reord
   }
 });
 
-test('correct-side saved pins survive exactly; wrong-side pins migrate and persist once', () => {
+test('safe matching pins survive exactly; district changes migrate and persist once', () => {
   const projects = [both('keep-tower'), local('keep-house'), both('move-tower'), local('move-house')];
   const pins = {
-    [projects[0].id]: { i: 2, j: -1 }, [projects[1].id]: { i: -2, j: 0 },
-    [projects[2].id]: { i: 1, j: 1 }, [projects[3].id]: { i: -1, j: -1 },
+    [projects[0].id]: { i: 2, j: -2 }, [projects[1].id]: { i: -2, j: 1 },
+    [projects[2].id]: { i: 1, j: 1 }, [projects[3].id]: { i: -1, j: -2 },
   };
   const slots = new SlotMap(), first = slots.assign(projects, { pins });
   assert.deepEqual(coordinates(first.cells.get(projects[0].id)), pins[projects[0].id]);
@@ -111,9 +114,9 @@ test('linking a repository moves a local project once; cloning an outline keeps 
   assert.deepEqual(cloned.cells.get(outline.id), beforeClone.cells.get(outline.id));
 });
 
-test('hidden reservations stay unavailable and wrong-side hidden pins are corrected', () => {
+test('hidden reservations stay unavailable and conflicting district pins are corrected', () => {
   const hidden = [repo('hidden-one'), repo('hidden-two'), local('hidden-house')];
-  const pins = { [hidden[0].id]: { i: -1, j: -1 }, [hidden[1].id]: { i: 0, j: -1 }, [hidden[2].id]: { i: 1, j: -1 } };
+  const pins = { [hidden[0].id]: { i: -1, j: -2 }, [hidden[1].id]: { i: 0, j: -2 }, [hidden[2].id]: { i: 1, j: -2 } };
   const result = new SlotMap().assign([both('visible'), local('visible-house')], { pins, reserve: hidden });
   assert.equal(result.reserved.size, 3);
   assert.equal(result.cells.size, 2);
@@ -161,10 +164,43 @@ test('contributor islands retain legacy pins and do not require spare district b
 
 test('placement order is deterministic and duplicate pins resolve without overlapping buildings', () => {
   const projects = [both('a'), both('b'), local('c'), local('d')];
-  const pins = { [projects[0].id]: { i: 1, j: -1 }, [projects[1].id]: { i: 1, j: -1 } };
+  const pins = { [projects[0].id]: { i: 1, j: -2 }, [projects[1].id]: { i: 1, j: -2 } };
   const forward = new SlotMap().assign(projects, { pins }), reverse = new SlotMap().assign([...projects].reverse(), { pins });
   assert.deepEqual(forward.cells, reverse.cells);
   assert.equal(new Set([...forward.cells.values()].map(c => cellKey(c.i, c.j))).size, projects.length);
   assert.equal(forward.migrated.length, 1);
   checkFree(forward);
+});
+
+test('river migration relocates intersecting footprints once and preserves every safe pin', () => {
+  const projects = [both('river-tower'), local('river-house'), both('safe-tower'), local('safe-house')];
+  const pins = { [projects[0].id]: { i: 0, j: -1 }, [projects[1].id]: { i: 1, j: 0 }, [projects[2].id]: { i: 2, j: -2 }, [projects[3].id]: { i: 0, j: 1 } };
+  const slots = new SlotMap();
+  // Existing standing cells can predate the river update, as can persisted pins.
+  for (const project of projects) slots.memo.set(project.id, pins[project.id]);
+  const first = slots.assign(projects, { pins });
+  assert.deepEqual(new Set(first.migrated.map(m => m.id)), new Set(projects.slice(0, 2).map(p => p.id)));
+  for (const project of projects.slice(2)) assert.deepEqual(coordinates(first.cells.get(project.id)), pins[project.id]);
+  for (const cell of first.cells.values()) assert.ok(riverCellUsable(cell.i, cell.j));
+  Object.assign(pins, savedPins(first));
+  const expanded = [...projects, ...Array.from({ length: 220 }, (_, n) => n % 2 ? local(`river-expansion-${n}`) : both(`river-expansion-${n}`))];
+  const next = slots.assign(expanded, { pins });
+  assert.deepEqual(next.migrated, []);
+  for (const [id, cell] of first.cells) assert.deepEqual(next.cells.get(id), cell);
+  for (const cell of next.cells.values()) assert.ok(riverCellUsable(cell.i, cell.j));
+  checkFree(next);
+  Object.assign(pins, savedPins(next));
+  const reopened = new SlotMap().assign(expanded, { pins });
+  assert.deepEqual(reopened.cells, next.cells);
+  assert.deepEqual(reopened.migrated, []);
+});
+
+test('an initially empty district ring does not prevent deterministic assignment', () => {
+  assert.equal(districtCells(1, 'downtown').length, 0);
+  const projects = Array.from({ length: 60 }, (_, n) => both(`first-ring-${n}`));
+  const result = new SlotMap().assign(projects);
+  assert.equal(result.cells.size, projects.length);
+  assert.equal(new Set([...result.cells.values()].map(c => cellKey(c.i, c.j))).size, projects.length);
+  for (const cell of result.cells.values()) assert.equal(districtForCell(cell), 'downtown');
+  checkFree(result);
 });

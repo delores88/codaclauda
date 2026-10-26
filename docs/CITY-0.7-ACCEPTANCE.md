@@ -1,103 +1,117 @@
 # City 0.7 UI acceptance
 
-Prepared 2026-10-25 on `codex/codaclauda-0.7-city`, based on
-`v0.6.2` (`ae5ddfadae2fa7d28655163a89b0e1fc1c204339`). UI changes only;
-no Rust, installation, Marketplace, release or external project changes.
+Prepared 2026-10-25 (local time) on `codex/codaclauda-0.7-city`. The river
+refinement follows `53e721dc3f7fdfc43c9b24ddd30acb3f1c726939`; the branch is based
+on `v0.6.2` (`ae5ddfadae2fa7d28655163a89b0e1fc1c204339`). This is UI source and
+headless preview evidence. No Rust, installation, publication or external project
+changes are included.
 
 ## Implemented behavior
 
-- GitHub identities occupy Downtown, with pale translucent ghost volumes until a
-  local folder is linked. Ghosts have ground signs and no ticker bands or rooftop
-  CI markers. Local-only folders occupy Old Town. Contributor islands
-  retain their existing layout and the Spark underside remains available.
-- The railway follows the street at z = -8. Downtown has cool glass towers and
-  planted urban plazas on vacant plots; Old Town has brick/timber, pitched roofs,
-  gardens and lanterns.
-- District placement preserves valid pins and standing buildings, corrects a
-  wrong-side pin once, persists aliases, and grows until both districts have
-  at least three unreserved empty plots. Tracks grow with the island.
-- Trains depart at randomized 90–180 second intervals, with at most six named
-  cars. Commit dates within 24 hours take precedence; missing/invalid dates
-  fall back to `commits_7d`. No activity produces empty cars. Crossings warn
-  before arrival. Reduced motion parks the train; low quality has no shadows.
-- Failed CI on real buildings uses a roof-attached red beacon and `CI failing` ticker text.
-  CI creates no weather. Compact cranes have no suspended loads. Mesh and
-  instanced outlines inflate about their own geometry centers; construction
-  sparks follow the tower's animated scale.
-- Clicking a ghost opens its project panel and the existing clone dialog
-  with that repository selected. Empty plots open the existing project dialog
-  on both sides. Legend, help and synthetic preview data cover all three states.
+- A gently winding river connects Downtown and Old Town. Its curve uses fixed
+  world coordinates, so expansion extends the water without shifting existing
+  banks, bridges or safe pins. Water has subtle surface animation, calmer at
+  night; low quality uses a simple material. Banks have grass and stones.
+- Each crossing street has a supported road bridge with continuous approaches.
+  Clicking a bridge walks the avatar there. Paths and street controls use dry
+  banks and bridge approaches, including the deck's actual height. Water and
+  reserved bank clearings cannot be selected as project plots.
+- Plot assignment checks the entire lot and sidewalk footprint against the river
+  envelope. Newly unsafe or district-mismatched pins migrate once; valid pins and
+  subsequent placements remain stable through expansion and reopening. Each
+  district keeps at least three unreserved empty plots. Hidden reservations and
+  project aliases remain supported.
+- Expansion keeps roads, banks and bridges fixed while animating the island's
+  depth below ground and emitting dust. New buildings retain their rise animation.
+- Small independent boats pass every randomized 90-180 seconds. Travel speed grows
+  on very large islands so a pass clears before the next departure. Up to six carry
+  recent project labels: commits within 24 hours, or weekly counts when a commit
+  date is unavailable. With no activity, unlabelled boats pass. Reduced motion
+  moors up to two boats at the dock and freezes the water. No sound is used.
+- Boat hulls cross the waterline, stay within the river and island, and fit under
+  every bridge. Labels are mounted on the boats. Bridge decks, ramps, parapets,
+  supports and docks form connected structures. Low quality has no river shadows.
+- Downtown retains cool glass towers, planted plazas and pale ghost volumes for
+  uncloned repositories. Ghosts are 83% of nominal height at 23% opacity, with
+  supported ground signs and no ticker bands or rooftop CI effects. Old Town
+  retains warm brick/timber, pitched roofs, gardens and lanterns.
+- Real buildings retain roof tickers and the red CI beacon. CI creates no weather.
+  Compact cranes have no suspended loads; growth effects follow building scale.
+  Clone selection and new-project dialogs on both district sides remain available.
+- Contributor islands keep their established layout; the river is hidden while
+  visiting them. Spark remains available. Help and legend describe the river,
+  bridges and boats, including `River boats = projects with recent commits`.
 
 ## Automated tests and independent review
 
-`node --test --test-reporter=spec ui/tests/*.test.mjs`: **149 passed, 0 failed**.
-The focused additions cover district assignment, spare plots, stable pins,
-migration, hidden reservations, alias changes, train intervals/car selection,
-crossing timing, CI selection/attachment, crane bounds, growth effects and
-outline ownership/disposal, ghost ticker suppression through rebuild/link changes,
-ground-sign ownership, and deterministic plaza layout/picking/disposal.
-`git diff --check` and module syntax checks passed.
+`node --test --test-reporter=spec ui/tests/*.test.mjs`: **171 passed, 0 failed**.
+`git diff --check` passed. Tests cover river extrema and full-footprint clearance,
+220-project expansion, safe-pin preservation and migration, bridge surfaces and
+ray picking, boat schedule/selection/containment/headroom, reduced motion, low
+quality, scenery support and disposal, and routes across the river.
 
-Separate agents reviewed district persistence, building/CI geometry and railway
-integration. Their findings on spark scaling, cloned outline disposal, repeated
-parked-train rebuilds and repository-name casing were corrected before handoff.
-The visual follow-up received a separate source and headless browser review:
-ghosts are 83% of nominal height at 23% opacity, signs stay grounded during tower
-scaling, link/unlink transitions restore/remove tickers correctly, and all owned
-sign geometry, materials and texture are disposed. No review blockers remained.
+An independent source review checked the renderer, scenery and navigation. It
+identified lateral entry through raised bridge walls, an empty-crossing-list
+fallback, portal relocation behavior, bridge target identity, and expansion
+alignment. These were corrected. Re-review found no blockers; 64,009 sampled
+routes between dry/bridge/approach endpoints had no unsupported segments.
 
 ## Observed browser preview acceptance
 
-Headless Chrome used the bundled `ui/dev/mock.js` backend, served on loopback.
-These are synthetic preview observations, not installed/native acceptance.
+Headless Chrome used `ui/dev/mock.js` on loopback, with synthetic projects. The
+implementing Codex agent inspected the day/night, boat, bridge, expansion,
+reduced-motion and growth/crane images. This does not establish installed/native
+or real-owner workflow acceptance.
 
-- Day/night, building growth and rotating cranes were captured before/after.
-- A real canvas click selected an unbuilt repo. Its clone action opened the
-  existing dialog with the correct repo selected. No real repository was cloned.
-- Empty-plot dialogs opened on both district sides. An actual canvas click on a
-  Downtown plaza opened Create; a ground-sign click opened its repo's clone action.
-- A sampled train pass showed pre-arrival crossing lights, named cars and a
-  night headlight. The elapsed clock was advanced for this deterministic check.
-- Adding 16 synthetic repos expanded ring 2 to ring 4; every existing cell
-  remained unchanged, both spare counts stayed above three, and track/island
-  bounds matched. The existing expansion animation was active. The final visual
-  capture advances building rise animations to completion, then renders a frame
-  at the overview zoom so distance-dependent fog and labels are current.
-- Reduced-motion positions stayed identical across two observed times; signals
-  were off. Low quality disabled both renderer shadows and railway casters.
-- Spark flipped PC → Spark → PC. A contributor portal round trip restored exact
-  home pins/cells and hid the railway while away. No browser errors were recorded.
+- Day/night and growth/crane previews completed without browser errors.
+- An actual canvas click selected bridge 24 and walked the owner onto its deck.
+  The final avatar height matched the bridge surface at y = 1.95.
+- Sampled boats sat at water y = 0.18, with hull bounds spanning the waterline;
+  independent geometry tests confirmed more than 0.5 units of bridge clearance.
+  Boat and night-water captures showed no detached river furniture or loads.
+- Reduced-motion snapshots had identical boat positions and water time. Low
+  quality disabled renderer shadows and all river shadow flags, and used no
+  water shader.
+- Adding 24 synthetic repos expanded ring 3 to ring 5. Every existing cell stayed
+  unchanged; all new cells were dry; free counts were 18 Downtown and 53 Old Town.
+  River and island bounds both reached 93.5. Roads/decor/river stayed unscaled
+  during growth, and the final capture settled the building rise animations.
+- Actual empty-plot clicks opened Create in Downtown and Link in Old Town. An
+  uncloned repo's ground sign opened the existing Clone dialog with the correct
+  repo selected. No repository was cloned. Water returned no project plot.
+- Spark flipped PC to Spark to PC. Contributor round trips starting on a bridge
+  and in Downtown returned the owner to HQ and preserved exact home pins/cells.
+  The river was hidden while away. All completed preview runs had no browser errors.
 
-At 1600×1000 with eight matching projects and the same camera, 3.5-second rAF
-samples on an RTX 4090 Laptop GPU (ANGLE D3D11) measured:
+At 1600x1000, device scale 1, eight matching synthetic projects and a fixed camera,
+sequential 3.5-second rAF samples on an RTX 4090 Laptop GPU (ANGLE D3D11) measured:
 
 | Preview | High quality | Low quality | p95 frame time |
 | --- | ---: | ---: | ---: |
-| Baseline | 59.655 FPS | 59.940 FPS | 16.8 ms |
-| Updated | 59.942 FPS | 59.940 FPS | 16.8 ms |
+| Baseline 53e721d | 59.942 FPS | 59.942 FPS | 16.8 ms |
+| River refinement | 59.942 FPS | 59.942 FPS | 16.8 ms |
 
-This supports the 60 Hz preview target on this machine. It does not establish
-performance on other hardware, large cities or an installed WebView.
+These samples support the 60 Hz preview target on this machine. They are not a
+sustained performance guarantee for larger cities, other hardware or an installed
+WebView. The river sample used 951 high-quality / 825 low-quality draw calls,
+versus 948 / 822 in the matching baseline scene.
 
 ## Local evidence
 
-Evidence is retained under `local/city-07-evidence/` in the original checkout,
-outside the branch's tracked files:
+Current evidence lives in `local/city-river-evidence/` in the original checkout,
+outside tracked files. The preceding visual evidence remains in
+`local/city-07-evidence/`.
 
-- `before-day.png`, `before-night.png`, `before-grow.png`, `before-crane.png`
 - `after-day.png`, `after-night.png`, `after-grow.png`, `after-crane.png`
-- `after-clone-dialog.png`, `after-train-night.png`, `after-train-detail.png`,
-  `after-expansion.png`
-- `workflow-reduced-motion.png`, `workflow-low-quality.png`,
-  `workflow-spark-flip.png`, `workflow-contributor-island.png`,
-  `workflow-home-return.png`
-- `before-browser.json`, `after-browser.json`, `interactions.json`, `workflow.json`
-- `review.json`, `review-ghost-sign.png`, `review-empty-plaza.png`, `tests-review.txt`
-- `review-before-0388221/` preserves the screenshots/receipts before the visual
-  follow-up. Current `after-*` images show the ghost/plaza refinements.
-- Reproduction scripts: `preview.cjs`, `interactions.cjs`, `workflow-check.cjs`,
-  `review-check.cjs`. The performance table uses isolated `workflow.json` samples;
-  concurrent reviewer samples in `review.json` are excluded.
+- `after-boats.png`, `after-boats-night.png`, `after-bridge-click.png`,
+  `after-expansion.png`, `after-reduced-motion.png`, `after-low-quality.png`
+- `after-clone-dialog.png`, `workflow-reduced-motion.png`,
+  `workflow-low-quality.png`, `workflow-spark-flip.png`, and contributor/home
+  round-trip captures listed by `workflow.json`
+- Receipts: `tests.txt`, `after-browser.json`, `river-check.json`,
+  `interaction-check.json`, `workflow.json`
+- Reproduction scripts: `preview.cjs`, `river-check.cjs`, `interaction-check.cjs`,
+  `workflow-check.cjs`
 
-Publishing, installation and real project/owner workflow acceptance remain
-separate steps. No release tag or installer was produced by this UI change.
+No release tag or installer was produced by this UI change. Source integration,
+publication, installation and real-project acceptance remain separate steps.

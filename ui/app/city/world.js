@@ -727,7 +727,10 @@ export class World {
     if (this.islandAnim) {
       const a = this.islandAnim; a.t = Math.min(1, a.t + dt / 0.9);
       const s = 1 + (a.from - 1) * Math.exp(-5 * a.t) * Math.cos(8 * a.t);
-      for (const g of [this.island.group, this.roads.group, this.decor]) g.scale.set(s, 1, s);
+      // Keep river banks, bridges, roads and pinned buildings aligned throughout
+      // growth. Stretch only the rock depth below ground in the home city.
+      if (this.districts) this.island.group.scale.set(1, s, 1);
+      else for (const g of [this.island.group, this.roads.group, this.decor]) g.scale.set(s, 1, s);
       if (a.t >= 1) { for (const g of [this.island.group, this.roads.group, this.decor]) g.scale.set(1, 1, 1); this.islandAnim = null; }
     }
     this.clouds.update(reduced ? 0 : dt * (this.cloudSpeed || 1), this.camera.position, reduced);   // cloudSpeed: weather wind
