@@ -171,3 +171,17 @@ and unstyled supplemental capture are retained under `interrupted/`. Sequential
 reruns with an explicit stylesheet-readiness check passed. `source-review.json`
 records the tested UI commit and screenshot hashes. These remain headless mock
 checks; installed rendering and real provider sends/copy context are not claimed.
+
+Bubble-anchor follow-up: collision layout retains the original owner/selected
+NPC head coordinates. Each tail moves within its balloon and extends to that
+same head after clearance shifts; it cannot inherit a nearby NPC's position.
+If the intended figure is missing during pending startup or is outside a safe
+anchor span, its bubble waits rather than pointing at a bystander. Production
+method regressions cover reversed screen order, clamping, a decoy NPC, pending
+absence and switching to another exact session. The pending/live/mobile browser
+fixture checks both coordinates of each rendered tail against the intended head.
+Evidence is in `local/talk-071-anchor-evidence`, separate from earlier captures.
+This follow-up passes **432 UI tests** and the pending/live/mobile anchor preview
+with zero browser errors. Rendered tail X and Y are checked against the intended
+head, including the real CSS pseudo-element. This remains synthetic preview
+evidence rather than native/provider acceptance.

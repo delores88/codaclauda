@@ -2467,7 +2467,7 @@ export class CityView {
       const pos = this.facesUp(target) ? this.npcs.position(target) : null;
       let on = Boolean(pos);
       if (pos) {
-        world.toWorld(scratch.set(pos.x, pos.y + this.npcs.topHeight(target) + 0.3, pos.z), { out: scratch });
+        world.toWorld(scratch.set(pos.x, pos.y + this.npcs.topHeight(target), pos.z), { out: scratch });
         on = (this._talkTo ||= new THREE.Vector3()).subVectors(scratch, cam.position).dot(dir) > 0.2;   // in front of the camera (off-screen is clamped in, below)
         world.project(scratch, point);
       }
@@ -2475,10 +2475,12 @@ export class CityView {
       if (!on) continue;
       if (b.maxWidth !== width) { b.maxWidth = width; b.node.style.maxWidth = `${width}px`; b.size = null; }
       b.size ||= { w: b.node.offsetWidth, h: b.node.offsetHeight };
-      placed.push({ b, x: point.x, y: point.y, w: b.size.w, h: b.size.h });
+      placed.push({ b, who, x: point.x, y: point.y, w: b.size.w, h: b.size.h });
     }
-    for (const { b, x, y, visible } of layoutTalkBubbles(placed, vis, headTop)) {
+    for (const { b, x, y, tailX, tailHeight, visible } of layoutTalkBubbles(placed, vis, headTop)) {
       b.node.style.visibility = visible ? '' : 'hidden';
+      b.node.style.setProperty('--talk-tail-x', `${tailX.toFixed(1)}px`);
+      b.node.style.setProperty('--talk-tail-height', `${tailHeight.toFixed(1)}px`);
       b.node.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -100%)`;
     }
   }
