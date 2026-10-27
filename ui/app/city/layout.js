@@ -6,7 +6,7 @@
  * two road points are joined by a Manhattan route through road intersections ("nodes").
  * Sidewalks sit SIDEWALK units either side of each road centre line. */
 import { hash } from '../avatar/spec.js';
-import { DISTRICTS, MIN_EMPTY_PLOTS, districtBanks, districtOf, districtForCell, districtCells, districtSlot, projectIds } from './districts.js';
+import { DISTRICTS, MIN_EMPTY_PLOTS, districtBanks, districtOf, districtForCell, districtCells, projectIds } from './districts.js';
 
 import { riverLot } from './river-lots.js';
 

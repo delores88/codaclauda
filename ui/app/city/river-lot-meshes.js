@@ -25,17 +25,24 @@ export function riverBuildingPlan(project, parcel, district) {
   return { W, D, H, floors, footprint: tier, shape, blocks, origin, side, streetZ: side * (depth / 2 - 0.3), parcel };
 }
 
-export function buildRiverBuilding(plan, material, district, tag) {
+export function buildRiverBuilding(plan, material, district, tag, glass = {}) {
   const group = new THREE.Group(); group.name = `riverfront-${plan.shape}`;
   const trim = district === 'downtown' ? '#d6e6ef' : '#3d4350';
   for (const b of plan.blocks) {
     box(group, b.w, b.h, b.d, 0, TOP + b.y + b.h / 2, b.z, material, 'riverfront-wall');
     box(group, b.w + 0.08, 0.12, b.d + 0.08, 0, TOP + b.y + b.h, b.z, trim, 'riverfront-roof');
     // Both banks get windows on the water and street facades.
-    for (const face of [-1, 1]) for (let x = -b.w / 2 + 0.65; x < b.w / 2 - 0.35; x += 1.15) {
+    for (const face of [-1, 1]) for (let x = -b.w / 2 + 0.65; x < b.w / 2 - 0.35; x += 1.655) {
       const height = Math.max(0.5, b.h - 0.55);
-      box(group, 0.72, height, 0.05, x, TOP + b.y + b.h / 2, b.z + face * (b.d / 2 + 0.035), '#526f84', 'riverfront-window', 0.01);
+      box(group, 0.72, height, 0.05, x, TOP + b.y + b.h / 2, b.z + face * (b.d / 2 + 0.035), glass.lit || '#a9cddd', 'riverfront-window', 0.01);
       if (district === 'downtown') for (let y = 1.25; y < height; y += 1.3) box(group, 0.74, 0.055, 0.06, x, TOP + b.y + 0.27 + y, b.z + face * (b.d / 2 + 0.04), trim, 'riverfront-mullion', 0);
+    }
+    for (const face of [-1, 1]) for (let z = -b.d / 2 + 0.7; z < b.d / 2 - 0.35; z += 1.35) {
+      box(group, 0.05, Math.max(0.5, b.h - 0.65), 0.8, face * (b.w / 2 + 0.035), TOP + b.y + b.h / 2, b.z + z, glass.dark || '#7899b0', 'riverfront-side-window', 0.01);
+    }
+    if (plan.shape === 'townhouse') {
+      box(group, b.w + 0.08, 0.12, b.d + 0.08, 0, TOP + b.h / 2, b.z, '#c89b6d', 'townhouse-storey-band');
+      box(group, 0.22, 1.8, 0.12, 0.58, TOP + 0.9, plan.side * (b.d / 2 + 0.07), '#c89b6d', 'townhouse-entry-timber');
     }
     if (plan.shape === 'terraced' && b !== plan.blocks.at(-1)) {
       const z = b.z - plan.side * (b.d / 2 - 0.16);
@@ -77,9 +84,13 @@ export function buildRiverLandscape(parcel, { origin = { x: 0, z: 0 }, building 
     const x = (r.x0 + r.x1) / 2, z = parcel.side > 0 ? r.z1 - 0.35 : r.z0 + 0.35;
     if (fits(x, z, (r.x1 - r.x0) / 2 - 0.15, 0.24)) box(group, r.x1 - r.x0 - 0.3, 0.04, 0.48, x - origin.x, TOP, z - origin.z, '#f1e6ce', 'riverfront-path', 0);
   }
-  let bench = false;
-  for (let x = parcel.bounds.x0 + 0.65; x < parcel.bounds.x1 - 0.5; x += 1.1) {
-    for (let z = parcel.bounds.z0 + 0.6; z < parcel.bounds.z1 - 0.5; z += 1.05) {
+  if (r && r.z1 - r.z0 > 1.3) {
+    const x = (r.x0 + r.x1) / 2, z = parcel.side > 0 ? r.z0 + 0.3 : r.z1 - 0.3;
+    if (fits(x, z, (r.x1 - r.x0) / 2 - 0.15, 0.19)) box(group, r.x1 - r.x0 - 0.3, 0.035, 0.38, x - origin.x, TOP, z - origin.z, '#e9ddc4', 'riverside-path', 0);
+  }
+  let bench = false, planted = 0;
+  for (let x = parcel.bounds.x0 + 0.65; x < parcel.bounds.x1 - 0.5; x += 1.65) {
+    for (let z = parcel.bounds.z0 + 0.6; z < parcel.bounds.z1 - 0.5; z += 1.6) {
       if (!fits(x, z, 0.5, 0.4)) continue;
       if (building && Math.abs(x - building.origin.x) < building.W / 2 + 0.75 && Math.abs(z - building.origin.z) < building.D / 2 + 0.9) continue;
       if (r && Math.abs(z - (parcel.side > 0 ? r.z1 : r.z0)) < 0.9) continue;
@@ -89,8 +100,13 @@ export function buildRiverLandscape(parcel, { origin = { x: 0, z: 0 }, building 
         box(group, 0.9, 0.36, 0.08, lx, TOP + 0.62, lz + parcel.side * 0.2, '#c89b6d', 'riverfront-bench-back');
         for (const dx of [-0.3, 0.3]) box(group, 0.08, 0.4, 0.32, lx + dx, TOP + 0.2, lz, '#526a60', 'bench-leg');
         bench = true;
-      } else {
+      } else if (!pointInParcel({ x, z: z - parcel.side * 1.25 }, parcel)) {
         for (const dx of [-0.15, 0.08, 0.22]) box(group, 0.06, 0.4 + dx, 0.06, lx + dx, TOP + (0.4 + dx) / 2, lz, '#6b9e55', 'riverfront-reeds', 0);
+      } else if (planted < 6 && (Math.abs(x - parcel.bounds.x0) < 1.5 || Math.abs(x - parcel.bounds.x1) < 1.5)) {
+        const shrub = new THREE.Mesh(placed(new THREE.IcosahedronGeometry(0.32, 1), { x: lx, y: TOP + 0.25, z: lz, sy: 0.8 }), toonMaterial('#5b9f66'));
+        shrub.name = 'riverfront-shrub'; addOutline(shrub, { thickness: 0.02 }); group.add(shrub);
+        const flower = new THREE.Mesh(placed(new THREE.IcosahedronGeometry(0.12, 0), { x: lx + 0.12, y: TOP + 0.5, z: lz }), toonMaterial(planted % 2 ? '#ffd23f' : '#ff9db9'));
+        flower.name = 'riverfront-flowers'; group.add(flower); planted++;
       }
     }
   }

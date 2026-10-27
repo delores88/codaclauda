@@ -28,6 +28,7 @@ test('inscribed rectangle keeps frontage, chooses an offset maximum and excludes
   const bounds = { x0: 0, x1: 10, z0: 0, z1: 10 };
   const edge = [{ x: 0, z: 7 }, { x: 4, z: 7 }, { x: 5, z: 2 }, { x: 10, z: 2 }];
   assert.deepEqual(inscribedRectangle(bounds, edge, 1), { x0: 5, x1: 10, z0: 2, z1: 10 });
+  assert.deepEqual(inscribedRectangle(bounds, [{ x: 0, z: 0 }, { x: 10, z: 10 }], 1), { x0: 0, x1: 5, z0: 5, z1: 10 }, 'the maximum can fall between polygon vertices');
   const obstacle = { x0: 8, x1: 10, z0: 0, z1: 10 };
   const rect = inscribedRectangle(bounds, edge, 1, [obstacle]);
   assert.equal(rect.z1, 10); assert.ok(!rectOverlap(rect, obstacle));
@@ -94,7 +95,11 @@ test('actual riverfront meshes, outlines and landscapes fit both banks and have 
           for (const obstacle of p.obstacles) assert.ok(!(v.x > obstacle.x0 + 0.001 && v.x < obstacle.x1 - 0.001 && v.z > obstacle.z0 + 0.001 && v.z < obstacle.z1 - 0.001), `${node.name}: bridge intrusion`);
         }
       });
-      if (unbuilt) { assert.equal(b.body.name, 'clone-foundation'); assert.ok(b.pickables.includes(b.body) && b.pickables.includes(b.plaque)); }
+      if (unbuilt) { assert.equal(b.body.name, 'clone-foundation'); assert.deepEqual(b.seats, []);
+        const visitor = b.workSpot(0); assert.ok(Math.abs(visitor.z - (b.origin.z + b.unbuiltSign.position.z)) < 0.5);
+        b.update(0, 0, { reducedMotion: true, night: 0 }); const day = b.signLamp.material.emissiveIntensity;
+        b.update(0, 0, { reducedMotion: true, night: 1 }); assert.ok(b.signLamp.material.emissiveIntensity > day);
+        assert.ok(b.pickables.includes(b.body) && b.pickables.includes(b.plaque)); }
       b.dispose();
     }
   }

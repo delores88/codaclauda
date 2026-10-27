@@ -339,7 +339,7 @@ export class CityView {
         this.legendDistricts = h('div.city-legend-extra',
           legendItem('city', 'Downtown', 'GitHub projects; taller towers reflect activity'),
           legendItem('home', 'Suburbs', 'Local folders; homes grow outward'),
-          legendItem('download', 'Ghost: clone'),
+          legendItem('download', 'Foundation + sign', 'Foundation + sign = repo to clone'),
           legendItem('city-boat', 'Boats: commits', 'Projects with recent commits'),
           legendItem('city-van', 'Van: working home'),
           legendItem('board', 'Clipboard: board agent')),
@@ -478,7 +478,7 @@ export class CityView {
     const spark = world.restSide === 'spark';
     const buildings = spark ? this.spark.buildings.list : this.buildings.list;
     for (const b of buildings) {
-      const height = Math.max(b.size.H + 1, b.roofTop || 0) + (b.jib ? 6 : 0);
+      const height = b.unbuilt ? b.roofTop : Math.max(b.size.H + 1, b.roofTop || 0) + (b.jib ? 6 : 0);
       for (const x of [-b.size.W / 2 - 0.6, b.size.W / 2 + 0.6]) for (const z of [-b.size.D / 2 - 0.6, b.size.D / 2 + 0.6]) for (const y of [0, height]) add(b.worldPoint(x, y, z));
     }
     // The central HQ/foundry is present even with no project buildings.

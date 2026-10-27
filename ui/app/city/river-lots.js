@@ -50,27 +50,58 @@ export function pointInPolygon(point, polygon) {
 }
 export const pointInParcel = (point, parcel) => parcel?.polygons.some(p => pointInPolygon(point, p)) || false;
 
-/** Maximal frontage rectangle for a sampled river boundary, with exact bridge cuts.
- * Between knots the boundary is linear: its extrema occur at the enumerated knots.
- * All x pairs are considered, not just a centred footprint or the parcel's corners. */
+/** Largest frontage rectangle in the clipped polygon. Sweep river-edge heights:
+ * each connected dry interval has width linear in height between polygon vertices.
+ * Its area is quadratic, so check endpoints and its interior stationary point. */
 export function inscribedRectangle(bounds, edge, side, obstacles = []) {
-  let best = null, area = 0;
+  const front = side > 0 ? bounds.z1 : -bounds.z0, back = side > 0 ? bounds.z0 : -bounds.z1;
   const xs = [...new Set([...edge.map(p => p.x), ...obstacles.flatMap(r => [r.x0, r.x1]).filter(x => x > bounds.x0 && x < bounds.x1)])].sort((a, b) => a - b);
   const edgeAt = x => {
     const n = edge.findIndex(p => p.x >= x);
-    if (n <= 0) return edge[0].z;
-    const a = edge[n - 1], b = edge[n]; return a.z + (b.z - a.z) * (x - a.x) / (b.x - a.x);
+    if (n <= 0) return side * edge[0].z;
+    const a = edge[n - 1], b = edge[n]; return side * (a.z + (b.z - a.z) * (x - a.x) / (b.x - a.x));
   };
-  for (let a = 0; a < xs.length - 1; a++) {
-    let boundary = edgeAt(xs[a]);
-    for (let b = a + 1; b < xs.length; b++) {
-      boundary = side > 0 ? Math.max(boundary, edgeAt(xs[b])) : Math.min(boundary, edgeAt(xs[b]));
-      const r = { x0: xs[a], x1: xs[b], z0: side > 0 ? Math.max(bounds.z0, boundary) : bounds.z0, z1: side < 0 ? Math.min(bounds.z1, boundary) : bounds.z1 };
-      for (const obstacle of obstacles) if (rectOverlap(r, obstacle)) {
-        if (side > 0) r.z0 = Math.max(r.z0, obstacle.z1); else r.z1 = Math.min(r.z1, obstacle.z0);
-      }
-      const value = rectArea(r);
-      if (value > area + EPS) { best = r; area = value; }
+  const segments = [];
+  for (let n = 1; n < xs.length; n++) {
+    const x0 = xs[n - 1], x1 = xs[n], mid = (x0 + x1) / 2;
+    const floor = Math.max(back, ...obstacles.filter(o => mid > o.x0 && mid < o.x1 && o.z1 > bounds.z0 && o.z0 < bounds.z1).map(o => side > 0 ? o.z1 : -o.z0));
+    const a = edgeAt(x0), b = edgeAt(x1), cuts = [x0, x1];
+    for (const height of [floor, front]) if (height > Math.min(a, b) && height < Math.max(a, b)) cuts.push(x0 + (x1 - x0) * (height - a) / (b - a));
+    cuts.sort((a, b) => a - b);
+    const at = x => Math.min(front, Math.max(floor, a + (b - a) * (x - x0) / (x1 - x0)));
+    for (let k = 1; k < cuts.length; k++) segments.push({ x0: cuts[k - 1], x1: cuts[k], y0: at(cuts[k - 1]), y1: at(cuts[k]) });
+  }
+  const spans = height => {
+    const runs = [];
+    for (const s of segments) {
+      if (Math.min(s.y0, s.y1) > height + EPS) continue;
+      let left = s.x0, right = s.x1;
+      if (s.y0 > height) left += (s.x1 - s.x0) * (s.y0 - height) / (s.y0 - s.y1);
+      if (s.y1 > height) right = s.x0 + (s.x1 - s.x0) * (height - s.y0) / (s.y1 - s.y0);
+      if (right - left <= EPS) continue;
+      const prior = runs.at(-1);
+      if (prior && left <= prior.x1 + EPS) prior.x1 = right; else runs.push({ x0: left, x1: right });
+    }
+    return runs;
+  };
+  let best = null, area = 0;
+  const consider = height => {
+    for (const run of spans(height)) {
+      const value = (run.x1 - run.x0) * (front - height);
+      if (value > area + EPS) { best = { ...run, z0: side > 0 ? height : -front, z1: side > 0 ? front : -height }; area = value; }
+    }
+  };
+  const levels = [...new Set([back, front, ...segments.flatMap(s => [s.y0, s.y1])])].sort((a, b) => a - b);
+  for (const level of levels) consider(level);
+  for (let n = 1; n < levels.length; n++) {
+    const lo = levels[n - 1], hi = levels[n]; if (hi - lo < EPS) continue;
+    const a = lo + (hi - lo) / 3, b = lo + 2 * (hi - lo) / 3, first = spans(a), last = spans(b);
+    for (let k = 0; k < first.length; k++) {
+      if (!last[k]) continue;
+      const width = first[k].x1 - first[k].x0, slope = ((last[k].x1 - last[k].x0) - width) / (b - a);
+      if (slope <= EPS) continue;
+      const height = (front - (width - slope * a) / slope) / 2;
+      if (height > lo && height < hi) consider(height);
     }
   }
   return best;

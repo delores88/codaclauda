@@ -366,7 +366,7 @@ export class Building {
     if (homePlan) style.body = homePlan.body;
     const m = project.metrics || {};
     const litFrac = Math.max(0.08, Math.min(0.92, 0.12 + (m.glow || 0) * 0.55 + Math.min(m.commits7d || 0, 30) / 60));
-    const sig = JSON.stringify([size.floors, size.footprint, style.key, style.body, project.name, Math.round(litFrac * 20), (m.commits7d || 0) > 0, project.source, !!project.private, unbuilt]);
+    const sig = JSON.stringify([size.floors, size.footprint, size.W, size.D, size.H, style.key, style.body, project.name, Math.round(litFrac * 20), (m.commits7d || 0) > 0, project.source, !!project.private, unbuilt]);
     if (sig === this.sig) return false;
     const previous = this.size;
     const footprintChanged = !previous || previous.footprint !== size.footprint || this.district !== district || this.unbuilt !== unbuilt;
@@ -413,7 +413,7 @@ export class Building {
     if (this.unbuilt) { this.buildUnbuilt(); return; }
     if (this.riverPlan) {
       this.bodyMaterial = toonMaterial(this.style.body, { cache: false });
-      const shell = buildRiverBuilding(this.riverPlan, this.bodyMaterial, this.district, { buildingId: this.id });
+      const shell = buildRiverBuilding(this.riverPlan, this.bodyMaterial, this.district, { buildingId: this.id }, { lit: this.district === 'downtown' ? MATERIALS.glassLit : MATERIALS.homeGlass, dark: this.district === 'downtown' ? MATERIALS.glassDark : MATERIALS.homeGlass });
       this.tower.add(shell); this.body = shell.children[0]; this.pickables.push(...shell.children);
       this.roofTop = this.roofSurface = PAD_TOP + this.size.H + 0.15; this.mountTicker(); return;
     }
@@ -623,7 +623,8 @@ export class Building {
     if (this.unbuilt || !this.tickerInfo || this.ticker || !this.size) return;
     const { W, D, H } = this.size;
     // Picking the band picks the building (same tag as its walls).
-    const home = this.home?.ticker;
+    const topBlock = this.riverPlan?.blocks.at(-1);
+    const home = this.home?.ticker || (topBlock ? { W: topBlock.w, D: topBlock.d, x: 0, y: PAD_TOP + this.size.H, z: topBlock.z, scaleY: this.district === 'suburbs' ? 0.6 : 1 } : null);
     this.ticker = new Ticker({ W: home?.W || W, D: home?.D || D, top: home ? 0 : PAD_TOP + H, tag: this.mirror ? { sparkBuildingId: this.id } : { buildingId: this.id } });
     if (home) { this.ticker.mesh.position.set(home.x, home.y, home.z); this.ticker.mesh.scale.y = home.scaleY; }
     this.ticker.set(this.tickerInfo.segments, { grey: this.tickerInfo.paused });
