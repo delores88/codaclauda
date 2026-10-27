@@ -316,7 +316,7 @@ function unbuiltSignTexture(name) {
   do { context.font = `600 ${fontSize}px "Segoe UI", system-ui, sans-serif`; fontSize -= 2; } while (context.measureText(label).width > 704 && fontSize > 22);
   context.fillStyle = '#60513f'; context.fillText(label, 384, 66, 704);
   context.font = '40px "Segoe UI", system-ui, sans-serif'; context.fillStyle = '#625343';
-  context.fillText('Clone to build', 384, 132, 704);
+  context.fillText('\u2193 Clone to build', 384, 132, 704);
   const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
   return texture;
 }
@@ -390,7 +390,7 @@ export class Building {
     if (this.unbuiltSign) { this.unbuiltSign.removeFromParent(); disposeObject(this.unbuiltSign); this.unbuiltSign = null; }
     for (const child of [...this.tower.children]) { this.tower.remove(child); disposeObject(child); }
     this.pickables = []; this.gear = null; this.flag = null; this.beaconLight = null; this.jib = null; this.chimneyTop = null; this.scaffold = null;
-    this.paintMeshes = []; this.litWindows = null; this.litPanes = []; this.rigTip = null; this.plaque = null; this.roofSurface = null; this.scaffoldFront = null; this.home = null; this.contractor = null;
+    this.paintMeshes = []; this.litWindows = null; this.litPanes = []; this.rigTip = null; this.plaque = null; this.roofSurface = null; this.scaffoldFront = null; this.home = null; this.contractor = null; this.signLamp = null;
     for (const m of this.signs || []) SPARK_SIGNS.delete(m);
     this.signs = [];
   }
@@ -566,18 +566,22 @@ export class Building {
 
   /** Remote-only repositories are clickable plans, with no working construction rig. */
   buildUnbuilt() {
-    const { W, D, H } = this.size, tag = { buildingId: this.id };
-    const ghostHeight = H * 0.83;
-    const geometry = placed(new THREE.BoxGeometry(W, ghostHeight, D), { y: PAD_TOP + ghostHeight / 2 });
-    this.bodyMaterial = toonMaterial('#b9d4e4', { transparent: true, opacity: 0.23, cache: false });
-    this.bodyMaterial.depthWrite = false;
-    const body = new THREE.Mesh(geometry, this.bodyMaterial);
-    body.userData = { ...tag, noOutline: true };
-    const frame = new THREE.LineSegments(new THREE.EdgesGeometry(geometry), new THREE.LineBasicMaterial({ color: '#a6bdcb', transparent: true, opacity: 0.18, depthWrite: false }));
-    frame.raycast = () => {};
-    this.tower.add(body, frame); this.body = body; this.pickables.push(body);
+    const { W, D } = this.size, tag = { buildingId: this.id };
+    this.bodyMaterial = toonMaterial('#d9d4c7', { cache: false });
+    const body = new THREE.Mesh(placed(new THREE.BoxGeometry(W, 0.15, D), { y: PAD_TOP + 0.075 }), this.bodyMaterial);
+    body.name = 'clone-foundation'; body.userData = { ...tag }; body.receiveShadow = true;
+    addOutline(body, { thickness: 0.02 });
+    this.tower.add(body); this.body = body; this.pickables.push(body);
+    // Three solid timber pallets stacked at a rear corner of the foundation.
+    const timber = new Batch();
+    for (let level = 0; level < 3; level++) {
+      const x = -W / 2 + 0.8, z = -D / 2 + 0.75, y = PAD_TOP + 0.15 + level * 0.22;
+      for (const dx of [-0.45, 0.45]) timber.add('#987047', placed(new THREE.BoxGeometry(0.14, 0.13, 1.0), { x: x + dx, y: y + 0.065, z }));
+      for (let k = 0; k < 4; k++) timber.add('#c89b66', placed(new THREE.BoxGeometry(1.2, 0.08, 0.22), { x, y: y + 0.17, z: z - 0.39 + k * 0.26 }));
+    }
+    timber.build(this.tower, { tag, outline: 0.015 });
     const sign = new THREE.Group(); sign.name = `unbuilt-sign:${this.id}`;
-    sign.position.set(0, PAD_TOP, D / 2 + 0.33);
+    sign.position.set(0, PAD_TOP, 5.15 - CZ);
     const plaqueW = Math.min(W * 0.65, 2.6), plaqueH = plaqueW / 4;
     const posts = new THREE.Mesh(mergeParts([-plaqueW * 0.35, plaqueW * 0.35].map(x => placed(new THREE.BoxGeometry(0.1, 0.8, 0.1), { x, y: 0.4 }))), toonMaterial('#b58c62'));
     addOutline(posts, { thickness: 0.02 }); sign.add(posts);
@@ -587,7 +591,9 @@ export class Building {
     plaque.position.set(0, 0.88, 0.056); plaque.userData = { ...tag };
     sign.add(plaque); this.group.add(sign); this.unbuiltSign = sign;
     this.pickables.push(backing, plaque); this.plaque = plaque;
-    this.roofTop = this.roofSurface = PAD_TOP + ghostHeight;
+    const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.12, 0.18), toonMaterial('#ffe3a3', { emissive: '#ffc766', emissiveIntensity: 0.1, cache: false }));
+    lamp.position.set(0, 1.35, 0.12); lamp.name = 'clone-sign-lamp'; sign.add(lamp); this.signLamp = lamp;
+    this.roofTop = this.roofSurface = PAD_TOP + 1.5;
   }
 
   /* Access ticker: segments from ticker.js tickerSegments (null: none); paused: grey and still. */
@@ -767,7 +773,7 @@ export class Building {
     if (this.hover === on) return;
     this.hover = on;
     if (this.mirror) { this.paintSpark(); return; }
-    if (this.unbuilt) { this.bodyMaterial.color.set(on ? '#cce2ee' : '#b9d4e4'); return; }
+    if (this.unbuilt) { this.bodyMaterial.color.set(on ? '#eee6ce' : '#d9d4c7'); return; }
     this.bodyMaterial.emissive.set(on ? '#5b4bd6' : '#000000');
     this.bodyMaterial.emissiveIntensity = on ? 0.22 : 1;
   }
@@ -796,6 +802,7 @@ export class Building {
   get door() { return this.home ? { x: this.origin.x + this.home.door.x, z: this.origin.z + this.home.door.z + 0.2 } : { x: this.origin.x, z: this.origin.z + this.size.D / 2 + 0.3 }; }
   /** Work spot k in front of the facade, facing the building. */
   workSpot(k) {
+    if (this.unbuiltSign) return { x: this.origin.x + ((k % 5) - 2) * 0.48, z: this.origin.z + this.unbuiltSign.position.z + 0.42 + Math.floor(k / 5) * 0.45, fx: 0, fz: -1 };
     if (this.home) return { x: this.door.x + ((k % 3) - 1) * 0.4, z: this.door.z + 0.6 + Math.floor(k / 3) * 0.5, fx: 0, fz: -1 };
     const offsets = [0, -1.3, 1.3, -2.6, 2.6, -0.65, 0.65, -1.95, 1.95];
     const limit = this.size.W / 2 - 0.25;
@@ -837,6 +844,7 @@ export class Building {
 
   /** Returns false when a sink animation has finished and the building can be disposed. */
   update(dt, elapsed, env) {
+    if (this.signLamp) this.signLamp.material.emissiveIntensity = 0.1 + (env.night || 0) * 0.9;
     if ((this.suburbs || this.district === 'downtown') && env.reducedMotion && this.anim) {
       if (this.anim.kind === 'sink') return false;
       this.anim = null; this.tower.scale.set(1, 1, 1); this.padGroup.scale.setScalar(1);

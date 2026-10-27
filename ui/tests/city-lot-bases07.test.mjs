@@ -81,8 +81,8 @@ test('ghost lots have lawn and a street path instead of a solid pad; clone sign 
   assert.ok(b.padGroup.getObjectByName('downtown-lawn'));
   assert.ok(b.padGroup.getObjectByName('downtown-entry-walk'));
   assert.equal(b.padGroup.getObjectByName('downtown-paving'), undefined);
-  assert.ok(drawn.includes('Clone to build'));
-  assert.ok(b.unbuilt && b.bodyMaterial.opacity < 0.25);
+  assert.ok(drawn.includes('\u2193 Clone to build'));
+  assert.ok(b.unbuilt && b.bodyMaterial.opacity === 1);
   assert.ok(b.pickables.includes(b.body) && b.pickables.includes(b.plaque));
   assert.equal(b.plaque.userData.buildingId, b.id);
   b.group.updateMatrixWorld(true);

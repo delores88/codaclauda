@@ -377,7 +377,7 @@ export class CityView {
       h('dl.city-help-list',
         ...[['M', 'Find me: fly to your avatar'], ['G', 'Street view behind your avatar (W/S walk, A/D turn, Esc exits)'], ['V', 'Flip to the other side'], ['Left-drag', 'Orbit'], ['Drag up / down', 'Turn the island over (Spark side on)'], ['Pan / P', 'Toggle drag-to-pan mode'], ['Right-drag', 'Pan'], ['Scroll / pinch', 'Zoom toward the pointer; keep zooming in for street view'], ['W A S D / arrows', 'Move'], ['Q / E', 'Rotate'], ['Click an agent', 'Talk to them (Esc leaves)'], ['Drag an agent', 'Drop it on a building to give it a task there'], ['Click', 'Select a building or your avatar'], ['Click an empty plot', 'Start a new project there'], ['Double-click a building', 'Center it on either face'], ['Double-click ground', 'Walk your avatar there'], ['Click a boat label', 'Center that boat'], ['F / Focus', 'Center the selected building, agent or boat'], ['Jump', 'Select and center a building or agent'], ['H', 'Fit the whole island'], ['Esc', 'Deselect']]
           .flatMap(([k, v]) => [h('dt', h('kbd', k)), h('dd', v)])),
-      h('p.city-note', 'A winding river connects Downtown (GitHub projects) and Suburbs (local folders without a repo). Road bridges link the districts. Pale Downtown ghosts have a ground sign and open a panel where you can clone the repo. Tickers sit on real buildings only. Both districts keep at least three empty plots and grow without moving placed buildings.'),
+      h('p.city-note', 'A winding river connects Downtown (GitHub projects) and Suburbs (local folders without a repo). Road bridges link the districts. Foundation + sign = repo to clone. Click either to open Clone to build. Tickers sit on real buildings only. Both districts keep at least three empty plots and grow without moving placed buildings.'),
       h('p.city-note', 'Suburbs have low modern homes with at most two storeys. Larger projects add wings and a wider footprint; Downtown towers grow taller. A contractor van and ladder show an agent working at a home, and a solar-panel glint marks a busy home.'),
       h('p.city-note', 'Sailboats, rowboats, tugboats, barges, paddle steamers and canoes travel a continuous river loop, over the waterfalls and along the Spark face. Boat labels show projects with recent commits; barges carry several names on their crates. Reduced motion moors boats at the docks on both faces. Click a bridge to walk there. A red rooftop beacon and CI failing ticker mark failed builds; weather is independent.'),
       h('button.btn.small.primary', { type: 'button', onclick: () => this.toggleHelp(false) }, 'Got it'));
@@ -1293,6 +1293,10 @@ export class CityView {
     this.renderToolbarState();
   }
   onClick(target) {
+    if (target?.kind === 'building' && !this.islands?.current && this.world.side === 'pc') {
+      const project = this.buildings.get(target.id)?.project;
+      if (project && isUnbuilt(project)) { this.cloneOutline(project); return; }
+    }
     // Talk mode: another agent switches the conversation; empty ground (or anything else but you) leaves it.
     if (this.talk) { if (target?.kind === 'agent') this.enterTalk(target.id); else if (target?.kind !== 'owner') this.exitTalk(); return; }
     if (!target) { this.select(null); return; }
