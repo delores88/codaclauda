@@ -1509,7 +1509,10 @@ mod tests {
         let command = |exe: &str, args: &[&str]| QueueCommand {
             exe: system.join(exe), args: args.iter().map(OsString::from).collect(), cwd: cwd.clone(), env: launch_env(),
         };
-        let found = run_queue(&command("where.exe", &["where"]), Duration::from_secs(20), &|| false);
+        // Keep this fixture lookup from enumerating the caller's PATH.
+        let mut lookup = command("where.exe", &[]);
+        lookup.args.push(system.join("where.exe").into_os_string());
+        let found = run_queue(&lookup, Duration::from_secs(20), &|| false);
         assert_eq!(found.ended, Ended::Exited(0));
         assert!(found.stdout.to_ascii_lowercase().contains("where.exe"));
         let started = Instant::now();
