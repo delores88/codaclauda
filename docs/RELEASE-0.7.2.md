@@ -3,6 +3,18 @@
 This candidate extends the completed 0.7.1 release. Source behavior below is
 separate from installed acceptance and publication.
 
+## DGXBridge executable identity
+
+Windows can redirect an ordinary installed bridge path into a packaged host's
+older private LocalCache copy even when the process reports no package identity.
+CodaClauda now checks the resolved file against the saved executable before
+starting bridge operations. A mismatch stops the call with an explanation;
+it does not replace the binding or change the bridge's configuration. Saving an
+ordinary executable that resolves into a package cache is also refused.
+After existing chats are idle, opening CodaClauda's installed shortcut from
+Windows Explorer provides the normal owner launch workflow. Actual connectivity
+must still be verified there; the guard alone does not establish a Spark connection.
+
 ## City conversations
 
 - Local building menus offer Claude and Codex through the managed session

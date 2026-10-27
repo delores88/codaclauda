@@ -392,8 +392,7 @@ pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value
             owner_api(store, "status", &json!({}), cli)
         }
         "spark-config" => {
-            let path = Path::new(field(a, "executable")?).canonicalize()?;
-            ensure!(path.is_file(), "Spark executable missing");
+            let path = spark::configured_executable(Path::new(field(a, "executable")?))?;
             store.compatible_transaction(|s| {
                 s.spark = Some(path.to_string_lossy().into());
                 Ok(())

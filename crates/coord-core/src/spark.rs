@@ -23,6 +23,92 @@ const OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 const LOG_LIMIT: u64 = 1024 * 1024;
 static FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+// A child can retain Windows filesystem redirection even when
+// GetCurrentPackageFullName reports APPMODEL_ERROR_NO_PACKAGE. Compare the
+// owner's recorded target with the actual resolved file, not package identity
+// or two freshly canonicalized paths (both could resolve to the stale copy).
+#[cfg(windows)]
+fn windows_path_key(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    let path: Vec<_> = path
+        .as_os_str()
+        .encode_wide()
+        .map(|c| if c == b'/' as u16 { b'\\' as u16 } else { c })
+        .collect();
+    if path.len() >= 8
+        && windows_path_equal(&path[..8], &r"\\?\UNC\".encode_utf16().collect::<Vec<_>>())
+    {
+        [vec![b'\\' as u16; 2], path[8..].to_vec()].concat()
+    } else if path.starts_with(&r"\\?\".encode_utf16().collect::<Vec<_>>()) {
+        path[4..].to_vec()
+    } else {
+        path
+    }
+}
+
+#[cfg(windows)]
+fn windows_path_equal(left: &[u16], right: &[u16]) -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CompareStringOrdinal(
+            a: *const u16,
+            a_len: i32,
+            b: *const u16,
+            b_len: i32,
+            ignore_case: i32,
+        ) -> i32;
+    }
+    let (Ok(a_len), Ok(b_len)) = (i32::try_from(left.len()), i32::try_from(right.len())) else {
+        return false;
+    };
+    // CSTR_EQUAL. An API failure also fails closed. Keep UTF-16 intact, including
+    // filenames that cannot be represented by a lossless Rust String.
+    unsafe { CompareStringOrdinal(left.as_ptr(), a_len, right.as_ptr(), b_len, 1) == 2 }
+}
+
+#[cfg(windows)]
+fn package_cache_path(path: &Path) -> bool {
+    let path = windows_path_key(path);
+    let parts: Vec<_> = path.split(|c| *c == b'\\' as u16).collect();
+    let matches = |part: &[u16], expected: &str| {
+        windows_path_equal(part, &expected.encode_utf16().collect::<Vec<_>>())
+    };
+    parts.windows(5).any(|p| {
+        matches(p[0], "appdata")
+            && matches(p[1], "local")
+            && matches(p[2], "packages")
+            && !p[3].is_empty()
+            && matches(p[4], "localcache")
+    })
+}
+
+#[cfg(windows)]
+fn check_windows_target(requested: &Path, resolved: &Path, configuring: bool) -> Result<()> {
+    let same = windows_path_equal(&windows_path_key(requested), &windows_path_key(resolved));
+    if configuring {
+        ensure!(
+            same || !package_cache_path(resolved),
+            "Windows redirected the selected DGXBridge executable into a packaged app's private LocalCache. The saved bridge path was not changed. When existing chats are idle, close CodaClauda and open its installed shortcut from Windows Explorer, then save the installed bridge executable again."
+        );
+    } else {
+        ensure!(
+            same,
+            "Windows resolved the saved DGXBridge executable to a different file. CodaClauda did not start that copy. When existing chats are idle, close CodaClauda and open its installed shortcut from Windows Explorer, then check the bridge connection. If the installed bridge moved, explicitly save its new executable in Agent setup."
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn configured_executable(requested: &Path) -> Result<PathBuf> {
+    let resolved = requested
+        .canonicalize()
+        .context("Could not resolve Spark executable")?;
+    ensure!(resolved.is_file(), "Spark executable missing");
+    #[cfg(windows)]
+    check_windows_target(requested, &resolved, true)?;
+    Ok(resolved)
+}
+
 struct Prepared {
     argv: Vec<OsString>,
     workload: Option<Vec<String>>,
@@ -301,13 +387,19 @@ pub fn invoke(
         "Configure an absolute Spark executable path"
     );
     #[cfg(windows)]
-    ensure!(
-        executable
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("exe")),
-        "Spark executable must be a native Windows executable"
-    );
+    {
+        ensure!(
+            executable
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("exe")),
+            "Spark executable must be a native Windows executable"
+        );
+        let resolved = executable
+            .canonicalize()
+            .context("Could not resolve saved Spark executable")?;
+        check_windows_target(executable, &resolved, false)?;
+    }
     ensure!(
         workspace.is_absolute() && workspace.is_dir(),
         "Spark workspace must be an absolute project directory"
@@ -422,6 +514,111 @@ pub fn invoke(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(windows)]
+    mod windows_targets {
+        use super::*;
+        const ORDINARY: &str = r"C:\Users\Owner\AppData\Local\DGXBridge\bin\sparkdev.exe";
+        const REDIRECTED: &str = r"\\?\C:\Users\Owner\AppData\Local\Packages\Example.Host_123\LocalCache\Local\DGXBridge\bin\sparkdev.exe";
+        fn check_windows_target(requested: &str, resolved: &str, configuring: bool) -> Result<()> {
+            super::check_windows_target(Path::new(requested), Path::new(resolved), configuring)
+        }
+        fn package_cache_path(path: &str) -> bool {
+            super::package_cache_path(Path::new(path))
+        }
+
+        #[test]
+        fn rejects_redirected_binding_before_bridge_launch() {
+            let error = check_windows_target(ORDINARY, REDIRECTED, false).unwrap_err();
+            assert!(error.to_string().contains("did not start that copy"));
+            assert!(check_windows_target(REDIRECTED, ORDINARY, false).is_err());
+        }
+
+        #[test]
+        fn configuration_does_not_silently_save_package_cache_redirection() {
+            let error = check_windows_target(ORDINARY, REDIRECTED, true).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("saved bridge path was not changed")
+            );
+            // Explicit owner choices remain explicit; there is no inferred fallback.
+            assert!(check_windows_target(REDIRECTED, REDIRECTED, true).is_ok());
+            assert!(
+                check_windows_target(
+                    REDIRECTED,
+                    &REDIRECTED.replace("Example.Host_123", "Other.Host_456"),
+                    true
+                )
+                .is_err()
+            );
+            assert!(check_windows_target(ORDINARY, ORDINARY, true).is_ok());
+        }
+
+        #[test]
+        fn binding_identity_allows_windows_case_and_verbatim_prefixes_only() {
+            assert!(
+                check_windows_target(
+                    ORDINARY,
+                    &format!(r"\\?\{}", ORDINARY.to_uppercase()),
+                    false
+                )
+                .is_ok()
+            );
+            assert!(
+                check_windows_target(
+                    "C:/Bridge/sparkdev.exe",
+                    r"\\?\c:\bridge\sparkdev.exe",
+                    false
+                )
+                .is_ok()
+            );
+            assert!(
+                check_windows_target(
+                    r"\\server\share\sparkdev.exe",
+                    r"\\?\UNC\SERVER\share\sparkdev.exe",
+                    false
+                )
+                .is_ok()
+            );
+            assert!(check_windows_target(ORDINARY, r"C:\Other\sparkdev.exe", false).is_err());
+            assert!(
+                check_windows_target(
+                    ORDINARY,
+                    r"\\localhost\C$\Users\Owner\AppData\Local\DGXBridge\bin\sparkdev.exe",
+                    false
+                )
+                .is_err()
+            );
+        }
+
+        #[test]
+        fn package_cache_detection_uses_components_and_preserves_normal_links() {
+            assert!(package_cache_path(
+                &REDIRECTED.to_uppercase().replace('\\', "/")
+            ));
+            assert!(!package_cache_path(
+                r"C:\work\packages\Example\LocalCache\sparkdev.exe"
+            ));
+            assert!(!package_cache_path(
+                r"C:\Users\Owner\AppData\Local\Packages\Example\LocalCacheBackup\sparkdev.exe"
+            ));
+            assert!(check_windows_target(r"C:\BridgeLink\sparkdev.exe", ORDINARY, true).is_ok());
+        }
+
+        #[test]
+        fn windows_identity_preserves_non_ascii_and_unpaired_utf16() {
+            use std::os::windows::ffi::OsStringExt;
+            assert!(
+                check_windows_target(r"C:\Üser\sparkdev.exe", r"\\?\c:\üser\SPARKDEV.EXE", false)
+                    .is_ok()
+            );
+            let left = PathBuf::from(OsString::from_wide(&[67, 58, 92, 0xd800, 92, 97]));
+            let right = PathBuf::from(OsString::from_wide(&[67, 58, 92, 0xd801, 92, 97]));
+            assert!(super::check_windows_target(&left, &left, false).is_ok());
+            assert!(super::check_windows_target(&left, &right, false).is_err());
+        }
+    }
 
     #[test]
     fn prepares_exact_workload_without_shell_interpolation() {
