@@ -1509,9 +1509,11 @@ mod tests {
         let command = |exe: &str, args: &[&str]| QueueCommand {
             exe: system.join(exe), args: args.iter().map(OsString::from).collect(), cwd: cwd.clone(), env: launch_env(),
         };
-        // Keep this fixture lookup from enumerating the caller's PATH.
+        // where.exe uses directory:pattern to avoid enumerating the caller's PATH.
         let mut lookup = command("where.exe", &[]);
-        lookup.args.push(system.join("where.exe").into_os_string());
+        let mut query = system.as_os_str().to_os_string();
+        query.push(":where.exe");
+        lookup.args.push(query);
         let found = run_queue(&lookup, Duration::from_secs(20), &|| false);
         assert_eq!(found.ended, Ended::Exited(0));
         assert!(found.stdout.to_ascii_lowercase().contains("where.exe"));
