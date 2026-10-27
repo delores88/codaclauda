@@ -442,7 +442,6 @@ button.city-label:focus-visible { outline: 2px solid var(--accent); outline-offs
 .city-session-provider.is-codex { background: var(--codex-soft); color: var(--codex); border-color: var(--codex); }
 .city-session-provider:disabled { opacity: .5; }
 .city-session-buttons .city-access-chip { margin-left: auto; white-space: nowrap; }
-.city-session-prompt { width: 100%; min-width: 0; font-size: 12px; }
 .city-session-help { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--muted); }
 .city-session-help .city-link { font-size: inherit; white-space: nowrap; }
 .city-session-error { margin: 0; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }

@@ -20,7 +20,7 @@ const agent = id => ({ id: `sess:${id}`, sessionId: id, kind: 'session', provide
 // Use the real City pending handles and exit lifecycle. Rendering and NPC geometry
 // are bounded fakes here; their independent acceptance is in the City talk tests.
 function fixture() {
-  const events = [], starts = [], sends = [], notices = [], failures = [], resolved = [];
+  const events = [], starts = [], sends = [], failures = [], resolved = [];
   const native = deferred(), agents = [agent('already-running')];
   const npcIds = new Set(agents.map(a => a.id));
   const store = { project: id => project.ids.includes(id) ? project : null, projectAccess: () => ({ level: 'read' }) };
@@ -42,15 +42,15 @@ function fixture() {
     syncCameraFramingMode() {}, closeCluster() {}, hideZoomHint() {}, setHover() {}, updateCameraFrame() {}, renderToolbarState() {},
     select: target => { view.selection = target; events.push(['select', target]); },
     focusSelection: () => events.push(['focus-selection']), stage: { focus: () => events.push(['stage-focus']) },
-    buildingSessions: { input: { focus: options => events.push(['input-focus', options]) }, start: () => assert.fail('Opening controls must never launch') },
+    buildingSessions: { focus: () => events.push(['provider-focus']), start: () => assert.fail('Opening controls must never launch') },
   });
   const client = {
     start: options => { starts.push(options); events.push(['native', options]); return native.promise; },
     send: async (id, text) => { sends.push([id, text]); events.push(['send', id, text]); },
   };
   const launch = new BuildingSessionLaunch({ store, sessions: client,
-    ...buildingTalkCallbacks(view, { notice: message => notices.push(message) }) });
-  return { view, store, client, launch, native, agents, events, starts, sends, notices, failures, resolved,
+    ...buildingTalkCallbacks(view) });
+  return { view, store, client, launch, native, agents, events, starts, sends, failures, resolved,
     add: (id, { npc = true } = {}) => { const next = agent(id); agents.push(next); if (npc) npcIds.add(next.id); return next; },
     spawn: id => npcIds.add(`sess:${id}`),
     // The frame stages the owner independently of session admission/registry updates.
@@ -60,12 +60,12 @@ function fixture() {
 
 test('building start enters pending talk before native start and resolves only the admitted session', async () => {
   const f = fixture();
-  const operation = f.launch.start('codex', project, '  Work here  ');
+  const operation = f.launch.start('codex', project);
   const pending = f.view.talk;
   assert.ok(f.launch.pending);
   assert.deepEqual(pending.pending, { provider: 'codex', projectId: project.id, label: 'New session' });
   assert.ok(f.events.findIndex(e => e[0] === 'open') < f.events.findIndex(e => e[0] === 'native'));
-  assert.equal(f.launch.start('claude', project, 'second click'), operation);
+  assert.equal(f.launch.start('claude', project), operation);
   assert.equal(f.starts.length, 1);
   assert.deepEqual(f.starts[0], { projectId: project.id, cwd: project.path, access: 'read', playwright: false, provider: 'codex', title: 'Codex · Alpha' });
   f.add('unrelated');
@@ -78,7 +78,7 @@ test('building start enters pending talk before native start and resolves only t
   assert.equal(f.view.talk, pending, 'pending presentation stays the same conversation');
   assert.ok(f.view.talk.pending, 'admission before owner staging stays pending');
   assert.equal(f.view.talk.expectedId, expectedAgent.id);
-  assert.deepEqual(f.sends, [['admitted', 'Work here']], 'presentation staging does not delay the first prompt');
+  assert.deepEqual(f.sends, [], 'admission creates a blank session without a turn');
   f.stageOwner();
   assert.equal(f.view.resolvePendingTalk(), false, 'a registry row without its NPC cannot become live');
   f.spawn('admitted');
@@ -86,16 +86,19 @@ test('building start enters pending talk before native start and resolves only t
   assert.equal(f.view.talk.id, expectedAgent.id);
   assert.equal(f.view.talk.pending, null);
   assert.deepEqual(f.resolved, [expectedAgent]);
-  assert.deepEqual(f.sends, [['admitted', 'Work here']]);
+  assert.deepEqual(f.sends, []);
   assert.equal(f.events.filter(e => e[0] === 'open').length, 1);
 });
 
-test('the exact admitted id remains pending until its own registry row arrives', async () => {
+test('a blank building session opens existing City talk only at its admitted id, without sending', async () => {
   const f = fixture();
   const operation = f.launch.start('claude', project);
   f.native.resolve({ id: 'expected' });
   await operation;
   assert.equal(f.view.talk.expectedId, 'sess:expected');
+  assert.equal(f.starts.length, 1);
+  assert.equal(f.starts[0].provider, 'claude');
+  assert.equal(f.events.filter(e => e[0] === 'open').length, 1);
   assert.ok(f.view.talk.pending);
   f.stageOwner();
   f.add('different');
@@ -103,7 +106,7 @@ test('the exact admitted id remains pending until its own registry row arrives',
   const expected = f.add('expected');
   assert.equal(f.view.resolvePendingTalk(), true);
   assert.deepEqual(f.resolved, [expected]);
-  assert.equal(f.sends.length, 0, 'an empty initial prompt starts no turn');
+  assert.equal(f.sends.length, 0, 'opening the conversation starts no turn');
 });
 
 for (const action of ['close', 'switch', 'hide', 'graphics-failure']) {
@@ -140,7 +143,7 @@ for (const action of ['close', 'switch']) {
 
 test('native refusal fails pending talk without inventing a session or send', async () => {
   const f = fixture(), refusal = new Error('Provider unavailable');
-  const operation = f.launch.start('claude', project, 'Keep the owner prompt');
+  const operation = f.launch.start('claude', project);
   f.native.reject(refusal);
   await assert.rejects(operation, error => error === refusal);
   assert.equal(f.view.talk.failed, true);
@@ -151,33 +154,26 @@ test('native refusal fails pending talk without inventing a session or send', as
   assert.equal(f.launch.recovery.size, 0);
 });
 
-test('first-send failure preserves the live session; explicit recovery and retry never restart it', async () => {
-  const f = fixture(), delivery = deferred(), sendReached = deferred();
-  f.client.send = (id, text) => { f.sends.push([id, text]); sendReached.resolve(); return delivery.promise; };
-  const operation = f.launch.start('codex', project, 'Keep this prompt');
+test('failed blank-session presentation recovers the admitted conversation without restart or send', async () => {
+  const f = fixture(), present = f.launch.onStarted;
+  f.launch.onStarted = (session, meta) => {
+    if (meta.origin === 'started') throw new Error('Conversation temporarily unavailable');
+    return present(session, meta);
+  };
+  const operation = f.launch.start('codex', project);
   f.stageOwner();
   f.add('admitted'); f.native.resolve({ id: 'admitted' });
-  await sendReached.promise;
-  assert.equal(f.view.talk.id, 'sess:admitted');
-  f.view.exitTalk({ instant: true });
-  const opens = f.events.filter(e => e[0] === 'open').length;
-  delivery.reject(new Error('Send temporarily unavailable'));
   const record = await operation;
-  assert.equal(f.view.talk, null, 'a send-error notification cannot reopen a closed conversation');
-  assert.equal(f.events.filter(e => e[0] === 'open').length, opens);
-  assert.equal(f.failures.length, 0, 'a send error is not a session-start failure');
-  assert.match(record.error, /Session started.*Send temporarily unavailable/);
-  assert.equal(record.prompt, 'Keep this prompt');
+  assert.match(record.openError, /Conversation temporarily unavailable/);
   assert.equal(f.launch.recovery.get(project.id), record);
-  assert.deepEqual(f.notices, [record.error]);
+  f.view.exitTalk({ instant: true });
   await f.launch.open(record);
   assert.equal(f.view.talk.id, 'sess:admitted');
   assert.equal(f.view.talk.pending, null, 'Open session uses its known identity, not another pending start');
-  f.client.send = async (id, text) => { f.sends.push([id, text]); };
-  await f.launch.retry(project.id);
   assert.equal(f.starts.length, 1);
-  assert.deepEqual(f.sends, [['admitted', 'Keep this prompt'], ['admitted', 'Keep this prompt']]);
-  assert.equal(record.prompt, ''); assert.equal(record.error, '');
+  assert.deepEqual(f.sends, []);
+  assert.equal(f.failures.length, 0, 'an opening error is not a native start failure');
+  assert.equal(record.openError, '');
   assert.equal(f.launch.recovery.size, 0);
   assert.equal(f.view.talk.id, 'sess:admitted');
 });
@@ -199,8 +195,8 @@ test('New session here reopens controls at the canonical local building without 
   f.view.openBuildingSessionControls('gh:sample/alpha');
   assert.equal(f.view.talk, null);
   assert.deepEqual(f.view.selection, { kind: 'building', id: project.id });
-  assert.deepEqual(f.events.filter(e => ['close', 'select', 'focus-selection', 'input-focus'].includes(e[0])), [
-    ['close'], ['select', { kind: 'building', id: project.id }], ['focus-selection'], ['input-focus', { preventScroll: true }],
+  assert.deepEqual(f.events.filter(e => ['close', 'select', 'focus-selection', 'provider-focus'].includes(e[0])), [
+    ['close'], ['select', { kind: 'building', id: project.id }], ['focus-selection'], ['provider-focus'],
   ]);
   assert.equal(f.starts.length, 0);
   assert.equal(f.sends.length, 0);

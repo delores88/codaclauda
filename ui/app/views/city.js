@@ -405,7 +405,7 @@ export class CityView {
     this.cityRoot = h('div.city-root', this.stage, ...this.bars, this.overlay, this.hud, this.legend, this.machinesCard, this.streetHint, this.zoomHint, this.toolbar, this.help, this.panel, this.empty, this.leaveBtn, this.talkPanel.node, this.fallback, this.dragGhost);
     this.root.append(this.cityRoot);
     this.buildingSessions = new BuildingSessionActions({ store: this.store, sessions,
-      ...buildingTalkCallbacks(this, { notice: message => toast(message, { kind: 'error', timeout: 9000 }) }),
+      ...buildingTalkCallbacks(this),
     });
     if (!storage.get(HELP_KEY)) this.help.hidden = false;
   }
@@ -1465,7 +1465,7 @@ export class CityView {
     this.exitTalk();
     this.select({ kind: 'building', id: project.id });
     this.focusSelection();
-    this.buildingSessions.input.focus({ preventScroll: true });
+    this.buildingSessions.focus();
   }
   refreshPanel() {
     const s = this.selection;

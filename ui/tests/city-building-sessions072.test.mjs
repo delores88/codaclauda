@@ -4,7 +4,6 @@ import { BuildingSessionActions, BuildingSessionLaunch, buildingProviders, offer
 import { startProjectSession } from '../app/session-start.js';
 
 const project = { id: 'local:c:/sample/project', name: 'Sample', path: 'C:/sample/project' };
-const found = ['claude', 'codex'].map(agent => ({ agent, executable: `${agent}.exe`, supported: true, authenticated: true }));
 const store = { projectAccess: () => ({ level: 'read', playwright: true }) };
 
 // Exercise the component's real refresh/start methods with only their DOM property surface.
@@ -12,9 +11,9 @@ function actionState(candidate, sessions) {
   const actions = Object.assign(Object.create(BuildingSessionActions.prototype), {
     project: candidate, context: { side: 'pc', remote: false }, sessions,
     store: { ...store, project: id => id === candidate.id ? candidate : null, agents: [{ id: 'busy-agent', status: 'active', currentProjectId: candidate.id }] },
-    phase: 'ready', found, selectedProvider: 'claude', error: '', destroyed: false, drafts: new Map(),
+    error: '', destroyed: false,
     node: { hidden: true }, buttons: ['claude', 'codex'].map(provider => ({ hidden: false, dataset: { provider } })),
-    access: {}, input: {}, hint: {}, check: {}, errorNode: {}, recoveryNode: {}, retry: {}, onStateChange: () => {},
+    access: {}, hint: {}, errorNode: {}, recoveryNode: {}, onStateChange: () => {},
   });
   actions.launch = new BuildingSessionLaunch({ store: actions.store, sessions, onChange: () => actions.refresh() });
   return actions;
@@ -29,28 +28,20 @@ test('new sessions are offered only for real local buildings on This PC', () => 
   ]) assert.equal(offersBuildingSession(candidate, context), false);
 });
 
-test('provider choices require installed, supported, explicitly authenticated CLIs', () => {
-  assert.deepEqual(buildingProviders(found).map(p => p.available), [true, true]);
-  const cases = [
-    [[], /not installed/],
-    [[{ ...found[0], authenticated: false }], /Sign in/],
-    [[{ ...found[0], authenticated: undefined }], /Sign in/],
-    [[{ ...found[0], supported: false }], /Update/],
-    [[{ ...found[0], executable: '' }], /not installed/],
-  ];
-  for (const [candidates, reason] of cases) {
-    const claude = buildingProviders(candidates)[0];
-    assert.equal(claude.available, false); assert.match(claude.reason, reason);
-  }
-  assert.equal(buildingProviders([{ ...found[0], executable: '', path: 'claude.exe' }])[0].available, true);
+test('both provider choices use managed session availability without claiming CLI detection', () => {
+  assert.deepEqual(buildingProviders(true).map(p => [p.id, p.available, p.reason]), [
+    ['claude', true, ''], ['codex', true, ''],
+  ]);
 });
 
-test('unknown, checking, failed discovery and missing session support fail closed', () => {
-  for (const phase of ['idle', 'checking', 'error']) {
-    assert.equal(buildingProviders(found, phase).some(p => p.available), false);
-    assert.ok(buildingProviders(found, phase).every(p => p.reason));
+test('unknown and unavailable managed session support disable both choices and starts', async () => {
+  for (const available of [false, null, undefined]) {
+    const actions = actionState(project, { available, start: () => assert.fail('Unavailable engine cannot start') });
+    actions.refresh();
+    assert.ok(actions.buttons.every(button => button.disabled && button.title));
+    await actions.start('claude');
+    await actions.start('codex');
   }
-  for (const availability of [false, null]) assert.equal(buildingProviders(found, 'ready', availability).some(p => p.available), false);
 });
 
 test('occupied and busy local projects retain the visible New session block and both ready providers', () => {
@@ -67,17 +58,66 @@ test('occupied and busy local projects retain the visible New session block and 
   }
 });
 
-test('busy project keeps both unavailable providers visible, disabled with an explanatory hover reason', () => {
-  const actions = actionState({ ...project, status: 'busy' }, { available: true, list: [{ id: 'working', status: 'running', projectId: project.id }], running: () => true });
-  actions.found = [{ ...found[0], authenticated: false }]; // Claude needs login; Codex is absent.
+test('missing legacy Claude discovery cannot veto an explicit blank managed session', async () => {
+  const starts = [], opens = [], sends = [];
+  const actions = actionState({ ...project, status: 'busy' }, {
+    available: true,
+    start: async options => { starts.push(options); return { id: 'managed-claude', ...options }; },
+    send: async (...args) => sends.push(args),
+  });
+  // The old board adapter may see only Codex; it is not the managed resolver.
+  actions.found = [
+    { agent: 'codex', executable: 'codex.exe', supported: true, authenticated: true },
+    { agent: 'claude', executable: null, supported: false, authenticated: false },
+  ];
+  actions.discover = () => assert.fail('Building controls must not probe the legacy board adapter');
+  actions.launch.onStarted = session => opens.push(session.id);
+  actions.setProject(project);
   actions.refresh();
   assert.equal(actions.node.hidden, false);
-  assert.deepEqual(actions.buttons.map(button => [button.dataset.provider, button.hidden, button.disabled]), [
-    ['claude', false, true], ['codex', false, true],
-  ]);
-  assert.match(actions.buttons[0].title, /Sign in to Claude/);
-  assert.match(actions.buttons[1].title, /Codex is not installed/);
-  assert.deepEqual(buildingProviders([], 'ready').map(provider => provider.id), ['claude', 'codex']);
+  assert.ok(actions.buttons.every(button => !button.hidden && !button.disabled));
+  assert.deepEqual(starts, [], 'opening or refreshing controls never starts a session');
+  assert.deepEqual(sends, []);
+  await actions.start('claude');
+  assert.deepEqual(starts, [{ projectId: project.id, cwd: project.path, access: 'read', playwright: false, provider: 'claude', title: 'Claude Code · Sample' }]);
+  assert.deepEqual(opens, ['managed-claude']);
+  assert.deepEqual(sends, [], 'the owner writes in TalkPanel after the blank session opens');
+});
+
+test('the building menu has only provider controls and each click opens one blank conversation', async t => {
+  const before = { document: globalThis.document, Node: globalThis.Node }, nodes = [];
+  class Element {
+    constructor(tag) { this.tag = tag; this.dataset = {}; this.children = []; this.handlers = {}; this.classList = { add() {} }; nodes.push(this); }
+    append(child) { this.children.push(child); }
+    setAttribute(name, value) { this[name] = value; }
+    addEventListener(name, handler) { this.handlers[name] = handler; }
+  }
+  globalThis.Node = Element;
+  globalThis.document = { createElement: tag => new Element(tag), createElementNS: (_, tag) => new Element(tag), createTextNode: () => new Element('#text') };
+  t.after(() => { globalThis.document = before.document; globalThis.Node = before.Node; });
+  const starts = [], opens = [], sends = [];
+  const actions = new BuildingSessionActions({
+    store: { ...store, project: () => project },
+    sessions: {
+      available: true,
+      start: async options => { starts.push(options); return { id: `session-${starts.length}`, ...options }; },
+      send: async (...args) => sends.push(args),
+    },
+    discover: () => assert.fail('The menu must not invoke legacy discovery'),
+    onStarted: (session, meta) => opens.push([session.id, meta.origin]),
+  });
+  actions.setProject(project); actions.refresh();
+  assert.ok(nodes.every(node => !['input', 'textarea'].includes(node.tag)), 'write in the existing conversation, not the building menu');
+  assert.deepEqual(starts, []); assert.deepEqual(opens, []); assert.deepEqual(sends, []);
+  for (const [i, button] of actions.buttons.entries()) {
+    await button.handlers.click();
+    assert.equal(starts.length, i + 1);
+    assert.equal(starts[i].provider, button.dataset.provider);
+    assert.equal(starts[i].projectId, project.id);
+    assert.equal(starts[i].access, 'read');
+    assert.deepEqual(opens[i], [`session-${i + 1}`, 'started']);
+    assert.deepEqual(sends, []);
+  }
 });
 
 test('another explicit launch remains available after admission while existing project sessions are still running', async () => {
@@ -89,22 +129,20 @@ test('another explicit launch remains available after admission while existing p
     send: async (id, text) => { sends.push([id, text]); },
   };
   const actions = actionState({ ...project, status: 'busy' }, sessions);
-  actions.drafts.set(project.id, 'First task');
   await actions.start('claude');
   actions.refresh();
   assert.equal(actions.launch.pending, null);
   assert.equal(actions.node.hidden, false);
   assert.ok(actions.buttons.every(button => !button.hidden && !button.disabled));
   assert.ok(sessions.list.every(session => session.status === 'running'));
-  actions.drafts.set(project.id, 'Second task');
   await actions.start('codex');
   assert.deepEqual(starts.map(options => [options.provider, options.projectId]), [['claude', project.id], ['codex', project.id]]);
-  assert.deepEqual(sends, [['new-1', 'First task'], ['new-2', 'Second task']]);
+  assert.deepEqual(sends, [], 'both explicit provider choices open blank sessions');
   assert.equal(sessions.list.length, 3);
   assert.ok(sessions.list.every(session => session.status === 'running'));
 });
 
-test('a refused start cannot display its error or change drafts after selecting another building', async () => {
+test('a refused start cannot display its error after selecting another building', async () => {
   const other = { id: 'local:c:/sample/other', name: 'Other', path: 'C:/sample/other' };
   const refusal = new Error('Sample admission refused'), failures = [];
   let rejectStart, starts = 0;
@@ -115,11 +153,8 @@ test('a refused start cannot display its error or change drafts after selecting 
   };
   const actions = actionState(project, sessions);
   actions.launch.onStartFailed = error => failures.push(error);
-  actions.drafts.set(project.id, 'Keep Sample task');
-  actions.drafts.set(other.id, 'Keep Other task');
   const operation = actions.start('codex');
   actions.setProject(other, { side: 'pc', remote: false });
-  assert.equal(actions.input.value, 'Keep Other task');
   rejectStart(refusal);
   await operation;
   assert.equal(starts, 1);
@@ -128,11 +163,33 @@ test('a refused start cannot display its error or change drafts after selecting 
   assert.equal(actions.error, '');
   assert.equal(actions.errorNode.hidden, true);
   assert.equal(actions.errorNode.textContent, '');
-  assert.equal(actions.input.value, 'Keep Other task');
-  assert.equal(actions.drafts.get(other.id), 'Keep Other task');
-  assert.equal(actions.drafts.get(project.id), 'Keep Sample task');
   assert.equal(actions.launch.pending, null);
   assert.equal(actions.launch.recovery.size, 0);
+});
+
+test('managed provider refusal is displayed without an invented session or send', async () => {
+  let starts = 0;
+  const actions = actionState(project, {
+    available: true,
+    start: async () => { starts++; throw Object.assign(new Error('Claude Code could not be found.'), { code: 'AGENT_UNAVAILABLE' }); },
+    send: () => assert.fail('A refused session cannot receive a prompt'),
+  });
+  await actions.start('claude');
+  assert.equal(starts, 1);
+  assert.match(actions.errorNode.textContent, /Could not start: Claude Code could not be found/);
+  assert.equal(actions.errorNode.hidden, false);
+  assert.equal(actions.launch.pending, null);
+  assert.equal(actions.launch.recovery.size, 0);
+  assert.ok(actions.buttons.every(button => !button.disabled));
+});
+
+test('focus moves to an enabled provider without starting a session', () => {
+  const focused = [], actions = actionState(project, { available: true });
+  actions.buttons.forEach(button => { button.focus = options => focused.push([button.dataset.provider, options]); });
+  actions.refresh(); actions.focus();
+  assert.deepEqual(focused, [['claude', { preventScroll: true }]]);
+  actions.sessions.available = false; actions.refresh(); actions.focus();
+  assert.equal(focused.length, 1);
 });
 
 test('shared start helper preserves exact project and current saved access through existing start path', async () => {
@@ -153,13 +210,13 @@ test('invalid local project, provider or access never reaches start', async () =
   await assert.rejects(startProjectSession({ projectAccess: () => ({}) }, sessions, 'codex', project), /access is unavailable/);
 });
 
-test('start opens the conversation before optional first prompt, and an empty prompt starts no turn', async () => {
+test('launcher opens a blank conversation without sending a turn', async () => {
   const events = [], sessions = { start: async () => { events.push('start'); return { id: 'a' }; }, send: async (id, text) => events.push(['send', id, text]) };
   const launch = new BuildingSessionLaunch({ store, sessions, onStarted: session => events.push(['open', session.id]) });
-  await launch.start('codex', project, '  Work here  ');
-  assert.deepEqual(events, ['start', ['open', 'a'], ['send', 'a', 'Work here']]);
+  await launch.start('codex', project);
+  assert.deepEqual(events, ['start', ['open', 'a']]);
   events.length = 0;
-  await launch.start('claude', project, '  ');
+  await launch.start('claude', project);
   assert.deepEqual(events, ['start', ['open', 'a']]);
 });
 
@@ -174,36 +231,24 @@ test('repeated clicks while start is pending reuse the same launch', async () =>
   assert.equal(launch.pending, null);
 });
 
-test('a failed first send preserves session identity and draft, and retry sends without a second start', async () => {
-  let fail = true, starts = 0;
-  const sends = [], opens = [], contexts = [];
-  const sessions = { start: async () => { starts++; return { id: 'a' }; }, send: async (...args) => { sends.push(args); if (fail) throw new Error('Unavailable'); } };
-  const launch = new BuildingSessionLaunch({ store, sessions, onStarting: ({ context }) => contexts.push(context), onStarted: (session, meta) => opens.push([session.id, { ...meta }]) });
-  const record = await launch.start('codex', project, 'Keep this prompt');
-  assert.equal(record.session.id, 'a'); assert.equal(record.prompt, 'Keep this prompt'); assert.match(record.error, /Unavailable/);
-  assert.equal(opens.length, 2); assert.match(opens[1][1].sendError, /Unavailable/);
-  assert.deepEqual(opens.map(([, meta]) => meta.origin), ['started', 'send-error']);
-  assert.equal(contexts.length, 1);
-  assert.ok(opens.every(([, meta]) => meta.context === contexts[0]));
-  await launch.start('codex', project, 'A duplicate click');
-  assert.equal(starts, 1);
-  assert.equal(opens[2][1].origin, 'recovery');
-  await launch.open(record); // explicit Open session uses the same recovery contract
-  assert.equal(opens[3][1].origin, 'recovery');
-  assert.equal(opens[3][1].context, contexts[0]);
-  fail = false; await launch.retry(project.id);
-  assert.equal(starts, 1); assert.deepEqual(sends, [['a', 'Keep this prompt'], ['a', 'Keep this prompt']]);
-  assert.equal(launch.recovery.size, 0); assert.equal(record.prompt, ''); assert.equal(record.error, '');
-});
-
-test('opening failure is separate from native start and keeps the existing session recoverable', async () => {
-  let starts = 0;
-  const sessions = { start: async () => { starts++; return { id: 'a' }; }, send: async () => {} };
-  const launch = new BuildingSessionLaunch({ store, sessions, onStarted: () => { throw new Error('UI unavailable'); } });
-  const record = await launch.start('claude', project, 'First prompt');
-  assert.equal(record.error, ''); assert.match(record.openError, /UI unavailable/); assert.equal(record.session.id, 'a');
+test('opening failure keeps the exact blank session recoverable without another start or send', async () => {
+  let starts = 0, fail = true;
+  const opens = [], contexts = [];
+  const sessions = { start: async () => { starts++; return { id: 'a' }; }, send: () => assert.fail('Opening a blank session cannot send') };
+  const launch = new BuildingSessionLaunch({ store, sessions,
+    onStarting: ({ context }) => contexts.push(context),
+    onStarted: (session, meta) => { opens.push([session.id, meta]); if (fail) throw new Error('UI unavailable'); },
+  });
+  const record = await launch.start('claude', project);
+  assert.match(record.openError, /UI unavailable/); assert.equal(record.session.id, 'a');
   await launch.start('claude', project);
   assert.equal(starts, 1); assert.equal(launch.recovery.get(project.id), record);
+  fail = false;
+  await launch.open(record);
+  assert.equal(starts, 1); assert.equal(record.openError, ''); assert.equal(launch.recovery.size, 0);
+  assert.deepEqual(opens.map(([id, meta]) => [id, meta.origin]), [['a', 'started'], ['a', 'recovery'], ['a', 'recovery']]);
+  assert.equal(contexts.length, 1);
+  assert.ok(opens.every(([, meta]) => meta.context === contexts[0]));
 });
 
 test('native start refusal preserves no fictitious session and allows a later explicit attempt', async () => {
@@ -232,7 +277,7 @@ test('starting callback receives project and provider immediately before native 
   finish({ id: 'a' }); await first;
 });
 
-test('presentation promises never delay native start or the first prompt', async () => {
+test('presentation promises never delay blank-session admission or trigger a send', async () => {
   let finishOpening;
   const events = [];
   const launch = new BuildingSessionLaunch({
@@ -241,8 +286,8 @@ test('presentation promises never delay native start or the first prompt', async
     onStarting: () => new Promise(() => {}),
     onStarted: () => new Promise(resolve => { finishOpening = resolve; }),
   });
-  const record = await launch.start('codex', project, 'Work');
-  assert.deepEqual(events, ['native', 'send']);
+  const record = await launch.start('codex', project);
+  assert.deepEqual(events, ['native']);
   assert.equal(launch.pending, null);
   assert.equal(record.opening, true);
   finishOpening(); await Promise.resolve();
@@ -270,7 +315,7 @@ test('late conversation failure recovers the created session without repeating n
     store, sessions: { start: async () => { starts++; return { id: 'a' }; }, send: async () => {} },
     onStarted: () => new Promise((_, reject) => { failOpening = reject; }), onStartFailed: error => failures.push(error),
   });
-  const record = await launch.start('codex', project, 'Work');
+  const record = await launch.start('codex', project);
   failOpening(new Error('Conversation unavailable')); await Promise.resolve();
   assert.match(record.openError, /Conversation unavailable/);
   await launch.start('codex', project);
