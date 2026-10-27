@@ -26,7 +26,9 @@ function fixture(t, { existing = [], reduced = true } = {}) {
   npcs.dropOwner = (...args) => { calls.drops.push(args); drop(...args); };
   t.after(() => npcs.dispose());
   const pose = { position: new THREE.Vector3(50, 60, 70), target: new THREE.Vector3(2, 0, 4), center: true, overview: false };
-  const world = { camera: { fov: 40, position: pose.position.clone() }, controls: { target: pose.target.clone() },
+  const camera = new THREE.PerspectiveCamera(40, 1500 / 900, .05, 10000);
+  camera.position.copy(pose.position); camera.lookAt(pose.target);
+  const world = { camera, controls: { target: pose.target.clone() },
     size: { w: 1500, h: 900 }, half: 90, side: 'pc', restSide: 'pc', settled: true, underside: false,
     centerTarget: pose.center, overview: pose.overview, toWorld: vector => vector.clone(),
     setShot: (...args) => calls.shots.push(args), flyAfterTurn: (...args) => calls.returns.push(args), flipTo() {}, stop() {}, dispose() {} };
@@ -225,6 +227,66 @@ test('managed session replaces its board duplicate while the address remains res
   assert.equal(agents.some(a => a.id === 'board-managed'), false);
   assert.equal(view.agentById('board-managed').id, 'sess:managed');
   assert.equal(view.allAgents(), agents, 'per-frame lookups reuse the location snapshot');
+});
+
+test('a quieter frontage is reserved before drop-in and remains exact through admission and reframing', t => {
+  const f = fixture(t), { view } = f;
+  const original = view.npcs.reserveTalkSpot(project.id);
+  view.npcs.releaseTalkSpot(original);
+  const alternative = { ...original, x: original.x + 6 };
+  let searches = 0;
+  view.npcs.talkSpotCandidates = (id, { limit } = {}) => {
+    if (limit === 1) return [{ ...original }];
+    searches++; return [alternative];
+  };
+  const texture = new THREE.Texture(); texture.userData.cityText = true;
+  const sign = new THREE.Mesh(new THREE.PlaneGeometry(2, 3), new THREE.MeshBasicMaterial({ map: texture }));
+  sign.position.set(original.x, 2, original.z - 2);
+  view.world.land = new THREE.Group(); view.world.land.add(sign);
+  // Fix the camera direction to isolate reservation lifecycle from the separately
+  // tested yaw search: the doorway is text-backed, the alternate frontage is clear.
+  view.makeTalkShot = (spot, position) => ({ eye: { x: position.x, y: 2, z: position.z + 8 },
+    look: { x: position.x, y: 1.3, z: position.z } });
+  t.after(() => { texture.dispose(); sign.geometry.dispose(); sign.material.dispose(); });
+  const handle = view.enterTalk(null, { pending: { provider: 'codex', projectId: project.id } });
+  view.updateTalk();
+  const reserved = view.talk.pendingSpot;
+  assert.equal(reserved.x, alternative.x); assert.equal(reserved.z, alternative.z);
+  assert.equal(view.npcs.talkReservation, reserved, 'the original reservation object still owns this generation');
+  assert.equal(searches, 1);
+  const ownerSpot = view.npcs.owner.pos.clone();
+  f.add(session('quiet-frontage')); handle.resolve('quiet-frontage'); view.updateTalk();
+  const npc = view.npcs.npcs.get('sess:quiet-frontage');
+  assert.equal(npc.pos.x, reserved.x); assert.equal(npc.pos.z, reserved.z);
+  assert.equal(view.npcs.owner.pos.x, ownerSpot.x); assert.equal(view.npcs.owner.pos.z, ownerSpot.z, 'the owner does not jump across the new agent');
+  view.stageTalk(view.talk);
+  assert.equal(searches, 1, 'admission and reframing cannot move the chosen NPC anchor again');
+  assert.equal(npc.pos.x, reserved.x); assert.equal(npc.pos.z, reserved.z);
+});
+
+test('pending talk without an available reservation never relocates a synthetic agent', t => {
+  const f = fixture(t), { view } = f, point = view.buildings.get(project.id).workSpot(0);
+  view.npcs.reserveTalkSpot = () => null;
+  let searches = 0, moves = 0;
+  view.npcs.talkSpotCandidates = () => { searches++; return [{ ...point, x: point.x + 6, projectId: project.id }]; };
+  view.npcs.stageTalkAgent = () => { moves++; return false; };
+  const texture = new THREE.Texture(); texture.userData.cityText = true;
+  const sign = new THREE.Mesh(new THREE.PlaneGeometry(2, 3), new THREE.MeshBasicMaterial({ map: texture }));
+  sign.position.set(point.x, 2, point.z - 2); view.world.land = new THREE.Group(); view.world.land.add(sign);
+  view.makeTalkShot = (spot, position) => ({ eye: { x: position.x, y: 2, z: position.z + 8 },
+    look: { x: position.x, y: 1.3, z: position.z } });
+  t.after(() => { texture.dispose(); sign.geometry.dispose(); sign.material.dispose(); });
+  const handle = view.enterTalk(null, { pending: { provider: 'codex', projectId: project.id } }); view.updateTalk();
+  assert.equal(searches, 0); assert.equal(moves, 0);
+  assert.equal(view.talk.pendingSpot, null);
+  assert.equal(view.talk.a.x, point.x); assert.equal(view.talk.a.z, point.z);
+  f.add(session('unreserved'));
+  const npc = view.npcs.npcs.get('sess:unreserved'); npc.place(point.x + 4, point.z);
+  handle.resolve('unreserved');
+  assert.equal(view.talk.arrivalSpot, null, 'an unreserved NPC needs a new owner spot beside its actual position');
+  view.updateTalk();
+  assert.ok(Math.abs(Math.hypot(view.npcs.owner.pos.x - npc.pos.x, view.npcs.owner.pos.z - npc.pos.z) - 2.4) < 1e-8);
+  assert.equal(moves, 0, 'the unreserved admitted NPC remains at its actual position');
 });
 
 test('contributor islands use their own mapped agents without borrowing the home location cache', () => {

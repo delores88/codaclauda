@@ -10,9 +10,11 @@ import { hash, defaultAvatar, normalizeAvatar } from '../avatar/spec.js';
 import { disposeAll } from './fx.js';
 import { bridgeHeight } from './river-path.js';
 import { riverRoute, riverStep } from './river-navigation.js';
+import { talkPlanterBoxes } from './talk-placement.js';
 
 const SPEED = { work: 2.2, stroll: 1.05, roam: 1.6, sit: 1.4, rest: 1.4, owner: 3.0 };
 const SIDEWALK_Y = GROUND_Y + 0.06;
+const inTalkBox = (point, box) => point.x > box.x0 && point.x < box.x1 && point.z > box.z0 && point.z < box.z1;
 
 export function groundY(x, z) { return Math.hypot(x, z) < 5.55 ? GROUND_Y + 0.14 : SIDEWALK_Y; }
 
@@ -170,26 +172,43 @@ export class NpcManager {
   }
   ownerAction(action) { if (this.owner && this.owner.action !== action) { this.owner.action = action; this.owner.person.setAction(action); } }
 
+  /** Safe alternative conversation anchors on this lot; observing them never reserves or moves anything. */
+  talkSpotCandidates(projectId, { excludeId = null, limit = 6, spread = false } = {}) {
+    if (!Number.isFinite(limit) || limit < 1) return [];
+    const count = Math.floor(limit);
+    const id = this.resolveProjectId(projectId) || projectId;
+    const building = this.buildings.get(id) || this.buildings.get(projectId);
+    if (!building) return [];
+    const planters = talkPlanterBoxes([building]);
+    const center = cellCenter(building.cell.i, building.cell.j);
+    const points = [...this.npcs.values()].filter(npc => npc.id !== excludeId)
+      .flatMap(npc => [npc.pos, ...(npc.path.length && npc.goal?.point ? [npc.goal.point] : [])]);
+    if (this.owner) points.push(this.owner.pos);
+    const candidates = [];
+    const clear = point => point && Number.isFinite(point.x) && Number.isFinite(point.z)
+      && Math.abs(point.x - center.x) <= WALK_HALF + 1e-8 && Math.abs(point.z - center.z) <= WALK_HALF + 1e-8
+      && !planters.some(box => inTalkBox(point, box))
+      && points.every(p => Math.hypot(p.x - point.x, p.z - point.z) >= .8)
+      && candidates.every(p => Math.hypot(p.x - point.x, p.z - point.z) >= .8);
+    const consider = point => {
+      if (clear(point)) candidates.push({ x: point.x, z: point.z, projectId: building.id });
+    };
+    if (spread) for (const side of [.5, 1.5, 2.5, 3.5]) {
+      if (candidates.length >= count) break;
+      consider(perimeterPoint(building.cell.i, building.cell.j, side));
+    }
+    for (let slot = 0; slot < 64 && candidates.length < count; slot++) consider(building.workSpot(slot));
+    for (let slot = 0; slot < 256 && candidates.length < count; slot++) {
+      consider(perimeterPoint(building.cell.i, building.cell.j, (slot + .5) * 4 / 256));
+    }
+    return candidates;
+  }
   /** Choose one clear arrival spot on a project's lot before its session exists.
    * The reservation keeps later goal allocation from putting another person there. */
   reserveTalkSpot(projectId) {
-    const id = this.resolveProjectId(projectId) || projectId;
-    const building = this.buildings.get(id) || this.buildings.get(projectId);
-    if (!building) return null;
-    const center = cellCenter(building.cell.i, building.cell.j);
-    const points = [...this.npcs.values()].flatMap(npc => [npc.pos, ...(npc.path.length && npc.goal?.point ? [npc.goal.point] : [])]);
-    if (this.owner) points.push(this.owner.pos);
-    const clear = point => point && Number.isFinite(point.x) && Number.isFinite(point.z)
-      && Math.abs(point.x - center.x) <= WALK_HALF + 1e-8 && Math.abs(point.z - center.z) <= WALK_HALF + 1e-8
-      && points.every(p => Math.hypot(p.x - point.x, p.z - point.z) >= .8);
-    let point;
-    for (let slot = 0; slot < 64 && !point; slot++) { const candidate = building.workSpot(slot); if (clear(candidate)) point = candidate; }
-    for (let slot = 0; slot < 256 && !point; slot++) {
-      const candidate = perimeterPoint(building.cell.i, building.cell.j, (slot + .5) * 4 / 256);
-      if (clear(candidate)) point = candidate;
-    }
+    const point = this.talkSpotCandidates(projectId, { limit: 1 })[0];
     if (!point) return null;
-    return this.talkReservation = { x: point.x, z: point.z, projectId: building.id };
+    return this.talkReservation = point;
   }
   /** A caller leaving/cancelling its pending start releases only its own reservation. */
   releaseTalkSpot(point) {
@@ -205,6 +224,22 @@ export class NpcManager {
     npc.path = []; npc.place(point.x, point.z); npc.pos.y += lift;
     npc.talkStaged = true;
     this.releaseTalkSpot(point);
+    return true;
+  }
+  /** Stand a seated partner or clear a planter overlap at its own building, keeping its original goal. */
+  prepareTalk(id) {
+    const npc = this.npcs.get(id);
+    if (!npc) return false;
+    const a = npc.agent;
+    const ids = 'cityProjectId' in a ? [a.cityProjectId] : [a.currentProjectId, a.lastKnownProjectId, a.homeProjectId];
+    const projectId = ids.find(candidate => candidate && (this.buildings.get(this.resolveProjectId(candidate) || candidate) || this.buildings.get(candidate)));
+    if (!projectId) return false;
+    const building = this.buildings.get(this.resolveProjectId(projectId) || projectId) || this.buildings.get(projectId);
+    if (npc.action !== 'sit' && !talkPlanterBoxes([building]).some(box => inTalkBox(npc.pos, box))) return false;
+    const point = this.reserveTalkSpot(projectId);
+    if (!point) return false;
+    if (!this.stageTalkAgent(id, point)) { this.releaseTalkSpot(point); return false; }
+    npc.setAction('stand');
     return true;
   }
 
@@ -296,7 +331,13 @@ export class NpcManager {
     }
     for (const npc of list) if (npc.held && npc.talkStaged) {
       const where = locations.get(npc.id);
-      if (where) occupied(where).push({ x: npc.pos.x, z: npc.pos.z, talkSpacing: .8 });
+      if (where) {
+        occupied(where).push({ x: npc.pos.x, z: npc.pos.z, talkSpacing: .8 });
+        if (npc.goal?.type === 'sit') {
+          usedSeats.add(npc.goal.point.key);
+          occupied(where).push(npc.goal.point);
+        }
+      }
     }
     const workSpot = where => {
       const points = occupied(where);
@@ -484,10 +525,11 @@ export class NpcManager {
   pickables() {
     const out = [];
     for (const npc of this.npcs.values()) {
+      if (npc.person.object.visible === false) continue;
       out.push(...(npc.person.pickable || []));
       npc.clipboard?.traverse(mesh => { if (mesh.isMesh && !mesh.userData.outline) out.push(mesh); });
     }
-    if (this.owner) out.push(...(this.owner.person.pickable || []));
+    if (this.owner && this.owner.person.object.visible !== false) out.push(...(this.owner.person.pickable || []));
     return out;
   }
   /** Resolve a raycast hit object to { kind: 'agent', id } | { kind: 'owner' }. */
@@ -620,10 +662,11 @@ export function createStandIn(specInput, { role = 'agent' } = {}) {
   const gem = new THREE.Mesh(new THREE.OctahedronGeometry(0.14, 0), toonMaterial('#3ccf8e', { emissive: '#3ccf8e', emissiveIntensity: 0.6, cache: false }));
   gem.position.y = 1.95; object.add(gem);
   const pickable = [legs, body, head, hair];
-  let status = role === 'owner' ? null : 'idle', action = 'stand', yaw = 0, targetYaw = 0, t = 0;
+  let status = role === 'owner' ? null : 'idle', action = 'stand', yaw = 0, targetYaw = 0, t = 0, inConversation = false;
   const person = {
     object, pickable,
-    setStatus(next) { status = next; gem.visible = !!next; if (next) { gem.material.color.set(GEM[next] || GEM.idle); gem.material.emissive.set(GEM[next] || GEM.idle); gem.material.emissiveIntensity = next === 'offline' ? 0.1 : 0.6; } },
+    setStatus(next) { status = next; gem.visible = !!next && !inConversation; if (next) { gem.material.color.set(GEM[next] || GEM.idle); gem.material.emissive.set(GEM[next] || GEM.idle); gem.material.emissiveIntensity = next === 'offline' ? 0.1 : 0.6; } },
+    setConversation(on) { inConversation = Boolean(on); gem.visible = Boolean(status) && !inConversation; },
     setAction(next) { action = next; },
     setHighlight(on) { bodyMat.emissive.set(on ? '#6c5cf0' : '#000000'); bodyMat.emissiveIntensity = on ? 0.5 : 1; },
     lookAt(x, z) { targetYaw = Math.atan2(x - object.position.x, z - object.position.z); },

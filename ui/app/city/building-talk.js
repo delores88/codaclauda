@@ -9,7 +9,12 @@ export function buildingTalkCallbacks(city) {
     onStarting({ provider, project, context }) {
       if (!visible()) return;
       handles.set(context, city.enterTalk(`building-start:${++sequence}`, {
-        pending: { provider, projectId: project.id, label: 'New session' },
+        pending: { provider, projectId: project.id, label: 'New session', fresh: true,
+          retry: () => {
+            if (!visible() || handles.get(context) !== city.talk?.handle) return;
+            return city.retryBuildingTalk(provider, project.id);
+          },
+        },
       }));
     },
     onStarted(session, { origin, context } = {}) {

@@ -15,8 +15,11 @@ import { River } from '../city/river.js';
 import { buildPlotMarker, GROUND_Y } from '../city/scenery.js';
 import { SparkCity, FOUNDRY, DECK_Y, jobLabel } from '../city/spark.js';
 import { TalkPanel, talkSpot, sayLine, STAGE } from '../city/talk.js';
-import { fitTalkShot, talkVisibleRect, talkFigureTargets, talkWallHits, talkSceneMeshes, talkSceneHits, cutawayTalkMeshes } from '../city/talk-frame.js';
+import { fitTalkShot, talkFacingPoint, talkVisibleRect, talkFigureTargets, talkWallHits, talkSceneMeshes, talkSceneHits, cutawayTalkMeshes } from '../city/talk-frame.js';
 import { layoutTalkBubbles } from '../city/talk-bubbles.js';
+import { talkSignOverlap, talkTextBounds, betterTalkComposition } from '../city/talk-signs.js';
+import { talkOccludingPeople } from '../city/talk-occlusion.js';
+import { talkPlanterBoxes } from '../city/talk-placement.js';
 import { IslandMode } from '../city/portal.js';
 import { CityWeather } from '../city/weather-hud.js';
 import { sessions } from '../sessions.js';
@@ -89,7 +92,6 @@ const statusText = agent => (agent?.kind === 'session' ? SESSION_STATUS_LABEL[ag
 const OWNER_PRIORITY = 55;       // "You": above idle people and idle groups (chips get +10), below working agents
 const SHORT_NAME = 18;
 const OWNER_TARGET = Object.freeze({ kind: 'owner' });
-const TALK_BAR = 0.08;           // letterbox bar height (share of the view), as .city-bar in city.css
 const shortName = name => (name.length > SHORT_NAME ? `${name.slice(0, SHORT_NAME - 1).trimEnd()}…` : name);
 const chipWidth = n => Math.round(34 + `${n} agents`.length * 6.6);
 
@@ -389,8 +391,7 @@ export class CityView {
     this.panel = h('aside.city-panel.card', { hidden: true, 'aria-live': 'polite' });
     this.empty = h('div.city-empty.card', { hidden: true });
     this.fallback = h('div.city-fallback', { hidden: true });
-    // Talk mode: letterbox bars, the way out and the conversation (city/talk.js).
-    this.bars = [h('div.city-bar.top', { 'aria-hidden': 'true' }), h('div.city-bar.bottom', { 'aria-hidden': 'true' })];
+    // Talk mode uses the full scene beside the conversation panel.
     this.leaveBtn = h('button.city-talk-leave', { type: 'button', title: 'Leave the conversation (Esc)', onclick: () => this.exitTalk() }, icon('city-leave'), h('span', 'Leave conversation'), h('kbd', 'Esc'));
     this.talkPanel = new TalkPanel({
       store: this.store, navigate: (view, params) => this.ctx.navigate(view, params),
@@ -405,7 +406,7 @@ export class CityView {
     this.newSessionHere = projectId => this.openBuildingSessionControls(projectId);
     // Drag to assign: the agent you're carrying, under the pointer (pointer-events: none).
     this.dragGhost = h('div.city-drag-ghost', { hidden: true, 'aria-hidden': 'true' });
-    this.cityRoot = h('div.city-root', this.stage, ...this.bars, this.overlay, this.hud, this.legend, this.machinesCard, this.streetHint, this.zoomHint, this.toolbar, this.help, this.panel, this.empty, this.leaveBtn, this.talkPanel.node, this.fallback, this.dragGhost);
+    this.cityRoot = h('div.city-root', this.stage, this.overlay, this.hud, this.legend, this.machinesCard, this.streetHint, this.zoomHint, this.toolbar, this.help, this.panel, this.empty, this.leaveBtn, this.talkPanel.node, this.fallback, this.dragGhost);
     this.root.append(this.cityRoot);
     this.buildingSessions = new BuildingSessionActions({ store: this.store, sessions,
       ...buildingTalkCallbacks(this),
@@ -420,7 +421,7 @@ export class CityView {
     this.talkPanel.close();
     this.talk = null;
     this.cityRoot.classList.remove('is-talk');
-    for (const node of [this.hud, this.legend, this.toolbar, this.help, this.panel, this.empty, this.overlay, this.machinesCard, this.leaveBtn, this.talkPanel.node, ...this.bars]) node.hidden = true;
+    for (const node of [this.hud, this.legend, this.toolbar, this.help, this.panel, this.empty, this.overlay, this.machinesCard, this.leaveBtn, this.talkPanel.node]) node.hidden = true;
     clear(this.fallback, h('div.city-fallback-card.card',
       h('div.empty-art', icon('city')),
       h('h3', 'The city needs 3D graphics'),
@@ -1479,6 +1480,14 @@ export class CityView {
     this.focusSelection();
     this.buildingSessions.focus();
   }
+  /** An explicit Retry click reuses the same eligible building/provider controls. */
+  retryBuildingTalk(provider, projectId) {
+    const project = this.store.project(projectId);
+    const context = { side: this.world?.restSide, remote: Boolean(this.islands?.current) };
+    if (!this.visible || this.failed || !this.talk?.failed || !offersBuildingSession(project, context)) return;
+    this.buildingSessions.setProject(project, context);
+    return this.buildingSessions.start(provider);
+  }
   refreshPanel() {
     const s = this.selection;
     if (!s || s.kind === 'boat') { this.panel.hidden = true; this.root.classList.remove('city-has-panel'); this.panelSig = ''; return; }
@@ -2213,7 +2222,7 @@ export class CityView {
 
   /* ---------------- talk mode ---------------- */
   /** Click an agent: your avatar drops in, the two face each other and the camera drops to an
-   *  over-the-shoulder shot while the conversation opens on the right (city/talk.js). Esc, Leave or a
+   *  side-on two-shot while the conversation opens on the right (city/talk.js). Esc, Leave or a
    *  click on empty ground ends it: the camera eases back, the HUD returns, the agent carries on.
    *  Agents live on This PC side: with the Spark side up the island turns over first. */
   enterTalk(id, { pending = null } = {}) {
@@ -2258,6 +2267,7 @@ export class CityView {
     if (world.underside && world.restSide !== 'pc') world.flipTo('pc');
     this.cityRoot.classList.add('is-talk');
     this.talkPanel.open(agent, { pending: t.pending });
+    this.setTalkMarkers(t, true);
     this.talkPanel.focus();
     this.declutterAt = 0;
     return t.handle;
@@ -2270,8 +2280,10 @@ export class CityView {
     if (agent?.kind !== 'session' || !this.npcs.position({ kind: 'agent', id: agent.id })) return false;
     if (t.pendingSpot && !this.npcs.stageTalkAgent(agent.id, t.pendingSpot)) return false;
     if (t.id !== agent.id) this.npcs.hold(t.id, false);
+    t.arrivalSpot = t.pendingSpot ? t.spot : null; // preserve the owner only when the NPC joins the exact reserved point
     t.id = agent.id; t.pending = null; t.phase = 'wait'; t.greeted = false;
     this.npcs.hold(t.id, true);
+    this.setTalkMarkers(t, true);
     this.talkPanel.resolvePending(agent);
     return true;
   }
@@ -2301,6 +2313,8 @@ export class CityView {
     if (!instant) this.stage.focus({ preventScroll: true });
   }
   releaseTalk(t) {
+    this.setTalkMarkers(t, false);
+    this.restoreTalkPeople(t);
     t.restoreCutaway?.(); t.restoreCutaway = null;
     this.npcs.releaseTalkSpot(t.pendingSpot);
     this.npcs.hold(t.id, false);
@@ -2311,6 +2325,7 @@ export class CityView {
   updateTalk() {
     const t = this.talk, world = this.world;
     if (!t) return;
+    this.setTalkMarkers(t, true);
     const now = performance.now();
     if (t.pending) this.resolvePendingTalk();
     if (t.phase === 'wait') {
@@ -2331,10 +2346,34 @@ export class CityView {
       t.frameCheck = now + 400;
       if (this.talkFrameSig() !== t.frameSig) this.stageTalk(t);
     }
+    if (t.spot) this.updateTalkPeople(t);
+  }
+  restoreTalkPeople(t) {
+    for (const [object, visible] of t.hiddenPeople || []) object.visible = visible;
+    t.hiddenPeople?.clear();
+  }
+  /** Keep moving passers-by from covering either full figure in the settled shot. */
+  updateTalkPeople(t) {
+    this.restoreTalkPeople(t);
+    const people = this.npcs.npcs;
+    if (!people || this.world.side !== 'pc') return;
+    const participants = [this.npcs.owner?.person, this.npcs.personOf({ kind: 'agent', id: t.id })].filter(Boolean);
+    const bystanders = [...people.values()].filter(npc => npc.id !== t.id && npc.person.object.visible).map(npc => npc.person);
+    const hidden = talkOccludingPeople(this.world.camera, participants, bystanders);
+    t.hiddenPeople ||= new Map();
+    for (const object of hidden) { t.hiddenPeople.set(object, object.visible); object.visible = false; }
+  }
+  /** Status stays in the panel; only the two conversation figures lose their markers. */
+  setTalkMarkers(t, on) {
+    for (const target of [OWNER_TARGET, { kind: 'agent', id: t.id }]) {
+      this.npcs.personOf?.(target)?.setConversation?.(on);
+    }
   }
   /** Stage the owner beside the target, including a pending session's project before it appears. */
   stageTalk(t) {
     const world = this.world, agentT = { kind: 'agent', id: t.id }, owner = this.npcs.owner;
+    if (!owner || world.side !== 'pc') return;
+    this.npcs.prepareTalk?.(t.id);
     let a = this.npcs.position(agentT);
     if (!a && t.pending) {
       const building = this.buildings.get(t.pending.projectId);
@@ -2342,56 +2381,96 @@ export class CityView {
       const point = t.pendingSpot || building?.workSpot(this.agentsAt(t.pending.projectId).length) || { x: -5.5, z: 5.5 };
       a = { x: point.x, y: this.npcs.surfaceY(point.x, point.z), z: point.z };
     }
-    if (!a || !owner || world.side !== 'pc') return;
+    if (!a) return;
     t.restoreCutaway?.(); t.restoreCutaway = null;
     t.phase = 'on';
     this.npcs.hold(t.id, true);
-    const reduced = this.reduced(), boxes = this.streetBoxes(), limit = world.half - 2;
+    const reduced = this.reduced(), wallBoxes = this.streetBoxes();
+    const boxes = [...wallBoxes, ...talkPlanterBoxes(this.buildings.list || [])], limit = world.half - 2;
     const near = owner && Math.hypot(owner.pos.x - a.x, owner.pos.z - a.z) < 9;
     t.seated = this.npcs.seated(t.id);
     // A bottom sheet leaves a short strip of the view: stand the camera further back so the two still fit.
     const vis = this.talkFraming().vis, k = Math.min(1.6, Math.max(1, Math.sqrt(world.size.h / Math.max(1, vis.y1 - vis.y0))));
-    const from = near ? owner.pos : this.cameraLocal(), baseYaw = Math.atan2(from.x - a.x, from.z - a.z);
-    const ground = this.npcs.surfaceY(a.x, a.z);
+    const from = near ? owner.pos : this.cameraLocal();
     const frame = this.talkFraming();
-    const meshes = talkSceneMeshes(world.land, [owner.person.object, this.npcs.personOf(agentT)?.object]);
+    const meshes = talkSceneMeshes(world.land, [owner.person.object, this.npcs.personOf(agentT)?.object,
+      this.npcs.personOf({ kind: 'agent', id: t.expectedId })?.object]);
+    const textOccluders = talkSceneMeshes(world.land, [owner.person.object,
+      ...[...(this.npcs.npcs?.values() || [])].map(npc => npc.person.object)]);
+    const signs = talkTextBounds(world.land);
     const toWorld = p => world.toWorld(new THREE.Vector3(p.x, p.y, p.z), { atRest: true });
-    let spot, bestScore = Infinity, obscures = new Set();
+    let spot, anchor = a, bestScore = null, obscures = new Set();
     // Narrow sheets need a longer shot. Choose a clear street direction using the
     // final fitted eye, so pulling back cannot silently place it inside a neighbour.
-    for (const turn of [0, .5, -.5, 1, -1, 1.5, -1.5, 2, -2, 2.5, -2.5, Math.PI]) {
-      const candidate = talkSpot(a, { x: a.x + Math.sin(baseYaw + turn) * 5, z: a.z + Math.cos(baseYaw + turn) * 5 },
-        { boxes, limit, facing: t.seated ? this.npcs.yaw(agentT) : null, back: STAGE.back * k, side: STAGE.side * k });
-      const shot = this.makeTalkShot(candidate, { ...a, y: ground }, frame);
-      const targets = [
-        ...talkFigureTargets(shot.eye, { ...a, y: ground }, this.npcs.faceHeight(agentT)),
-        ...talkFigureTargets(shot.eye, { ...candidate, y: this.npcs.surfaceY(candidate.x, candidate.z) }, this.npcs.faceHeight(OWNER_TARGET)),
-      ];
-      const walls = talkWallHits(shot.eye, targets, boxes);
-      if (walls * 100 > bestScore) continue;
-      const hits = talkSceneHits(meshes, toWorld(shot.eye), targets.map(toWorld));
-      const score = walls * 100 + hits.size;
-      if (score < bestScore) { spot = candidate; bestScore = score; obscures = hits; }
-      if (!score) break;
+    const consider = at => {
+      const ground = this.npcs.surfaceY(at.x, at.z), baseYaw = Math.atan2(from.x - at.x, from.z - at.z);
+      for (const turn of t.arrivalSpot ? [0] : [0, .5, -.5, 1, -1, 1.5, -1.5, 2, -2, 2.5, -2.5, Math.PI]) {
+        const candidate = t.arrivalSpot || talkSpot(at, { x: at.x + Math.sin(baseYaw + turn) * 5, z: at.z + Math.cos(baseYaw + turn) * 5 },
+          { boxes, limit, facing: t.seated ? this.npcs.yaw(agentT) : null, back: STAGE.back * k, side: STAGE.side * k, cameraClearance: false });
+        const shot = this.makeTalkShot(candidate, { ...at, y: ground }, frame);
+        const targets = [
+          ...talkFigureTargets(shot.eye, { ...at, y: ground }, this.npcs.faceHeight(agentT)),
+          ...talkFigureTargets(shot.eye, { ...candidate, y: this.npcs.surfaceY(candidate.x, candidate.z) }, this.npcs.faceHeight(OWNER_TARGET)),
+        ];
+        const walls = talkWallHits(shot.eye, targets, wallBoxes);
+        const occupied = Number(boxes.some(b => candidate.x > b.x0 && candidate.x < b.x1 && candidate.z > b.z0 && candidate.z < b.z1));
+        if (bestScore && (occupied > bestScore[0] || (occupied === bestScore[0] && walls > bestScore[1]))) continue;
+        const hits = talkSceneHits(meshes, toWorld(shot.eye), targets.map(toWorld));
+        const heads = [toWorld({ ...at, y: ground + this.npcs.faceHeight(agentT) }),
+          toWorld({ ...candidate, y: this.npcs.surfaceY(candidate.x, candidate.z) + this.npcs.faceHeight(OWNER_TARGET) })];
+        const tops = [toWorld({ ...at, y: ground + this.npcs.topHeight(agentT) }),
+          toWorld({ ...candidate, y: this.npcs.surfaceY(candidate.x, candidate.z) + this.npcs.topHeight(OWNER_TARGET) })];
+        const signOverlap = talkSignOverlap({ eye: toWorld(shot.eye), look: toWorld(shot.look) }, heads, signs,
+          { vfov: world.camera.fov, aspect: world.size.w / world.size.h, width: world.size.w, height: world.size.h, vis: frame.vis, tops,
+            occluders: textOccluders.filter(mesh => !hits.has(mesh)) });
+        const score = [occupied, walls, signOverlap, hits.size];
+        if (betterTalkComposition(score, bestScore)) { spot = candidate; anchor = at; bestScore = score; obscures = hits; }
+        if (score.every(value => value === 0)) break;
+      }
+    };
+    consider(a);
+    // Choose a quiet frontage once, before the owner's arrival. A pending
+    // reservation keeps that exact anchor when its admitted session appears.
+    if (!t.anchorChosen && !t.failed && (!t.pending || t.pendingSpot) && !t.seated && bestScore?.[2] > 0) {
+      const projectId = t.pending?.projectId || this.agentById(t.id)?.cityProjectId;
+      const alternatives = projectId && this.npcs.talkSpotCandidates?.(projectId, { excludeId: t.expectedId || t.id, limit: 6, spread: true });
+      for (const point of alternatives || []) {
+        if (Math.hypot(point.x - a.x, point.z - a.z) < .1 || boxes.some(b => point.x > b.x0 && point.x < b.x1 && point.z > b.z0 && point.z < b.z1)) continue;
+        consider(point);
+        if (bestScore.every(value => value === 0)) break;
+      }
     }
+    if (anchor !== a) {
+      if (t.pendingSpot && t.pending) Object.assign(t.pendingSpot, { x: anchor.x, z: anchor.z });
+      else this.npcs.stageTalkAgent(t.id, anchor);
+      a = anchor;
+    }
+    t.anchorChosen = true;
     t.spot = spot; t.a = { x: a.x, y: this.npcs.surfaceY(a.x, a.z), z: a.z };
     if (obscures.size) t.restoreCutaway = cutawayTalkMeshes(obscures);
     if (t.ownerDropped) this.npcs.driveOwner(spot.x, spot.z, spot.heading, false);
     else { this.npcs.dropOwner(spot.x, spot.z, spot.heading); t.ownerDropped = true; }
     this.arriveTalk(t);
     this.aimTalk(t, reduced ? 0 : 0.85);
+    t.arrivalSpot = null;
   }
-  /** Ben is in place: the two face each other and the agent says hello. */
+  /** Ben is in place: open the pair's stance toward each other and the side camera. */
   arriveTalk(t) {
     t.phase = 'on';
-    const agentT = { kind: 'agent', id: t.id }, owner = this.npcs.owner, a = this.npcs.position(agentT);
-    if (owner && a) { this.npcs.face(OWNER_TARGET, a.x, a.z); if (!t.seated) this.npcs.face(agentT, owner.pos.x, owner.pos.z); }
+    const agentT = { kind: 'agent', id: t.id }, owner = this.npcs.owner, a = this.npcs.position(agentT) || t.a;
+    if (owner && a) {
+      const eye = this.makeTalkShot(t.spot, t.a).eye;
+      const ownerFacing = talkFacingPoint(owner.pos, a, eye), agentFacing = talkFacingPoint(a, owner.pos, eye);
+      this.npcs.face(OWNER_TARGET, ownerFacing.x, ownerFacing.z);
+      if (!t.seated) this.npcs.face(agentT, agentFacing.x, agentFacing.z);
+    }
     const agent = this.agentById(t.id);
     if (!agent || t.greeted) return;
     t.greeted = true;
     this.npcs.act(agentT, 'wave'); t.agentPose = { until: performance.now() + 1600, next: 'stand' };
     const messages = this.talkPanel.messages(this.talkPanel.info());
     for (const [role, who] of [['owner', 'owner'], ['agent', 'agent']]) {
+      if (who === 'agent' && this.talkPanel.thinking) { this.talkThinking(true); continue; }
       const line = messages.filter(m => m.role === role && m.text?.trim()).at(-1);
       if (line) this.talkSay(who, sayLine(line.text, 80));
       else if (who === 'agent') this.talkSay('agent', sayLine(this.bubbleText(agent), 80));
@@ -2404,7 +2483,7 @@ export class CityView {
       ownerY: this.npcs.surfaceY(spot.x, spot.z), agentY: position.y,
       ownerHeight: this.npcs.topHeight(OWNER_TARGET), agentHeight: this.npcs.topHeight(target), vfov: world.camera.fov });
   }
-  /** Fly to (or, after a resize, re-aim) the over-the-shoulder shot. */
+  /** Fly to (or, after a resize, re-aim) the side-on conversation shot. */
   aimTalk(t, duration) {
     const world = this.world, spot = t.spot;
     if (!spot) return;

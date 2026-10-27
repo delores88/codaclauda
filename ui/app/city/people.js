@@ -1055,7 +1055,7 @@ class Person {
     if (s === this.status) return;
     this.status = s;
     const g = this.gem;
-    g.group.visible = !!s;
+    g.group.visible = !!s && !this.inConversation;
     if (s) {
       g.core.material = gemMaterial(s);
       g.glow.material = glowMaterial(s);
@@ -1069,11 +1069,17 @@ class Person {
 
   setAction(action) { this.action = ACTIONS.includes(action) ? action : 'stand'; }
 
+  setConversation(on) {
+    this.inConversation = Boolean(on);
+    this.gem.group.visible = Boolean(this.status) && !this.inConversation;
+    this.selection.visible = this.highlighted && !this.inConversation;
+  }
+
   setHighlight(on) {
     on = !!on;
     if (on === this.highlighted) return;
     this.highlighted = on;
-    this.selection.visible = on;
+    this.selection.visible = on && !this.inConversation;
     this._outline(on);
   }
 

@@ -303,14 +303,8 @@ button.city-label:focus-visible { outline: 2px solid var(--accent); outline-offs
 .city-view.reduce-motion .city-zoom-hint, .city-view.reduce-motion .city-bubble, .city-view.reduce-motion .city-help, .city-view.reduce-motion .city-panel, .city-view.reduce-motion .city-task-form, .city-view.reduce-motion .city-cluster-pop { animation: none; }
 .city-view.reduce-motion .city-toolbar, .city-view.reduce-motion .city-meter-fill, .city-view.reduce-motion .city-flip, .city-view.reduce-motion .city-cluster, .city-view.reduce-motion .city-side, .city-view.reduce-motion .city-findme, .city-view.reduce-motion .city-street-btn, .city-view.reduce-motion .city-pan-btn { transition: none; }
 
-/* Talk mode (click an agent): letterbox bars, the way out, what you both say over your heads and the
+/* Talk mode (click an agent): the way out, what you both say over your heads and the
    conversation docked on the right (a bottom sheet on narrow windows). The HUD and chrome step aside. */
-.city-root { --city-bar: #05060b; }
-[data-theme="light"] .city-root { --city-bar: #10121c; }
-.city-bar { position: absolute; left: 0; right: 0; z-index: 1; height: 8%; background: var(--city-bar); pointer-events: none; transform: scaleY(0); transition: transform 420ms var(--ease); }
-.city-bar.top { top: 0; transform-origin: top; }
-.city-bar.bottom { bottom: 0; transform-origin: bottom; }
-.city-root.is-talk .city-bar { transform: scaleY(1); }
 .city-root.is-talk .city-hud, .city-root.is-talk .city-legend, .city-root.is-talk .city-toolbar, .city-root.is-talk .city-machines, .city-root.is-talk .city-help,
 .city-root.is-talk .city-empty, .city-root.is-talk .city-panel, .city-root.is-talk .city-zoom-hint, .city-root.is-talk .city-street-hint, .city-root.is-talk .city-labels,
 .city-root.is-talk .city-chips, .city-root.is-talk .city-cluster-pop, .city-root.is-talk .city-offline-tag { display: none; }
@@ -333,17 +327,20 @@ button.city-label:focus-visible { outline: 2px solid var(--accent); outline-offs
 /* The conversation */
 .city-talk { position: absolute; top: 0; right: 0; bottom: 0; z-index: 5; display: flex; flex-direction: column; width: min(400px, 100%); border-left: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow-lg); animation: city-slide var(--med) var(--ease); }
 .city-talk[hidden] { display: none; }
-.city-talk-head { display: flex; align-items: center; gap: 12px; padding: 16px 12px 10px 16px; }
+.city-talk-head { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; min-width: 0; padding: 12px; }
+.city-talk-head > .portrait { flex: none; }
 .city-talk-title { flex: 1; min-width: 0; }
-.city-talk-title h2 { display: -webkit-box; margin: 0; overflow: hidden; font: 600 16px/1.25 var(--font-display); overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.city-talk-title p { margin: 2px 0 0; overflow: hidden; color: var(--muted); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
-.city-talk-actions { display: flex; align-items: center; gap: 4px; align-self: flex-start; }
-.city-talk-open { white-space: nowrap; }
+.city-talk-title h2 { display: block; margin: 0; overflow: hidden; font: 600 15px/1.25 var(--font-display); text-overflow: ellipsis; white-space: nowrap; }
+.city-talk-title p { margin: 3px 0 0; overflow: hidden; color: var(--muted); font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.city-talk-presence { display: flex; align-items: center; gap: 6px; cursor: help; }
+.city-talk-presence > .city-gem { flex: none; border-radius: 50%; transform: none; }
+.city-talk-presence > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.city-talk-presence:focus-visible { outline: 2px solid var(--accent); border-radius: 4px; }
+.city-talk-actions { display: flex; flex: none; flex-wrap: nowrap; align-items: center; gap: 2px; }
+.city-talk-actions .icon-btn { flex: none; width: 28px; height: 30px; }
+.city-talk-actions .icon { width: 16px; height: 16px; }
 .city-talk-mode { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 16px 12px; border-bottom: 1px solid var(--border); }
 .city-talk-mode[hidden] { display: none; }
-.city-talk-actions { flex-wrap: wrap; justify-content: flex-end; max-width: 48%; }
-.city-talk-routing { display: inline-grid; place-items: center; width: 24px; height: 28px; color: var(--muted); font-size: 14px; cursor: help; }
-.city-talk-routing:focus-visible { outline: 2px solid var(--accent); border-radius: 50%; }
 .city-talk-pill { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 10px; border-radius: var(--radius-pill); background: var(--surface-2); color: var(--text-2); font-size: 11.5px; white-space: nowrap; }
 .city-talk-pill .icon { width: 13px; height: 13px; }
 .city-talk-pill.live { background: var(--accent-soft); }
@@ -382,11 +379,17 @@ button.city-label:focus-visible { outline: 2px solid var(--accent); outline-offs
 .city-talk-more:hover { background: var(--surface-hover); }
 .city-talk-intro { display: grid; gap: 10px; padding: 4px 2px; color: var(--text-2); font-size: 13px; line-height: 1.5; }
 .city-talk-intro p { margin: 0; }
+.city-talk-ready { display: grid; gap: 7px; padding: 4px 0 8px; }
+.city-talk-ready h3 { margin: 0; color: var(--text); font: 600 17px/1.4 var(--font-display); }
+.city-talk-ready .city-talk-access { color: var(--muted); font-size: 12px; }
 .city-talk-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.city-talk-chip { padding: 6px 11px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: var(--surface-2); color: var(--text); font-size: 12.5px; text-align: left; cursor: pointer; transition: border-color var(--fast); }
+.city-talk-chip { max-width: 100%; padding: 6px 11px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: var(--surface-2); color: var(--text); font-size: 12.5px; text-align: left; cursor: pointer; transition: border-color var(--fast); }
 .city-talk-chip:hover, .city-talk-chip:focus-visible { border-color: var(--accent); }
 .city-talk-wait { display: flex; gap: 10px; margin-top: 12px; padding: 10px 12px; border: 1px dashed var(--border-strong); border-radius: 12px; color: var(--text-2); font-size: 12.5px; }
 .city-talk-wait > .icon { flex: none; width: 16px; height: 16px; margin-top: 1px; color: var(--warning); }
+.city-talk-wait > .spinner { flex: none; width: 14px; height: 14px; margin-top: 4px; opacity: .65; }
+.city-talk-wait > p { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.city-talk-wait > .city-talk-retry { flex: none; align-self: center; }
 .city-talk-wait.seen > .icon { color: var(--success); }
 .city-talk-wait strong { color: var(--text); font-weight: 650; }
 .city-talk-wait p { margin: 3px 0 0; color: var(--muted); }
@@ -413,11 +416,11 @@ button.city-label:focus-visible { outline: 2px solid var(--accent); outline-offs
   .city-talk { top: auto; left: 0; right: auto; width: min(100%, var(--city-visible-width, 100%)); height: min(56%, 520px); border-top: 1px solid var(--border); border-left: 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0; animation-name: city-rise; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .city-bar, .city-talk-leave, .city-talk-chip, .city-talk-box { transition: none; }
+  .city-talk-leave, .city-talk-chip, .city-talk-box { transition: none; }
   .city-talk, .city-root.is-talk .city-talk-leave { animation: none; }
   .city-talk-say .typing-dots i, .city-talk-typing .typing-dots i { animation: none; opacity: .75; }
 }
-.city-view.reduce-motion .city-bar, .city-view.reduce-motion .city-talk-leave, .city-view.reduce-motion .city-talk-chip, .city-view.reduce-motion .city-talk-box { transition: none; }
+.city-view.reduce-motion .city-talk-leave, .city-view.reduce-motion .city-talk-chip, .city-view.reduce-motion .city-talk-box { transition: none; }
 .city-view.reduce-motion .city-talk, .city-view.reduce-motion .city-root.is-talk .city-talk-leave, .city-view.reduce-motion .city-talk-say { animation: none; }
 .city-view.reduce-motion .typing-dots i { animation: none; opacity: .75; }
 
