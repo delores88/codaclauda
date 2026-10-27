@@ -273,7 +273,8 @@ export class CityView {
       if (this.remoteIsland) return base;
       // Your own island: CodaClauda and desktop sessions working on its projects join too.
       const extra = this.extraAgents().filter(a => a.currentProjectId && this.store.project(a.currentProjectId)).map(a => ({ ...a, cityProjectId: a.currentProjectId }));
-      return [...base, ...extra];
+      const managedAddresses = new Set(extra.filter(a => a.kind === 'session').map(a => sessions.session(a.sessionId)?.mailboxAddress).filter(Boolean));
+      return [...base.filter(a => !managedAddresses.has(a.address)), ...extra];
     }
     if (this.agentLocations) return this.agentLocations.agents;
     const store = this.store, extra = this.extraAgents();

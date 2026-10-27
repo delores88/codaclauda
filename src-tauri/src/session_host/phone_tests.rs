@@ -620,3 +620,23 @@ fn an_answer_is_never_routed_as_an_ordinary_phone_message() {
         assert!(phone_approvals::parse_decision(message).is_none(), "{message}");
     }
 }
+
+#[test]
+fn phone_off_on_and_topic_rebinding_permanently_revoke_old_approval_generations() {
+    let (dir, _store, mut book) = fixture();
+    let original = book.revision;
+    assert!(book.approval_current(original));
+    book.settings(false).unwrap();
+    assert!(!book.approval_current(original));
+    book.settings(true).unwrap();
+    assert!(!book.approval_current(original));
+    let resumed = book.revision;
+    assert!(book.approval_current(resumed));
+    book.bind(Some("https://ntfy.sh/another-fixture"), coord_core::now()).unwrap();
+    assert!(!book.approval_current(resumed));
+    persist(&dir.path().join(FILE), &book).unwrap();
+    let saved = read_book(&dir.path().join(FILE)).unwrap();
+    assert!(!saved.approval_current(original) && !saved.approval_current(resumed));
+    fs::write(dir.path().join(FILE), b"{unreadable").unwrap();
+    assert_eq!(read_book(&dir.path().join(FILE)).err().unwrap().0, "PHONE_STORAGE_FAILED");
+}

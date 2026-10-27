@@ -496,6 +496,10 @@ struct Batch {
 }
 
 fn batch(store: &Store, address: &str, cursor: u64) -> Result<Batch, String> {
+    batch_filtered(store, address, cursor, &|_| false)
+}
+
+fn batch_filtered(store: &Store, address: &str, cursor: u64, skip: &dyn Fn(&Value) -> bool) -> Result<Batch, String> {
     let mut found = Batch { through: cursor, ..Batch::default() };
     let mut since = cursor;
     for _ in 0..PAGES {
@@ -503,8 +507,8 @@ fn batch(store: &Store, address: &str, cursor: u64) -> Result<Batch, String> {
             .map_err(|e| e.to_string())?;
         for message in page["messages"].as_array().into_iter().flatten() {
             let from = message["from"].as_str().unwrap_or("");
-            if from == address {
-                continue; // a chat's note to itself never wakes it
+            if from == address || skip(message) {
+                continue; // self notes and separately delivered bridge decisions never wake twice
             }
             found.count += 1;
             found.ack_message = message["id"].as_str().map(str::to_owned);
@@ -745,6 +749,14 @@ fn poll_file(
     run: Runner<'_>,
     stop_all: &dyn Fn() -> bool,
 ) -> usize {
+    poll_file_filtered(path, store, current_context, exe, run, stop_all, &|_| false)
+}
+
+fn poll_file_filtered(
+    path: &Path, store: &Store, current_context: &dyn Fn() -> Ctx,
+    exe: &dyn Fn() -> Result<PathBuf, String>, run: Runner<'_>,
+    stop_all: &dyn Fn() -> bool, skip: &dyn Fn(&Value) -> bool,
+) -> usize {
     let loaded = {
         let _guard = lock(&FILE);
         load(path)
@@ -761,7 +773,7 @@ fn poll_file(
         if stop_all() {
             break;
         }
-        let found = match batch(store, &binding.address, binding.cursor) {
+        let found = match batch_filtered(store, &binding.address, binding.cursor, skip) {
             Ok(found) if found.through > binding.cursor => found,
             Ok(_) => continue,
             Err(e) => {
@@ -853,61 +865,100 @@ pub(super) async fn poll_bound(inner: &Arc<Inner>) {
                 Err(outcome) => outcome,
             }
         };
-        poll_file(&path, &store, &current_context, &exe, &run, &stop_all)
+        poll_file_filtered(&path, &store, &current_context, &exe, &run, &stop_all, &|m| worker.phone_approval_reply(m))
     })
     .await;
 }
 
-/// Is this board address bound to a Codex desktop chat?
-pub(super) fn bound(dir: &Path, address: &str) -> bool {
-    let path = dir.join(BINDINGS_FILE);
-    path.is_file() && {
-        let _guard = lock(&FILE);
-        load(&path).is_ok_and(|book| book.bindings.iter().any(|b| b.address == address))
+/// Frozen routing identity only: no transcript, receipt tail or credential.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct OwnerAnswerBinding {
+    address: String,
+    thread_id: String,
+    cwd: String,
+    project_id: String,
+    project_root: String,
+    bound_at: u64,
+}
+impl OwnerAnswerBinding {
+    fn from_binding(b: &Binding) -> Self {
+        Self { address: b.address.clone(), thread_id: b.thread_id.clone(), cwd: b.cwd.clone(),
+            project_id: b.project_id.clone(), project_root: b.project_root.clone(), bound_at: b.bound_at }
+    }
+    fn binding(&self) -> Binding {
+        Binding { address: self.address.clone(), provider: "codex".into(), thread_id: self.thread_id.clone(),
+            cwd: self.cwd.clone(), project_id: self.project_id.clone(), project_root: self.project_root.clone(),
+            bound_at: self.bound_at, cursor: 0, last: None }
     }
 }
 
-/// Ben's answer to an approval request, from his phone (0.7.2): the one case a
-/// desktop chat gets message text instead of a count-only notice, and only after
-/// phone_approvals.rs checked his one-time code. Queued once into the bound
-/// thread, re-verified first, with the same stripped environment and timeout.
-pub(super) async fn queue_owner_answer(inner: &Arc<Inner>, address: &str, text: String) -> Result<(), String> {
-    let path = inner.dir.join(BINDINGS_FILE);
-    let binding = {
-        let _guard = lock(&FILE);
-        load(&path)?.bindings.into_iter().find(|b| b.address == address)
-    }
-    .ok_or("that chat is no longer bound")?;
+pub(super) fn owner_answer_binding(dir: &Path, address: &str) -> Result<Option<OwnerAnswerBinding>, String> {
+    let path = dir.join(BINDINGS_FILE);
+    if !path.is_file() { return Ok(None); }
+    let _guard = lock(&FILE);
+    Ok(load(&path)?.bindings.iter().find(|b| b.address == address).map(OwnerAnswerBinding::from_binding))
+}
+
+pub(super) struct OwnerAnswerOutcome {
+    pub state: &'static str,
+    pub detail: String,
+}
+fn owner_answer_outcome(outcome: &Outcome) -> OwnerAnswerOutcome {
+    let (state, detail) = match &outcome.ended {
+        Ended::Exited(0) if !says_unreachable(&outcome.stderr) =>
+            ("queued", "Codex accepted the queue command. Recipient acknowledgment and execution remain unverified.".into()),
+        Ended::NotStarted(why) | Ended::Refused(why) =>
+            ("not-started", format!("Not sent: {}", clean(why))),
+        _ => ("unknown", "The queue outcome is unknown; the answer may have arrived. It will not be sent again automatically. Reconcile the exact chat before any further action.".into()),
+    };
+    OwnerAnswerOutcome { state, detail }
+}
+
+/// Admission failed before start_queue could create a process; cancellation
+/// here is certain non-dispatch, unlike cancellation while waiting for a child.
+fn owner_answer_not_started(outcome: &Outcome) -> OwnerAnswerOutcome {
+    if outcome.ended == Ended::Cancelled {
+        OwnerAnswerOutcome { state: "not-started", detail: "Not sent: approval settings or the original binding changed before queue startup.".into() }
+    } else { owner_answer_outcome(outcome) }
+}
+
+/// One bridge decision, never resolved again from a mutable mailbox name.
+/// Its durable sending record is already committed before entering this function.
+pub(super) async fn queue_owner_answer(
+    inner: &Arc<Inner>, frozen: OwnerAnswerBinding, request: String, revision: u64, text: String,
+) -> OwnerAnswerOutcome {
     let worker = inner.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let exe = match lock(&worker.executables).get(&Provider::Codex).filter(|p| p.is_file()).cloned() {
+        let path = worker.dir.join(BINDINGS_FILE);
+        let binding = frozen.binding();
+        let key = delivery_key(&path, &binding);
+        let allowed = || worker.wake_enabled() && worker.phone_desktop_approval_current(&request, revision, &frozen);
+        if !allowed() || owner_answer_binding(&worker.dir, &binding.address).ok().flatten().as_ref() != Some(&frozen) {
+            return owner_answer_outcome(&not_run(Ended::Refused("The approval settings or original chat binding changed.".into())));
+        }
+        let cached = { lock(&worker.executables).get(&Provider::Codex).filter(|p| p.is_file()).cloned() };
+        let exe = match cached {
             Some(found) => found,
-            None => {
-                let found = super::discover(Provider::Codex)?;
-                lock(&worker.executables).insert(Provider::Codex, found.clone());
-                found
-            }
+            None => match super::discover(Provider::Codex) {
+                Ok(found) => { lock(&worker.executables).insert(Provider::Codex, found.clone()); found }
+                Err(why) => return owner_answer_outcome(&not_run(Ended::NotStarted(why))),
+            },
         };
         let command = queue_command(&exe, &binding, &text);
         let started = {
             let _lifecycle = lock(&worker.lifecycle);
-            admit_queue(&path, &binding, &|| context(&worker), &|| true, || start_queue(&command))
+            admit_queue(&path, &binding, &|| context(&worker), &allowed, || start_queue(&command))
         };
+        let stop = || !allowed() || lock(&CANCELLED).contains(&key);
         let outcome = match started {
-            Ok(child) => wait_queue(child, QUEUE_TIMEOUT, &|| false),
-            Err(outcome) => outcome,
+            Ok(child) => wait_queue(child, QUEUE_TIMEOUT, &stop),
+            Err(outcome) => return owner_answer_not_started(&outcome),
         };
-        let why = |fallback: &str| telling_line(&outcome.stdout, &outcome.stderr).map(|l| clean(&l)).unwrap_or_else(|| fallback.to_owned());
-        match &outcome.ended {
-            Ended::Exited(0) if !says_unreachable(&outcome.stderr) => Ok(()),
-            Ended::Exited(code) => Err(why(&format!("codex queue exited with {code}"))),
-            Ended::TimedOut => Err("codex queue timed out".into()),
-            Ended::Cancelled => Err("the binding changed while queuing".into()),
-            Ended::NotStarted(why) | Ended::Lost(why) | Ended::Refused(why) => Err(clean(why)),
-        }
+        owner_answer_outcome(&outcome)
+    }).await.unwrap_or_else(|_| OwnerAnswerOutcome {
+        state: "unknown", detail: "The queue task stopped with an unknown result. Do not replay the answer automatically.".into(),
     })
-    .await
-    .map_err(|_| "the queue task stopped".to_owned())?
 }
 
 // ----------------------------------------------------------------- commands
@@ -1036,6 +1087,46 @@ mod tests {
         let mut book = load(&f.path).unwrap();
         assert_eq!(book.bindings.len(), 1);
         book.bindings.remove(0)
+    }
+
+    #[test]
+    fn phone_queue_uses_frozen_generation_and_distinguishes_cancellation_phases() {
+        let f = fixture(); let c = ctx(&f, true);
+        bind(&f.path, &f.store, &c, "codex-desk", THREAD, 100).unwrap();
+        let frozen = owner_answer_binding(&f.root, "codex-desk").unwrap().unwrap();
+        let blocked = admit_queue(&f.path, &frozen.binding(), &|| c.clone(), &|| false,
+            || -> Result<(), Outcome> { panic!("revoked phone approval must not start") }).unwrap_err();
+        assert_eq!(owner_answer_not_started(&blocked).state, "not-started");
+        assert_eq!(owner_answer_outcome(&blocked).state, "unknown", "same cancellation after process startup is ambiguous");
+        unbind(&f.path, "codex-desk").unwrap();
+        bind(&f.path, &f.store, &c, "codex-desk", THREAD, 101).unwrap();
+        assert_ne!(owner_answer_binding(&f.root, "codex-desk").unwrap().unwrap(), frozen);
+        assert!(admit_queue(&f.path, &frozen.binding(), &|| c.clone(), &|| true,
+            || -> Result<(), Outcome> { panic!("same thread in a replacement binding is still a different generation") }).is_err());
+        for end in [Ended::TimedOut, Ended::Cancelled, Ended::Lost("lost".into()), Ended::Exited(1)] {
+            let result = owner_answer_outcome(&not_run(end));
+            assert_eq!(result.state, "unknown");
+            assert!(result.detail.contains("may have arrived") && result.detail.contains("not be sent again"));
+        }
+        let queued = owner_answer_outcome(&not_run(Ended::Exited(0)));
+        assert_eq!(queued.state, "queued");
+        assert!(queued.detail.contains("unverified") && !queued.detail.contains("Delivered"));
+    }
+
+    #[test]
+    fn phone_bridge_reply_is_excluded_from_the_ordinary_desktop_batch_even_without_a_ledger() {
+        let f = fixture();
+        mailbox::api(&f.store, "post", &json!({"id":"desktop-approval","to":"owner","from":"codex-desk","kind":"question","subject":"APPROVAL REQUEST: fixture","body":"Fixture"})).unwrap();
+        let id = format!("phone-answer-{}", super::super::hex_digest(b"desktop-approval"));
+        mailbox::post_first_owner_reply(&f.store, &json!({"id":id,"from":"owner","to":"codex-desk","kind":"reply","reply_to":"desktop-approval","subject":"Decision","body":"Fixture answer"})).unwrap();
+        let skip = |message: &Value| message["id"].as_str().is_some_and(mailbox::phone_answer_id);
+        let only_bridge = batch_filtered(&f.store, "codex-desk", 0, &skip).unwrap();
+        assert_eq!(only_bridge.count, 0);
+        assert!(only_bridge.through > 0, "cursor advances without a second queue notice");
+        post(&f, "ordinary-mail", "owner");
+        let mixed = batch_filtered(&f.store, "codex-desk", 0, &skip).unwrap();
+        assert_eq!(mixed.count, 1);
+        assert_eq!(mixed.ack_message.as_deref(), Some("ordinary-mail"));
     }
 
     #[test]

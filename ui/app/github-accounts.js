@@ -27,6 +27,16 @@ export function uncloned(store, account) {
 }
 const sizeOf = repos => repos.reduce((sum, repo) => sum + (Number(repo.size_kb) || 0) * 1024, 0);
 
+/** A successful clone is never repeated just because its local scan/link failed. */
+export async function cloneAndLinkRepo({ store, bridge, repo, parentDir, account, row }) {
+  if (!row.path) {
+    const result = await bridge.desktop.cloneRepo({ fullName: repo.full_name, parentDir, account, createParent: true });
+    row.path = result.path;
+  }
+  await store.linkFolder(row.path);
+  return row.path;
+}
+
 /** One choice for all your extra accounts: one big city, or each account its own island. */
 function layoutControl(current, onPick) {
   const option = (value, label, hint) => h('label.gha-mode-opt', { title: hint },
@@ -126,7 +136,7 @@ export function openCloneRepos({ store, bridge, account }) {
   const accountSelect = h('select.input', { 'aria-label': 'GitHub account', onchange: () => {
     state.views.delete(render);
     state = runFor(accountSelect.value); state.views.add(render);
-    if (!state.running) { state.picked.clear(); state.rows.clear(); }
+    if (!state.running) state.picked.clear();
     render();
   } }, ...accounts.map(a => h('option', { value: a.user, selected: lower(a.user) === lower(state.account) }, `@${a.user}`)));
   const folder = h('input.input.gha-folder', { type: 'text', readOnly: true, 'aria-label': 'Clone folder' });
@@ -136,21 +146,26 @@ export function openCloneRepos({ store, bridge, account }) {
   } }, icon('folder'), 'Change…');
   const reset = h('button.btn.small.ghost', { type: 'button', onclick: () => { store.setPref(`cloneFolder:${lower(state.account)}`, ''); render(); } }, 'Use suggested');
   const selectAll = h('input', { type: 'checkbox', 'aria-label': 'Select every repository', onchange: () => {
-    const repos = uncloned(store, state.account);
+    const repos = available(state);
     if (selectAll.checked) for (const r of repos) state.picked.add(lower(r.full_name)); else state.picked.clear();
     render();
   } });
   const list = h('ul.gha-repos', { 'aria-label': 'Repositories not on this PC' });
   const summary = h('span.gha-summary');
-  const cloneAll = h('button.btn', { type: 'button', onclick: () => { for (const r of uncloned(store, state.account)) state.picked.add(lower(r.full_name)); start(state); } }, icon('download'), 'Clone all');
+  const cloneAll = h('button.btn', { type: 'button', onclick: () => { for (const r of available(state)) state.picked.add(lower(r.full_name)); start(state); } }, icon('download'), 'Clone all');
   const clonePicked = h('button.btn.primary', { type: 'button', onclick: () => start(state) }, icon('download'), 'Clone selected');
   const stop = h('button.btn.ghost', { type: 'button', hidden: true, onclick: () => { state.cancel = true; notify(state); } }, 'Stop');
   const note = h('p.field-hint');
 
-  const STATUS = { queued: 'Queued', cloning: 'Cloning…', done: 'Cloned', linked: 'Already here · linked', failed: 'Failed', skipped: 'Stopped' };
+  const available = run => uncloned(store, run.account).filter(r => !run.rows.get(lower(r.full_name))?.path);
+  const retainRecovery = run => {
+    if ([...run.rows.values()].some(row => row.state === 'link-failed')) runs.set(lower(run.account), run);
+    else runs.delete(lower(run.account));
+  };
+  const STATUS = { queued: 'Queued', cloning: 'Cloning…', linking: 'Linking…', done: 'Cloned and linked', 'link-failed': 'Clone saved · link failed', failed: 'Failed', skipped: 'Stopped' };
   let listSig = '';
   function render() {
-    const repos = uncloned(store, state.account);
+    const repos = available(state);
     const running = [...state.rows.keys()];
     // Keep finished rows visible during and after a run, even once they leave the uncloned list.
     const shown = [...repos, ...running.filter(key => !repos.some(r => lower(r.full_name) === key)).map(key => state.rows.get(key).repo)];
@@ -162,12 +177,13 @@ export function openCloneRepos({ store, bridge, account }) {
       listSig = sig;
       list.replaceChildren(...(shown.length ? shown.map(repo => {
         const key = lower(repo.full_name), row = state.rows.get(key);
-        const box = h('input', { type: 'checkbox', checked: state.picked.has(key), disabled: state.running, 'aria-label': `Clone ${repo.full_name}`,
+        const box = h('input', { type: 'checkbox', checked: state.picked.has(key), disabled: state.running || Boolean(row?.path), 'aria-label': `Clone ${repo.full_name}`,
           onchange: () => { if (box.checked) state.picked.add(key); else state.picked.delete(key); render(); } });
         return h('li.gha-repo', { dataset: { state: row?.state || '' } },
           h('label.gha-repo-main', box, h('span.gha-repo-icon', icon(repo.private ? 'lock' : 'github')),
             h('span.gha-repo-text', h('strong', repo.name || repo.full_name), h('span', repo.description || repo.full_name))),
-          h('span.gha-repo-meta', repo.size_kb ? formatBytes(repo.size_kb * 1024) : '', row ? h('span.gha-repo-status', { title: row.message || '' }, row.message && row.state === 'failed' ? `Failed: ${row.message}` : STATUS[row.state]) : null));
+          h('span.gha-repo-meta', repo.size_kb ? formatBytes(repo.size_kb * 1024) : '', row ? h('span.gha-repo-status', { title: row.message || '' }, row.message && row.state === 'failed' ? `Failed: ${row.message}` : STATUS[row.state]) : null,
+            row?.state === 'link-failed' ? h('button.btn.small', { type: 'button', disabled: state.running, title: row.message || '', onclick: () => retryLink(state, row) }, 'Retry link') : null));
       }) : [h('li.gha-empty', 'Every repository of this account is already on this PC.')]));
     }
     const picked = repos.filter(r => state.picked.has(lower(r.full_name)));
@@ -182,14 +198,14 @@ export function openCloneRepos({ store, bridge, account }) {
     stop.textContent = state.cancel ? 'Stopping after this repo…' : 'Stop';
     note.textContent = state.running
       ? `Cloning into ${dir}. You can close this window: cloning carries on and the City shows each lot as "Cloning…".`
-      : `Each repo goes into its own folder inside ${dir}. Existing folders are never overwritten: a repo already there is linked instead.`;
+      : `Each repo goes into its own folder inside ${dir}. Existing folders are never overwritten or automatically linked. Choose another folder if one already exists.`;
   }
 
   async function start(run) {
-    const repos = uncloned(store, run.account).filter(r => run.picked.has(lower(r.full_name)) && !store.cloning.has(`gh:${lower(r.full_name)}`));
+    const repos = available(run).filter(r => run.picked.has(lower(r.full_name)) && !store.cloning.has(`gh:${lower(r.full_name)}`));
     if (!repos.length || run.running) return;
-    const dir = cloneDirFor(store, run.account), main = store.githubAccounts.find(a => lower(a.user) === lower(run.account))?.main;
-    run.running = true; run.cancel = false; run.rows.clear();
+    const dir = cloneDirFor(store, run.account);
+    run.running = true; run.cancel = false;
     runs.set(lower(run.account), run);
     for (const repo of repos) { run.rows.set(lower(repo.full_name), { repo, state: 'queued' }); store.setCloning(`gh:${lower(repo.full_name)}`, { state: 'queued' }); }
     notify(run);
@@ -199,22 +215,30 @@ export function openCloneRepos({ store, bridge, account }) {
       if (run.cancel) { row.state = 'skipped'; store.setCloning(ghId, null); continue; }
       row.state = 'cloning'; store.setCloning(ghId, { state: 'cloning' }); notify(run);
       try {
-        const result = await bridge.desktop.cloneRepo({ fullName: repo.full_name, parentDir: dir, account: main ? null : run.account, createParent: true });
-        await store.linkFolder(result.path).catch(() => {});
+        await cloneAndLinkRepo({ store, bridge, repo, parentDir: dir, account: run.account, row });
         row.state = 'done'; done++;
       } catch (e) {
-        if (e?.code === 'FOLDER_EXISTS') {
-          try { await store.linkFolder(joinPath(dir, repo.name || key.split('/')[1])); row.state = 'linked'; done++; }
-          catch (linkError) { row.state = 'failed'; row.message = linkError.message; failed++; }
-        } else { row.state = 'failed'; row.message = e?.message || String(e); failed++; }
+        row.state = row.path ? 'link-failed' : 'failed'; row.message = e?.message || String(e); failed++;
       }
       store.setCloning(ghId, null);
       run.picked.delete(key);
       notify(run);
     }
-    run.running = false; runs.delete(lower(run.account));
+    run.running = false; retainRecovery(run);
     notify(run);
-    toast(`@${run.account}: ${plural(done, 'repo')} cloned to this PC${failed ? ` · ${failed} failed` : ''}${run.cancel ? ' · stopped' : ''}`, { kind: failed ? 'error' : 'success' });
+    toast(`@${run.account}: ${plural(done, 'repo')} cloned and linked${failed ? ` · ${failed} failed` : ''}${run.cancel ? ' · stopped' : ''}`, { kind: failed ? 'error' : 'success' });
+  }
+
+  async function retryLink(run, row) {
+    if (run.running || row.state !== 'link-failed' || !row.path) return;
+    run.running = true; run.cancel = false; row.state = 'linking'; runs.set(lower(run.account), run); notify(run);
+    try {
+      await cloneAndLinkRepo({ store, bridge, repo: row.repo, account: run.account, row });
+      row.state = 'done'; row.message = ''; toast(`Linked ${row.repo.full_name}`, { kind: 'success' });
+    } catch (e) {
+      row.state = 'link-failed'; row.message = e?.message || String(e);
+      toast(`Could not link ${row.repo.full_name}: ${row.message}`, { kind: 'error' });
+    } finally { run.running = false; retainRecovery(run); notify(run); }
   }
 
   const body = h('div.gha-clone',

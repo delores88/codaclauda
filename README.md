@@ -18,21 +18,20 @@ the local coordination board.
 
 ## Current status
 
-[Version 0.7.0](https://github.com/delores88/codaclauda/releases/tag/v0.7.0)
-is installed, published and accepted in the Marketplace.
+[Version 0.7.1](https://github.com/delores88/codaclauda/releases/tag/v0.7.1)
+is published and accepted in the Marketplace.
 
-This **0.7.1 source** fixes City loading, local-project rendering, agent placement
-and panning. Clicking an agent opens its conversation beside the City, and local
-buildings offer **New session**. A desktop conversation continues only as an
-explicitly confirmed, labelled copy. Failed first-message recovery retains the
-admitted copy instead of creating another conversation.
-See the [0.7.1 release scope](docs/RELEASE-0.7.1.md).
+This **0.7.2 candidate source** extends City conversations, Claude Code discovery,
+building variety, GitHub account islands and cloning, and phone approval replies.
+Building Claude/Codex choices open the existing City conversation panel. A desktop
+conversation continues only as an explicitly confirmed, labelled copy.
+See the [0.7.2 release scope](docs/RELEASE-0.7.2.md).
 
 Source tests and previews remain separate from installed acceptance. The release
-requires local installation and six actual City workflow checks before source
-push, GitHub publication and Marketplace submission. Native Marketplace UI,
-authenticated served bytes, phone display and unrelated GPU workflows remain
-separate evidence limits.
+requires installation of the exact candidate and actual City, provider and new
+feature checks before source push, GitHub publication and Marketplace submission.
+Native Marketplace UI, authenticated served bytes, physical phone display and
+unrelated GPU workflows remain separate evidence layers.
 
 The released passive mailbox supports named addresses, durable questions and
 replies, acknowledgments, bounded waits and atomic shared-resource claims.
@@ -241,6 +240,12 @@ analysis. Optional create/clone actions use the separately installed, signed-in
 `gh` CLI and Git; creating a repository changes GitHub and clones it into a new
 folder under the selected parent. Named public-user lookup can use the GitHub
 API without `gh`.
+
+Multiple GitHub accounts can share the City or appear on separate owned islands.
+Clone selected repositories or all repositories from an account into a selected
+parent folder; progress continues when its dialog closes. Renaming a building or
+removing it from the City does not rename or delete the local folder or remote
+repository. Saved account selections do not grant new GitHub permissions.
 
 Tasks and the 3D City organize project, message, request and claim records. Agent
 activity includes recency heuristics and task status can include owner overrides;

@@ -400,7 +400,9 @@ export class NpcManager {
       } else if (where.offsite) {
         const k = offsiteSlots.get(where.id) || 0, point = this.neighbors.spotFor(where.id, k), type = a.status === 'active' ? 'work' : 'rest';
         offsiteSlots.set(where.id, k + 1);
-        goal = { type, key: `${type}:${where.id}:${k}`, point, face: point.face, offsite: true, island: point.island };
+        // A neighbor can move when home grows, and this project can move into the
+        // main city. Neither change may reuse an onsite work slot's identity.
+        goal = { type, key: `offsite:${type}:${where.id}:${point.island}:${point.x},${point.z}:${k}`, point, face: point.face, offsite: true, island: point.island };
       } else if (a.status === 'offline') {
         const seats = (where.seats || []).map((s, k) => ({ ...s, key: `lot:${where.id}:${k}` }));
         const seat = seats.find(s => !usedSeats.has(s.key) && occupied(where).every(p => Math.hypot(p.x - s.x, p.z - s.z) >= (p.talkSpacing || .72)));
@@ -521,7 +523,7 @@ export class NpcManager {
   endTrip(npc) { if (npc.trip) { this.landPlane(npc); npc.trip = null; } }
   /** Crossing to another island view: everyone is placed at their goal there, no trips in flight. */
   settle() {
-    for (const npc of this.npcs.values()) { this.endTrip(npc); npc.flight = null; npc.path = []; }
+    for (const npc of this.npcs.values()) { this.endTrip(npc); npc.flight = null; npc.path = []; npc.goalKey = ''; }
     this.first = true;
   }
   /** Planes in the air (their agents are aboard): picking one picks its agent. */

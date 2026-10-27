@@ -62,7 +62,7 @@ pub(super) struct Book {
     schema: u32,
     enabled: bool,
     topic_digest: Option<String>,
-    revision: u64,
+    pub(super) revision: u64,
     created_at: u64,
     last_id: Option<String>,
     last_recipient: Option<String>,
@@ -76,7 +76,8 @@ pub(super) struct Book {
     legacy_cursor: Option<String>,
     last_error: Option<String>,
     /// 0.7.2: send agents' APPROVAL REQUESTs to the phone with one-time codes (phone_approvals.rs).
-    approvals: bool,
+    pub(super) approvals: bool,
+    pub(super) approval_ledger: phone_approvals::Ledger,
     #[serde(skip)]
     storage_failed: bool,
 }
@@ -86,7 +87,7 @@ impl Default for Book {
         Self { schema: 2, enabled: true, topic_digest: None, revision: 0,
             created_at: 0, last_id: None, last_recipient: None, inbound: BTreeMap::new(),
             outbound: BTreeMap::new(), published: BTreeMap::new(), legacy_inbound: BTreeMap::new(),
-            legacy_cursor: None, last_error: None, approvals: true, storage_failed: false }
+            legacy_cursor: None, last_error: None, approvals: true, approval_ledger: phone_approvals::Ledger::default(), storage_failed: false }
     }
 }
 
@@ -99,8 +100,11 @@ impl Book {
             self.last_error = None;
         }
     }
-    fn current(&self, revision: u64) -> bool {
+    pub(super) fn current(&self, revision: u64) -> bool {
         self.enabled && !self.storage_failed && self.topic_digest.is_some() && self.revision == revision
+    }
+    pub(super) fn approval_current(&self, revision: u64) -> bool {
+        self.approvals && self.current(revision)
     }
     fn settings(&mut self, enabled: bool) -> Result<(), Failure> {
         if self.storage_failed { return Err(failure("PHONE_STORAGE_FAILED", STORAGE_ERROR)); }
@@ -188,12 +192,16 @@ fn read_book(path: &Path) -> Result<Book, Failure> {
     }
     let mut book: Book = serde_json::from_value(value).map_err(|_| failure("PHONE_STORAGE_FAILED", STORAGE_ERROR))?;
     if book.schema != 2 || book.inbound.len() > RECEIPT_LIMIT || book.outbound.len() > RECEIPT_LIMIT
-        || book.published.len() > RECEIPT_LIMIT || book.legacy_inbound.len() > RECEIPT_LIMIT {
+        || book.published.len() > RECEIPT_LIMIT || book.legacy_inbound.len() > RECEIPT_LIMIT
+        || !book.approval_ledger.valid(RECEIPT_LIMIT) {
         return Err(failure("PHONE_STORAGE_FAILED", STORAGE_ERROR));
     }
     if book.outbound.values().any(|r| r.state == "sending")
         || book.legacy_inbound.values().any(|r| r.feedback_state.as_deref() == Some("sending")) {
         book.last_error = Some(UNKNOWN_PUSH.into());
+    }
+    if book.approval_ledger.uncertain() {
+        book.last_error = Some("A phone approval delivery is reserved or has an unknown result. It is not retried automatically; reconcile its exact board request and chat.".into());
     }
     Ok(book)
 }
@@ -501,7 +509,7 @@ impl Inner {
         *lock(&self.phone) = book;
         if let Err((_, message)) = self.phone_bind(self.phone_reply_url().as_deref()) { self.phone_error(&message); }
     }
-    fn change_phone<T>(&self, update: impl FnOnce(&mut Book) -> Result<T, Failure>) -> Result<T, Failure> {
+    pub(super) fn change_phone<T>(&self, update: impl FnOnce(&mut Book) -> Result<T, Failure>) -> Result<T, Failure> {
         let mut held = lock(&self.phone);
         if held.storage_failed { return Err(failure("PHONE_STORAGE_FAILED", STORAGE_ERROR)); }
         let mut next = held.clone();
@@ -516,8 +524,13 @@ impl Inner {
     pub(super) fn phone_error(&self, message: &str) { let _ = self.change_phone(|b| { b.last_error = Some(message.into()); Ok(()) }); }
     /// Caller holds phone_gate, or is initializing before any tasks start.
     pub(super) fn phone_bind(&self, url: Option<&str>) -> Result<(), Failure> {
+        // Same synchronous gate as managed dispatch and desktop queue spawn.
+        // Caller already holds phone_gate; never hold this across an await.
+        let _lifecycle = lock(&self.lifecycle);
         if lock(&self.phone).topic_digest == url.map(url_digest) { return Ok(()); }
-        self.change_phone(|b| b.bind(url, coord_core::now()).map(|_| ()))
+        let changed = self.change_phone(|b| b.bind(url, coord_core::now()))?;
+        if changed { self.phone_approvals_reset(); }
+        Ok(())
     }
     fn phone_directory(&self) -> Result<Value, Failure> {
         mailbox::api(&self.board_store()?, "directory", &json!({})).map_err(|_| failure("PHONE_BOARD_FAILED", "The board directory is unavailable."))
@@ -534,6 +547,7 @@ impl Inner {
         Ok(json!({"enabled": book.enabled, "topicUrl": self.phone_reply_url(), "lastRecipient": book.last_recipient, "recipients": choices, "lastError": last_error, "approvals": approvals}))
     }
     pub(super) fn phone_current(&self, revision: u64) -> bool { lock(&self.phone).current(revision) }
+    pub(super) fn phone_approval_current(&self, revision: u64) -> bool { lock(&self.phone).approval_current(revision) }
     pub(super) fn phone_approvals_on(&self) -> bool { let book = lock(&self.phone); book.approvals && book.enabled && !book.storage_failed }
     pub(super) fn phone_created_at(&self) -> u64 { lock(&self.phone).created_at }
     /// "approve <code>" / "deny <code>": an answer to an approval request (phone_approvals.rs).
@@ -707,8 +721,10 @@ pub(crate) async fn phone_settings_set(app: tauri::AppHandle, enabled: bool) -> 
     let inner = host(&app);
     let _gate = inner.phone_gate.lock().await;
     let result = (|| {
+        let _lifecycle = lock(&inner.lifecycle);
         if !enabled && lock(&inner.phone).storage_failed { lock(&inner.phone).enabled = false; return inner.phone_view(); }
         inner.change_phone(|b| b.settings(enabled))?;
+        inner.phone_approvals_reset();
         inner.phone_view()
     })();
     reply(result)
@@ -719,15 +735,16 @@ pub(crate) async fn phone_settings_set(app: tauri::AppHandle, enabled: bool) -> 
 pub(crate) async fn phone_approvals_set(app: tauri::AppHandle, enabled: bool) -> Value {
     let inner = host(&app);
     let _gate = inner.phone_gate.lock().await;
-    reply(inner.change_phone(|b| { b.approvals = enabled; Ok(()) }).and_then(|_| inner.phone_view()))
+    let _lifecycle = lock(&inner.lifecycle);
+    reply(inner.change_phone(|b| { b.approvals = enabled; b.revision = b.revision.wrapping_add(1); Ok(()) }).and_then(|_| { inner.phone_approvals_reset(); inner.phone_view() }))
 }
 
 /// After five wrong codes phone approvals lock; only the owner, on the PC, unlocks them.
 #[tauri::command]
 pub(crate) async fn phone_approvals_unlock(app: tauri::AppHandle) -> Value {
     let inner = host(&app);
-    inner.phone_approvals_unlock();
-    reply(inner.phone_view())
+    let _gate = inner.phone_gate.lock().await;
+    reply(inner.phone_approvals_unlock().and_then(|_| inner.phone_view()))
 }
 
 #[cfg(test)]

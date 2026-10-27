@@ -1022,17 +1022,11 @@ export function mount(root, ctx) {
           toast(`${p.name} is hidden from the Board and City`, { kind: 'success', action: { label: 'Undo', run: () => saveSettings(currentProject(p.id) || p, { board: p.visible.board, city: p.visible.city }) } });
         } },
         { label: 'Unlink', kind: 'danger', run: () => {
-          const d = store.desktop.projects;
-          const localEntries = (d.local || []).filter(item => p.ids.includes(`local:${normalizePath(item.path)}`));
-          const repoEntries = (d.github?.repos || []).filter(r => p.ids.includes(`gh:${String(r.full_name || r.name).toLowerCase()}`));
-          store.unlinkProject(p);
+          const removed = store.unlinkProject(p);
           // A folder an agent registered is forgotten too, so it does not come back on its own.
           if (team.projects?.[team.get(p).key]?.autoRegistered) team.set(p, { remove: true }).catch(error => toast(`Couldn't forget the teammate registration: ${error?.message || error}`, { kind: 'error', timeout: 8000 }));
-          const canUndo = typeof store.updateDesktop === 'function' && (localEntries.length || repoEntries.length);
-          toast(`Unlinked ${p.name}`, { kind: 'success', timeout: 7000, action: canUndo ? { label: 'Undo', run: () => store.updateDesktop(draft => {
-            draft.projects.local.push(...localEntries);
-            draft.projects.github.repos.push(...repoEntries);
-          }) } : undefined });
+          const canUndo = removed?.local.length || removed?.accounts.length;
+          toast(`Unlinked ${p.name}`, { kind: 'success', timeout: 7000, action: canUndo ? { label: 'Undo', run: () => store.restoreProjectLinks(removed) } : undefined });
         } },
       ],
     });

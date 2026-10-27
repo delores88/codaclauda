@@ -407,7 +407,7 @@ fn persist_book(path: &Path, book: &Book) -> std::io::Result<()> {
     write_atomic(path, &serde_json::to_vec_pretty(&value)?)
 }
 
-fn wake_key(id: &str, address: &str, message_id: &str) -> String {
+pub(super) fn wake_key(id: &str, address: &str, message_id: &str) -> String {
     format!("wake:{id}:{address}:{message_id}")
 }
 
@@ -842,6 +842,7 @@ impl Inner {
             address,
             message_id,
         )?;
+        self.validate_phone_wake(record, origin)?;
         let mut book = lock(&self.wake);
         let mut updated = book.clone();
         let changed = updated.reserve(
@@ -977,9 +978,15 @@ impl Inner {
                 let now = now_ms();
                 let subject = message["subject"].as_str().unwrap_or("");
                 let kind = message["kind"].as_str().unwrap_or("");
-                let origin = json!({"kind": "wake", "address": address, "from": from, "subject": subject, "messageId": message_id, "messageKind": kind, "pair": pair});
+                let mut origin = json!({"kind": "wake", "address": address, "from": from, "subject": subject, "messageId": message_id, "messageKind": kind, "pair": pair});
+                let text = match self.phone_approval_wake(message) {
+                    Some(Ok((text, proof))) => { origin["phoneApproval"] = proof; text }
+                    Some(Err(("PHONE_APPROVAL_PENDING", _))) => continue,
+                    Some(Err(_)) => { acks.push((address.clone(), message_id.to_owned())); continue; }
+                    None => wake_text(&address, message),
+                };
                 let item = Queued::keyed(
-                    wake_text(&address, message),
+                    text,
                     Vec::new(),
                     origin,
                     wake_key(&id, &address, message_id),
@@ -1013,6 +1020,10 @@ impl Inner {
                             self.loop_guard_notice(&id, pair, from, &address);
                         }
                         continue;
+                    }
+                    // A revoked or changed bridge route can never fall back to ordinary mail or revive later.
+                    Err(("PHONE_APPROVAL_REVOKED", _)) => {
+                        acks.push((address.clone(), message_id.to_owned())); continue;
                     }
                     // The owner paused this pair: its mail waits unread, without a notice each poll.
                     Err(("WAKE_PAIR_PAUSED", _)) => continue,

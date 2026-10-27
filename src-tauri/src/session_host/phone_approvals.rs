@@ -8,7 +8,8 @@
 //! (a CodaClauda chat as a turn, a bound Codex desktop chat through `codex
 //! queue`), and an owner reply on the board marks the request answered.
 //! Anyone holding the private topic could answer; docs/PHONE.md says so.
-use super::{Failure, Inner, Queued, desktop_queue, lock, phone::Publication};
+use super::{Failure, Inner, Record, desktop_queue, lock, phone::Publication};
+use serde::{Deserialize, Serialize};
 use coord_core::{mailbox, secrets::mailbox_credential, store::Store};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,7 +34,6 @@ pub(super) struct Approvals {
     pushed: BTreeSet<String>,
     /// Owner inbox cursor (board sequence).
     since: u64,
-    wrong: u32,
     /// Per run, so a restart's new codes get their own push receipts.
     run: String,
 }
@@ -44,6 +44,8 @@ struct Pending {
     from: String,
     title: String,
     expires: u64,
+    revision: u64,
+    route: Route,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -103,8 +105,10 @@ fn request_title(subject: &str) -> String {
     let title: String = rest.chars().filter(|c| !c.is_control()).take(200).collect();
     if title.is_empty() { "(no description)".into() } else { title }
 }
-fn answered(store: &Store, request: &str) -> bool {
-    mailbox::api(store, "wait-reply", &json!({"id": request, "timeout": 0})).is_ok_and(|r| !r["reply"].is_null())
+fn answered(store: &Store, request: &str) -> Result<bool, Failure> {
+    mailbox::api(store, "wait-reply", &json!({"id": request, "timeout": 0}))
+        .map(|r| !r["reply"].is_null())
+        .map_err(|_| ("PHONE_BOARD_FAILED", "The existing owner decision could not be verified.".into()))
 }
 /// The words put into the agent's own chat: Ben's answer, said plainly.
 pub(super) fn chat_text(decision: Decision, title: &str, request: &str, note: &str) -> String {
@@ -134,28 +138,120 @@ fn actions(url: &str, code: &str) -> String {
     format!("http, Approve, {url}, method=POST, body=approve {code}, clear=true; http, Deny, {url}, method=POST, body=deny {code}, clear=true")
 }
 
+/// Only identities/digests/generation/outcomes persist. Codes and request text do not.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct Ledger {
+    wrong: u32,
+    decisions: BTreeMap<String, Applied>,
+}
+impl Ledger {
+    pub(super) fn uncertain(&self) -> bool { self.decisions.values().any(|a| matches!(a.outcome.as_str(), "reserved" | "desktop-sending" | "unknown")) }
+    pub(super) fn valid(&self, limit: usize) -> bool {
+        self.wrong <= WRONG_LIMIT && self.decisions.len() <= limit && self.decisions.iter().all(|(id, a)| {
+            id == &a.request && !id.is_empty() && a.body_digest.len() == 64
+                && a.body_digest.bytes().all(|c| c.is_ascii_hexdigit())
+                && a.message == answer_id(id)
+                && matches!(a.outcome.as_str(), "reserved" | "managed" | "desktop-sending" | "queued" | "unknown" | "not-started" | "board-only" | "superseded" | "board-failed")
+        })
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagedRoute {
+    id: String,
+    provider: String,
+    project: String,
+    cwd: String,
+    address: Option<String>,
+    thread: Option<String>,
+    provider_session: Option<String>,
+}
+impl ManagedRoute {
+    fn from_record(r: &Record) -> Self {
+        Self { id: r.id.clone(), provider: r.provider.clone(), project: r.project_id.clone(), cwd: r.cwd.clone(),
+            address: r.mailbox_address.clone(), thread: r.thread_id.clone(), provider_session: r.provider_session_id.clone() }
+    }
+    fn matches(&self, r: &Record) -> bool { r.status != "closed" && r.wake && self == &Self::from_record(r) }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum Route {
+    Managed(ManagedRoute),
+    Desktop(desktop_queue::OwnerAnswerBinding),
+    BoardOnly,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Applied {
+    request: String,
+    address: String,
+    message: String,
+    body_digest: String,
+    revision: u64,
+    route: Route,
+    outcome: String,
+    at: u64,
+}
+fn answer_id(request: &str) -> String { format!("phone-answer-{}", super::hex_digest(request.as_bytes())) }
+impl Applied {
+    fn matches_message(&self, m: &Value) -> bool {
+        m["id"] == self.message && m["reply_to"] == self.request && m["from"] == OWNER
+            && m["to"] == self.address && m["kind"] == "reply"
+            && m["body"].as_str().is_some_and(|body| super::hex_digest(body.as_bytes()) == self.body_digest)
+    }
+    fn proof(&self) -> Value {
+        json!({"request": self.request, "message": self.message, "digest": self.body_digest, "revision": self.revision})
+    }
+}
+
 impl Inner {
     pub(super) fn phone_approvals_view(&self) -> Value {
-        let approvals = lock(&self.phone_approvals);
-        json!({"locked": approvals.wrong >= WRONG_LIMIT, "waiting": approvals.codes.len()})
+        let wrong = lock(&self.phone).approval_ledger.wrong;
+        let waiting = lock(&self.phone_approvals).codes.len();
+        json!({"locked": wrong >= WRONG_LIMIT, "waiting": waiting})
     }
-    pub(super) fn phone_approvals_unlock(&self) {
-        lock(&self.phone_approvals).wrong = 0;
+    pub(super) fn phone_approvals_unlock(&self) -> Result<(), Failure> {
+        self.change_phone(|b| { b.approval_ledger.wrong = 0; Ok(()) })
+    }
+    pub(super) fn phone_approvals_reset(&self) {
+        *lock(&self.phone_approvals) = Approvals::default();
+    }
+    fn phone_approval_route(&self, address: &str) -> Route {
+        let state = lock(&self.state);
+        let records: Vec<_> = state.records.iter().filter(|r| r.status != "closed" && r.mailbox_address.as_deref() == Some(address)).collect();
+        if let [r] = records.as_slice() { return Route::Managed(ManagedRoute::from_record(r)); }
+        if !records.is_empty() { return Route::BoardOnly; }
+        drop(state);
+        desktop_queue::owner_answer_binding(&self.dir, address).ok().flatten().map(Route::Desktop).unwrap_or(Route::BoardOnly)
+    }
+    fn phone_approval_route_current(&self, address: &str, route: &Route) -> bool {
+        if !self.wake_enabled() { return false; }
+        match route {
+            Route::Managed(expected) => lock(&self.state).records.iter().any(|r| expected.matches(r)),
+            Route::Desktop(expected) => desktop_queue::owner_answer_binding(&self.dir, address).ok().flatten().as_ref() == Some(expected),
+            Route::BoardOnly => false,
+        }
+    }
+    fn phone_approval_outcome(&self, request: &str, outcome: &str) -> Result<(), Failure> {
+        self.change_phone(|b| {
+            let a = b.approval_ledger.decisions.get_mut(request).ok_or(("PHONE_STORAGE_FAILED", "The decision record is unavailable.".into()))?;
+            a.outcome = outcome.into(); Ok(())
+        })
     }
 
-    /// Phone tick: each new APPROVAL REQUEST to owner goes to the phone once per run, with a fresh code.
+    /// Phone tick: only new, uncommitted requests receive an ephemeral code.
     pub(super) async fn phone_approval_requests(&self, revision: u64, store: &Store) -> Result<(), Failure> {
-        if !self.phone_approvals_on() {
-            return Ok(());
-        }
+        if !self.phone_approval_current(revision) { return Ok(()); }
         let since = lock(&self.phone_approvals).since;
         let page = mailbox::api(store, "inbox", &json!({"addr": OWNER, "since": since, "limit": 100}))
             .map_err(|_| ("PHONE_BOARD_FAILED", "The owner inbox could not be read for approval requests.".to_owned()))?;
         let floor = self.phone_created_at().max(coord_core::now().saturating_sub(LOOKBACK));
         for m in page["messages"].as_array().into_iter().flatten() {
             let (Some(id), Some(sequence)) = (m["id"].as_str(), m["sequence"].as_u64()) else { continue };
-            let wanted = is_request(m) && m["created_at"].as_u64().unwrap_or(0) >= floor && !lock(&self.phone_approvals).pushed.contains(id);
-            if wanted && !answered(store, id) {
+            let committed = lock(&self.phone).approval_ledger.decisions.contains_key(id);
+            let wanted = is_request(m) && !committed && m["created_at"].as_u64().unwrap_or(0) >= floor && !lock(&self.phone_approvals).pushed.contains(id);
+            if wanted && !answered(store, id)? {
                 let Some(code) = new_code() else {
                     self.phone_error("Phone approvals need the system's secure random source, which is unavailable. Approve on the PC.");
                     return Ok(());
@@ -163,19 +259,23 @@ impl Inner {
                 let from = m["from"].as_str().unwrap_or("an agent").to_owned();
                 let title = request_title(m["subject"].as_str().unwrap_or(""));
                 let body = push_body(&title, m["body"].as_str().unwrap_or(""), &code);
+                let route = self.phone_approval_route(&from);
+                let _gate = self.phone_gate.lock().await;
+                if !self.phone_approval_current(revision) { return Ok(()); }
+                let Some(url) = self.phone_reply_url() else { return Ok(()) };
                 let run = {
                     let mut approvals = lock(&self.phone_approvals);
                     if approvals.run.is_empty() { approvals.run = super::random_hex(6); }
                     approvals.codes.retain(|_, p| p.expires > coord_core::now());
-                    approvals.codes.insert(code.clone(), Pending { request: id.into(), from: from.clone(), title, expires: coord_core::now() + CODE_TTL });
+                    if approvals.codes.len() >= 20_000 || approvals.codes.contains_key(&code) { return Ok(()); }
+                    approvals.codes.insert(code.clone(), Pending { request: id.into(), from: from.clone(), title, expires: coord_core::now() + CODE_TTL, revision, route });
                     approvals.run.clone()
                 };
-                let _gate = self.phone_gate.lock().await;
-                if !self.phone_current(revision) { return Ok(()); }
-                let Some(url) = self.phone_reply_url() else { return Ok(()) };
                 let publication = Publication { id: format!("approval:{run}:{id}"), title: format!("Approval needed: {from}"), subject: String::new(), body, limit: 1500, tag: "raised_hand", recipient: None };
                 self.phone_publish_actions_locked(&url, publication, Some(&actions(&url, &code))).await?;
             }
+            let _gate = self.phone_gate.lock().await;
+            if !self.phone_approval_current(revision) { return Ok(()); }
             let mut approvals = lock(&self.phone_approvals);
             if is_request(m) { approvals.pushed.insert(id.to_owned()); }
             approvals.since = approvals.since.max(sequence);
@@ -183,56 +283,119 @@ impl Inner {
         Ok(())
     }
 
-    /// Applies a phone answer; returns the note sent back to the phone.
+    /// Caller holds phone_gate. Reserve before board commit; no external action
+    /// is possible without both durable records. Restart never reissues a code
+    /// for a reserved/unknown decision.
     pub(super) fn phone_decide(&self, decision: Decision, code: &str, note: &str, store: &Store) -> String {
-        let pending = {
-            let mut approvals = lock(&self.phone_approvals);
-            if approvals.wrong >= WRONG_LIMIT { return LOCKED.into(); }
-            match approvals.codes.remove(code) {
-                Some(pending) => { approvals.wrong = 0; pending }
-                None => {
-                    approvals.wrong += 1;
-                    return if approvals.wrong >= WRONG_LIMIT { LOCKED.into() } else { WRONG.into() };
-                }
-            }
+        if !self.phone_approvals_on() { return "Phone approvals are off. Nothing was approved or sent.".into(); }
+        if lock(&self.phone).approval_ledger.wrong >= WRONG_LIMIT { return LOCKED.into(); }
+        let pending = lock(&self.phone_approvals).codes.remove(code);
+        let Some(pending) = pending else {
+            return match self.change_phone(|b| { b.approval_ledger.wrong = (b.approval_ledger.wrong + 1).min(WRONG_LIMIT); Ok(b.approval_ledger.wrong) }) {
+                Ok(wrong) if wrong >= WRONG_LIMIT => LOCKED.into(),
+                Ok(_) => WRONG.into(), Err(_) => "Phone approval storage failed. Nothing was sent.".into(),
+            };
         };
+        if !self.phone_approval_current(pending.revision) { return "That approval was revoked by changed phone settings. Nothing was sent.".into(); }
         if pending.expires <= coord_core::now() { return EXPIRED.into(); }
-        if answered(store, &pending.request) { return "That request was already answered in CodaClauda. Nothing changed.".into(); }
+        match answered(store, &pending.request) {
+            Ok(true) => return "That request was already answered in CodaClauda. Nothing changed.".into(),
+            Err(_) => return "The owner decision could not be checked. Nothing was sent.".into(),
+            Ok(false) => {}
+        }
         let verb = if decision == Decision::Approve { "Approved" } else { "Denied" };
         let text = chat_text(decision, &pending.title, &pending.request, note);
-        // The board record: an owner reply on the request (the Approvals page shows it answered).
-        let reply = json!({"id": format!("phone-answer-{}", pending.request), "from": OWNER, "to": pending.from, "kind": "reply",
-            "reply_to": pending.request, "subject": format!("{verb} from Ben's phone"), "body": text});
-        let recorded = mailbox::api(store, "post", &reply).is_ok();
-        let record_note = if recorded { "" } else { " The board record failed, so the request may still look open in CodaClauda." };
-        let who = &pending.from;
-        // Ben's words in the agent's own chat.
-        let session = lock(&self.state).records.iter()
-            .find(|r| r.status != "closed" && r.mailbox_address.as_deref() == Some(who.as_str()))
-            .map(|r| r.id.clone());
-        if let (Some(id), Some(inner)) = (session, self.me.upgrade()) {
-            let item = Queued::keyed(text, Vec::new(), json!({"from": PHONE, "approval": pending.request}), format!("approval:{}", pending.request));
-            return match inner.submit(&id, item) {
-                Ok(_) => format!("{verb}: \"{}\". Sent to @{who}'s CodaClauda chat as your words.{record_note}", pending.title),
-                Err((_, why)) => format!("{verb} on the board, but @{who}'s CodaClauda chat did not take it: {why}{record_note}"),
-            };
-        }
-        if desktop_queue::bound(&self.dir, who) {
-            if let Some(inner) = self.me.upgrade() {
-                let (address, title) = (who.clone(), pending.title.clone());
-                tauri::async_runtime::spawn(async move {
-                    let outcome = desktop_queue::queue_owner_answer(&inner, &address, text).await;
-                    let line = match outcome {
-                        Ok(()) => format!("Delivered to @{address}'s Codex chat: \"{title}\"."),
-                        Err(why) => format!("Could not put your answer into @{address}'s Codex chat ({why}). Answer it in the Codex app."),
-                    };
-                    inner.phone_notification(Publication { id: format!("approval-delivery:{}", super::random_hex(8)), title: "CodaClauda".into(), subject: String::new(), body: line, limit: 400, tag: "", recipient: None });
-                });
+        let id = answer_id(&pending.request);
+        let applied = Applied { request: pending.request.clone(), address: pending.from.clone(), message: id.clone(),
+            body_digest: super::hex_digest(text.as_bytes()), revision: pending.revision, route: pending.route.clone(), outcome: "reserved".into(), at: coord_core::now() };
+        let reserved = self.change_phone(|b| {
+            if !b.approval_current(pending.revision) || b.approval_ledger.decisions.contains_key(&pending.request) || b.approval_ledger.decisions.len() >= 20_000 {
+                return Err(("PHONE_APPROVAL_REFUSED", "The decision is revoked or already reserved.".into()));
             }
-            return format!("{verb}: \"{}\". Putting it into @{who}'s Codex chat now.{record_note}", pending.title);
+            b.approval_ledger.wrong = 0;
+            b.approval_ledger.decisions.insert(pending.request.clone(), applied); Ok(())
+        });
+        if reserved.is_err() { return "The decision could not be reserved. Nothing was sent.".into(); }
+        let reply = json!({"id": id, "from": OWNER, "to": pending.from, "kind": "reply",
+            "reply_to": pending.request, "subject": format!("{verb} from Ben's phone"), "body": text});
+        match mailbox::post_first_owner_reply(store, &reply) {
+            Ok(saved) if saved["recorded"] == true => {},
+            Ok(_) => { let _ = self.phone_approval_outcome(&pending.request, "superseded"); return "That request was already answered on the PC. Nothing was sent.".into(); }
+            Err(_) => { let _ = self.phone_approval_outcome(&pending.request, "board-failed"); return "The board decision could not be confirmed. Nothing was dispatched; reconcile the request before any further action.".into(); }
         }
-        format!("{verb} and recorded on the board, but @{who} is not a chat CodaClauda can type into. Answer it in its own app.{record_note}")
+        if !self.phone_approval_route_current(&pending.from, &pending.route) {
+            let _ = self.phone_approval_outcome(&pending.request, "board-only");
+            return format!("{verb} on the board only. The original chat route or Wake setting is unavailable; no replacement chat was used.");
+        }
+        match pending.route {
+            Route::Managed(_) => {
+                if self.phone_approval_outcome(&pending.request, "managed").is_err() { return "The decision is on the board, but delivery storage failed. No turn was started.".into(); }
+                // The existing wake route is the only managed-session writer.
+                format!("{verb} on the board. Waiting for the original CodaClauda chat's normal Wake on mail admission; execution is not yet confirmed.")
+            }
+            Route::Desktop(binding) => {
+                if self.phone_approval_outcome(&pending.request, "desktop-sending").is_err() { return "The decision is on the board, but queue reservation failed. Nothing was queued.".into(); }
+                let Some(inner) = self.me.upgrade() else { let _ = self.phone_approval_outcome(&pending.request, "not-started"); return "The chat host is unavailable; no queue command started.".into() };
+                let request = pending.request.clone();
+                tauri::async_runtime::spawn(async move {
+                    let result = desktop_queue::queue_owner_answer(&inner, binding, request.clone(), pending.revision, text).await;
+                    let _ = inner.phone_approval_outcome(&request, result.state);
+                    inner.phone_notification(Publication { id: format!("approval-delivery:{}", super::random_hex(8)), title: "CodaClauda".into(), subject: String::new(), body: result.detail, limit: 500, tag: "", recipient: None });
+                });
+                format!("{verb} on the board. A single queue attempt is reserved for the original Codex binding; recipient delivery is not yet confirmed.")
+            }
+            Route::BoardOnly => unreachable!("unavailable routes handled above"),
+        }
     }
+
+    /// Used by desktop's count-only poll to exclude this separately tracked
+    /// decision, even when it was revoked or its send became unknown.
+    pub(super) fn phone_approval_reply(&self, message: &Value) -> bool {
+        bridge_reply(message)
+    }
+    /// Only the exact persisted bridge reply may become a checked phone wake.
+    /// Other owner-labelled messages retain the ordinary untrusted-mail path.
+    pub(super) fn phone_approval_wake(&self, message: &Value) -> Option<Result<(String, Value), Failure>> {
+        checked_wake_message(&lock(&self.phone), message)
+    }
+    /// Revalidated under lifecycle/state both at durable admission and dequeue.
+    pub(super) fn validate_phone_wake(&self, record: &Record, origin: &Value) -> Result<(), Failure> {
+        validate_checked_wake(&lock(&self.phone), record, origin)
+    }
+    pub(super) fn phone_desktop_approval_current(&self, request: &str, revision: u64, binding: &desktop_queue::OwnerAnswerBinding) -> bool {
+        let book = lock(&self.phone);
+        book.approval_current(revision) && book.approval_ledger.decisions.get(request).is_some_and(|a| a.revision == revision
+            && a.outcome == "desktop-sending" && matches!(&a.route, Route::Desktop(original) if original == binding))
+    }
+}
+
+fn bridge_reply(message: &Value) -> bool {
+    message["id"].as_str().is_some_and(mailbox::phone_answer_id)
+}
+fn checked_wake_message(book: &super::phone::Book, message: &Value) -> Option<Result<(String, Value), Failure>> {
+    if !bridge_reply(message) { return None; }
+    let Some(a) = message["reply_to"].as_str().and_then(|id| book.approval_ledger.decisions.get(id)) else {
+        return Some(Err(("PHONE_APPROVAL_REVOKED", "The durable phone decision is unavailable; it cannot become ordinary mail.".into())));
+    };
+    if a.matches_message(message) && book.approval_current(a.revision) && a.outcome == "reserved" {
+        return Some(Err(("PHONE_APPROVAL_PENDING", "The durable decision commit has not completed.".into())));
+    }
+    if !a.matches_message(message) || !book.approval_current(a.revision) || a.outcome != "managed" || !matches!(a.route, Route::Managed(_)) {
+        return Some(Err(("PHONE_APPROVAL_REVOKED", "This bridge decision is not available for automatic delivery.".into())));
+    }
+    Some(Ok((message["body"].as_str().unwrap_or("").to_owned(), a.proof())))
+}
+fn validate_checked_wake(book: &super::phone::Book, record: &Record, origin: &Value) -> Result<(), Failure> {
+    let Some(proof) = origin.get("phoneApproval") else {
+        return if origin["messageId"].as_str().is_some_and(mailbox::phone_answer_id) {
+            Err(("PHONE_APPROVAL_REVOKED", "A bridge answer needs its original durable proof.".into()))
+        } else { Ok(()) };
+    };
+    let a = proof["request"].as_str().and_then(|id| book.approval_ledger.decisions.get(id));
+    let valid = a.is_some_and(|a| book.approval_current(a.revision) && a.outcome == "managed" && a.proof() == *proof
+        && origin["messageId"] == a.message && origin["from"] == OWNER && origin["address"] == a.address
+        && matches!(&a.route, Route::Managed(route) if route.matches(record)));
+    if valid { Ok(()) } else { Err(("PHONE_APPROVAL_REVOKED", "The original checked phone decision or route changed.".into())) }
 }
 
 #[cfg(test)]
@@ -294,4 +457,114 @@ mod tests {
         let no = chat_text(Decision::Deny, "Ship 0.7.2", "req-1", "");
         assert!(no.contains("Do not go ahead") && !no.contains("Ben added"));
     }
+    fn decision_fixture() -> (super::super::phone::Book, Record, Value) {
+        let record: Record = serde_json::from_value(json!({"id":"s_0123456789abcdef","provider":"codex","projectId":"local:fixture","cwd":"C:/fixture","title":"Fixture","access":"full","threadId":null,"providerSessionId":null,"status":"idle","createdAt":1,"lastActivityAt":1,"shared":false,"sharedId":null,"wake":true,"mailboxAddress":"codex-fixture"})).unwrap();
+        let mut book: super::super::phone::Book = serde_json::from_value(json!({"schema":2,"enabled":true,"topicDigest":"fixture-topic-digest","revision":7,"approvals":true})).unwrap();
+        let text = chat_text(Decision::Approve, "Fixture scope", "request-fixture", "");
+        let applied = Applied { request: "request-fixture".into(), address: "codex-fixture".into(), message: answer_id("request-fixture"),
+            body_digest: super::super::hex_digest(text.as_bytes()), revision: 7, route: Route::Managed(ManagedRoute::from_record(&record)), outcome: "managed".into(), at: 1 };
+        let message = json!({"id":applied.message,"from":"owner","to":"codex-fixture","kind":"reply","reply_to":"request-fixture","body":text});
+        book.approval_ledger.decisions.insert(applied.request.clone(), applied);
+        (book, record, message)
+    }
+    fn checked_item(book: &super::super::phone::Book, record: &Record, message: &Value) -> super::super::Queued {
+        let (text, proof) = checked_wake_message(book, message).unwrap().unwrap();
+        let origin = json!({"kind":"wake","from":"owner","address":"codex-fixture","messageId":message["id"],"messageKind":"reply","phoneApproval":proof});
+        validate_checked_wake(book, record, &origin).unwrap();
+        super::super::Queued::keyed(text, Vec::new(), origin, super::super::wake::wake_key(&record.id, "codex-fixture", message["id"].as_str().unwrap()))
+    }
+
+    #[test]
+    fn committed_phone_reply_admits_one_supported_wake_and_reconciles_after_restart() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let store = Store::new(Some(dir.path().join("board"))).unwrap();
+        mailbox::api(&store, "register", &json!({"name":"codex-fixture"})).unwrap();
+        mailbox::api(&store, "post", &json!({"id":"request-fixture","from":"codex-fixture","to":"owner","kind":"question","subject":"APPROVAL REQUEST: Fixture scope","body":"Fixture only"})).unwrap();
+        let (book, record, message) = decision_fixture();
+        let mut reply = message.clone(); reply["subject"] = json!("Approved from phone");
+        assert_eq!(mailbox::post_first_owner_reply(&store, &reply).unwrap()["recorded"], true);
+        let inbox = mailbox::api(&store, "inbox", &json!({"addr":"codex-fixture","unread":true})).unwrap();
+        let item = checked_item(&book, &record, &inbox["messages"][0]);
+        assert_eq!(item.origin["kind"], "wake");
+        assert!(!super::super::owner_equivalent_origin(&item.origin), "not a generic owner-origin bypass");
+        let mut state = super::super::State { records: vec![record.clone()], ..Default::default() };
+        state.accept_queued(&record.id, item.clone(), |s| super::super::save_snapshot(dir.path(), &s.records, &s.ledger)).unwrap();
+        assert!(state.duplicate(&record.id, &item).unwrap().is_some());
+        let (records, ledger) = super::super::read_snapshot(&dir.path().join(super::super::REGISTRY_FILE)).unwrap();
+        let recovered = super::super::State { records, ledger, ..Default::default() };
+        assert!(recovered.duplicate(&record.id, &item).unwrap().is_some(), "same mailbox identity reconciles; it cannot start a second turn");
+        let saved = serde_json::to_string(&book).unwrap();
+        assert!(!saved.contains("Fixture scope") && !saved.contains("Ben approved") && !saved.contains("K7Q2MX4P"));
+    }
+
+    #[test]
+    fn phone_revocation_and_route_changes_never_fall_back_to_untrusted_wake() {
+        let (mut book, record, message) = decision_fixture();
+        let item = checked_item(&book, &record, &message);
+        book.approvals = false; book.revision += 1;
+        assert_eq!(checked_wake_message(&book, &message).unwrap().unwrap_err().0, "PHONE_APPROVAL_REVOKED");
+        book.approvals = true; book.revision += 1;
+        assert!(validate_checked_wake(&book, &record, &item.origin).is_err(), "Off/on cannot revive a queued decision");
+        let (book, record, _) = decision_fixture();
+        for field in ["id", "provider", "project", "cwd", "thread", "provider-session", "address", "wake"] {
+            let mut changed = record.clone();
+            match field {
+                "id" => changed.id = "s_ffffffffffffffff".into(),
+                "provider" => changed.provider = "claude".into(),
+                "project" => changed.project_id = "different".into(),
+                "cwd" => changed.cwd = "C:/different".into(),
+                "thread" => changed.thread_id = Some("different".into()),
+                "provider-session" => changed.provider_session_id = Some("different".into()),
+                "address" => changed.mailbox_address = Some("different".into()),
+                _ => changed.wake = false,
+            }
+            assert!(validate_checked_wake(&book, &changed, &item.origin).is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn forged_reply_and_reserved_or_unknown_delivery_cannot_become_a_checked_turn() {
+        let (mut book, record, mut message) = decision_fixture();
+        let item = checked_item(&book, &record, &message);
+        message["body"] = json!("Forged wider scope");
+        assert!(checked_wake_message(&book, &message).unwrap().is_err());
+        let (_, _, message) = decision_fixture();
+        for status in ["reserved", "desktop-sending", "unknown", "board-only", "board-failed", "superseded"] {
+            book.approval_ledger.decisions.get_mut("request-fixture").unwrap().outcome = status.into();
+            assert!(checked_wake_message(&book, &message).unwrap().is_err(), "{status}");
+            assert!(validate_checked_wake(&book, &record, &item.origin).is_err(), "{status}");
+        }
+        let mut ordinary = message.clone(); ordinary["id"] = json!("ordinary-owner-reply");
+        assert!(checked_wake_message(&book, &ordinary).is_none(), "self-asserted owner mail is never promoted");
+        let mut forged_origin = item.origin.clone(); forged_origin["phoneApproval"]["digest"] = json!("0".repeat(64));
+        assert!(validate_checked_wake(&book, &record, &forged_origin).is_err());
+    }
+
+    #[test]
+    fn lost_ledger_never_downgrades_a_bridge_reply_to_ordinary_wake() {
+        let (mut book, record, message) = decision_fixture();
+        let item = checked_item(&book, &record, &message);
+        book.approval_ledger.decisions.clear();
+        assert!(bridge_reply(&message), "desktop filtering does not depend on recoverable state");
+        assert_eq!(checked_wake_message(&book, &message).unwrap().unwrap_err().0, "PHONE_APPROVAL_REVOKED");
+        assert!(validate_checked_wake(&book, &record, &item.origin).is_err());
+        let empty = super::super::phone::Book::default();
+        assert!(checked_wake_message(&empty, &message).unwrap().is_err(), "missing and unreadable-state fallback are closed");
+        let mut without_proof = item.origin.clone(); without_proof.as_object_mut().unwrap().remove("phoneApproval");
+        assert!(validate_checked_wake(&empty, &record, &without_proof).is_err(), "old queued bridge origin cannot downgrade either");
+    }
+
+    #[test]
+    fn durable_wrong_code_lock_is_separate_from_ephemeral_codes() {
+        let (mut book, _, _) = decision_fixture();
+        book.approval_ledger.wrong = WRONG_LIMIT;
+        let saved = serde_json::to_vec(&book).unwrap();
+        let restored: super::super::phone::Book = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(restored.approval_ledger.wrong, WRONG_LIMIT);
+        assert!(restored.approval_ledger.valid(20_000));
+        assert!(Approvals::default().codes.is_empty());
+        book.approval_ledger.wrong = WRONG_LIMIT + 1;
+        assert!(!book.approval_ledger.valid(20_000), "malformed count fails closed");
+    }
+
 }

@@ -279,6 +279,14 @@ fn open_threads<'a>(state: &'a Mailbox, from: &str, to: &str) -> Vec<&'a Message
     open.sort_by_key(|m| std::cmp::Reverse(m.sequence));
     open
 }
+fn approval_request(message: &Message) -> bool {
+    message.to == "owner" && !matches!(message.from.as_str(), "owner" | "owner-phone")
+        && message.subject.trim_start().to_ascii_lowercase().starts_with("approval request")
+}
+/// This ID namespace belongs to the internal phone decision bridge, not callers.
+pub fn phone_answer_id(id: &str) -> bool {
+    id.strip_prefix("phone-answer-").is_some_and(|digest| digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()))
+}
 fn save_post(state: &mut Mailbox, id: &str, post: &Post, now: u64) -> Result<Value> {
     if let Some(existing) = state.messages.get(id) {
         // A retry takes the parent the first post resolved, then compares.
@@ -316,6 +324,12 @@ fn save_post(state: &mut Mailbox, id: &str, post: &Post, now: u64) -> Result<Val
     if let Some(parent_id) = &post.reply_to {
         let parent = &state.messages.get(parent_id).ok_or_else(|| anyhow::anyhow!("Reply message is unavailable or outside retention"))?.message;
         ensure!(parent.to == post.from && parent.from == post.to, "Reply must reverse the original sender and recipient");
+        // The same transaction guards the PC/API and phone bridge. Preserve
+        // ordinary multi-reply threads, but an approval has one terminal choice.
+        if post.from == "owner" && approval_request(parent) {
+            ensure!(!state.messages.values().any(|row| row.message.reply_to.as_deref() == Some(parent_id)),
+                "This approval request already has an owner answer; start a new request to change the decision");
+        }
     }
     if matches!(post.kind.as_str(), "claim" | "release") {
         let resource = post.resource.as_ref().expect("validated claim resource");
@@ -390,6 +404,7 @@ pub const RESERVED_SENDERS: [&str; 1] = ["owner-phone"];
 pub fn api(store: &Store, op: &str, args: &Value) -> Result<Value> {
     if op == "post" {
         let from = args.get("from").and_then(Value::as_str).unwrap_or("").trim();
+        ensure!(!args.get("id").and_then(Value::as_str).is_some_and(phone_answer_id), "Phone answer IDs are reserved for the internal bridge");
         ensure!(!RESERVED_SENDERS.iter().any(|r| r.eq_ignore_ascii_case(from)), "{from} is reserved for CodaClauda's phone bridge; post as your own address");
     }
     api_with_clock(store, op, args, &crate::now)
@@ -397,6 +412,25 @@ pub fn api(store: &Store, op: &str, args: &Value) -> Result<Value> {
 /// CodaClauda's phone bridge only: a post that may use a reserved sender.
 pub fn post_reserved(store: &Store, args: &Value) -> Result<Value> {
     api_with_clock(store, "post", args, &crate::now)
+}
+/// Internal phone bridge decision commit. No CLI/MCP operation exposes this.
+/// The check and save share one mailbox transaction: an already answered
+/// request never receives a second bridge decision. Errors must stop dispatch.
+pub fn post_first_owner_reply(store: &Store, args: &Value) -> Result<Value> {
+    let (id, post) = post(args)?;
+    ensure!(post.from == "owner" && post.kind == "reply", "Expected an owner reply");
+    let request = post.reply_to.as_deref().ok_or_else(|| anyhow::anyhow!("Expected an exact request"))?;
+    transaction(store, crate::now(), |state| {
+        let original = &state.messages.get(request).ok_or_else(|| anyhow::anyhow!("Original mailbox message is unavailable"))?.message;
+        ensure!(approval_request(original) && original.from == post.to, "Expected the original approval request and recipient");
+        let existing = state.messages.values().map(|row| &row.message)
+            .filter(|m| m.reply_to.as_deref() == Some(request)).min_by_key(|m| m.sequence);
+        if let Some(reply) = existing {
+            return Ok(json!({"recorded": false, "reply": reply}));
+        }
+        let reply = save_post(state, &id, &post, crate::now())?;
+        Ok(json!({"recorded": true, "reply": reply}))
+    })
 }
 fn api_with_clock(store: &Store, op: &str, args: &Value, clock: &dyn Fn() -> u64) -> Result<Value> {
     match op {
@@ -549,6 +583,53 @@ mod tests {
         let answer = json!({"id":"answer-1","to":"owner-phone","from":"codex-claudacoda","kind":"reply","reply_to":"phone-1","subject":"Re","body":"Green."});
         assert_eq!(api(&store, "post", &answer).unwrap()["to"], "owner-phone");
     }
+    #[test]
+    fn phone_bridge_and_real_pc_api_commit_only_the_first_decision_atomically() {
+        let (_dir, store) = fixture();
+        api(&store, "post", &json!({"id":"approval-race","to":"owner","from":"codex-claudacoda","kind":"question","subject":"APPROVAL REQUEST","body":"Fixture only"})).unwrap();
+        let answer = |id: &str, body: &str| json!({"id":id,"to":"codex-claudacoda","from":"owner","kind":"reply","reply_to":"approval-race","subject":"Decision","body":body});
+        let left = store.clone();
+        let right = store.clone();
+        let approve = answer("approval-yes", "Approved");
+        let deny = answer("approval-no", "Denied");
+        let a = std::thread::spawn(move || post_first_owner_reply(&left, &approve).unwrap());
+        let b = std::thread::spawn(move || api(&right, "post", &deny));
+        let phone_won = a.join().unwrap()["recorded"] == true;
+        let pc_won = b.join().unwrap().is_ok();
+        assert_ne!(phone_won, pc_won, "exactly one side wins even through the ordinary PC API");
+        let inbox = api(&store, "inbox", &json!({"addr":"codex-claudacoda"})).unwrap();
+        assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(post_first_owner_reply(&store, &answer("again", "Approved")).unwrap()["recorded"], false);
+    }
+
+    #[test]
+    fn phone_bridge_respects_prior_pc_reply_and_refuses_unreadable_board() {
+        let (_dir, store) = fixture();
+        let request = json!({"id":"pc-first","to":"owner","from":"codex-claudacoda","kind":"question","subject":"APPROVAL REQUEST","body":"Fixture only"});
+        api(&store, "post", &request).unwrap();
+        let mut reply = json!({"id":"pc-denied","to":"codex-claudacoda","from":"owner","kind":"reply","reply_to":"pc-first","subject":"Decision","body":"Denied"});
+        api(&store, "post", &reply).unwrap();
+        reply["id"] = json!("phone-approved"); reply["body"] = json!("Approved");
+        assert_eq!(post_first_owner_reply(&store, &reply).unwrap()["recorded"], false);
+        reply["from"] = json!("codex-claudacoda");
+        assert!(post_first_owner_reply(&store, &reply).is_err());
+        reply["from"] = json!("owner");
+        fs::write(store.root.join("mailbox.json"), b"{invalid").unwrap();
+        assert!(post_first_owner_reply(&store, &reply).is_err());
+    }
+
+    #[test]
+    fn approval_guard_preserves_unrelated_multi_reply_threads_and_reserves_bridge_ids() {
+        let (_dir, store) = fixture();
+        api(&store, "post", &json!({"id":"ordinary","to":"owner","from":"codex-claudacoda","kind":"question","subject":"A question","body":"Fixture"})).unwrap();
+        let mut reply = json!({"id":"first","to":"codex-claudacoda","from":"owner","kind":"reply","reply_to":"ordinary","subject":"Answer","body":"Fixture"});
+        api(&store, "post", &reply).unwrap();
+        reply["id"] = json!("second"); api(&store, "post", &reply).unwrap();
+        reply["id"] = json!(format!("phone-answer-{}", "a".repeat(64)));
+        assert!(api(&store, "post", &reply).is_err(), "ordinary callers cannot impersonate the bridge ID namespace");
+        assert!(post_first_owner_reply(&store, &reply).is_err(), "bridge only answers approval requests");
+    }
+
     #[test]
     fn stable_posts_replay_once_and_reject_changed_payload_after_restart() {
         let (_dir, store) = fixture();

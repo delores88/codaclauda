@@ -1,7 +1,7 @@
 # CodaClauda privacy and local data
 
 CodaClauda is a DeloresAI desktop utility for owner-authorized coordination between
-Claude Code and Codex. This document describes the 0.6 source and phone messaging changes,
+Claude Code and Codex. This document describes the 0.7.2 candidate source,
 including the preserved scoped-request and mailbox tools. Source review does not
 establish native acceptance, publication or Marketplace admission; those require
 separate release evidence.
@@ -182,6 +182,15 @@ log message bodies; accepted messages still follow ordinary board and provider
 history storage. ntfy receives message content and ordinary network information
 and applies its own retention and service limits. See [Phone setup](PHONE.md).
 
+The optional phone-approval feature also sends approval-request text and a
+one-time answer code to that topic. Codes are held in native process memory,
+expire after 24 hours and are not saved to the board or UI state. Five wrong
+codes lock phone approvals until the owner unlocks them on the PC. A valid answer
+is recorded on the board and may be delivered to the requester's managed chat
+or an existing Codex desktop binding under the saved controls. Anyone who can
+read the topic can use a code; this is not independent authentication of the
+person answering. The board CLI and agent tools cannot post as `owner-phone`.
+
 Earlier Live chat records remain readable. That separate workflow started a
 fresh dedicated read-only request for each send, with up to 12 recent messages
 truncated to 4,000 characters each and bounded attachments. Polling legacy
@@ -326,8 +335,15 @@ repository creation sends the chosen name, description and visibility to GitHub
 and clones the repository locally; cloning downloads files into a new child
 folder beneath the selected parent. These are real remote/local changes, not
 only UI entries. An ambiguous timeout or partial creation must be checked before
-retrying. CodaClauda does not import or copy gh credentials. Git/gh may use the
-owner's configured GitHub transport and have their own networking behavior.
+retrying. Selecting an existing signed-in account may ask `gh` for that account's
+token in native process memory and supply it to the corresponding `gh` child
+process. It is not sent to the UI or saved in CodaClauda state or logs. Account
+names, repository metadata, linked paths and City layout preferences can be
+saved locally. Cloning with a selected account uses an isolated child Git
+configuration and that account's GitHub authorization. Other Git/gh operations
+may use the owner's configured transport and have their own networking behavior.
+Removing an account or building from the City
+does not delete its local files or remote repositories.
 
 Avatar editing and local photo matching run on the device. Photo matching uses
 image analysis to suggest editable colors/features, not a bundled generative

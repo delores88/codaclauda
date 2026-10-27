@@ -77,6 +77,7 @@ class Store extends EventTarget {
     this._scanRequests = new Map();
     this._scanPool = createRequestPool();
     this._githubRequests = new Map();
+    this._githubAccountRequests = new Map();
     this.paths = {};
     this.prefsInfo = {};
     this.desktop = emptyDesktop();
@@ -679,17 +680,31 @@ class Store extends EventTarget {
   async linkGithubAccount(user) {
     const login = String(user || '').trim().replace(/^@/, '');
     if (!LOGIN.test(login)) throw new Error('Enter a GitHub username (letters, numbers and dashes).');
-    if (login.toLowerCase() === String(this.desktop.projects.github?.user || '').toLowerCase()) throw new Error(`@${login} is already your main account.`);
-    const result = await withTimeout(desktop.githubRepos(login));
-    this.updateDesktop(d => {
-      const list = d.projects.githubAccounts ||= [];
-      const at = list.findIndex(a => a.user.toLowerCase() === login.toLowerCase());
-      const entry = { user: result.user || login, repos: result.repos || [], fetchedAt: Date.now(), source: result.source || '' };
-      if (at >= 0) list[at] = entry; else list.push(entry);
-    });
-    return result;
+    const key = login.toLowerCase();
+    if (key === String(this.desktop.projects.github?.user || '').toLowerCase()) throw new Error(`@${login} is already your main account.`);
+    const previous = this.desktop.projects.githubAccounts.find(a => a.user.toLowerCase() === key);
+    const request = { previous };
+    this._githubAccountRequests.set(key, request);
+    try {
+      const result = await withTimeout(desktop.githubRepos(login));
+      const current = this.desktop.projects.githubAccounts.find(a => a.user.toLowerCase() === key);
+      // Removal, unlink, relink, a newer refresh or a main-account change wins.
+      if (this._githubAccountRequests.get(key) === request && current === previous
+          && key !== String(this.desktop.projects.github?.user || '').toLowerCase()) {
+        this.updateDesktop(d => {
+          const list = d.projects.githubAccounts;
+          const at = list.findIndex(a => a.user.toLowerCase() === key);
+          const entry = { user: result.user || login, repos: result.repos || [], fetchedAt: Date.now(), source: result.source || '' };
+          if (at >= 0) list[at] = entry; else list.push(entry);
+        });
+      }
+      return result;
+    } finally {
+      if (this._githubAccountRequests.get(key) === request) this._githubAccountRequests.delete(key);
+    }
   }
   removeGithubAccount(user) {
+    this._githubAccountRequests.delete(String(user).toLowerCase());
     this.updateDesktop(d => { d.projects.githubAccounts = (d.projects.githubAccounts || []).filter(a => a.user.toLowerCase() !== String(user).toLowerCase()); });
   }
   /* Repos being cloned right now (ghId -> { state: 'queued' | 'cloning' | 'failed', message? }). The City
@@ -701,15 +716,42 @@ class Store extends EventTarget {
   }
   unlinkProject(project) {
     const ids = new Set([project.id, ...(project.ids || [])]);
+    const removed = { local: [], accounts: [] };
     this.updateDesktop(d => {
+      removed.local = d.projects.local.filter(p => ids.has(`local:${normalizePath(p.path)}`));
       d.projects.local = d.projects.local.filter(p => !ids.has(`local:${normalizePath(p.path)}`));
-      const github = d.projects.github;
-      // Replace the snapshot so an already-running fetch cannot resurrect an
-      // explicitly removed project when its old inventory arrives later.
-      d.projects.github = { ...github, repos: github.repos.filter(repo => {
-        const owner = repo.owner?.login || github.user;
-        return !ids.has(githubIdentity(repo.full_name || (owner && repo.name ? `${owner}/${repo.name}` : repo.name), { allowSlug: true }));
-      }) };
+      const withoutProject = (account, main) => {
+        const matches = repo => {
+          const owner = repo.owner?.login || account.user;
+          return ids.has(githubIdentity(repo.full_name || (owner && repo.name ? `${owner}/${repo.name}` : repo.name), { allowSlug: true }));
+        };
+        const repos = (account.repos || []).filter(matches);
+        if (repos.length) removed.accounts.push({ user: account.user, main, repos });
+        // Replacement invalidates a pending refresh of the affected snapshot.
+        return main || repos.length ? { ...account, repos: (account.repos || []).filter(r => !matches(r)) } : account;
+      };
+      d.projects.github = withoutProject(d.projects.github, true);
+      d.projects.githubAccounts = d.projects.githubAccounts.map(a => withoutProject(a, false));
+    });
+    return removed;
+  }
+  restoreProjectLinks(removed) {
+    this.updateDesktop(d => {
+      for (const item of removed.local || []) {
+        if (!d.projects.local.some(p => normalizePath(p.path) === normalizePath(item.path))) d.projects.local.push(item);
+      }
+      for (const saved of removed.accounts || []) {
+        const key = String(saved.user).toLowerCase();
+        const current = saved.main ? d.projects.github : d.projects.githubAccounts.find(a => a.user.toLowerCase() === key);
+        // Undo project removal cannot restore an account the owner removed/switched.
+        if (!current || String(current.user).toLowerCase() !== key) continue;
+        const identity = repo => githubIdentity(repo.full_name || `${repo.owner?.login || current.user}/${repo.name}`, { allowSlug: true });
+        const repos = [...(current.repos || [])];
+        for (const repo of saved.repos) if (!repos.some(r => identity(r) === identity(repo))) repos.push(repo);
+        const restored = { ...current, repos };
+        if (saved.main) d.projects.github = restored;
+        else d.projects.githubAccounts = d.projects.githubAccounts.map(a => a === current ? restored : a);
+      }
     });
   }
   /** visibility: { board?: boolean, city?: boolean, name?, aliases? } */

@@ -56,7 +56,7 @@ export class RouteMap {
     this.panel = h('div.city-routes-panel.card', { tabindex: '-1' },
       h('header.city-routes-head',
         h('span.city-routes-logo', icon('route')),
-        h('div.city-routes-titles', h('h2#city-routes-title', 'Islands'), h('p', 'Your other GitHub accounts sit beside your home city on the same level, joined by bridges. Contributor islands, repos other people added you to, lie below along flight routes. Pick one to go there.')),
+        h('div.city-routes-titles', h('h2#city-routes-title', 'Islands'), h('p', 'Your other GitHub accounts sit beside your home city on the same level, with airport flights between them. Contributor islands, repos other people added you to, lie below along flight routes. Pick one to go there.')),
         iconButton('close', 'Close the route map (Esc)', () => this.close(), 'city-routes-close')),
       h('div.city-routes-body', this.mapBox, this.side),
       this.foot);
@@ -127,7 +127,7 @@ export class RouteMap {
     labels.append(s('g', { class: 'city-routes-label is-home' },
       s('text', { x: home.x, y: home.y + home.r + 20, class: 'owner', 'text-anchor': 'middle' }, 'Home'),
       s('text', { x: home.x, y: home.y + home.r + 39, class: 'count', 'text-anchor': 'middle' }, away ? plural(data.homeCount, 'building') : 'You are here')));
-    // Your own accounts' islands: beside home on the same level, joined by a bridge.
+    // Your own accounts' islands: beside home on the same level, connected by flights.
     for (const island of owned) {
       const spot = spots.get(island.id);
       if (!spot) continue;
@@ -135,7 +135,7 @@ export class RouteMap {
       const dir = Math.sign(spot.x - home.x) || 1;
       arcs.append(s('path', { d: `M${fx(home.x + dir * home.r * 1.1)} ${fx(home.y)} L${fx(spot.x - dir * spot.r * 1.15)} ${fx(spot.y)}`, class: `city-routes-bridge${cls}`, 'data-id': island.id }));
       const g = s('g', { class: `city-routes-island is-owned${cls}`, tabindex: '0', role: 'button', 'data-id': island.id,
-        'aria-label': `Your account @${island.owner}, ${plural(island.count ?? island.repos.length, 'building')}${here ? ', you are here' : ''}. Cross the bridge.` },
+        'aria-label': `Your account @${island.owner}, ${plural(island.count ?? island.repos.length, 'building')}${here ? ', you are here' : ''}. Visit this island.` },
       s('path', { d: blobPath(spot.x, spot.y, spot.r, spot.seed), class: 'city-routes-land' }),
       s('g', { class: 'city-routes-skyline' }, ...[[-15, 10], [-5, 18], [6, 13]].map(([dx, hh]) => s('rect', { x: fx(spot.x + dx), y: fx(spot.y - hh + 5), width: 8, height: hh, rx: 1.5 }))));
       this.bindTarget(g, island.id);

@@ -68,7 +68,8 @@ phone** in **Settings > Phone**; it is on by default and needs phone messages on
 CodaClauda checks the code, then puts your answer into that agent's own chat as
 your words:
 
-- a CodaClauda chat gets it as a turn, like typing it in Chat;
+- a CodaClauda chat receives it through its normal **Wake on mail** admission,
+  once, under the saved wake, access and owner controls;
 - a Codex desktop chat set to **Wake by mail** in **Running** gets it through
   Codex's own `codex queue` command (the only case where CodaClauda queues
   message text into a desktop chat, not just a count);
@@ -78,13 +79,23 @@ your words:
 
 Either way an owner reply on the board marks the request answered in
 **Approvals**. If you already answered it on the PC, a phone answer changes
-nothing and says so.
+nothing and says so. The first recorded owner answer wins when PC and phone
+answers arrive together. The code is bound to the original chat route; a changed
+or unavailable binding receives no automatic replacement. The phone distinguishes
+a board record, a pending delivery, an accepted queue command and an unknown
+outcome. Queue acceptance does not prove that the recipient read or acted on it.
+
+Turning phone messaging or phone approvals off, or changing the topic, revokes
+outstanding codes and unsent checked decisions. Turning the feature back on does
+not revive an old decision. A delivery with an unknown result is not retried
+automatically; inspect the exact request and recipient before any further action.
 
 Codes are 8 characters from an alphabet without look-alikes (no 0, O, 1, I or
 L). Each works once and expires after 24 hours. Codes live only in CodaClauda's
 memory: never on disk, on the board or in the UI. After a restart, open
 requests from the last 24 hours are sent again with new codes. Five wrong codes
-lock phone approvals until you choose **Unlock phone approvals** on the PC. A
+lock phone approvals until you choose **Unlock phone approvals** on the PC;
+restarting the app does not clear that lock. A
 request whose text looks like it contains a credential is sent without its
 text. Anyone who can read your topic can see codes and approve, the same trust
 as phone messages: keep the topic private.
@@ -141,7 +152,9 @@ never send credentials, pairing codes, or private transcripts.
 The URL remains in the existing native notification settings. Phone routing,
 cursor, and delivery receipts are owner-local in `desktop-ui/phone.json`.
 Receipts contain identifiers, digests, destinations, and status, not message
-bodies. Completed receipts become eligible for pruning after 30 days during
+bodies. The phone approval ledger additionally keeps the wrong-code count,
+original route identifiers, settings generation and decision/delivery outcomes.
+It never stores answer codes. Completed transport receipts become eligible for pruning after 30 days during
 later activity; unfinished incoming receipts remain. Unknown push outcomes
 remain recorded instead of being silently resent. Unreadable phone state is
 preserved and forwarding stays off until storage is repaired and the app is
