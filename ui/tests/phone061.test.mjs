@@ -46,7 +46,7 @@ test('one-topic phone settings use the saved URL with one switch and no setup or
   assert.equal(f.control(PHONE_COPY.title).checked, true);
   assert.equal(f.control(PHONE_COPY.title).disabled, false);
   assert.match(f.status(), /^On: send and receive messages in the same ntfy topic/);
-  assert.equal(f.nodes.filter(n => n.tag === 'input').length, 1);
+  assert.equal(f.nodes.filter(n => n.tag === 'input').length, 2, 'one switch for messages, one for approvals (0.7.2)');
   assert.equal(f.nodes.some(n => n.tag.startsWith('select')), false);
   for (const oldAction of ['Set up phone messages', 'Copy', 'Regenerate']) assert.equal(f.button(oldAction), undefined);
   assert.equal(f.control('Private inbound topic URL'), undefined);

@@ -197,6 +197,10 @@ export const desktop = {
   /** Owner-only phone messaging (0.6.1): { enabled, topicUrl|null, lastRecipient|null, recipients:[{address,label}], lastError|null }. Uses notify.ntfyUrl. */
   phoneSettingsGet: () => invoke('phone_settings_get'),
   phoneSettingsSet: ({ enabled } = {}) => invoke('phone_settings_set', { enabled: Boolean(enabled) }),
+  /** Phone approvals (0.7.2): approval requests go to the phone with one-time codes. Same reply shape as phoneSettingsGet. */
+  phoneApprovalsSet: ({ enabled } = {}) => invoke('phone_approvals_set', { enabled: Boolean(enabled) }),
+  /** Owner only, on the PC: clears the lock after five wrong codes. */
+  phoneApprovalsUnlock: () => invoke('phone_approvals_unlock'),
   /** Owner setting: CodaClauda sessions working at once (Settings → Limits) → { maxLive, queueMax } */
   sessionLimitsGet: () => invoke('session_limits_get'),
   /** maxLive is a whole number ≥ 1 or 'unlimited' (the default) → { maxLive, queueMax } */

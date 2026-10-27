@@ -1016,6 +1016,11 @@ const v05Handlers = {
     writeJson(LIMITS_KEY, value);
     return { maxLive: value, queueMax: QUEUE_MAX };
   },
+  // Phone messages and approvals (0.6.1 / 0.7.2): in-memory preview state; nothing is sent anywhere.
+  phone_settings_get: () => mockPhone(),
+  phone_settings_set: ({ enabled }) => { phoneState.enabled = Boolean(enabled); return mockPhone(); },
+  phone_approvals_set: ({ enabled }) => { phoneState.approvals = Boolean(enabled); return mockPhone(); },
+  phone_approvals_unlock: () => { phoneState.locked = false; return mockPhone(); },
   notify_settings_get: () => readJson(NOTIFY_KEY, { ntfyUrl: null, onFinish: true, onError: true }),   // 0.6: on until a URL is the only step
   notify_settings_set: ({ ntfyUrl = null, onFinish = false, onError = false }) => {
     const url = String(ntfyUrl || '').trim();
@@ -1055,6 +1060,11 @@ const v05Handlers = {
   },
 };
 
+/** Folders the preview "cloned": lower-cased path -> origin URL (their scans report it). */
+const clonedRemotes = new Map();
+/** Preview phone state (?phoneLocked=1 shows the locked approvals screen). */
+const phoneState = { enabled: true, approvals: true, locked: /[?&]phoneLocked=1/.test(globalThis.location?.search || '') };
+const mockPhone = () => ({ enabled: phoneState.enabled, topicUrl: readJson(NOTIFY_KEY, {}).ntfyUrl || null, lastRecipient: null, recipients: [{ address: 'codex-claudacoda', label: 'Release chat' }], lastError: null, approvals: { enabled: phoneState.approvals, locked: phoneState.locked, waiting: phoneState.locked ? 0 : 1 } });
 const desktopHandlers = {
   ...sessionHandlers,
   ...scheduleHandlers,
@@ -1072,7 +1082,11 @@ const desktopHandlers = {
     { name: 'Garden Notes', local_path: 'C:\\Users\\Ben\\Desktop\\GardenNotes' },
     { name: 'Workshop', local_path: 'C:\\Users\\Ben\\Desktop\\Workshop' },
   ] } }),
-  project_scan: ({ path }) => stats(path, 14000 + (path.length * 997) % 40000, 180, 160, [['Rust', 0.55], ['JavaScript', 0.3], ['CSS', 0.15]]),
+  project_scan: ({ path }) => {
+    const scanned = stats(path, 14000 + (path.length * 997) % 40000, 180, 160, [['Rust', 0.55], ['JavaScript', 0.3], ['CSS', 0.15]]);
+    const remote = clonedRemotes.get(String(path).toLowerCase());
+    return remote ? { ...scanned, git: { ...scanned.git, remote } } : scanned;
+  },
   desktop_discover_projects: () => ({ projects: [
     { name: 'CodaClauda', path: 'C:\\Users\\Ben\\Desktop\\CodaClauda', is_git: true, markers: ['Cargo.toml', 'package.json'] },
     { name: 'TuningSpork', path: 'C:\\Users\\Ben\\Desktop\\TuningSpork', is_git: true, markers: ['package.json'] },
@@ -1084,7 +1098,9 @@ const desktopHandlers = {
   github_clone_repo: async ({ fullName, parentDir }) => {
     await new Promise(resolve => setTimeout(resolve, 900 + Math.random() * 900));
     const name = String(fullName).split('/')[1];
-    return { path: `${String(parentDir).replace(/[\/]+$/, '')}\${name}`, full_name: fullName, url: `https://github.com/${fullName}` };
+    const path = `${String(parentDir).replace(/[\\/]+$/, '')}\\${name}`;
+    clonedRemotes.set(path.toLowerCase(), `https://github.com/${fullName}.git`);   // its scan then knows the origin
+    return { path, full_name: fullName, url: `https://github.com/${fullName}` };
   },
   github_collab_repos: () => ({ user: 'delores88', source: 'mock', repos: collabRepos.map(({ mockAdded, ...repo }) => repo), truncated: false }),
   attachment_save: ({ name }) => ({ path: `C:\\mock\\board\\desktop-ui\\attachments\\${name}`, name, bytes: 1234 }),

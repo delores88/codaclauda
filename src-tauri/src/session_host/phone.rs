@@ -1,7 +1,7 @@
 //! Two-way messages on the owner's one ntfy topic. The owner chooses this
 //! phone channel. Every app publish is tagged, scanned and receipted.
 //! Only the passive board is written; existing wake/access checks still apply.
-use super::{Failure, Inner, Record, host, lock, notify, reply, write_atomic};
+use super::{Failure, Inner, Record, host, lock, notify, phone_approvals, reply, write_atomic};
 use coord_core::{mailbox, secrets::mailbox_credential, store::Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -75,6 +75,8 @@ pub(super) struct Book {
     legacy_inbound: BTreeMap<String, LegacyInboundReceipt>,
     legacy_cursor: Option<String>,
     last_error: Option<String>,
+    /// 0.7.2: send agents' APPROVAL REQUESTs to the phone with one-time codes (phone_approvals.rs).
+    approvals: bool,
     #[serde(skip)]
     storage_failed: bool,
 }
@@ -84,7 +86,7 @@ impl Default for Book {
         Self { schema: 2, enabled: true, topic_digest: None, revision: 0,
             created_at: 0, last_id: None, last_recipient: None, inbound: BTreeMap::new(),
             outbound: BTreeMap::new(), published: BTreeMap::new(), legacy_inbound: BTreeMap::new(),
-            legacy_cursor: None, last_error: None, storage_failed: false }
+            legacy_cursor: None, last_error: None, approvals: true, storage_failed: false }
     }
 }
 
@@ -477,11 +479,13 @@ fn response_outcome(status: u16, bytes: Result<&[u8], Failure>) -> PushOutcome {
 }
 /// The only HTTP publish site. The tag suppresses a self-message even if the
 /// app closes after ntfy accepts it but before its ID receipt is persisted.
-async fn push(url: &str, title: &str, body: &str, tag: &str) -> PushOutcome {
+async fn push(url: &str, title: &str, body: &str, tag: &str, actions: Option<&str>) -> PushOutcome {
     let Some(client) = notify::client() else {
         return PushOutcome { result: Err(failure("PHONE_CLIENT_UNAVAILABLE", "The HTTPS client is unavailable. No notice was sent.")), http_status: None, attempted: false };
     };
-    let response = match client.post(url).header("Title", title).header("Tags", publish_tags(tag)).body(body.to_owned()).send().await {
+    let mut request = client.post(url).header("Title", title).header("Tags", publish_tags(tag));
+    if let Some(actions) = actions { request = request.header("Actions", actions); }
+    let response = match request.body(body.to_owned()).send().await {
         Ok(response) => response,
         Err(_) => return PushOutcome { result: Err(failure("PHONE_PUSH_UNKNOWN", UNKNOWN_PUSH)), http_status: None, attempted: true },
     };
@@ -525,9 +529,35 @@ impl Inner {
         let choices = recipients(&directory.unwrap_or_else(|_| json!({"addresses": []})), &lock(&self.state).records);
         let choices: Vec<_> = choices.iter().filter(|r| r.active || book.last_recipient.as_deref() == Some(&r.address))
             .map(|r| json!({"address": r.address, "label": r.title.as_deref().unwrap_or(&r.address)})).collect();
-        Ok(json!({"enabled": book.enabled, "topicUrl": self.phone_reply_url(), "lastRecipient": book.last_recipient, "recipients": choices, "lastError": last_error}))
+        let mut approvals = self.phone_approvals_view();
+        approvals["enabled"] = json!(book.approvals);
+        Ok(json!({"enabled": book.enabled, "topicUrl": self.phone_reply_url(), "lastRecipient": book.last_recipient, "recipients": choices, "lastError": last_error, "approvals": approvals}))
     }
-    fn phone_current(&self, revision: u64) -> bool { lock(&self.phone).current(revision) }
+    pub(super) fn phone_current(&self, revision: u64) -> bool { lock(&self.phone).current(revision) }
+    pub(super) fn phone_approvals_on(&self) -> bool { let book = lock(&self.phone); book.approvals && book.enabled && !book.storage_failed }
+    pub(super) fn phone_created_at(&self) -> u64 { lock(&self.phone).created_at }
+    /// "approve <code>" / "deny <code>": an answer to an approval request (phone_approvals.rs).
+    /// Receipted like any phone message so a re-poll never applies it twice, but never posted
+    /// as a board notice. Ok(false): not an answer, or one prepare() already handles.
+    fn phone_answer(&self, item: &Incoming, store: &Store) -> Result<bool, Failure> {
+        if mailbox_credential(&item.message) || mailbox_credential(&item.title) || item.message.len() > MESSAGE_BYTES { return Ok(false); }
+        let Some((decision, code, note)) = phone_approvals::parse_decision(&item.message) else { return Ok(false) };
+        let now = coord_core::now();
+        {
+            let book = lock(&self.phone);
+            let id = scoped(book.topic_digest.as_deref().unwrap_or(""), &item.id);
+            if book.own(item) || book.inbound.contains_key(&id) || item.time < book.created_at || item.time < now.saturating_sub(RETENTION) { return Ok(false); }
+        }
+        let feedback = self.phone_decide(decision, &code, &note, store);
+        let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&(&item.title, &item.message)).unwrap_or_default()));
+        self.change_phone(|book| {
+            let id = scoped(book.topic_digest.as_deref().unwrap_or(""), &item.id);
+            book.inbound.insert(id, InboundReceipt { digest, to: None, text_start: 0, feedback: Some(feedback), at: now, done: true, ..Default::default() });
+            book.advance_cursor(&item.id);
+            Ok(())
+        })?;
+        Ok(true)
+    }
     fn phone_register(&self) -> Result<Store, Failure> {
         let store = self.board_store()?;
         mailbox::api(&store, "register", &json!({"name": ADDRESS, "label": "Ben (phone)"}))
@@ -535,6 +565,7 @@ impl Inner {
         Ok(store)
     }
     fn phone_incoming(&self, item: &Incoming, store: &Store) -> Result<(), Failure> {
+        if self.phone_answer(item, store)? { return Ok(()); }
         let records = lock(&self.state).records.clone();
         let choices = recipients(&self.phone_directory()?, &records);
         let wake = self.wake_enabled();
@@ -552,7 +583,7 @@ impl Inner {
             let id = scoped(&namespace, &item.id);
             (id.clone(), namespace, book.inbound[&id].clone())
         };
-        if receipt.to.is_some() && mailbox::api(store, "post", &post_args(&namespace, item, &receipt)).is_err() {
+        if receipt.to.is_some() && mailbox::post_reserved(store, &post_args(&namespace, item, &receipt)).is_err() {
             self.change_phone(|b| { b.inbound.get_mut(&id).unwrap().feedback = Some("The message could not be confirmed on the board. CodaClauda will retry the same message ID; check Settings > Phone.".into()); Ok(()) })?;
             return Err(failure("PHONE_BOARD_FAILED", "The phone message could not be confirmed on the board. The same message ID will be retried."));
         }
@@ -560,9 +591,14 @@ impl Inner {
     }
     /// Called under phone_gate, so URL changes/disable cannot race publication.
     pub(super) async fn phone_publish_locked(&self, url: &str, publication: Publication) -> Result<Value, Failure> {
+        self.phone_publish_actions_locked(url, publication, None).await
+    }
+    /// Like phone_publish_locked, with ntfy action buttons (approval requests). A refused
+    /// (credential) notice never carries buttons.
+    pub(super) async fn phone_publish_actions_locked(&self, url: &str, publication: Publication, actions: Option<&str>) -> Result<Value, Failure> {
         let prepared = self.change_phone(|b| begin_push(b, &publication))?;
         if let Some((title, body, refused)) = prepared {
-            let outcome = push(url, &title, &body, publication.tag).await;
+            let outcome = push(url, &title, &body, publication.tag, if refused { None } else { actions }).await;
             let mut receipt = outcome.receipt(&publication.id, refused);
             if self.change_phone(|b| {
                 b.complete_push(&publication.id, outcome.result.as_deref(), refused, publication.recipient.as_deref());
@@ -647,6 +683,7 @@ impl Inner {
         if let Err((_, message)) = &consumed { self.phone_error(message); }
         self.phone_feedback(snapshot.revision).await?;
         self.phone_outbound(snapshot.revision, &store).await?;
+        self.phone_approval_requests(snapshot.revision, &store).await?;
         consumed
     }
 }
@@ -675,6 +712,22 @@ pub(crate) async fn phone_settings_set(app: tauri::AppHandle, enabled: bool) -> 
         inner.phone_view()
     })();
     reply(result)
+}
+
+/// Turn phone approvals on or off (Settings > Phone); messaging itself is unchanged.
+#[tauri::command]
+pub(crate) async fn phone_approvals_set(app: tauri::AppHandle, enabled: bool) -> Value {
+    let inner = host(&app);
+    let _gate = inner.phone_gate.lock().await;
+    reply(inner.change_phone(|b| { b.approvals = enabled; Ok(()) }).and_then(|_| inner.phone_view()))
+}
+
+/// After five wrong codes phone approvals lock; only the owner, on the PC, unlocks them.
+#[tauri::command]
+pub(crate) async fn phone_approvals_unlock(app: tauri::AppHandle) -> Value {
+    let inner = host(&app);
+    inner.phone_approvals_unlock();
+    reply(inner.phone_view())
 }
 
 #[cfg(test)]

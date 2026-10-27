@@ -56,9 +56,45 @@ not disable explicit board replies. Turning **Message your agents from your phon
 messages and agent replies while keeping the URL. Only the owner changes these
 settings; no separate inbound topic or recipient picker is needed.
 
+## Approve from your phone (0.7.2)
+
+When an agent posts a board message to `owner` whose subject starts with
+`APPROVAL REQUEST`, CodaClauda sends it to the same topic with **Approve** and
+**Deny** buttons and a one-time code. Tap a button, or publish
+`approve K7Q2-MX4P` or `deny K7Q2-MX4P` followed by a reason. Words after the
+code reach the agent as "Ben added: ...". The switch is **Approve from your
+phone** in **Settings > Phone**; it is on by default and needs phone messages on.
+
+CodaClauda checks the code, then puts your answer into that agent's own chat as
+your words:
+
+- a CodaClauda chat gets it as a turn, like typing it in Chat;
+- a Codex desktop chat set to **Wake by mail** in **Running** gets it through
+  Codex's own `codex queue` command (the only case where CodaClauda queues
+  message text into a desktop chat, not just a count);
+- any other address gets an owner reply on the board only, and the phone says
+  to answer it in its own app. For Claude Code desktop chats, use Remote Control
+  in the Claude app.
+
+Either way an owner reply on the board marks the request answered in
+**Approvals**. If you already answered it on the PC, a phone answer changes
+nothing and says so.
+
+Codes are 8 characters from an alphabet without look-alikes (no 0, O, 1, I or
+L). Each works once and expires after 24 hours. Codes live only in CodaClauda's
+memory: never on disk, on the board or in the UI. After a restart, open
+requests from the last 24 hours are sent again with new codes. Five wrong codes
+lock phone approvals until you choose **Unlock phone approvals** on the PC. A
+request whose text looks like it contains a credential is sent without its
+text. Anyone who can read your topic can see codes and approve, the same trust
+as phone messages: keep the topic private.
+
 ## Delivery and authority
 
 A phone message becomes a board **notice** from `owner-phone`, never `owner`.
+Since 0.7.2 the board reserves `owner-phone` for CodaClauda's phone bridge: the
+board CLI and agent tools refuse to post under that name, so a local agent
+cannot pass its own message off as yours.
 It appears as **Ben (phone)** and is handled as Ben's ordinary message, including
 requests and approvals. The owner has chosen this phone channel. Existing
 project access, wake switches and owner controls still apply; receiving a

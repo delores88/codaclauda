@@ -88,7 +88,7 @@ fn apply_fixture(book: &mut Book, path: &Path, store: &Store, event: &PollEvent)
             if pending {
                 let id = receipt_id(book, &item.id);
                 let namespace = book.topic_digest.as_deref().unwrap();
-                mailbox::api(store, "post", &post_args(namespace, item, &book.inbound[&id]))
+                mailbox::post_reserved(store, &post_args(namespace, item, &book.inbound[&id]))
                     .map_err(|_| failure("PHONE_BOARD_FAILED", "fixture board post failed"))?;
                 book.inbound.get_mut(&id).unwrap().done = true;
                 book.advance_cursor(&item.id);
@@ -260,13 +260,13 @@ fn inbound_restart_posts_once_with_frozen_title_offset_recipient_and_phone_sende
     restored.last_recipient = Some("claude-codaclauda".into());
     assert!(prepare(&mut restored, &item, &renamed, |_| None).unwrap());
     assert_eq!(restored.inbound[&id].to.as_deref(), Some("codex-claudacoda"));
-    let first = mailbox::api(&store, "post", &post_args(&namespace, &item, &restored.inbound[&id])).unwrap();
+    let first = mailbox::post_reserved(&store, &post_args(&namespace, &item, &restored.inbound[&id])).unwrap();
 
     // Crash after the board saves, before the phone cursor advances. The renamed
     // session must neither steal the retry nor change the original message text.
     let mut restarted = read_book(&path).unwrap();
     assert!(prepare(&mut restarted, &item, &renamed, |_| None).unwrap());
-    let again = mailbox::api(&store, "post", &post_args(&namespace, &item, &restarted.inbound[&id])).unwrap();
+    let again = mailbox::post_reserved(&store, &post_args(&namespace, &item, &restarted.inbound[&id])).unwrap();
     assert_eq!(first["id"], again["id"]);
     assert_eq!(first["sequence"], again["sequence"]);
     assert_eq!(again["from"], ADDRESS);
@@ -595,4 +595,28 @@ fn peer_turns_can_explicitly_post_to_phone_and_turn_attempts_never_replay_after_
         assert!(begin_push(&mut book, &notice).unwrap().is_none());
     }
     assert!(begin_push(&mut book, &explicit).unwrap().is_none());
+}
+
+#[test]
+fn phone_approvals_default_on_and_an_older_saved_book_keeps_them_on() {
+    assert!(Book::default().approvals);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(FILE);
+    std::fs::write(&path, br#"{"schema":2,"enabled":true,"topicDigest":null,"revision":3}"#).unwrap();
+    assert!(read_book(&path).unwrap().approvals, "0.7.1 phone.json has no approvals field");
+    let mut off = Book::default();
+    off.approvals = false;
+    persist(&path, &off).unwrap();
+    assert!(!read_book(&path).unwrap().approvals, "an owner's Off is kept");
+}
+
+#[test]
+fn an_answer_is_never_routed_as_an_ordinary_phone_message() {
+    // parse_decision runs before routing; a code-shaped answer never reaches an agent as a notice.
+    for answer in ["approve K7Q2-MX4P", "deny K7Q2MX4P not now", "Yes k7q2-mx4p"] {
+        assert!(phone_approvals::parse_decision(answer).is_some(), "{answer}");
+    }
+    for message in ["@Reviewer approve K7Q2-MX4P", "approve the release", "What passed?"] {
+        assert!(phone_approvals::parse_decision(message).is_none(), "{message}");
+    }
 }

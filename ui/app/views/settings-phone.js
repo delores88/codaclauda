@@ -9,6 +9,9 @@ export const PHONE_COPY = {
   trust: 'Messages arrive as Ben (phone), using the owner-phone reply address. Your existing project access and owner controls still apply. Anyone who knows the topic can read and send messages.',
   privacy: 'Keep the topic URL private and use a long random topic. Never send credentials or private transcripts. Recognized credentials are refused in both directions; the filter cannot detect every secret. Message bodies are not written to diagnostic logs, but delivered messages stay on the board and may enter the agent conversation.',
   availability: 'Keep CodaClauda open and this PC online. Wake on mail and the recipient\'s existing access still apply. ntfy keeps only a limited cache, so messages sent while this PC is offline may expire. Saving a setting or message does not prove an agent acted or a phone received it.',
+  approvalsTitle: 'Approve from your phone',
+  approvalsIntro: 'When an agent sends you an APPROVAL REQUEST, your phone gets it with Approve and Deny buttons and a one-time code. You can also reply approve K7Q2-MX4P, or deny K7Q2-MX4P and a reason. Your answer goes into that agent\'s own chat as your words: CodaClauda chats, and Codex chats set to Wake by mail in Running. For Claude Code desktop chats, use Remote Control in the Claude app.',
+  approvalsTrust: 'Each code works once, expires after 24 hours and lives only in CodaClauda\'s memory; after a restart, open requests are sent again with new codes. Five wrong codes lock phone approvals until you unlock them here. Anyone who can read your topic could approve, so keep it private.',
 };
 
 /** Require a confirmed native response before enabling edits. */
@@ -25,7 +28,21 @@ export function phoneSettingsValue(value) {
     lastRecipient: typeof value.lastRecipient === 'string' && value.lastRecipient ? value.lastRecipient : null,
     recipients,
     lastError: typeof value.lastError === 'string' && value.lastError ? value.lastError : null,
+    // Older builds have no phone approvals: null hides the section.
+    approvals: value.approvals && typeof value.approvals.enabled === 'boolean'
+      ? { enabled: value.approvals.enabled, locked: value.approvals.locked === true, waiting: Number.isInteger(value.approvals.waiting) && value.approvals.waiting > 0 ? value.approvals.waiting : 0 }
+      : null,
   };
+}
+
+export function phoneApprovalsText(saved) {
+  const a = saved?.approvals;
+  if (!a) return '';
+  if (!saved.topicUrl) return 'Save your ntfy topic URL above first.';
+  if (!saved.enabled) return 'Turn on phone messages above to approve from your phone.';
+  if (a.locked) return 'Locked after five wrong codes. Nothing can be approved from the phone until you unlock it.';
+  if (!a.enabled) return 'Off: approval requests stay in CodaClauda > Approvals.';
+  return a.waiting ? `On: ${a.waiting} request${a.waiting === 1 ? ' is' : 's are'} waiting for your answer on the phone.` : 'On: new approval requests go to your phone.';
 }
 
 export function phoneThreadText(saved) {
@@ -48,11 +65,18 @@ export function phoneSettings({ ui }) {
   const thread = h('p.field-hint.phone-thread', { 'aria-live': 'polite' });
   const failure = h('p.inline-error', { role: 'alert', hidden: true });
   const refresh = h('button.btn.small.ghost', { type: 'button', onclick: () => load() }, icon('refresh'), 'Refresh phone status');
+  const approvalsInput = h('input', { type: 'checkbox', 'aria-label': PHONE_COPY.approvalsTitle, onchange: event => saveApprovals(event.currentTarget.checked) });
+  const approvalsStatus = h('p.field-hint.phone-approvals-status', { 'aria-live': 'polite' });
+  const unlock = h('button.btn.small', { type: 'button', hidden: true, onclick: () => unlockApprovals() }, icon('lock'), 'Unlock phone approvals');
+  const approvals = h('div.phone-approvals', { hidden: true },
+    h('div.setting-row', h('div.setting-text', h('h3.panel-title', PHONE_COPY.approvalsTitle), h('span.field-hint', PHONE_COPY.approvalsIntro)), h('label.switch', approvalsInput, h('span'))),
+    approvalsStatus, unlock, h('p.field-hint', PHONE_COPY.approvalsTrust));
   const node = h('div.phone-messages',
     h('div.setting-row', h('div.setting-text', h('h3.panel-title', PHONE_COPY.title), h('span.field-hint', PHONE_COPY.intro)), h('label.switch', onInput, h('span'))),
     status, failure, h('p.field-hint', PHONE_COPY.send), thread,
     h('p.field-hint', 'For a name with spaces, write @"Session title" followed by a space and your message. If a name matches more than one agent, use its board address.'),
     refresh,
+    approvals,
     h('details.phone-details', h('summary', 'Privacy and delivery'), h('p.field-hint', PHONE_COPY.trust), h('p.field-hint', PHONE_COPY.privacy), h('p.field-hint', PHONE_COPY.availability)));
 
   function render() {
@@ -65,6 +89,12 @@ export function phoneSettings({ ui }) {
     failure.hidden = !error;
     failure.textContent = error;
     thread.textContent = phoneThreadText(state.saved);
+    const phoneApprovals = state.saved?.approvals;
+    approvals.hidden = !phoneApprovals || !['phoneApprovalsSet', 'phoneApprovalsUnlock'].every(name => typeof desktop[name] === 'function');
+    approvalsInput.checked = phoneApprovals?.enabled === true;
+    approvalsInput.disabled = !phoneApprovals || state.busy || !state.saved?.topicUrl || !state.saved?.enabled;
+    approvalsStatus.textContent = phoneApprovalsText(state.saved);
+    unlock.hidden = !phoneApprovals?.locked; unlock.disabled = state.busy;
     status.textContent = unavailable ? 'Phone messages need CodaClauda 0.6.1 desktop.'
       : state.busy ? 'Reading or saving phone settings...'
         : !loaded ? 'Phone settings have not been read. Choose Refresh phone status to try again.'
@@ -88,6 +118,26 @@ export function phoneSettings({ ui }) {
       ui.toast(state.saved.enabled ? 'Phone messages are on when a topic URL is saved' : 'Phone messages are off', { kind: 'success', timeout: 2600 });
     } catch (error) {
       ui.toast(`Couldn't save phone message settings: ${error?.message || error}`, { kind: 'error', timeout: 8000 });
+    } finally { finish(); }
+  }
+  async function saveApprovals(enabled) {
+    if (!state.saved || state.busy) { render(); return; }
+    state.busy = true; render();
+    try {
+      state.saved = phoneSettingsValue(await desktop.phoneApprovalsSet({ enabled }));
+      ui.toast(state.saved.approvals?.enabled ? 'Approval requests go to your phone' : 'Phone approvals are off', { kind: 'success', timeout: 2600 });
+    } catch (error) {
+      ui.toast(`Couldn't save phone approvals: ${error?.message || error}`, { kind: 'error', timeout: 8000 });
+    } finally { finish(); }
+  }
+  async function unlockApprovals() {
+    if (state.busy) return;
+    state.busy = true; render();
+    try {
+      state.saved = phoneSettingsValue(await desktop.phoneApprovalsUnlock());
+      ui.toast('Phone approvals unlocked', { kind: 'success', timeout: 2600 });
+    } catch (error) {
+      ui.toast(`Couldn't unlock phone approvals: ${error?.message || error}`, { kind: 'error', timeout: 8000 });
     } finally { finish(); }
   }
   function finish() {

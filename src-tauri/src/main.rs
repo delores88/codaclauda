@@ -489,6 +489,8 @@ fn main() {
             session_host::notify::notify_test,
             session_host::phone::phone_settings_get,
             session_host::phone::phone_settings_set,
+            session_host::phone::phone_approvals_set,
+            session_host::phone::phone_approvals_unlock,
             session_host::limits::session_limits_get,
             session_host::limits::session_limits_set,
             session_host::team::team_settings_get,

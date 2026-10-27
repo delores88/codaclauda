@@ -858,6 +858,58 @@ pub(super) async fn poll_bound(inner: &Arc<Inner>) {
     .await;
 }
 
+/// Is this board address bound to a Codex desktop chat?
+pub(super) fn bound(dir: &Path, address: &str) -> bool {
+    let path = dir.join(BINDINGS_FILE);
+    path.is_file() && {
+        let _guard = lock(&FILE);
+        load(&path).is_ok_and(|book| book.bindings.iter().any(|b| b.address == address))
+    }
+}
+
+/// Ben's answer to an approval request, from his phone (0.7.2): the one case a
+/// desktop chat gets message text instead of a count-only notice, and only after
+/// phone_approvals.rs checked his one-time code. Queued once into the bound
+/// thread, re-verified first, with the same stripped environment and timeout.
+pub(super) async fn queue_owner_answer(inner: &Arc<Inner>, address: &str, text: String) -> Result<(), String> {
+    let path = inner.dir.join(BINDINGS_FILE);
+    let binding = {
+        let _guard = lock(&FILE);
+        load(&path)?.bindings.into_iter().find(|b| b.address == address)
+    }
+    .ok_or("that chat is no longer bound")?;
+    let worker = inner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let exe = match lock(&worker.executables).get(&Provider::Codex).filter(|p| p.is_file()).cloned() {
+            Some(found) => found,
+            None => {
+                let found = super::discover(Provider::Codex)?;
+                lock(&worker.executables).insert(Provider::Codex, found.clone());
+                found
+            }
+        };
+        let command = queue_command(&exe, &binding, &text);
+        let started = {
+            let _lifecycle = lock(&worker.lifecycle);
+            admit_queue(&path, &binding, &|| context(&worker), &|| true, || start_queue(&command))
+        };
+        let outcome = match started {
+            Ok(child) => wait_queue(child, QUEUE_TIMEOUT, &|| false),
+            Err(outcome) => outcome,
+        };
+        let why = |fallback: &str| telling_line(&outcome.stdout, &outcome.stderr).map(|l| clean(&l)).unwrap_or_else(|| fallback.to_owned());
+        match &outcome.ended {
+            Ended::Exited(0) if !says_unreachable(&outcome.stderr) => Ok(()),
+            Ended::Exited(code) => Err(why(&format!("codex queue exited with {code}"))),
+            Ended::TimedOut => Err("codex queue timed out".into()),
+            Ended::Cancelled => Err("the binding changed while queuing".into()),
+            Ended::NotStarted(why) | Ended::Lost(why) | Ended::Refused(why) => Err(clean(why)),
+        }
+    })
+    .await
+    .map_err(|_| "the queue task stopped".to_owned())?
+}
+
 // ----------------------------------------------------------------- commands
 
 /// → { bindings: [{ address, provider, threadId, cwd, projectId, boundAt, cursor, last }], wakeEnabled, pollSeconds }

@@ -32,6 +32,7 @@ pub(crate) mod limits;
 pub(crate) mod mcp;
 pub(crate) mod notify;
 pub(crate) mod phone;
+pub(crate) mod phone_approvals;
 pub(crate) mod schedule;
 pub(crate) mod team;
 pub(crate) mod usage;
@@ -921,6 +922,8 @@ struct Inner {
     run_lock: Mutex<()>,
     notify: Mutex<notify::Settings>,
     phone: Mutex<phone::Book>,
+    /// One-time phone approval codes, in memory only (phone_approvals.rs).
+    phone_approvals: Mutex<phone_approvals::Approvals>,
     /// Owner changes and delivery commits serialize; a fetched old topic never delivers after regeneration.
     phone_gate: tokio::sync::Mutex<()>,
     team: Mutex<team::Book>,
@@ -962,6 +965,7 @@ impl SessionHost {
             run_lock: Mutex::new(()),
             notify: Mutex::new(notify::Settings::default()),
             phone: Mutex::new(phone::Book::default()),
+            phone_approvals: Mutex::new(phone_approvals::Approvals::default()),
             phone_gate: tokio::sync::Mutex::new(()),
             team: Mutex::new(team::Book::default()),
             team_registered: AtomicBool::new(false),

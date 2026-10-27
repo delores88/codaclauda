@@ -107,7 +107,7 @@ export function createPreviewScenario({ search = '', baseURL, fetchImpl = global
       if (command === 'project_scan') {
         const project = projects.find(p => p.path && normalizePath(p.path) === normalizePath(String(args.path || '')));
         const stats = statsForPath(args.path);
-        return { ...stats, name: project?.name || stats.name, git: { ...stats.git, remote: project?.remote || (project?.repo ? `https://github.com/${project.repo}.git` : '') } };
+        return { ...stats, name: project?.name || stats.name, git: { ...stats.git, remote: project?.remote || (project?.repo ? `https://github.com/${project.repo}.git` : stats.git?.remote || '') } };
       }
       return { projects: projects.filter(p => p.path).map(p => ({ name: p.name, path: p.path, is_git: Boolean(p.remote || p.repo), markers: [] })) };
     },

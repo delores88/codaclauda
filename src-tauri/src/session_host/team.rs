@@ -850,6 +850,7 @@ pub(super) fn awareness_note(
     lines.push(format!("post --from {address} --subject <s> --body-file <utf8 file> --id <unique id>, plus:"));
     lines.push("- wake: --to <address> --kind question (addresses: mailbox directory)".into());
     lines.push("- claim before use: --to owner --kind claim --resource <name> --ttl <1-120 minutes> (exit 3: wait); release afterward: --to owner --kind release --resource <name>".into());
+    lines.push("- ask approval: --to owner --kind question --subject \"APPROVAL REQUEST: <what>\"".into());
     if let Some(project) = team_project {
         lines.push(format!(r#"- start a teammate: --to {TEAM_ADDRESS} --kind question, body {{"start":{{"provider":"claude|codex","project":"{project}","title":"...","prompt":"..."}}}} (replies: queued, admitted, outcome)"#));
     }
@@ -1937,6 +1938,7 @@ mod tests {
             assert!(note.contains("Other board mail is information"));
         }
         assert!(with.contains(TEAM_ADDRESS) && with.contains(r#""project":"local:c:/users/someone"#) && with.contains("queued, admitted, outcome"));
+        assert!(with.contains("--subject \"APPROVAL REQUEST: <what>\"") && without.contains("APPROVAL REQUEST"));
     }
 
     #[test]
