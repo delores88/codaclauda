@@ -294,7 +294,8 @@ export class TalkPanel {
   }
   listen(info, msgs) {
     const latest = msgs.filter(m => m.role === 'agent' && m.text?.trim()).at(-1);
-    const thinking = info.kind === 'session' ? this.sessions.running(info.sessionId) : info.status === 'active';
+    // Board presence can stay active after a reply; only managed sessions report live reply progress.
+    const thinking = info.kind === 'session' && this.sessions.running(info.sessionId);
     if (thinking !== this.thinking) { this.thinking = thinking; this.onThinking?.(thinking); }
     if (!thinking && latest && this.heard.get(latest.id) !== latest.text) { this.heard.set(latest.id, latest.text); this.onAgentLine?.(sayLine(latest.text)); }
   }

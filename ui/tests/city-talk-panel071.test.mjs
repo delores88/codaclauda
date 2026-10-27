@@ -179,6 +179,47 @@ test('working bubbles keep typing until the final line replaces it after complet
   assert.deepEqual(events, [['thinking', true], ['thinking', false], ['line', 'Final answer']]);
 });
 
+test('active board presence never suppresses a completed reply or repeats it on refresh', t => {
+  const events = [], { panel, store } = fixture(t, {
+    onThinking: on => events.push(['thinking', on]), onAgentLine: text => events.push(['line', text]),
+  });
+  const messages = [{ id: 'question', role: 'owner', text: 'Review this project', status: 'seen' }];
+  store.threadMessages = () => messages;
+  panel.open({ id: 'board', kind: 'mailbox', address: 'codex-board', name: 'Builder', provider: 'codex', status: 'active' });
+  assert.equal(panel.info().status, 'active', 'presence remains available in the header');
+  assert.equal(panel.thinking, false, 'recent activity or a live claim is not a streaming reply');
+  assert.deepEqual(events, []);
+  messages.push({ id: 'reply', role: 'agent', text: 'The review is complete.' });
+  panel.refresh(); panel.refresh();
+  assert.equal(panel.log.textContent, 'Review this projectThe review is complete.');
+  assert.deepEqual(events, [['line', 'The review is complete.']]);
+  assert.equal(panel.heard.get('reply'), 'The review is complete.');
+});
+
+test('opening active board history speaks the completed reply when City arrives', async t => {
+  globalThis.localStorage ||= { getItem: () => null, setItem() {} };
+  const { CityView } = await import('../app/views/city.js');
+  const heard = [], { panel, store } = fixture(t, { onAgentLine: text => heard.push(text) });
+  store.threadMessages = () => [
+    { id: 'question', role: 'owner', text: 'Any update?' },
+    { id: 'reply', role: 'agent', text: 'The review is complete.' },
+  ];
+  const agent = { id: 'board', kind: 'mailbox', address: 'codex-board', name: 'Builder', status: 'active' };
+  const spoken = [], view = {
+    npcs: { owner: null, position: () => null, act() {} }, agentById: () => agent, talkPanel: panel,
+    talkSay: (who, text) => spoken.push([who, text]),
+    talkThinking: () => spoken.push(['agent', 'typing']), bubbleText: () => 'Fallback greeting',
+  };
+  for (let opening = 0; opening < 2; opening++) {
+    panel.open(agent);
+    assert.equal(panel.thinking, false);
+    CityView.prototype.arriveTalk.call(view, { id: agent.id });
+    assert.deepEqual(spoken.splice(0), [['owner', 'Any update?'], ['agent', 'The review is complete.']]);
+    panel.close();
+  }
+  assert.deepEqual(heard, ['The review is complete.', 'The review is complete.']);
+});
+
 test('optional New session here calls the canonical observed City project and otherwise stays hidden', t => {
   const chosen = [], details = [], { panel, managed } = fixture(t, { onNewSessionHere: (id, context) => { chosen.push(id); details.push(context); } });
   panel.open({ ...managed, currentProjectId: null, cityProjectId: 'gh:owner/demo' });
