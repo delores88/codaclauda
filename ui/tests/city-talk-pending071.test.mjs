@@ -26,7 +26,9 @@ function fixture(t, { existing = [], reduced = true } = {}) {
   npcs.dropOwner = (...args) => { calls.drops.push(args); drop(...args); };
   t.after(() => npcs.dispose());
   const pose = { position: new THREE.Vector3(50, 60, 70), target: new THREE.Vector3(2, 0, 4), center: true, overview: false };
-  const world = { camera: { fov: 40, position: pose.position.clone() }, controls: { target: pose.target.clone() },
+  const camera = new THREE.PerspectiveCamera(40, 1500 / 900, .05, 10000);
+  camera.position.copy(pose.position); camera.lookAt(pose.target);
+  const world = { camera, controls: { target: pose.target.clone() },
     size: { w: 1500, h: 900 }, half: 90, side: 'pc', restSide: 'pc', settled: true, underside: false,
     centerTarget: pose.center, overview: pose.overview, toWorld: vector => vector.clone(),
     setShot: (...args) => calls.shots.push(args), flyAfterTurn: (...args) => calls.returns.push(args), flipTo() {}, stop() {}, dispose() {} };

@@ -34,7 +34,7 @@ test('RPG two-shot puts full bodies in their thirds at comparable size from ches
     [1280, 800, 1280, { left: 880, top: 0, width: 400, height: 800 }],
     [640, 788, 314, { left: 0, top: 347, width: 314, height: 441 }],
     [640, 760, 320, { left: 0, top: 334, width: 320, height: 426 }],
-  ]) for (const [ownerHeight, agentHeight] of [[1.9, 1.9], [2.1, 1.9]]) for (const yaw of [0, .7, -1.9]) {
+  ]) for (const [ownerHeight, agentHeight] of [[1.9, 1.9], [2.1, 1.9], [1.74, 1.878], [1.74, 1.95]]) for (const yaw of [0, .7, -1.9]) {
     const agent = { x: 12, z: 22 }, ground = .24;
     const spot = talkSpot(agent, { x: agent.x + Math.sin(yaw) * 4, z: agent.z + Math.cos(yaw) * 4 });
     const face = { ...agent, y: ground + agentHeight * .72 };
@@ -55,13 +55,15 @@ test('RPG two-shot puts full bodies in their thirds at comparable size from ches
     assert.ok((owner.left + owner.right) / 2 < vis.x0 + roomW / 3, 'owner stays in the left third');
     assert.ok((npc.left + npc.right) / 2 > vis.x0 + roomW * 2 / 3, 'agent stays in the right third');
     for (const figure of figures) assert.ok((figure.bottom - figure.top) / roomH >= .45 && (figure.bottom - figure.top) / roomH <= .55,
-      `full body occupies 45-55% of the free view: ${(figure.bottom - figure.top) / roomH}`);
+      `${width}/${visibleWidth}, heights ${ownerHeight}/${agentHeight}, yaw ${yaw}: full body occupies 45-55% of the free view: ${(figure.bottom - figure.top) / roomH}`);
     assert.ok(Math.min(owner.top, npc.top) >= vis.y0 + Math.min(90, roomH * .30), 'speech has head clearance');
     assert.ok(shot.eye.y > ground + Math.min(ownerHeight, agentHeight) * .5 && shot.eye.y < ground + Math.max(ownerHeight, agentHeight) * .75, 'camera remains at chest height');
     const midpoint = new THREE.Vector2((spot.x + agent.x) / 2, (spot.z + agent.z) / 2);
     const line = new THREE.Vector2(spot.x - agent.x, spot.z - agent.z).normalize();
     const toCamera = new THREE.Vector2(shot.eye.x, shot.eye.z).sub(midpoint).normalize();
-    assert.ok(Math.abs(toCamera.dot(line) + Math.sin(25 * Math.PI / 180)) < 1e-8, 'side camera has a 25-degree front bias');
+    const bias = Math.asin(-toCamera.dot(line)) * 180 / Math.PI;
+    assert.ok(bias >= 15 - 1e-8 && bias <= 25 + 1e-8, 'side camera keeps a gentle front bias for varied avatar heights');
+    if (ownerHeight >= agentHeight) assert.ok(Math.abs(bias - 25) < 1e-8, 'equal or taller owner keeps the 25-degree shot');
     for (const [position, partner] of [[spot, agent], [agent, spot]]) {
       const facing = talkFacingPoint(position, partner, shot.eye);
       const forward = new THREE.Vector2(facing.x - position.x, facing.z - position.z).normalize();
@@ -125,4 +127,21 @@ test('face silhouette rays detect a narrow off-centre lamp that the face-centre 
   assert.equal(lamp.material.opacity, .10);
   restore(); assert.equal(lamp.material.opacity, 1);
   lamp.geometry.dispose(); lamp.material.dispose();
+});
+
+test('full-figure rays detect low planters and rails that leave the face and chest clear', () => {
+  const eye = { x: 0, y: 1.5, z: 8 }, position = { x: 0, y: .18, z: 0 }, faceHeight = 1.5;
+  for (const [width, height, depth, x, y, z] of [
+    [1.2, .34, .4, 0, .35, .5], // tree planter clips the shins beside the talk spot
+    [.1, .12, .1, .18, .87, 4], // narrow low rail hides one ankle in projection
+  ]) {
+    const obstruction = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), new THREE.MeshBasicMaterial());
+    obstruction.position.set(x, y, z); obstruction.raycast = () => {};
+    const root = new THREE.Group(); root.add(obstruction);
+    const meshes = talkSceneMeshes(root), targets = talkFigureTargets(eye, position, faceHeight);
+    const upperBody = targets.filter(p => p.y >= position.y + faceHeight - .65);
+    assert.equal(talkSceneHits(meshes, eye, upperBody).size, 0, 'head/chest-only checks miss the low obstruction');
+    assert.deepEqual([...talkSceneHits(meshes, eye, targets)], [obstruction], 'complete silhouette checks include legs and shoes');
+    obstruction.geometry.dispose(); obstruction.material.dispose();
+  }
 });

@@ -333,7 +333,7 @@ button.city-label:focus-visible { outline: 2px solid var(--accent); outline-offs
 .city-talk-title h2 { display: block; margin: 0; overflow: hidden; font: 600 15px/1.25 var(--font-display); text-overflow: ellipsis; white-space: nowrap; }
 .city-talk-title p { margin: 3px 0 0; overflow: hidden; color: var(--muted); font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .city-talk-presence { display: flex; align-items: center; gap: 6px; cursor: help; }
-.city-talk-presence > .city-gem { flex: none; }
+.city-talk-presence > .city-gem { flex: none; border-radius: 50%; transform: none; }
 .city-talk-presence > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .city-talk-presence:focus-visible { outline: 2px solid var(--accent); border-radius: 4px; }
 .city-talk-actions { display: flex; flex: none; flex-wrap: nowrap; align-items: center; gap: 2px; }

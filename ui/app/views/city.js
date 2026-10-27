@@ -16,6 +16,8 @@ import { TalkPanel, talkSpot, sayLine, STAGE } from '../city/talk.js';
 import { fitTalkShot, talkFacingPoint, talkVisibleRect, talkFigureTargets, talkWallHits, talkSceneMeshes, talkSceneHits, cutawayTalkMeshes } from '../city/talk-frame.js';
 import { layoutTalkBubbles } from '../city/talk-bubbles.js';
 import { talkSignOverlap } from '../city/talk-signs.js';
+import { talkOccludingPeople } from '../city/talk-occlusion.js';
+import { talkPlanterBoxes } from '../city/talk-placement.js';
 import { IslandMode } from '../city/portal.js';
 import { CityWeather } from '../city/weather-hud.js';
 import { sessions } from '../sessions.js';
@@ -2299,6 +2301,7 @@ export class CityView {
   }
   releaseTalk(t) {
     this.setTalkMarkers(t, false);
+    this.restoreTalkPeople(t);
     t.restoreCutaway?.(); t.restoreCutaway = null;
     this.npcs.releaseTalkSpot(t.pendingSpot);
     this.npcs.hold(t.id, false);
@@ -2330,6 +2333,22 @@ export class CityView {
       t.frameCheck = now + 400;
       if (this.talkFrameSig() !== t.frameSig) this.stageTalk(t);
     }
+    if (t.spot) this.updateTalkPeople(t);
+  }
+  restoreTalkPeople(t) {
+    for (const [object, visible] of t.hiddenPeople || []) object.visible = visible;
+    t.hiddenPeople?.clear();
+  }
+  /** Keep moving passers-by from covering either full figure in the settled shot. */
+  updateTalkPeople(t) {
+    this.restoreTalkPeople(t);
+    const people = this.npcs.npcs;
+    if (!people || this.world.side !== 'pc') return;
+    const participants = [this.npcs.owner?.person, this.npcs.personOf({ kind: 'agent', id: t.id })].filter(Boolean);
+    const bystanders = [...people.values()].filter(npc => npc.id !== t.id && npc.person.object.visible).map(npc => npc.person);
+    const hidden = talkOccludingPeople(this.world.camera, participants, bystanders);
+    t.hiddenPeople ||= new Map();
+    for (const object of hidden) { t.hiddenPeople.set(object, object.visible); object.visible = false; }
   }
   /** Status stays in the panel; only the two conversation figures lose their markers. */
   setTalkMarkers(t, on) {
@@ -2340,6 +2359,8 @@ export class CityView {
   /** Stage the owner beside the target, including a pending session's project before it appears. */
   stageTalk(t) {
     const world = this.world, agentT = { kind: 'agent', id: t.id }, owner = this.npcs.owner;
+    if (!owner || world.side !== 'pc') return;
+    this.npcs.prepareTalk?.(t.id);
     let a = this.npcs.position(agentT);
     if (!a && t.pending) {
       const building = this.buildings.get(t.pending.projectId);
@@ -2347,11 +2368,11 @@ export class CityView {
       const point = t.pendingSpot || building?.workSpot(this.agentsAt(t.pending.projectId).length) || { x: -5.5, z: 5.5 };
       a = { x: point.x, y: this.npcs.surfaceY(point.x, point.z), z: point.z };
     }
-    if (!a || !owner || world.side !== 'pc') return;
+    if (!a) return;
     t.restoreCutaway?.(); t.restoreCutaway = null;
     t.phase = 'on';
     this.npcs.hold(t.id, true);
-    const reduced = this.reduced(), boxes = this.streetBoxes(), limit = world.half - 2;
+    const reduced = this.reduced(), boxes = [...this.streetBoxes(), ...talkPlanterBoxes(this.buildings.list || [])], limit = world.half - 2;
     const near = owner && Math.hypot(owner.pos.x - a.x, owner.pos.z - a.z) < 9;
     t.seated = this.npcs.seated(t.id);
     // A bottom sheet leaves a short strip of the view: stand the camera further back so the two still fit.
@@ -2381,7 +2402,8 @@ export class CityView {
         toWorld({ ...candidate, y: this.npcs.surfaceY(candidate.x, candidate.z) + this.npcs.faceHeight(OWNER_TARGET) })];
       const signOverlap = talkSignOverlap({ eye: toWorld(shot.eye), look: toWorld(shot.look) }, heads, signs,
         { vfov: world.camera.fov, aspect: world.size.w / world.size.h });
-      const score = walls * 10000 + hits.size * 100 + signOverlap;
+      const occupied = boxes.some(b => candidate.x > b.x0 && candidate.x < b.x1 && candidate.z > b.z0 && candidate.z < b.z1);
+      const score = Number(occupied) * 1000000 + walls * 10000 + hits.size * 100 + signOverlap;
       if (score < bestScore) { spot = candidate; bestScore = score; obscures = hits; }
       if (!score) break;
     }

@@ -16,8 +16,8 @@ export function talkSceneMeshes(root, ignored = []) {
   return meshes;
 }
 
-/** Rays cover the face silhouette, not only its centre: a narrow lamp can hide
- * an eye while missing a centre ray. Samples share a plane facing the camera. */
+/** Cover the complete silhouette: a narrow lamp can hide an eye, while a low
+ * planter can hide the legs even when every face ray is clear. */
 export function talkFigureTargets(eye, position, faceHeight) {
   const centre = new THREE.Vector3(position.x, (position.y || 0) + faceHeight, position.z);
   const normal = new THREE.Vector3(eye.x, eye.y, eye.z).sub(centre).normalize();
@@ -28,8 +28,12 @@ export function talkFigureTargets(eye, position, faceHeight) {
   for (const x of [-.5, -.25, 0, .25, .5]) for (const y of [-.35, 0, .35]) {
     targets.push(centre.clone().addScaledVector(right, x).addScaledVector(up, y));
   }
-  for (const x of [-.45, 0, .45]) {
-    targets.push(new THREE.Vector3(position.x, (position.y || 0) + Math.max(.35, faceHeight - .65), position.z).addScaledVector(right, x));
+  const ground = position.y || 0;
+  for (const [height, halfWidth] of [
+    [faceHeight * .72, .45], [faceHeight * .48, .4],
+    [faceHeight * .26, .3], [faceHeight * .12, .3], [.06, .36],
+  ]) for (const x of [-halfWidth, 0, halfWidth]) {
+    targets.push(new THREE.Vector3(position.x, ground + height, position.z).addScaledVector(right, x));
   }
   return targets;
 }
@@ -131,14 +135,19 @@ export function fitTalkShot(spot, face, { width, height, vis, ownerHeight = 1.8,
   }
   const line = new THREE.Vector2(spot.x - face.x, spot.z - face.z).normalize();
   if (!line.lengthSq()) line.set(Math.sin(spot.yaw || 0), Math.cos(spot.yaw || 0));
-  const angle = 25 * Math.PI / 180;
+  // Keep a shorter owner from becoming the smaller, farther figure as well.
+  // Equal-height figures keep the 25-degree view; varied avatars open it a little.
+  const angle = Math.max(15, 25 - Math.max(0, agentHeight - ownerHeight) / agentHeight * 90) * Math.PI / 180;
   const direction = new THREE.Vector2(line.y * Math.cos(angle) - line.x * Math.sin(angle),
     -line.x * Math.cos(angle) - line.y * Math.sin(angle));
   const middle = new THREE.Vector3((spot.x + face.x) / 2,
     (ownerY + agentY) / 2 + (ownerHeight + agentHeight) * .25, (spot.z + face.z) / 2);
   const bounds = { x0: vis.x0 + roomW * .045, x1: vis.x1 - roomW * .045,
     y0: vis.y0 + Math.min(90, roomH * .30), y1: vis.y1 - roomH * .055 };
-  let distance = (ownerHeight + agentHeight) / 2 * focal / (roomH * .50);
+  // A standing mesh fills less of its conservative depth box than the corners
+  // do. Keep desktop figures readable without crowding the shorter mobile view.
+  const fill = roomH > height * .6 ? .528 : .50;
+  let distance = (ownerHeight + agentHeight) / 2 * focal / (roomH * fill);
   let shot;
   const look = new THREE.Vector3();
   for (let step = 0; step < 36; step++) {
@@ -165,7 +174,11 @@ export function fitTalkShot(spot, face, { width, height, vis, ownerHeight = 1.8,
     const heights = projected.map(points => Math.max(...points.map(p => p.y)) - Math.min(...points.map(p => p.y)));
     shot = { eye: { x: eye.x, y: eye.y, z: eye.z }, look: { x: look.x, y: look.y, z: look.z } };
     const average = (heights[0] + heights[1]) / 2;
-    if (step === 0 || average > roomH * .51) { distance *= Math.max(1.005, average / (roomH * .50)); continue; }
+    const scale = Math.max(average / (roomH * fill), Math.max(...heights) / (roomH * .5498));
+    // Settle size in both directions before enforcing scenery/edge clearance.
+    // A short owner beside a taller agent can start with an over-distant shot.
+    if (step < 7 && Math.abs(scale - 1) > .0001) { distance *= scale; continue; }
+    if (scale > 1.0001) { distance *= Math.max(1.005, scale); continue; }
     const inside = projected.flat().every(p => p.z > -1 && p.z < 1 && p.x >= bounds.x0 && p.x <= bounds.x1 && p.y >= bounds.y0 && p.y <= bounds.y1);
     if (inside) break;
     distance *= 1.035;
