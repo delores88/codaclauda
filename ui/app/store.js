@@ -34,10 +34,20 @@ export const LANGUAGE_COLORS = {
 };
 export const languageColor = name => LANGUAGE_COLORS[name] || `hsl(${hash(name || 'x') % 360} 55% 55%)`;
 
+const LOGIN = /^[a-z\d](?:[a-z\d-]{0,38})$/i;
+/** Saved extra GitHub accounts, dropping malformed rows. */
+function cleanAccounts(list) {
+  return (Array.isArray(list) ? list : []).filter(a => a && LOGIN.test(String(a.user || ''))).map(a => ({
+    user: String(a.user), repos: Array.isArray(a.repos) ? a.repos : [], fetchedAt: Number(a.fetchedAt) || 0, source: String(a.source || ''),
+  }));
+}
+
 function emptyDesktop() {
   return {
     version: 1,
-    projects: { local: [], github: { user: '', repos: [], fetchedAt: 0, source: '' }, settings: {} },
+    // githubAccounts: more owned GitHub accounts [{ user, repos, fetchedAt, source }]. accountLayout, one
+    // choice for all of them: 'city' (one big city) or 'islands' (each its own island beside the city).
+    projects: { local: [], github: { user: '', repos: [], fetchedAt: 0, source: '' }, githubAccounts: [], accountLayout: 'city', settings: {} },
     agents: {},
     avatar: null,
     avatarRequests: {},
@@ -297,7 +307,7 @@ class Store extends EventTarget {
     if (!saved) { try { saved = JSON.parse(localStorage.getItem(LOCAL_KEY) || 'null'); } catch { saved = null; } }
     const base = emptyDesktop();
     if (saved && typeof saved === 'object') {
-      this.desktop = { ...base, ...saved, projects: { ...base.projects, ...saved.projects, github: { ...base.projects.github, ...saved.projects?.github } }, prefs: { ...base.prefs, ...saved.prefs }, chats: { threads: { ...saved.chats?.threads } } };
+      this.desktop = { ...base, ...saved, projects: { ...base.projects, ...saved.projects, github: { ...base.projects.github, ...saved.projects?.github }, githubAccounts: cleanAccounts(saved.projects?.githubAccounts), accountLayout: saved.projects?.accountLayout === 'islands' ? 'islands' : 'city' }, prefs: { ...base.prefs, ...saved.prefs }, chats: { threads: { ...saved.chats?.threads } } };
     }
   }
   /** Mutate desktop state through fn(draft); saved (debounced) and broadcast. */
@@ -333,7 +343,19 @@ class Store extends EventTarget {
   get projects() { return this.derived().projects; }
   get agents() { return this.derived().agents; }
   get tasks() { return this.derived().tasks; }
-  visibleProjects(surface /* 'board' | 'city' */) { return this.projects.filter(p => p.visible[surface]); }
+  /** Home City excludes projects of accounts shown as their own island (IslandMode portals there). */
+  visibleProjects(surface /* 'board' | 'city' */) { return this.projects.filter(p => p.visible[surface] && !(surface === 'city' && p.island)); }
+  /** Projects of one owned account shown as its own island, with that account's island id. */
+  islandProjects(id) { return this.projects.filter(p => p.visible.city && p.island === id); }
+  /** Owned accounts: the main one (always part of the city) plus linked extras. */
+  get githubAccounts() {
+    const main = this.desktop.projects.github || {};
+    const extra = this.desktop.projects.githubAccounts || [];
+    return [...(main.user ? [{ user: main.user, main: true, repos: main.repos || [], fetchedAt: main.fetchedAt, source: main.source }] : []), ...extra];
+  }
+  /** One choice for every extra account: 'city' (one big city) or 'islands' (each its own island). */
+  get accountLayout() { return this.desktop.projects.accountLayout === 'islands' ? 'islands' : 'city'; }
+  setAccountLayout(layout) { this.updateDesktop(d => { d.projects.accountLayout = layout === 'islands' ? 'islands' : 'city'; }); }
   project(id) { return this.projects.find(p => p.id === id || p.ids.includes(id)); }
   agent(id) { return this.agents.find(a => a.id === id); }
   get mailboxMessages() { return [...this.messages.values()].sort((a, b) => (a.sequence || 0) - (b.sequence || 0)); }
@@ -370,15 +392,22 @@ class Store extends EventTarget {
       project.aliases.push(...(Array.isArray(item.aliases) ? item.aliases.map(String) : []));
       project.homeAgents.push(...(Array.isArray(item.agents) ? item.agents.map(String) : []));
     }
-    for (const repo of d.github?.repos || []) {
-      const owner = repo.owner?.login || d.github?.user;
+    // The main account's repos, then each extra owned account's. A project remembers its
+    // account; with the islands layout, an extra account's repos live on that account's island.
+    const islands = d.accountLayout === 'islands';
+    const sources = [{ user: d.github?.user, main: true, repos: d.github?.repos || [] }, ...(d.githubAccounts || [])];
+    for (const account of sources) for (const repo of account.repos || []) {
+      const owner = repo.owner?.login || account.user;
       const ghId = githubIdentity(repo.full_name || (owner && repo.name ? `${owner}/${repo.name}` : repo.name), { allowSlug: true });
       if (!ghId) continue;
       let project = [...byKey.values()].find(p => p.ids.includes(ghId));
       if (!project) project = add({ ...blank(ghId, repo.name), source: 'github' });
+      else if (project.repo) continue;   // the first account listing a repo owns it
       else project.source = project.path ? 'both' : 'github';
       if (!project.ids.includes(ghId)) project.ids.push(ghId);
       project.repo = repo;
+      project.account = String(account.user || '').toLowerCase();
+      project.island = islands && !account.main && account.user ? `owned:${String(account.user).toLowerCase()}` : null;
       project.description ||= repo.description || '';
       project.aliases.push(repo.name);
     }
@@ -645,6 +674,30 @@ class Store extends EventTarget {
       this._githubSelection = entry; this._githubManualRequest = entry.promise;
     }
     return withTimeout(entry.promise);
+  }
+  /** Link (or refresh) another owned GitHub account; where it appears follows accountLayout. */
+  async linkGithubAccount(user) {
+    const login = String(user || '').trim().replace(/^@/, '');
+    if (!LOGIN.test(login)) throw new Error('Enter a GitHub username (letters, numbers and dashes).');
+    if (login.toLowerCase() === String(this.desktop.projects.github?.user || '').toLowerCase()) throw new Error(`@${login} is already your main account.`);
+    const result = await withTimeout(desktop.githubRepos(login));
+    this.updateDesktop(d => {
+      const list = d.projects.githubAccounts ||= [];
+      const at = list.findIndex(a => a.user.toLowerCase() === login.toLowerCase());
+      const entry = { user: result.user || login, repos: result.repos || [], fetchedAt: Date.now(), source: result.source || '' };
+      if (at >= 0) list[at] = entry; else list.push(entry);
+    });
+    return result;
+  }
+  removeGithubAccount(user) {
+    this.updateDesktop(d => { d.projects.githubAccounts = (d.projects.githubAccounts || []).filter(a => a.user.toLowerCase() !== String(user).toLowerCase()); });
+  }
+  /* Repos being cloned right now (ghId -> { state: 'queued' | 'cloning' | 'failed', message? }). The City
+   * shows a "Cloning…" sign on their lots. In memory only. */
+  get cloning() { return this._cloning ||= new Map(); }
+  setCloning(ghId, state) {
+    if (state) this.cloning.set(ghId, state); else this.cloning.delete(ghId);
+    this.emit('change');
   }
   unlinkProject(project) {
     const ids = new Set([project.id, ...(project.ids || [])]);

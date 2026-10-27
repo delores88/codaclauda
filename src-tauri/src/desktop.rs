@@ -929,7 +929,22 @@ pub(crate) async fn gh_output(
     limit: Duration,
     cwd: Option<&Path>,
 ) -> Result<std::process::Output, Failure> {
+    gh_output_as(args, limit, cwd, None).await
+}
+
+/// gh_output run as one signed-in GitHub CLI account: `token` (from
+/// `account_token`) goes only into this child's `GH_TOKEN`. It is never
+/// logged, returned or written anywhere.
+async fn gh_output_as(
+    args: &[&str],
+    limit: Duration,
+    cwd: Option<&Path>,
+    token: Option<&str>,
+) -> Result<std::process::Output, Failure> {
     let mut command = Command::new("gh");
+    if let Some(token) = token {
+        command.env("GH_TOKEN", token);
+    }
     command
         .args(args)
         .env("GH_PROMPT_DISABLED", "1")
@@ -998,7 +1013,11 @@ pub(crate) async fn kill_tree(pid: u32) {
 }
 
 pub(crate) async fn run_gh(args: &[&str], limit: Duration) -> Result<Vec<u8>, Failure> {
-    let output = gh_output(args, limit, None)
+    run_gh_as(args, limit, None).await
+}
+
+async fn run_gh_as(args: &[&str], limit: Duration, token: Option<&str>) -> Result<Vec<u8>, Failure> {
+    let output = gh_output_as(args, limit, None, token)
         .await
         .map_err(|(code, message)| match code {
             "GH_TIMEOUT" => ("GH_UNAVAILABLE", message),
@@ -1035,6 +1054,76 @@ async fn gh_login() -> Result<String, Failure> {
             "GH_UNAVAILABLE",
             "GitHub CLI did not return a signed-in login.",
         ))
+    }
+}
+
+/// Accounts signed into the GitHub CLI for github.com as (login, active).
+/// Reads `gh auth status`, which never prints tokens; both the multi-account
+/// layout (gh 2.40+: "account <login>" plus "Active account: true") and the
+/// older single-account "as <login>" line are understood.
+pub(crate) fn parse_gh_accounts(text: &str) -> Vec<(String, bool)> {
+    let mut accounts: Vec<(String, bool)> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(at) = line.find("Logged in to github.com") {
+            let rest = line[at + "Logged in to github.com".len()..].trim_start();
+            let (login, single) = if let Some(after) = rest.strip_prefix("account ") {
+                (after.split_whitespace().next().unwrap_or(""), false)
+            } else if let Some(after) = rest.strip_prefix("as ") {
+                (after.split_whitespace().next().unwrap_or(""), true)
+            } else {
+                continue;
+            };
+            if valid_login(login) && !accounts.iter().any(|(known, _)| known.eq_ignore_ascii_case(login)) {
+                accounts.push((login.to_owned(), single));
+            }
+        } else if line.contains("Active account: true")
+            && let Some(last) = accounts.last_mut()
+        {
+            last.1 = true;
+        }
+    }
+    accounts.sort_by_key(|(_, active)| !*active);
+    accounts
+}
+
+async fn gh_accounts() -> Result<Vec<(String, bool)>, Failure> {
+    let output = gh_output(&["auth", "status", "--hostname", "github.com"], GH_TIMEOUT, None).await?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(parse_gh_accounts(&text))
+}
+
+/// A signed-in, non-active account's token, so one call can run as that
+/// account (its private repos and clones). None for the active account (gh
+/// already uses it), an unknown login, or a gh without `auth token --user`.
+async fn account_token(login: &str) -> Option<String> {
+    let accounts = gh_accounts().await.ok()?;
+    let (known, active) = accounts.iter().find(|(known, _)| known.eq_ignore_ascii_case(login))?;
+    if *active {
+        return None;
+    }
+    let args = ["auth", "token", "--hostname", "github.com", "--user", known.as_str()];
+    let output = gh_output(&args, GH_TIMEOUT, None).await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let plausible = (20..=255).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    plausible.then_some(value)
+}
+
+/// Accounts signed into the GitHub CLI on this PC (logins only, never tokens).
+#[tauri::command]
+pub(crate) async fn github_accounts() -> Value {
+    match gh_accounts().await {
+        Ok(accounts) => ok(json!({
+            "accounts": accounts.iter().map(|(login, active)| json!({"login": login, "active": active})).collect::<Vec<_>>(),
+        })),
+        Err((code, message)) => error(code, message),
     }
 }
 
@@ -1081,7 +1170,7 @@ fn graphql_repo(node: &Value) -> Value {
     })
 }
 
-async fn gh_repos(login: &str) -> Result<Vec<Value>, Failure> {
+async fn gh_repos(login: &str, token: Option<&str>) -> Result<Vec<Value>, Failure> {
     let query = format!("query={REPOS_QUERY}");
     let login_arg = format!("login={login}");
     let mut cursor: Option<String> = None;
@@ -1099,7 +1188,7 @@ async fn gh_repos(login: &str) -> Result<Vec<Value>, Failure> {
         if let Some(cursor_arg) = &cursor_arg {
             args.extend(["-f", cursor_arg.as_str()]);
         }
-        let stdout = run_gh(&args, GH_GRAPHQL_TIMEOUT).await?;
+        let stdout = run_gh_as(&args, GH_GRAPHQL_TIMEOUT, token).await?;
         let response: Value = serde_json::from_slice(&stdout)
             .map_err(|_| fail("GH_UNAVAILABLE", "GitHub CLI returned invalid JSON."))?;
         let Some(connection) = response.pointer("/data/repositoryOwner/repositories") else {
@@ -1225,7 +1314,9 @@ pub(crate) async fn github_repos(user: String) -> Value {
             "GitHub user names contain 1-39 letters, digits or hyphens.",
         );
     };
-    match gh_repos(&login).await {
+    // Another signed-in account lists as itself, so its private repos appear.
+    let token = account_token(&login).await;
+    match gh_repos(&login, token.as_deref()).await {
         Ok(repos) => ok(json!({"user": login, "source": "gh", "repos": repos})),
         Err(_) => match api_repos(&login).await {
             Ok(repos) => ok(json!({"user": login, "source": "api", "repos": repos})),
@@ -1555,7 +1646,7 @@ async fn create_repo(
     read_clone(&target, expected, "CREATE_FAILED").await
 }
 
-async fn clone_repo(full_name: &str, parent_dir: &str) -> Result<Value, Failure> {
+async fn clone_repo(full_name: &str, parent_dir: &str, token: Option<&str>) -> Result<Value, Failure> {
     let full_name = full_name.trim();
     // valid_repo_folder also refuses "." and ".." (no trailing dot).
     let valid = full_name.split_once('/').filter(|(owner, name)| {
@@ -1570,7 +1661,7 @@ async fn clone_repo(full_name: &str, parent_dir: &str) -> Result<Value, Failure>
     let (parent, target) = clone_target(parent_dir, name)?;
     let cwd = PathBuf::from(display_path(&parent));
     let args = ["repo", "clone", full_name, name];
-    let output = match gh_output(&args, GH_CLONE_TIMEOUT, Some(&cwd)).await {
+    let output = match gh_output_as(&args, GH_CLONE_TIMEOUT, Some(&cwd), token).await {
         Ok(output) => output,
         Err(("GH_TIMEOUT", _)) => {
             return Err(fail(
@@ -1621,10 +1712,42 @@ pub(crate) async fn github_create_repo(
     }
 }
 
-/// Clones `owner/name` into `<parent_dir>/<name>` with the GitHub CLI.
+/// Creates a missing clone folder (for "Clone all" into Desktop\GitHub\<account>),
+/// but only inside this user's home folder and only from an existing ancestor.
+fn ensure_clone_parent(parent_dir: &str) -> Result<(), Failure> {
+    let invalid = |message: String| fail("INVALID_FOLDER", message);
+    let path = local_absolute(parent_dir).ok_or_else(|| invalid("The path must be an absolute local folder.".to_owned()))?;
+    if path.is_dir() {
+        return Ok(());
+    }
+    let home = home_dir().ok_or_else(|| invalid("Your home folder is unknown.".to_owned()))?;
+    let home = fs::canonicalize(&home).unwrap_or(home);
+    let mut ancestor = path.as_path();
+    while !ancestor.exists() {
+        ancestor = ancestor.parent().ok_or_else(|| invalid(format!("{} has no existing parent folder.", display_path(&path))))?;
+    }
+    let anchor = fs::canonicalize(ancestor).map_err(|e| invalid(format!("{}: {e}", display_path(ancestor))))?;
+    if !anchor.starts_with(&home) {
+        return Err(invalid(format!("New clone folders are created only inside {}.", display_path(&home))));
+    }
+    fs::create_dir_all(&path).map_err(|e| invalid(format!("{}: {e}", display_path(&path))))
+}
+
+/// Clones `owner/name` into `<parent_dir>/<name>` with the GitHub CLI, as
+/// `account` when that is another signed-in account (its private repos).
+/// With `create_parent`, a missing parent inside the home folder is created.
 #[tauri::command]
-pub(crate) async fn github_clone_repo(full_name: String, parent_dir: String) -> Value {
-    match clone_repo(&full_name, &parent_dir).await {
+pub(crate) async fn github_clone_repo(full_name: String, parent_dir: String, account: Option<String>, create_parent: Option<bool>) -> Value {
+    if create_parent == Some(true)
+        && let Err((code, message)) = ensure_clone_parent(&parent_dir)
+    {
+        return error(code, message);
+    }
+    let token = match account.as_deref().map(str::trim).filter(|login| valid_login(login)) {
+        Some(login) => account_token(login).await,
+        None => None,
+    };
+    match clone_repo(&full_name, &parent_dir, token.as_deref()).await {
         Ok(data) => ok(data),
         Err((code, message)) => error(code, message),
     }
@@ -1935,6 +2058,19 @@ pub(crate) async fn open_external(target: String) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gh_status_lists_every_signed_in_account_active_first() {
+        let multi = "github.com\n  ✓ Logged in to github.com account delores88 (keyring)\n  - Active account: false\n  - Git operations protocol: https\n  ✓ Logged in to github.com account deloresai-work (keyring)\n  - Active account: true\n  - Token scopes: 'gist', 'read:org', 'repo'\n";
+        assert_eq!(parse_gh_accounts(multi), vec![("deloresai-work".to_owned(), true), ("delores88".to_owned(), false)]);
+        let single = "github.com\n  ✓ Logged in to github.com as delores88 (oauth_token)\n  ✓ Git operations for github.com configured to use https protocol.\n";
+        assert_eq!(parse_gh_accounts(single), vec![("delores88".to_owned(), true)]);
+        let failing = "github.com\n  X Failed to log in to github.com account old-login (keyring)\n  - Active account: true\n";
+        assert!(parse_gh_accounts(failing).is_empty(), "accounts that failed to sign in are not offered");
+        assert!(parse_gh_accounts("You are not logged into any GitHub hosts.").is_empty());
+        let odd = "  ✓ Logged in to github.com account bad;name (keyring)\n";
+        assert!(parse_gh_accounts(odd).is_empty(), "only valid logins are returned");
+    }
 
     #[test]
     fn collab_repo_keeps_other_owners_and_trims_fields() {

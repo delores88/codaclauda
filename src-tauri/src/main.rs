@@ -439,6 +439,7 @@ fn main() {
             desktop::project_scan,
             desktop::desktop_discover_projects,
             desktop::github_user,
+            desktop::github_accounts,
             desktop::github_repos,
             desktop::github_collab_repos,
             desktop::github_create_repo,

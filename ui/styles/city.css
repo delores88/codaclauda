@@ -465,3 +465,4 @@ button.city-label:focus-visible { outline: 2px solid var(--accent); outline-offs
 
 /* Reserved build sites have opaque, readable names at overview zoom. */
 .city-label.is-clone-lot { background: #fff5df; color: #3c352b; border-color: #ab9270; opacity: 1; backdrop-filter: none; -webkit-backdrop-filter: none; font-size: 12px; font-weight: 700; max-width: 370px; overflow: hidden; text-overflow: ellipsis; display: block; }
+.city-label.is-island-label { background: #eaf3ff; color: #1f3b57; border-color: #6d97c4; opacity: 1; backdrop-filter: none; -webkit-backdrop-filter: none; font-size: 12.5px; font-weight: 750; display: block; }

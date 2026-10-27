@@ -70,7 +70,7 @@ export function createPreviewScenario({ search = '', baseURL, fetchImpl = global
       if (cause.code?.startsWith?.('MOCK_')) throw cause;
       throw error('MOCK_FIXTURE_LOAD', 'Could not load the requested preview fixture.');
     } finally { clearTimeout(timeout); }
-  })();
+  })().catch(cause => { pendingFixture = null; throw cause; });   // a failed load (e.g. a throttled background tab) retries next call
   return {
     async run(command, args, fallback) {
       const fault = options.faults[SERVICES[command]];
@@ -95,6 +95,8 @@ export function createPreviewScenario({ search = '', baseURL, fetchImpl = global
       if (command === 'desktop_manifest_load') return { path: options.fixture, manifest: { schema: 'codaclauda.projects/1', github_user: fixture.githubUser, projects: projects.map(p => ({ name: p.name, ...(p.path ? { local_path: p.path } : {}), ...(p.repo ? { github: p.repo } : {}) })) } };
       if (command === 'github_user') return { login: fixture.githubUser, source: 'mock-fixture' };
       if (command === 'github_repos') {
+        // Another of your accounts (GitHub accounts dialog) keeps the ordinary mock repos.
+        if (args.user && args.user.toLowerCase() !== fixture.githubUser.toLowerCase()) return fallback(args);
         const repos = new Map();
         for (const project of projects) {
           const full = project.repo || remoteRepo(project.remote || '');

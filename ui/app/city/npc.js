@@ -11,9 +11,12 @@ import { disposeAll } from './fx.js';
 import { bridgeHeight } from './river-path.js';
 import { riverRoute, riverStep } from './river-navigation.js';
 import { talkPlanterBoxes } from './talk-placement.js';
+import { flightWaypoints, flightCurve, flightSeconds, makePlane } from './airport.js';
 
 const SPEED = { work: 2.2, stroll: 1.05, roam: 1.6, sit: 1.4, rest: 1.4, owner: 3.0 };
 const SIDEWALK_Y = GROUND_Y + 0.06;
+const PLANE_COLORS = { claude: '#d97757', codex: '#10a37f', other: '#8e7bff' };
+const RUNWAY_Y = 0.06;   // plane wheels on a runway (airport.js)
 const inTalkBox = (point, box) => point.x > box.x0 && point.x < box.x1 && point.z > box.z0 && point.z < box.z1;
 
 export function groundY(x, z) { return Math.hypot(x, z) < 5.55 ? GROUND_Y + 0.14 : SIDEWALK_Y; }
@@ -80,13 +83,29 @@ class Npc {
   get pos() { return this.person.object.position; }
   setAction(action) { if (this.action !== action) { this.action = action; this.person.setAction(action); } }
   place(x, z) { this.pos.set(x, this.surfaceY(x, z), z); }
-  get moving() { return this.path.length > 0 && this.pause <= 0 && !this.held; }
-  get anchored() { return this.held || Boolean(this.drop) || (!this.path.length && this.goal && (this.goal.type === 'sit' || this.goal.type === 'work')); }
+  get moving() { return (this.path.length > 0 || Boolean(this.flight) || Boolean(this.trip)) && this.pause <= 0 && !this.held; }
+  get anchored() { return this.held || Boolean(this.drop) || Boolean(this.flight) || Boolean(this.trip) || (!this.path.length && this.goal && (this.goal.type === 'sit' || this.goal.type === 'work')); }
 }
 
+/* FLIGHT-BEGIN (pure: checked headless) */
+/** A plane-less hop between islands, used only when an island has no airport: up over the open air
+ * and down again, never a walk across the gap.
+ * Returns { from, to, peak, duration }; flightPoint(f, t) gives the position at t in [0, 1]. */
+export function planFlight(from, to) {
+  const distance = Math.hypot(to.x - from.x, to.z - from.z);
+  return { from: { x: from.x, y: from.y, z: from.z }, to: { x: to.x, y: to.y, z: to.z }, peak: 3 + Math.min(9, distance * 0.12), duration: Math.max(1.4, Math.min(4.5, distance / 9)), t: 0 };
+}
+export function flightPoint(f, t) {
+  const u = Math.max(0, Math.min(1, t)), s = u * u * (3 - 2 * u);
+  return { x: f.from.x + (f.to.x - f.from.x) * s, y: f.from.y + (f.to.y - f.from.y) * s + Math.sin(Math.PI * s) * f.peak, z: f.from.z + (f.to.z - f.from.z) * s };
+}
+/* FLIGHT-END */
+
 export class NpcManager {
-  constructor(parent, { buildings, particles, reducedMotion, river = () => null, resolveProjectId = id => id }) {
+  constructor(parent, { buildings, particles, reducedMotion, river = () => null, resolveProjectId = id => id, neighbors = null }) {
     this.parent = parent;
+    this.neighbors = neighbors;   // your other accounts' islands: agents on their projects fly there (neighbors.js)
+    this.airports = () => null;   // island id (null: home) -> its airstrip (airport.js); set by the City
     this.buildings = buildings;
     this.particles = particles;
     this.reducedMotion = reducedMotion;
@@ -147,6 +166,7 @@ export class NpcManager {
   }
   tagPickables(person, tag) { for (const m of person.pickable || []) { m.userData.person = person; m.userData.cityTarget = tag; } }
   removeNpc(npc, poof) {
+    this.endTrip(npc);
     if (poof && this.particles && !this.reducedMotion()) this.particles.emit('sparkle', { x: npc.pos.x, y: npc.pos.y + 1, z: npc.pos.z }, 14, { spread: 0.6 });
     if (npc.clipboard) { npc.clipboard.removeFromParent(); disposeAll(npc.clipboard); npc.clipboard = null; }
     npc.person.object.removeFromParent();
@@ -309,11 +329,15 @@ export class NpcManager {
   assignGoals() {
     const list = [...this.npcs.values()].sort((a, b) => a.id.localeCompare(b.id));
     const building = id => id ? this.buildings.get(this.resolveProjectId(id) || id) || this.buildings.get(id) : null;
+    // A project on one of your accounts' own islands has no building here; its agents work beside its block there.
+    const offsite = id => { const pid = id ? this.resolveProjectId(id) || id : null; return pid && this.neighbors?.spotFor(pid) ? { offsite: true, id: pid } : null; };
+    const where = id => building(id) || offsite(id);
     const locations = new Map(list.map(npc => {
-      if ('cityProjectId' in npc.agent) return [npc.id, building(npc.agent.cityProjectId)];
-      const current = building(npc.agent.currentProjectId), last = building(npc.agent.lastKnownProjectId), home = building(npc.agent.homeProjectId);
+      if ('cityProjectId' in npc.agent) return [npc.id, where(npc.agent.cityProjectId)];
+      const current = where(npc.agent.currentProjectId), last = where(npc.agent.lastKnownProjectId), home = where(npc.agent.homeProjectId);
       return [npc.id, current || last || home];
     }));
+    const offsiteSlots = new Map();
     const unassigned = list.filter(npc => !locations.get(npc.id));
     // Allocate the whole HQ sidewalk ring across statuses, so equal hashes and
     // simultaneous arrivals cannot put several people at the same fallback.
@@ -373,6 +397,10 @@ export class NpcManager {
       if (hq) {
         const type = a.status === 'active' ? 'work' : a.status === 'offline' ? 'rest' : 'stroll';
         goal = { type, key: `${type}:hq:${hq.slot}:${unassigned.length}`, point: hq.point, cell: { i: 0, j: 0 }, face: { x: 0, z: 0 } };
+      } else if (where.offsite) {
+        const k = offsiteSlots.get(where.id) || 0, point = this.neighbors.spotFor(where.id, k), type = a.status === 'active' ? 'work' : 'rest';
+        offsiteSlots.set(where.id, k + 1);
+        goal = { type, key: `${type}:${where.id}:${k}`, point, face: point.face, offsite: true, island: point.island };
       } else if (a.status === 'offline') {
         const seats = (where.seats || []).map((s, k) => ({ ...s, key: `lot:${where.id}:${k}` }));
         const seat = seats.find(s => !usedSeats.has(s.key) && occupied(where).every(p => Math.hypot(p.x - s.x, p.z - s.z) >= (p.talkSpacing || .72)));
@@ -404,7 +432,9 @@ export class NpcManager {
         npc.place(goal.point.x, goal.point.z); this.arrive(npc);
         if (!this.first) this.drop(npc);
       }
-      else {
+      else if (goal.offsite || previous?.offsite || npc.trip || npc.flight || this.neighbors?.contains(npc.pos.x, npc.pos.z)) {
+        this.travel(npc, goal);
+      } else {
         npc.path = this.route(npc.pos, planPath({ x: npc.pos.x, z: npc.pos.z }, goal.point, npc.lane));
         npc.roaming = goal.type === 'stroll';
         npc.wait = 0;
@@ -414,6 +444,88 @@ export class NpcManager {
       npc.fresh = false;
     }
   }
+
+  /* ---------- trips between islands ---------- */
+  /** Walk to this island's airport, fly a little plane to the other island's, walk on to the goal
+   * (a teleport with reduced motion). A new goal while airborne waits until the plane has landed. */
+  travel(npc, goal) {
+    npc.path = []; npc.roaming = false; npc.wait = 0; npc.pause = 0;
+    if (this.reducedMotion?.()) { this.endTrip(npc); npc.flight = null; npc.place(goal.point.x, goal.point.z); this.arrive(npc); return; }
+    const flying = npc.trip?.legs[0]?.kind === 'fly' && npc.trip.legs[0].plane;
+    if (flying) { npc.trip.next = goal; return; }
+    this.endTrip(npc);
+    const from = this.neighbors?.islandAt(npc.pos.x, npc.pos.z) || null, to = goal.island || null;
+    if (from === to) {   // same island after all: walk (streets at home, straight across a small island)
+      npc.flight = null;
+      npc.path = from ? [{ x: goal.point.x, z: goal.point.z }] : this.route(npc.pos, planPath({ x: npc.pos.x, z: npc.pos.z }, goal.point, npc.lane));
+      if (npc.path.length) npc.setAction('walk'); else this.arrive(npc);
+      return;
+    }
+    const a = this.airports(from), b = this.airports(to);
+    if (!a || !b) {   // no airport to use: hop across instead of walking over open air
+      npc.flight = planFlight(npc.pos, { ...goal.point, y: this.surfaceY(goal.point.x, goal.point.z) });
+      npc.person.lookAt(goal.point.x, goal.point.z); npc.setAction('stand');
+      return;
+    }
+    npc.flight = null;
+    const out = from ? [{ x: a.apron.x, z: a.apron.z }]
+      : [...this.route(npc.pos, planPath({ x: npc.pos.x, z: npc.pos.z }, a.gate || a.apron, npc.lane)), { x: a.apron.x, z: a.apron.z }];
+    const curve = flightCurve(flightWaypoints(a, b, RUNWAY_Y));
+    const inbound = () => to ? [{ x: goal.point.x, z: goal.point.z }]
+      : [...(b.gate ? [{ x: b.gate.x, z: b.gate.z }] : []), ...this.route(b.gate || b.apron, planPath(b.gate || b.apron, goal.point, npc.lane))];
+    npc.trip = { legs: [{ kind: 'walk', path: out }, { kind: 'fly', curve, duration: flightSeconds(curve.getLength()), t: 0 }, { kind: 'walk', path: null, make: inbound }], next: null };
+    npc.setAction('walk');
+  }
+  tripStep(npc, dt) {
+    const trip = npc.trip, leg = trip.legs[0];
+    if (!leg) { this.finishTrip(npc); return; }
+    if (leg.kind === 'walk') {
+      leg.path ||= leg.make();
+      if (leg.path.length) { this.step(npc, leg.path, SPEED.work, dt); return; }
+      trip.legs.shift();
+      if (!trip.legs.length) this.finishTrip(npc);
+      return;
+    }
+    if (!leg.plane) {   // board: the plane takes the agent's place (its name label rides along)
+      leg.plane = makePlane(PLANE_COLORS[npc.agent.provider] || PLANE_COLORS.other);
+      leg.plane.userData.cityTarget = { kind: 'agent', id: npc.id };
+      this.parent.add(leg.plane);
+      npc.person.object.visible = false;
+      if (npc.clipboard) npc.clipboard.visible = false;
+    }
+    leg.t = Math.min(1, leg.t + dt / leg.duration);
+    const u = leg.t * leg.t * (3 - 2 * leg.t), at = leg.curve.getPointAt(u);
+    at.y = Math.max(at.y, RUNWAY_Y);   // the smooth curve may dip on the ground roll
+    leg.plane.position.copy(at);
+    if (u < 0.998) leg.plane.lookAt(leg.plane.parent.localToWorld(leg.curve.getPointAt(Math.min(1, u + 0.004))));
+    leg.plane.userData.spin?.(dt);
+    npc.pos.set(at.x, at.y, at.z);
+    if (leg.t < 1) return;
+    this.landPlane(npc);
+    trip.legs.shift();
+    npc.place(at.x, at.z);
+    if (trip.next) { const next = trip.next; npc.trip = null; this.travel(npc, next); }
+  }
+  landPlane(npc) {
+    const plane = npc.trip?.legs.find(l => l.plane)?.plane;
+    if (plane) { plane.removeFromParent(); for (const l of npc.trip.legs) l.plane = null; }
+    npc.person.object.visible = true;
+    if (npc.clipboard) npc.clipboard.visible = true;
+  }
+  finishTrip(npc) {
+    npc.trip = null; npc.path = [];
+    if (npc.goal?.point) npc.place(npc.goal.point.x, npc.goal.point.z);
+    this.arrive(npc);
+  }
+  /** Drop a trip at once (talk, removal, a new island view). */
+  endTrip(npc) { if (npc.trip) { this.landPlane(npc); npc.trip = null; } }
+  /** Crossing to another island view: everyone is placed at their goal there, no trips in flight. */
+  settle() {
+    for (const npc of this.npcs.values()) { this.endTrip(npc); npc.flight = null; npc.path = []; }
+    this.first = true;
+  }
+  /** Planes in the air (their agents are aboard): picking one picks its agent. */
+  planes() { return [...this.npcs.values()].map(npc => npc.trip?.legs[0]?.plane).filter(Boolean); }
 
   arrive(npc) {
     const g = npc.goal;
@@ -430,7 +542,13 @@ export class NpcManager {
       if (npc.held || npc.drop) {
         npc.person.update(dt, elapsed); this.updateDrop(npc, dt); this.updateGesture(npc, dt); continue;
       }   // talk mode and arrivals stay put (see hold/drop)
-      if (npc.pause > 0) {
+      if (npc.trip) this.tripStep(npc, dt);
+      else if (npc.flight) {
+        npc.flight.t += dt / npc.flight.duration;
+        const at = flightPoint(npc.flight, npc.flight.t);
+        npc.pos.set(at.x, at.y, at.z);
+        if (npc.flight.t >= 1) { npc.flight = null; npc.place(npc.goal.point.x, npc.goal.point.z); this.arrive(npc); }
+      } else if (npc.pause > 0) {
         npc.pause -= dt;
         if (npc.pause <= 0) { npc.pause = 0; if (npc.path.length) npc.setAction('walk'); else this.arrive(npc); }
       } else if (npc.path.length) {
@@ -488,7 +606,7 @@ export class NpcManager {
   }
   /** Soft separation so walkers don't overlap; seated/working agents act as fixed posts. */
   separate() {
-    const list = [...this.npcs.values()];
+    const list = [...this.npcs.values()].filter(npc => !npc.flight && !npc.trip && !npc.goal?.offsite);
     if (this.owner) list.push({ pos: this.owner.person.object.position, anchored: !this.owner.path.length, owner: true });
     for (let a = 0; a < list.length; a++) for (let b = a + 1; b < list.length; b++) {
       const p = list[a], q = list[b];
@@ -529,6 +647,7 @@ export class NpcManager {
       out.push(...(npc.person.pickable || []));
       npc.clipboard?.traverse(mesh => { if (mesh.isMesh && !mesh.userData.outline) out.push(mesh); });
     }
+    for (const plane of this.planes()) plane.traverse(mesh => { if (mesh.isMesh && !mesh.userData.outline) out.push(mesh); });
     if (this.owner && this.owner.person.object.visible !== false) out.push(...(this.owner.person.pickable || []));
     return out;
   }
@@ -576,6 +695,7 @@ export class NpcManager {
     const npc = this.npcs.get(id);
     if (!npc || Boolean(npc.held) === Boolean(on)) return;
     npc.held = Boolean(on);
+    if (on && (npc.flight || npc.trip)) { this.endTrip(npc); npc.flight = null; npc.path = []; if (npc.goal?.point) npc.place(npc.goal.point.x, npc.goal.point.z); }   // talking lands a traveller at once
     if (on) { if (npc.action === 'walk' || npc.action === 'wave') npc.setAction('stand'); return; }
     npc.talkStaged = false;
     npc.pause = 0;

@@ -174,3 +174,8 @@
 .city-view.reduce-motion .city-routes-pulse { opacity: .8; }
 .city-view.reduce-motion .city-islands-btn, .city-view.reduce-motion .city-routes-item, .city-view.reduce-motion .city-routes-arc { transition: none; }
 .city-routes-foot .btn[aria-disabled="true"] { opacity: .6; cursor: progress; }
+
+/* Your own accounts' islands: beside home on the same level, joined by a bridge (portal.js owned). */
+.city-routes-bridge { fill: none; stroke: var(--routes-shore); stroke-width: 7; stroke-linecap: round; opacity: .9; }
+.city-routes-bridge.is-here, .city-routes-bridge.is-hot { stroke: var(--routes-arc); }
+.city-routes-island.is-owned .city-routes-land { fill: color-mix(in srgb, var(--routes-land) 88%, var(--routes-arc)); }

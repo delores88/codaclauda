@@ -308,7 +308,7 @@ const easeOutBack = t => { const c = 1.6; return 1 + (c + 1) * Math.pow(t - 1, 3
 const easeIn = t => t * t * t;
 
 /** A quiet two-line ground sign: texture belongs to this repository's sign. */
-function unbuiltSignTexture(name) {
+function unbuiltSignTexture(name, cloning = false) {
   const canvas = document.createElement('canvas'); canvas.width = 1024; canvas.height = 288;
   const context = canvas.getContext('2d');
   context.fillStyle = '#fff5df'; context.fillRect(0, 0, 1024, 288);
@@ -318,8 +318,8 @@ function unbuiltSignTexture(name) {
   let fontSize = 82;
   do { context.font = `800 ${fontSize}px "Segoe UI", system-ui, sans-serif`; fontSize -= 2; } while (context.measureText(label).width > 944 && fontSize > 40);
   context.fillStyle = '#332d25'; context.fillText(label, 512, 108, 944);
-  context.font = '38px "Segoe UI", system-ui, sans-serif'; context.fillStyle = '#625343';
-  context.fillText('\u2193 Clone to build', 512, 222, 944);
+  context.font = '38px "Segoe UI", system-ui, sans-serif'; context.fillStyle = cloning ? '#2f7d4f' : '#625343';
+  context.fillText(cloning ? '\u21bb Cloning\u2026' : '\u2193 Clone to build', 512, 222, 944);
   const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
   texture.userData.cityText = true;
   return texture;
@@ -356,7 +356,8 @@ export class Building {
     this.project = project;
     const district = !this.mirror && this.env.districts ? districtOf(project) : null;
     const unbuilt = Boolean(district && isUnbuilt(project));
-    this.parcel = district ? riverLot(this.cell.i, this.cell.j) : null;
+    // 'plain' (your accounts' islands): Downtown looks and clone lots, but no river, so no riverfront parcels.
+    this.parcel = district && this.env.districts !== 'plain' ? riverLot(this.cell.i, this.cell.j) : null;
     if (!this.parcel?.eligible) this.parcel = null;
     this.riverPlan = this.parcel ? riverBuildingPlan(project, this.parcel, district) : null;
     const center = cellCenter(this.cell.i, this.cell.j);
@@ -376,7 +377,7 @@ export class Building {
     const m = project.metrics || {};
     const litFrac = Math.max(0.08, Math.min(0.92, 0.12 + (m.glow || 0) * 0.55 + Math.min(m.commits7d || 0, 30) / 60));
     const lookKey = look ? [look.silhouette, look.palette.name, look.windows, look.roof] : this.riverPlan?.shape || null;
-    const sig = JSON.stringify([size.floors, size.footprint, size.W, size.D, size.H, style.key, style.body, project.name, Math.round(litFrac * 20), (m.commits7d || 0) > 0, project.source, !!project.private, unbuilt, lookKey]);
+    const sig = JSON.stringify([size.floors, size.footprint, size.W, size.D, size.H, style.key, style.body, project.name, Math.round(litFrac * 20), (m.commits7d || 0) > 0, project.source, !!project.private, unbuilt, lookKey, Boolean(unbuilt && project.cloning)]);
     if (sig === this.sig) return false;
     const previous = this.size;
     const footprintChanged = !previous || previous.footprint !== size.footprint || this.district !== district || this.unbuilt !== unbuilt;
@@ -764,7 +765,7 @@ export class Building {
     addOutline(posts, { thickness: 0.02 }); sign.add(posts);
     const backing = new THREE.Mesh(new THREE.BoxGeometry(plaqueW + 0.1, plaqueH + 0.1, 0.1), toonMaterial('#c5a17b'));
     backing.position.y = 1.35; backing.userData = { ...tag }; addOutline(backing, { thickness: 0.02 }); sign.add(backing);
-    const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueH), new THREE.MeshBasicMaterial({ map: unbuiltSignTexture(this.project.name) }));
+    const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueH), new THREE.MeshBasicMaterial({ map: unbuiltSignTexture(this.project.name, Boolean(this.project.cloning)) }));
     plaque.position.set(0, 1.35, 0.056); plaque.userData = { ...tag };
     const reverse = new THREE.Mesh(plaque.geometry.clone(), plaque.material.clone());
     reverse.material.map = plaque.material.map.clone(); reverse.position.set(0, 1.35, -0.056); reverse.rotation.y = Math.PI; reverse.userData = { ...tag };

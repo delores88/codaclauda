@@ -558,7 +558,10 @@ function build({ store, ui, bridge }, lot, resolve, initial) {
     setBusy(true, 'Cloning…', `Cloning ${repo.full_name}…`);
     let cloned;
     try {
-      cloned = await bridge.desktop.cloneRepo({ fullName: repo.full_name, parentDir: state.parent });
+      // A repo of another of your signed-in accounts clones as that account (its private repos).
+      const owner = store.projects.find(p => p.ids.includes(`gh:${String(repo.full_name).toLowerCase()}`))?.account;
+      const main = String(store.desktop?.projects?.github?.user || '').toLowerCase();
+      cloned = await bridge.desktop.cloneRepo({ fullName: repo.full_name, parentDir: state.parent, account: owner && owner !== main ? owner : null });
     } catch (error) {
       setBusy(false);
       if (error?.code === 'GH_UNAVAILABLE') { state.account = 'error'; state.accountError = error.message; renderAccount(); }

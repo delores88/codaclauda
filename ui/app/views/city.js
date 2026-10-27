@@ -3,7 +3,7 @@ import { riverLot, pointInParcel } from '../city/river-lots.js';
 /* City view: a playful 3D "project city". Every visible project is a building on a
  * floating island; agents walk between them as little people. HTML overlays (labels,
  * tags, bubbles, panels, toolbar) sit on top of the WebGL canvas. */
-import { h, icon, iconButton, registerIcons, toast, portrait, timeAgo, fullTime, pill, plural, statusDot, STATUS_LABEL, formatNumber, formatBytes, clear } from '../ui.js';
+import { h, icon, iconButton, registerIcons, toast, modal, portrait, timeAgo, fullTime, pill, plural, statusDot, STATUS_LABEL, formatNumber, formatBytes, clear } from '../ui.js';
 import { PROVIDER_COLORS, defaultAvatar } from '../avatar/spec.js';
 import { THREE } from '../city/toon.js';
 import { World, webglAvailable, wheelZoomLog } from '../city/world.js';
@@ -21,6 +21,9 @@ import { talkSignOverlap, talkTextBounds, betterTalkComposition } from '../city/
 import { talkOccludingPeople } from '../city/talk-occlusion.js';
 import { talkPlanterBoxes } from '../city/talk-placement.js';
 import { IslandMode } from '../city/portal.js';
+import { NeighborIslands } from '../city/neighbors.js';
+import { Airfield } from '../city/airport.js';
+import { riverZ } from '../city/river-path.js';
 import { CityWeather } from '../city/weather-hud.js';
 import { sessions } from '../sessions.js';
 import { sessionAgents, externalAgents, SESSION_STATUS_LABEL, PROVIDER_NAME } from '../city/agents-extra.js';
@@ -232,18 +235,30 @@ export class CityView {
     try { this.initWorld(); }
     catch (error) { console.error(error); this.fail(`The 3D view could not start: ${error.message}`); return; }
     this.islands = new IslandMode(this);   // contributor islands: route map, portal, current island (city/portal.js)
-    this.store.on('change', () => { this.extraCache = null; this.agentLocations = null; this.dirty = true; if (this.visible && !this.world.running) this.sync(); });
+    this.neighbors = new NeighborIslands(this.world.land);   // your other accounts' islands beside home, same level
+    this.neighbors.attachLabels(this.labelLayer, id => this.islands.portal(id));
+    this.npcs.neighbors = this.neighbors;   // agents on those islands' projects fly there
+    this.airfield = new Airfield(this.world.land);   // home airport (outside the lot grid: never a plot)
+    this.npcs.airports = id => (id ? this.neighbors.airportFor(id) : this.airfield.strip);
+    this.store.on('change', () => {
+      this.extraCache = null; this.agentLocations = null; this.dirty = true;
+      // On one of your accounts' islands when it stops being one (one big city, or account removed): back home.
+      if (this.islands?.owned() && !this.islands.island() && !this.islands.busy) { this.islands.changed(); return; }
+      if (this.visible && !this.world.running) this.sync();
+    });
     this.offSessions = sessions.on('change', () => { this.extraCache = null; this.agentLocations = null; this.dirty = true; if (this.visible && !this.world.running) this.sync(); });
     loadPeople().then(create => { this.npcs.setCreate(create); this.peopleReady = true; this.dirty = true; if (this.visible) this.sync(); });
   }
 
   reduced() { return Boolean(this.store.prefs.reducedMotion) || Boolean(this.motionQuery?.matches); }
+  /** On a contributor island (repos other people own): no new sessions, access, renames or plots. */
+  get remoteIsland() { return Boolean(this.islands?.current) && !String(this.islands.current).startsWith('owned:'); }
 
   /* ---------------- zero-config agents (0.5) ---------------- */
   /** CodaClauda's own sessions (working / idle / error) and active Claude Code / Codex sessions found
    *  on this PC, as City agents next to the board's. Home city only (contributor islands show theirs). */
   extraAgents() {
-    if (this.islands?.current) return [];
+    if (this.remoteIsland) return [];
     if (!this.extraCache) {
       const store = this.store, projects = store.projects;
       const own = sessions.available === false ? [] : sessionAgents(sessions.list, projects, { projectOf: id => (id ? store.project(id) : null), running: id => sessions.running(id) });
@@ -253,12 +268,18 @@ export class CityView {
   }
   allAgents() {
     // Contributor islands have their own remapped projects and must not share home placement memory.
-    if (this.islands?.current) return this.store.agents.map(agent => ({ ...agent, cityProjectId: agent.currentProjectId }));
+    if (this.islands?.current) {
+      const base = this.store.agents.map(agent => ({ ...agent, cityProjectId: agent.currentProjectId }));
+      if (this.remoteIsland) return base;
+      // Your own island: CodaClauda and desktop sessions working on its projects join too.
+      const extra = this.extraAgents().filter(a => a.currentProjectId && this.store.project(a.currentProjectId)).map(a => ({ ...a, cityProjectId: a.currentProjectId }));
+      return [...base, ...extra];
+    }
     if (this.agentLocations) return this.agentLocations.agents;
     const store = this.store, extra = this.extraAgents();
     const managedAddresses = new Set(extra.filter(a => a.kind === 'session').map(a => sessions.session(a.sessionId)?.mailboxAddress).filter(Boolean));
     const result = locateAgents([...store.agents.filter(a => !managedAddresses.has(a.address)), ...extra], {
-      projects: store.projects, visibleProjects: store.visibleProjects('city'),
+      projects: store.projects, visibleProjects: store.projects.filter(p => p.visible?.city),   // incl. your accounts' islands: agents fly there
       remembered: store.prefs[AGENT_PROJECT_PREF], rememberedAt: store.prefs[AGENT_PROJECT_TIME_PREF],
       sessions: sessions.list, messages: store.mailboxMessages, assignments: store.tasks,
       matchProject: text => store.matchProject(text),
@@ -290,7 +311,7 @@ export class CityView {
   /** Access ticker segments per building (home city): name • Full access / Read only • who works there. */
   tickerMap(projects, agents) {
     const map = new Map();
-    if (this.islands?.current || typeof this.store.projectAccess !== 'function') return map;
+    if (this.remoteIsland || typeof this.store.projectAccess !== 'function') return map;
     const working = new Map();
     for (const a of agents) if (a.status === 'active' && a.currentProjectId) { const id = this.store.project(a.currentProjectId)?.id || a.currentProjectId; working.set(id, (working.get(id) || 0) + 1); }
     for (const p of projects) {
@@ -400,7 +421,7 @@ export class CityView {
       onAgentLine: text => this.talkHeard(text),
       onThinking: on => this.talkThinking(on),
       onAgentChanged: agent => { this.extraCache = null; this.agentLocations = null; this.dirty = true; this.enterTalk(agent.id); },
-      canNewSessionHere: project => !this.islands?.current && (!this.world?.underside || this.world.restSide === 'pc')
+      canNewSessionHere: project => !this.remoteIsland && (!this.world?.underside || this.world.restSide === 'pc')
         && typeof project?.path === 'string' && Boolean(project.path.trim()),
     });
     this.newSessionHere = projectId => this.openBuildingSessionControls(projectId);
@@ -541,6 +562,15 @@ export class CityView {
     }, 0);
   }
 
+  /** Your other GitHub accounts' islands, beside home on the same level (home only). */
+  syncNeighbors() {
+    if (!this.neighbors || !this.world) return;
+    const home = this.islands && !this.islands.current ? this.islands.home : null;
+    const list = home ? this.islands.ownedIslands().map(island => ({ ...island, projects: home.islandProjects(island.id) })) : [];
+    this.neighbors.sync(list, this.world.half);
+    // An airport whenever there are islands to fly between: home, or one of your accounts' islands.
+    this.airfield?.sync({ half: this.world.half, show: list.length > 0 || Boolean(this.islands?.owned()), avoidZ: home ? riverZ(this.world.half) : null });
+  }
   /** Render immediately; save the first bank choice when hydration settles or its deadline expires. */
   ensureDistrictBanks(projects) {
     if (this.islands?.current || this.homeBanksFinal) return true;
@@ -582,6 +612,7 @@ export class CityView {
     // must not write migrated pins before the bounded first bank decision.
     if (!districts || (this.homeBanksFinal && store.cityProjectsReady !== false)) this.persistLots(fresh, pinRepairs);
     const ringsChanged = this.world.setRings(rings, { animate: Boolean(this.firstSyncDone), districts, banks: this.homeBanks });
+    this.syncNeighbors();
     // A skipped expansion holds its old pose, including through later HUD resize
     // callbacks. It becomes an overview again when the owner explicitly asks.
     if (ringsChanged && this.firstSyncDone && (!this.world.canAutoRefit() || this.pendingFocus || this.talk || this.street || this.streetPending || this.following)) this.world.overview = false;
@@ -596,7 +627,10 @@ export class CityView {
       });
     }
     const active = new Set(agents.filter(a => a.status === 'active' && a.currentProjectId).map(a => store.project(a.currentProjectId)?.id || a.currentProjectId));
-    const lotsChanged = this.buildings.sync(projects, cells, active, { animate: true, tickers: this.tickerMap(projects, agents), districts });
+    // Repos being cloned show "Cloning…" on their lot's sign until the folder is linked.
+    const cloning = store.cloning;
+    const shown = cloning?.size ? projects.map(p => p.ids?.some(id => ['queued', 'cloning'].includes(cloning.get(id)?.state)) ? { ...p, cloning: true } : p) : projects;
+    const lotsChanged = this.buildings.sync(shown, cells, active, { animate: true, tickers: this.tickerMap(projects, agents), districts: districts || (this.islands?.owned() ? 'plain' : false) });
     if (lotsChanged || ringsChanged) this.world.setLots(this.buildings.lots());
     this.ci?.sync();
     const quality = store.prefs.cityQuality === 'low' ? 'low' : 'high';
@@ -713,6 +747,8 @@ export class CityView {
     // 1. Project every name label from its WORLD position (math only, no DOM). HTML labels ignore
     //    depth, so only the face that's up shows names, and none show while the island turns.
     const still = world.settled, pcUp = still && world.side === 'pc', sparkUp = still && world.side === 'spark';
+    const pcSide = world.side === 'pc';   // islands beside home and the airport belong to the PC face
+    this.neighbors?.setVisible(pcSide); this.airfield?.setVisible(pcSide);
     const projectLabel = (label, fadeFrom, fadeOver) => {
       world.project(scratch, point);
       label.dist = camPos.distanceTo(scratch);
@@ -741,7 +777,8 @@ export class CityView {
     // 3. Every frame: shown labels and chips follow the heads (Spark runners stand upright too once their side is up).
     for (const label of this.runnerLabels.values()) this.placeLabel(label, 'translate(-50%, -100%)');
     for (const label of this.labels.values()) this.placeLabel(label, 'translate(-50%, -100%)');
-    this.cloneLabels?.update(world, pcUp && !this.talk && !this.street && !this.islands?.current, this.cloneLabelBlockers || []);
+    this.cloneLabels?.update(world, pcUp && !this.talk && !this.street && !this.remoteIsland, this.cloneLabelBlockers || []);
+    this.neighbors?.updateLabels(world, pcUp && !this.talk && !this.street && !this.islands?.current);
     this.placeChips();
     this.placeClusterPop();
     // Tags and bubbles sit just above a person's name label (offset in screen space) or above a roof,
@@ -1111,7 +1148,7 @@ export class CityView {
   pickAny(clientX, clientY) {
     const ndc = this.world.ndc(clientX, clientY);
     // Island slabs and the Spark deck are occluders: a ray never reaches through to the other side.
-    const hit = this.world.raycast(ndc, [...this.npcs.pickables(), ...this.buildings.pickables(), ...this.world.hq.pickables, ...this.spark.pickables(), ...(!this.islands?.current ? [...this.river.pickables(), ...this.river.labelPickables(), ...this.river.occluders()] : []), ...this.world.occluders(), ...this.spark.occluders()]);
+    const hit = this.world.raycast(ndc, [...this.npcs.pickables(), ...this.buildings.pickables(), ...this.world.hq.pickables, ...this.spark.pickables(), ...(!this.islands?.current ? [...this.river.pickables(), ...this.river.labelPickables(), ...this.river.occluders(), ...(this.neighbors?.pickables() || [])] : []), ...(this.airfield?.pickables() || []), ...this.world.occluders(), ...this.spark.occluders()]);
     if (!hit || hit.object.userData?.occluder) return this.plotAt(clientX, clientY);
     const object = hit.object;
     const person = this.npcs.targetOf(object);
@@ -1123,6 +1160,8 @@ export class CityView {
         const point = this.world.toLocal(hit.point.clone());
         return { kind: 'bridge', id: `bridge:${data.crossing?.id || data.crossingId || data.crossingX}`, x: point.x, z: point.z };
       }
+      if (data.ownedIsland) return { kind: 'island', id: data.ownedIsland };
+      if (data.airport) return { kind: 'airport' };
       if (data.buildingId) return this.buildings.get(data.buildingId) ? { kind: 'building', id: data.buildingId } : null;
       if (data.sparkBuildingId) return this.spark.buildings.get(data.sparkBuildingId) ? { kind: 'spark', id: data.sparkBuildingId } : null;
       if (data.sparkFoundry) return { kind: 'foundry' };
@@ -1304,7 +1343,9 @@ export class CityView {
   onClick(target) {
     // Talk mode: another agent switches the conversation; empty ground (or anything else but you) leaves it.
     if (this.talk) { if (target?.kind === 'agent') this.enterTalk(target.id); else if (target?.kind !== 'owner') this.exitTalk(); return; }
-    if (target?.kind === 'building' && !this.islands?.current && this.world?.side === 'pc') {
+    if (target?.kind === 'island') { this.islands.portal(target.id); return; }
+    if (target?.kind === 'airport') { toast('Airport: your agents fly from here to your other islands. It is not a building plot, so nothing can be built on it and it cannot be removed.', { kind: 'info', timeout: 4200 }); return; }
+    if (target?.kind === 'building' && !this.remoteIsland && this.world?.side === 'pc') {
       const project = this.buildings.get(target.id)?.project;
       if (project && isUnbuilt(project)) { this.cloneOutline(project); return; }
     }
@@ -1464,7 +1505,7 @@ export class CityView {
   refreshBuildingTalkAction() {
     if (!this.talkPanel?.isOpen) return;
     const project = this.talkPanel.info()?.project;
-    const action = offersBuildingSession(project, { side: this.world?.restSide, remote: Boolean(this.islands?.current) })
+    const action = offersBuildingSession(project, { side: this.world?.restSide, remote: this.remoteIsland })
       ? this.newSessionHere : undefined;
     if (this.talkPanel.onNewSessionHere === action) return;
     // Bind the documented public hook only for the currently eligible project.
@@ -1474,7 +1515,7 @@ export class CityView {
   }
   openBuildingSessionControls(projectId) {
     const project = this.store.project(projectId);
-    if (!this.visible || !offersBuildingSession(project, { side: this.world?.restSide, remote: Boolean(this.islands?.current) })) return;
+    if (!this.visible || !offersBuildingSession(project, { side: this.world?.restSide, remote: this.remoteIsland })) return;
     this.exitTalk();
     this.select({ kind: 'building', id: project.id });
     this.focusSelection();
@@ -1483,7 +1524,7 @@ export class CityView {
   /** An explicit Retry click reuses the same eligible building/provider controls. */
   retryBuildingTalk(provider, projectId) {
     const project = this.store.project(projectId);
-    const context = { side: this.world?.restSide, remote: Boolean(this.islands?.current) };
+    const context = { side: this.world?.restSide, remote: this.remoteIsland };
     if (!this.visible || this.failed || !this.talk?.failed || !offersBuildingSession(project, context)) return;
     this.buildingSessions.setProject(project, context);
     return this.buildingSessions.start(provider);
@@ -1506,7 +1547,7 @@ export class CityView {
       const compute = [...this.spark.sparkJobs(project.id), ...this.spark.gearJobs(project.id)].map(j => [j.job, j.state, j.machine]);
       const ci = this.ci?.status(project.id);
       let access = '';
-      try { access = this.islands?.current ? '' : this.store.projectAccess(project).level; } catch { /* islands */ }
+      try { access = this.remoteIsland ? '' : this.store.projectAccess(project).level; } catch { /* islands */ }
       sig = JSON.stringify(['building', project.id, project.name, project.description, project.metrics, project.languages, project.source, project.private, project.path, project.url, here, compute, ci ? [ci.at, ci.error] : null, access, this.world.restSide, Math.floor(Date.now() / 60000)]);
       render = () => this.renderBuildingPanel(project);
     } else if (s.kind === 'owner') {
@@ -1675,7 +1716,11 @@ export class CityView {
     if (isUnbuilt(project)) actions.unshift(h('button.btn.small.primary', { type: 'button', onclick: () => this.cloneOutline(project) }, icon('folder'), 'Clone to this PC'));
     if (project.url) actions.push(h('button.btn.small', { type: 'button', onclick: () => this.open(project.url) }, icon('github'), 'Open on GitHub'));
     if (project.path) actions.push(h('button.btn.small', { type: 'button', onclick: event => this.rescan(project, event.currentTarget) }, icon('refresh'), 'Rescan'));
-    actions.push(h('button.btn.small.ghost', { type: 'button', onclick: () => this.hideProject(project) }, icon('eyeOff'), 'Hide from city'));
+    // Your own projects (home and owned-account islands); contributor-island repos are not yours to rename.
+    if (!this.islands?.current || String(this.islands.current).startsWith('owned:')) {
+      actions.push(h('button.btn.small', { type: 'button', title: 'Give this building any name you like (files, folders and repos keep theirs)', onclick: () => this.editProject(project) }, icon('edit'), 'Edit name'));
+      actions.push(h('button.btn.small.ghost', { type: 'button', title: 'Take this building out of the City. Nothing is deleted.', onclick: () => this.removeProject(project) }, icon('eyeOff'), 'Remove from City'));
+    }
     const jobRow = (job, spark) => h('div.city-job', h(`span.city-job-where.${spark ? 'spark' : 'local'}`, spark ? 'DGX Spark' : 'This PC'), h('span.city-job-label', jobLabel(job)), job.started_at ? h('span.city-job-time', timeAgo(job.started_at)) : null);
     const sparkJobs = this.spark.sparkJobs(project.id), localJobs = this.spark.gearJobs(project.id);
     const compute = sparkJobs.length || localJobs.length
@@ -1683,13 +1728,13 @@ export class CityView {
       : null;
     const ci = this.ciSection(project);
     let accessRow = null;
-    if (!this.islands?.current && typeof store.projectAccess === 'function') {
+    if (!this.remoteIsland && typeof store.projectAccess === 'function') {
       const level = store.projectAccess(project).level;
       accessRow = h('div.city-access-row', h(`span.city-access-chip.is-${level}`, level === 'full' ? 'Full access' : 'Read only'),
         h('span.muted', level === 'full' ? 'Agents work without permission prompts' : 'Agents can read and explain, not change files'),
         h('button.city-link', { type: 'button', onclick: () => this.ctx.navigate('projects', { project: project.id }) }, 'Change'));
     }
-    this.buildingSessions.setProject(project, { side: this.world.restSide, remote: Boolean(this.islands?.current) });
+    this.buildingSessions.setProject(project, { side: this.world.restSide, remote: this.remoteIsland });
     const newSession = this.buildingSessions.node.hidden ? null : this.buildingSessions.node;
     clear(this.panel,
       this.panelHead(swatch, project.name, project.primaryLanguage ? `${project.primaryLanguage} · ${building?.size.floors || m.floors} floor${(building?.size.floors || m.floors) === 1 ? '' : 's'}` : null,
@@ -1801,9 +1846,42 @@ export class CityView {
     finally { if (button.isConnected) { button.disabled = false; label.textContent = before; } }
   }
   hideProject(project) {
-    this.store.setProjectSettings(project, { city: false });
+    this.store.setProjectSettings(project, { ...this.projectSettings(project), city: false });
     this.select(null);
-    toast(`${project.name} is hidden from the city`, { kind: 'info', action: { label: 'Undo', run: () => this.store.setProjectSettings(project, { city: true }) } });
+    toast(`${project.name} is out of the City. Nothing was deleted; bring it back from Projects.`, { kind: 'info', action: { label: 'Undo', run: () => this.store.setProjectSettings(project, { ...this.projectSettings(project), city: true }) } });
+  }
+  /** Current saved settings (name, aliases, visibility) so a change never drops the others. */
+  projectSettings(project) {
+    const all = this.store.desktop?.projects?.settings || {};
+    return project.ids.map(id => all[id]).find(Boolean) || {};
+  }
+  /** Any meaningful name for the building: shown on its sign, labels, Jump to and the Board.
+   * The folder, repo and files keep their own names. */
+  editProject(project) {
+    const own = this.projectSettings(project), original = project.aliases?.[0] || project.name;
+    const custom = Array.isArray(own.aliases) ? own.aliases : [];
+    const name = h('input.input', { type: 'text', value: project.name, placeholder: original, maxLength: 80, 'aria-label': 'Name in the City' });
+    const aliases = h('input.input', { type: 'text', value: custom.join(', '), placeholder: 'e.g. forge, release app', 'aria-label': 'Other names' });
+    const body = h('div.rename-modal',
+      h('label.field', 'Name in the City', name, h('span.field-hint', `Shown on the building, its labels, Jump to and the Board. Leave empty for “${original}”. The folder and repo keep their names.`)),
+      h('label.field', 'Other names (optional)', aliases, h('span.field-hint', 'Comma-separated names agents might use for this project.')));
+    const save = () => {
+      const value = name.value.trim();
+      const list = [...new Set(aliases.value.split(',').map(a => a.trim()).filter(Boolean))].slice(0, 20);
+      this.store.setProjectSettings(project, { ...this.projectSettings(project), name: value && value !== original ? value.slice(0, 80) : undefined, aliases: list });
+      toast(`Renamed to ${value || original}`, { kind: 'success', timeout: 2200 });
+    };
+    const dialog = modal({ title: `Edit ${project.name}`, body, actions: [{ label: 'Cancel' }, { label: 'Save', kind: 'primary', run: save }] });
+    for (const input of [name, aliases]) input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); dialog.querySelector('.modal-actions .btn.primary')?.click(); } });
+    name.focus(); name.select();
+  }
+  /** Take a building out of the City without touching anything on disk or GitHub. */
+  removeProject(project) {
+    const where = [project.path ? `the folder ${project.path}` : null, project.repo?.full_name ? `the GitHub repo ${project.repo.full_name}` : null].filter(Boolean).join(' and ') || 'its files';
+    modal({ title: `Remove ${project.name} from the City?`,
+      body: h('div', h('p', `The building leaves your City. Nothing is deleted: ${where} stay exactly as they are, and agents keep working.`),
+        h('p.field-hint', 'Bring it back any time from Projects (show hidden projects, then turn City back on).')),
+      actions: [{ label: 'Cancel' }, { label: 'Remove from City', kind: 'primary', run: () => this.hideProject(project) }] });
   }
 
   /* ---------------- HUD, labels, empty state ---------------- */

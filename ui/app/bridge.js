@@ -45,7 +45,10 @@ export const desktop = {
   /** Creates a repo (with a README) in the GitHub CLI's signed-in account and clones it into parentDir\name → { path, full_name, url }. */
   createRepo: ({ name, description = '', private: isPrivate = true, parentDir }) => invoke('github_create_repo', { name, description, private: isPrivate, parentDir }),
   /** Clones owner/name into parentDir\name with the GitHub CLI → { path, full_name, url }. */
-  cloneRepo: ({ fullName, parentDir }) => invoke('github_clone_repo', { fullName, parentDir }),
+  /** Clones owner/name into parentDir\name with the GitHub CLI, as `account` when that is another signed-in account → { path, full_name, url }. */
+  cloneRepo: ({ fullName, parentDir, account = null, createParent = false }) => invoke('github_clone_repo', { fullName, parentDir, account, createParent }),
+  /** Logins signed into the GitHub CLI on this PC (never tokens) → { accounts: [{ login, active }] }. */
+  githubAccounts: () => invoke('github_accounts'),
   saveAttachment: (name, dataBase64) => invoke('attachment_save', { name, dataBase64 }),
   startDictation: () => invoke('dictation_start'),
   attention: () => invoke('window_attention'),

@@ -119,6 +119,14 @@ const repos = [
   ['dotfiles', 'Machine setup', 'Shell', 90, 12, 200],
 ].map(([name, description, language, size_kb, commit_count, days]) => ({ name, full_name: `delores88/${name}`, description, language, size_kb, commit_count, url: `https://github.com/delores88/${name}`, private: name === 'phaseforge', pushed_at: new Date(Date.now() - days * 86400e3).toISOString(), stars: Math.round(size_kb / 900), default_branch: 'main' }));
 
+/* A second GitHub account signed into the mock GitHub CLI (multi-account preview). */
+const workRepos = [
+  ['ledger-api', 'Billing and invoices service', 'Go', 7200, 340, 1],
+  ['ops-dashboard', 'Fleet health dashboard', 'TypeScript', 5400, 220, 3],
+  ['ml-pipelines', 'Training and eval pipelines', 'Python', 21000, 510, 6],
+  ['brand-site', 'Marketing site', 'Astro', 1800, 90, 12],
+].map(([name, description, language, size_kb, commit_count, days]) => ({ name, full_name: `deloresai-work/${name}`, description, language, size_kb, commit_count, url: `https://github.com/deloresai-work/${name}`, private: name !== 'brand-site', pushed_at: new Date(Date.now() - days * 86400e3).toISOString(), stars: 0, default_branch: 'main' }));
+
 /* Contributor islands: repos other owners added delores88 to (github_collab_repos). codaMock.addCollaborator() adds one more. */
 const collabRepo = ([login, type, name, language, size_kb, days, role = 'push', extra = {}]) => ({
   full_name: `${login}/${name}`, owner: { login, type }, name, private: !!extra.private, archived: !!extra.archived, fork: !!extra.fork,
@@ -1071,7 +1079,13 @@ const desktopHandlers = {
     { name: 'scratch', path: 'C:\\Users\\Ben\\Desktop\\scratch', is_git: false, markers: [] },
   ] }),
   github_user: () => ({ login: 'delores88', source: 'mock' }),
-  github_repos: ({ user }) => ({ user: user || 'delores88', source: 'mock', repos }),
+  github_accounts: () => ({ accounts: [{ login: 'delores88', active: true }, { login: 'deloresai-work', active: false }] }),
+  github_repos: ({ user }) => ({ user: user || 'delores88', source: 'mock', repos: String(user || '').toLowerCase() === 'deloresai-work' ? workRepos : repos }),
+  github_clone_repo: async ({ fullName, parentDir }) => {
+    await new Promise(resolve => setTimeout(resolve, 900 + Math.random() * 900));
+    const name = String(fullName).split('/')[1];
+    return { path: `${String(parentDir).replace(/[\/]+$/, '')}\${name}`, full_name: fullName, url: `https://github.com/${fullName}` };
+  },
   github_collab_repos: () => ({ user: 'delores88', source: 'mock', repos: collabRepos.map(({ mockAdded, ...repo }) => repo), truncated: false }),
   attachment_save: ({ name }) => ({ path: `C:\\mock\\board\\desktop-ui\\attachments\\${name}`, name, bytes: 1234 }),
   dictation_start: () => ({ started: false, reason: 'Browser preview: use the desktop app for Windows voice typing.' }),

@@ -83,18 +83,26 @@ export function repoProject(repo, { colorOf = () => '#8b8fa3', fresh = false, no
  *  can, keeps a clear bearing from the rest so routes fan out from the hub. Islands are placed in
  *  hash order, so a new one rarely moves the others. Islands that find no room stay off the map
  *  (the list still has them). → { home, spots: Map(id → { x, y, r, seed }) } */
-export function layoutIslands(islands, { w = 1000, h = 600, max = 14 } = {}) {
-  const home = { x: w / 2, y: h / 2 - 14, r: 58 };
+export function layoutIslands(islands, { w = 1000, h = 600, max = 14, owned = [] } = {}) {
+  // With your own accounts' islands, home sits higher and they line up beside it on the same
+  // level; contributor islands then fan out below (they are a level down in the City).
+  const home = owned.length ? { x: w / 2, y: h * 0.3, r: 58 } : { x: w / 2, y: h / 2 - 14, r: 58 };
   const placed = [home], spots = new Map(), bearings = [];
+  owned.slice(0, 6).forEach((island, k) => {
+    const side = k % 2 ? -1 : 1, step = Math.floor(k / 2);
+    const spot = { x: home.x + side * (home.r + 92 + step * 118), y: home.y, r: 38, seed: hash(island.id), owned: true };
+    placed.push(spot); spots.set(island.id, spot);
+  });
   const chosen = islands.slice(0, max).map(island => ({ island, seed: hash(island.id) })).sort((a, b) => a.seed - b.seed);
   const spread = Math.min(1, Math.PI * 2 / (chosen.length + 1));
   const gap = (a, b) => { const d = Math.abs(a - b) % (Math.PI * 2); return Math.min(d, Math.PI * 2 - d); };
   for (const { island, seed } of chosen) {
     const r = Math.min(46, 20 + Math.sqrt(island.repos.length) * 7);
     let angle = (seed % 3600) / 1800 * Math.PI, range = 0.62 + ((seed >>> 12) % 1000) / 3000;
+    if (owned.length) angle = Math.PI * (0.18 + ((seed % 3600) / 3600) * 0.64);   // below home
     for (let k = 0; k < 360; k++) {
       const x = home.x + Math.cos(angle) * range * (w / 2 - 70), y = home.y + Math.sin(angle) * range * (h / 2 - 62);
-      const inside = x - r * 1.2 > 14 && x + r * 1.2 < w - 14 && y - r - 28 > 8 && y + r + 46 < h;
+      const inside = x - r * 1.2 > 14 && x + r * 1.2 < w - 14 && y - r - 28 > 8 && y + r + 46 < h && (!owned.length || y > home.y + home.r + 30);
       const fans = k > 180 || bearings.every(b => gap(b, angle) >= spread * 0.8);
       if (inside && fans && placed.every(q => Math.hypot((x - q.x) * 0.8, y - q.y) > r + q.r + 52)) {
         const spot = { x, y, r, seed }; placed.push(spot); spots.set(island.id, spot); bearings.push(angle); break;

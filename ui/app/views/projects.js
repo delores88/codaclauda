@@ -12,6 +12,7 @@
  * form opens only once the saved settings are read, so it can never replace a project's own setting
  * with the default. */
 import { openNewProjectDialog } from '../newproject.js';
+import { openGithubAccounts, openCloneRepos, uncloned } from '../github-accounts.js';
 import { LEVELS, ACCESS_NOTE, BROWSER_UNAVAILABLE, levelInfo } from '../access.js';
 import { openInstructions, openMcpTools, MCP_NOTE } from '../project-tools.js';
 import { has as hasFeature } from '../features.js';
@@ -204,6 +205,8 @@ export function mount(root, ctx) {
   const scanButton = h('button.btn', { type: 'button', onclick: event => scanDesktop(event.currentTarget) }, icon('search'), 'Scan my Desktop');
   const githubButton = h('button.btn', { type: 'button', onclick: () => connectGithub() }, icon('github'), 'Connect GitHub');
   const rescanButton = h('button.btn.ghost', { type: 'button', onclick: () => rescanAll() }, icon('refresh'), 'Rescan all');
+  const accountsButton = h('button.btn', { type: 'button', title: 'Add more GitHub accounts and choose one big city or an island per account', onclick: () => openGithubAccounts({ store, bridge }) }, icon('github'), 'GitHub accounts');
+  const cloneButton = h('button.btn', { type: 'button', title: 'Clone repos that are not on this PC yet, one by one or all at once', onclick: () => openCloneRepos({ store, bridge }) }, icon('download'), 'Clone repos');
 
   const progressLabel = h('span.proj-progress-label');
   const progressFill = h('div.proj-progress-fill');
@@ -265,7 +268,7 @@ export function mount(root, ctx) {
         h('h1', 'Projects'),
         h('p', 'Each project is a building in your City and a lane on your Board. Link Desktop folders and GitHub repos, then choose where each one shows up.'),
       ),
-      h('div.proj-actions', newButton, linkButton, scanButton, githubButton, rescanButton),
+      h('div.proj-actions', newButton, linkButton, scanButton, githubButton, accountsButton, cloneButton, rescanButton),
     ),
     progressNode,
     sourcesSlot,
@@ -420,7 +423,8 @@ export function mount(root, ctx) {
   function renderSources(projects) {
     const gh = store.desktop.projects.github || {};
     const localCount = (store.desktop.projects.local || []).length;
-    const sig = JSON.stringify([localCount, gh.user, gh.repos?.length || 0, gh.fetchedAt ? timeAgo(gh.fetchedAt) : '', gh.source, projects.length]);
+    const extra = store.desktop.projects.githubAccounts || [];
+    const sig = JSON.stringify([localCount, gh.user, gh.repos?.length || 0, gh.fetchedAt ? timeAgo(gh.fetchedAt) : '', gh.source, projects.length, extra.map(a => [a.user, a.mode, a.repos?.length || 0])]);
     patch(sourcesSlot, sig, () => projects.length || gh.fetchedAt ? [
       h('span.proj-source-chip', { title: 'Folders on this PC linked to CodaClauda' }, icon('folder'), plural(localCount, 'Desktop folder')),
       gh.fetchedAt
@@ -428,6 +432,8 @@ export function mount(root, ctx) {
           icon('github'), h('span', `@${gh.user} · ${plural(gh.repos?.length || 0, 'repo')} · synced ${timeAgo(gh.fetchedAt)}`),
           h('button.proj-chip-btn', { type: 'button', dataset: { fk: 'gh-refresh' }, 'aria-label': 'Refresh GitHub repositories', title: 'Refresh GitHub repositories', onclick: event => refreshGithub(event.currentTarget) }, icon('refresh')))
         : h('button.proj-source-chip.as-button', { type: 'button', dataset: { fk: 'gh-connect' }, onclick: () => connectGithub() }, icon('github'), 'GitHub not connected'),
+      ...extra.map(a => h('button.proj-source-chip.as-button', { type: 'button', title: `@${a.user}: ${store.accountLayout === 'islands' ? 'its own island beside your city' : 'part of your one big city'}. Manage GitHub accounts.`, onclick: () => openGithubAccounts({ store, bridge }) },
+        icon('github'), h('span', `@${a.user} · ${plural(a.repos?.length || 0, 'repo')} · ${store.accountLayout === 'islands' ? 'own island' : 'in city'}`))),
     ] : null);
   }
 

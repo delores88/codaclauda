@@ -56,7 +56,7 @@ export class RouteMap {
     this.panel = h('div.city-routes-panel.card', { tabindex: '-1' },
       h('header.city-routes-head',
         h('span.city-routes-logo', icon('route')),
-        h('div.city-routes-titles', h('h2#city-routes-title', 'Contributor islands'), h('p', 'Routes from your home city to GitHub repos other people added you to. Pick an island to fly there.')),
+        h('div.city-routes-titles', h('h2#city-routes-title', 'Islands'), h('p', 'Your other GitHub accounts sit beside your home city on the same level, joined by bridges. Contributor islands, repos other people added you to, lie below along flight routes. Pick one to go there.')),
         iconButton('close', 'Close the route map (Esc)', () => this.close(), 'city-routes-close')),
       h('div.city-routes-body', this.mapBox, this.side),
       this.foot);
@@ -100,9 +100,9 @@ export class RouteMap {
     const refocus = !at ? null : at.closest('.city-routes-foot') ? '.city-routes-foot .btn'
       : id && at.matches('.city-routes-item') ? `.city-routes-item[data-id="${CSS.escape(id)}"]`
         : id && at.matches('.city-routes-island, .city-routes-home') ? `.city-routes-island[data-id="${CSS.escape(id)}"], .city-routes-home[data-id="${CSS.escape(id)}"]` : null;
-    const { islands, fresh, current } = data;
-    const freshOf = island => island.repos.filter(r => fresh.has(repoKey(r))).length;
-    const { home, spots } = layoutIslands(islands);
+    const { islands, fresh, current } = data, owned = data.owned || [];
+    const freshOf = island => island.owned ? 0 : island.repos.filter(r => fresh.has(repoKey(r))).length;
+    const { home, spots } = layoutIslands(islands, { owned });
     this.spots = spots; this.home = home;
     // Ocean, graticule, a few wave marks.
     const sea = s('defs', {}, s('radialGradient', { id: 'city-routes-sea', cx: '50%', cy: '46%', r: '72%' }, s('stop', { offset: '0%', class: 'sea-a' }), s('stop', { offset: '100%', class: 'sea-b' })));
@@ -127,6 +127,23 @@ export class RouteMap {
     labels.append(s('g', { class: 'city-routes-label is-home' },
       s('text', { x: home.x, y: home.y + home.r + 20, class: 'owner', 'text-anchor': 'middle' }, 'Home'),
       s('text', { x: home.x, y: home.y + home.r + 39, class: 'count', 'text-anchor': 'middle' }, away ? plural(data.homeCount, 'building') : 'You are here')));
+    // Your own accounts' islands: beside home on the same level, joined by a bridge.
+    for (const island of owned) {
+      const spot = spots.get(island.id);
+      if (!spot) continue;
+      const here = current === island.id, cls = here ? ' is-here' : '';
+      const dir = Math.sign(spot.x - home.x) || 1;
+      arcs.append(s('path', { d: `M${fx(home.x + dir * home.r * 1.1)} ${fx(home.y)} L${fx(spot.x - dir * spot.r * 1.15)} ${fx(spot.y)}`, class: `city-routes-bridge${cls}`, 'data-id': island.id }));
+      const g = s('g', { class: `city-routes-island is-owned${cls}`, tabindex: '0', role: 'button', 'data-id': island.id,
+        'aria-label': `Your account @${island.owner}, ${plural(island.count ?? island.repos.length, 'building')}${here ? ', you are here' : ''}. Cross the bridge.` },
+      s('path', { d: blobPath(spot.x, spot.y, spot.r, spot.seed), class: 'city-routes-land' }),
+      s('g', { class: 'city-routes-skyline' }, ...[[-15, 10], [-5, 18], [6, 13]].map(([dx, hh]) => s('rect', { x: fx(spot.x + dx), y: fx(spot.y - hh + 5), width: 8, height: hh, rx: 1.5 }))));
+      this.bindTarget(g, island.id);
+      lands.append(g);
+      labels.append(s('g', { class: `city-routes-label is-owned${cls}`, 'data-id': island.id },
+        s('text', { x: fx(spot.x), y: fx(spot.y + spot.r + 20), class: 'owner', 'text-anchor': 'middle' }, `@${island.owner}`),
+        s('text', { x: fx(spot.x), y: fx(spot.y + spot.r + 39), class: 'count', 'text-anchor': 'middle' }, here ? 'You are here' : plural(island.count ?? island.repos.length, 'building'))));
+    }
     for (const island of islands) {
       const spot = spots.get(island.id);
       if (!spot) continue;
@@ -150,14 +167,14 @@ export class RouteMap {
       labels.append(label);
     }
     this.svg.replaceChildren(sea, s('rect', { x: 0, y: 0, width: W, height: H, class: 'city-routes-sea', fill: 'url(#city-routes-sea)' }), grid, waves, compass, arcs, lands, labels);
-    this.renderList(islands, freshOf, current);
+    this.renderList([...owned, ...islands], freshOf, current);
     this.renderNote(data);
-    this.renderFoot(data, islands.length - spots.size);
+    this.renderFoot(data, islands.length + owned.length - spots.size);
     if (this.hot) this.hover(this.hot);
     if (refocus) this.node.querySelector(refocus)?.focus({ preventScroll: true });
   }
   renderList(islands, freshOf, current) {
-    const order = [...islands].sort((a, b) => (freshOf(b) > 0) - (freshOf(a) > 0));
+    const order = [...islands].sort((a, b) => (Boolean(b.owned) - Boolean(a.owned)) || (freshOf(b) > 0) - (freshOf(a) > 0));
     const item = (id, art, name, count, extra, cls) => h('li', h(`button.city-routes-item${cls}`, { type: 'button', dataset: { id },
       onclick: () => this.pick(id), onpointerenter: () => this.hover(id), onpointerleave: () => this.hover(null), onfocus: () => this.hover(id), onblur: () => this.hover(null) },
     h('span.city-routes-item-art', icon(art)), h('span.city-routes-item-name', name), h('span.city-routes-item-count', count), extra));
@@ -165,13 +182,14 @@ export class RouteMap {
       current ? item('home', 'home', 'Home city', 'Fly home', null, '.is-home') : null,
       ...order.map(island => {
         const n = freshOf(island), here = island.id === current;
+        if (island.owned) return item(island.id, 'github', `@${island.owner}`, plural(island.count ?? island.repos.length, 'building'), here ? h('span.city-routes-here', 'Here') : h('span.city-routes-new', 'yours'), here ? '.is-here' : '');
         return item(island.id, island.ownerType === 'Organization' ? 'agents' : 'avatar', island.owner, plural(island.repos.length, 'repo'),
           [n ? h('span.city-routes-new', n > 1 ? `${n} new` : 'new') : null, here ? h('span.city-routes-here', 'Here') : null], `${n ? '.is-new' : ''}${here ? '.is-here' : ''}`);
       }));
     this.side.hidden = !islands.length;
   }
   renderNote(data) {
-    const text = data.islands.length ? '' : !data.checked && !data.error ? 'Looking for contributor islands on GitHub…' : EMPTY_TEXT;
+    const text = data.islands.length || data.owned?.length ? '' : !data.checked && !data.error ? 'Looking for contributor islands on GitHub…' : EMPTY_TEXT;
     this.note.hidden = !text;
     if (!text) return;
     clear(this.note, h('strong', text), data.error && !data.islands.length ? h('span', `GitHub could not be checked: ${String(data.error).slice(0, 220)}`) : null);
@@ -202,7 +220,7 @@ export class RouteMap {
   hover(id) {
     this.hot = id;
     for (const node of this.node.querySelectorAll('[data-id]')) node.classList.toggle('is-hot', id != null && node.dataset.id === id);
-    const island = id && id !== 'home' ? this.data?.islands.find(i => i.id === id) : null;
+    const island = id && id !== 'home' ? this.data?.islands.find(i => i.id === id) : null;   // owned islands need no repo card
     const spot = island ? this.spots?.get(id) : null;
     if (!island || !spot) { this.card.hidden = true; return; }
     const fresh = this.data.fresh, here = this.data.current === id;

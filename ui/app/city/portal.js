@@ -18,7 +18,8 @@ const ACCESS_NOTE = { Admin: 'Admin: full control', Maintain: 'Maintain: manage 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const noAccess = () => Promise.reject(new Error('Access levels are set on home projects, not contributor islands.'));
 
-/** The real store, seen from a contributor island (functions stay bound to the real store). */
+/** The real store, seen from an island (functions stay bound to the real store). Owned-account
+ * islands hold your own projects, so their access levels stay editable. */
 function islandStore(store, mode) {
   const own = {
     get projects() { return mode.projects(); },
@@ -29,7 +30,8 @@ function islandStore(store, mode) {
     cityLots: {},
     setCityLot: undefined,   // island layouts are hashed per island, never pinned into the home city's lots
     // Access levels belong to home projects: an island repo never writes one (or a home clone's).
-    setProjectAccess: noAccess, setProjectAccessMany: noAccess,
+    get setProjectAccess() { return mode.owned() ? store.setProjectAccess.bind(store) : noAccess; },
+    get setProjectAccessMany() { return mode.owned() ? store.setProjectAccessMany.bind(store) : noAccess; },
     get machines() { return NO_MACHINES; },
   };
   return new Proxy(store, {
@@ -63,8 +65,21 @@ export class IslandMode {
   }
   /** The map or a portal owns the keyboard and wheel. */
   get blocking() { return this.map.open || Boolean(this.busy); }
-  island() { return this.current ? this.routes.island(this.current) : null; }
-  projects() { return this.current ? this.routes.projects(this.current) : []; }
+  /** True on an island of one of your own GitHub accounts (beside home, same level). */
+  owned(id = this.current) { return Boolean(id) && String(id).startsWith('owned:'); }
+  /** Your other GitHub accounts shown as their own islands: [{ id: 'owned:<login>', owner, owned: true, repos }]. */
+  ownedIslands() {
+    return (this.home.accountLayout === 'islands' ? this.home.githubAccounts || [] : []).filter(a => !a.main)
+      .map(a => ({ id: `owned:${String(a.user).toLowerCase()}`, owner: a.user, ownerType: 'Owned', owned: true, repos: a.repos || [] }));
+  }
+  island(id = this.current) {
+    if (!id) return null;
+    return this.owned(id) ? this.ownedIslands().find(i => i.id === id) || null : this.routes.island(id);
+  }
+  projects() {
+    if (!this.current) return [];
+    return this.owned() ? this.home.islandProjects(this.current) : this.routes.projects(this.current);
+  }
   /** Agents whose current project is one of this island's repos, re-pointed at its buildings. */
   agents() {
     const real = this.home.agents, projects = this.projects();
@@ -105,8 +120,10 @@ export class IslandMode {
     v.dirty = true;
     this.renderButton();
     if (this.current && !this.island()) {   // gone from the list: back home (a cut-short list keeps what it lacks, so only past 500)
-      toast(this.routes.truncated ? 'GitHub returned a partial list (500 repos at most) without that contributor island, so you are back home.'
-        : 'That contributor island is gone: you no longer have access to its repos.', { kind: 'info' });
+      const stillLinked = this.owned() && (this.home.githubAccounts || []).some(a => `owned:${String(a.user).toLowerCase()}` === this.current);
+      toast(this.owned() ? (stillLinked ? 'Your accounts are one big city now, so you are back home.' : 'That account was removed from CodaClauda, so you are back home.')
+        : this.routes.truncated ? 'GitHub returned a partial list (500 repos at most) without that contributor island, so you are back home.'
+          : 'That contributor island is gone: you no longer have access to its repos.', { kind: 'info' });
       this.apply(null);
     } else if (this.current) this.renderChip();
   }
@@ -124,7 +141,7 @@ export class IslandMode {
   }
   mapData() {
     const r = this.routes;
-    return { islands: r.islands, fresh: r.fresh, current: this.current, homeCount: this.home.visibleProjects('city').length, checked: r.checked, loading: Boolean(this.loading || r.pending), error: r.error, truncated: r.truncated, checkedAt: r.at };
+    return { islands: r.islands, owned: this.ownedIslands().map(i => ({ ...i, count: this.home.islandProjects(i.id).length })), fresh: r.fresh, current: this.current, homeCount: this.home.visibleProjects('city').length, checked: r.checked, loading: Boolean(this.loading || r.pending), error: r.error, truncated: r.truncated, checkedAt: r.at };
   }
   renderMap() { if (this.map.open) this.map.render(this.mapData()); }
   mapClosed(restore) {
@@ -144,7 +161,7 @@ export class IslandMode {
   /* ---------- portal ---------- */
   /** Map pick / Home: close the map, play the portal and rebuild the city for that island. */
   async portal(id) {
-    const target = id ? this.routes.island(id) : null;
+    const target = id ? this.island(id) : null;
     if ((id && !target) || this.busy) return;
     if ((target?.id || null) === this.current) { this.map.close(); return; }
     const v = this.view, world = v.world, reduced = v.reduced();
@@ -154,10 +171,17 @@ export class IslandMode {
     if (v.street || v.streetPending) v.exitStreet({ fly: false, instant: true });
     if (v.following) v.toggleFollow(false);
     v.closeCluster(); v.closeAccess?.(); v.setHover(null); v.select(null);
-    this.fxText.textContent = target ? `Flying to ${target.owner} island…` : 'Flying home…';
-    this.fx.className = `city-portal ${reduced ? 'is-plain' : 'is-swirl'} is-in`;
+    // Your own accounts' islands sit beside home on the same level: glide across. Contributor
+    // islands lie below: the portal dives.
+    const across = this.owned(target?.id) || (!target && this.owned());
+    this.fxText.textContent = target ? (across ? `Crossing to @${target.owner}'s island…` : `Flying to ${target.owner} island…`) : across ? 'Crossing home…' : 'Flying home…';
+    this.fx.className = `city-portal ${reduced || across ? 'is-plain' : 'is-swirl'} is-in`;
     this.fx.hidden = false;
-    if (!reduced) world.flyTo({ target: world.baseTarget(), distance: Math.max(6, world.distance * 0.28) }, { duration: 0.55, auto: true });
+    if (!reduced) {
+      const base = world.baseTarget();
+      if (across) { const side = base.clone(); side.x += (target ? 1 : -1) * Math.max(30, world.distance * 0.6); world.flyTo({ target: side, distance: world.distance }, { duration: 0.55, auto: true }); }
+      else world.flyTo({ target: base, distance: Math.max(6, world.distance * 0.28) }, { duration: 0.55, auto: true });
+    }
     try {
       await wait(reduced ? 220 : 560);
       this.apply(target);
@@ -178,6 +202,8 @@ export class IslandMode {
     this.homeSlots ||= v.slots;
     v.slots = island ? this.slotsFor(island.id) : this.homeSlots;
     v.store = island ? (this.islandView ||= islandStore(this.home, this)) : this.home;
+    v.extraCache = null; v.agentLocations = null;
+    v.npcs?.settle();   // no plane is mid-air across a view switch: everyone starts at their goal there
     v.cityRoot.classList.toggle('is-island', Boolean(island));
     v.select(null);
     v.hudSig = ''; v.panelSig = ''; v.emptySig = ''; v.machinesSig = '';
@@ -199,22 +225,22 @@ export class IslandMode {
   renderChip() {
     const island = this.island();
     this.chip.hidden = !island;
-    if (this.eyebrow) this.eyebrow.textContent = island ? 'Contributor island' : 'Project city';
+    if (this.eyebrow) this.eyebrow.textContent = !island ? 'Project city' : island.owned ? 'Your island' : 'Contributor island';
     if (!island) { this.chip.replaceChildren(); return; }
     clear(this.chip,
-      h('span.city-island-name', icon('route'), h('strong', `${island.owner} island`), h('span.muted', plural(island.repos.length, 'repo'))),
+      h('span.city-island-name', icon(island.owned ? 'github' : 'route'), h('strong', island.owned ? `@${island.owner}` : `${island.owner} island`), h('span.muted', island.owned ? `${plural(this.projects().length, 'building')} · beside home` : plural(island.repos.length, 'repo'))),
       h('button.btn.small.city-island-home', { type: 'button', title: 'Portal back to your home city', onclick: () => this.portal(null) }, icon('home'), 'Home'));
   }
 
   /* ---------- City hooks ---------- */
   /** HUD tag for the town hall on a contributor island. */
-  hqInfo() { const island = this.island(); return island ? { title: `${island.owner} island`, sub: `Town hall · ${plural(island.repos.length, 'repo')} · click for the list` } : null; }
+  hqInfo() { const island = this.island(); return island ? { title: island.owned ? `@${island.owner}` : `${island.owner} island`, sub: `Town hall · ${plural(island.owned ? this.projects().length : island.repos.length, island.owned ? 'building' : 'repo')} · click for the list` } : null; }
   /** Side cards on a contributor island: { sig, render } for a building or the town hall, else null. */
   panelFor(target) {
     const island = this.island();
     if (!island || !target) return null;
     if (target.kind === 'hq') return { sig: JSON.stringify(['island', island.id, island.repos.map(r => r.full_name), Math.floor(Date.now() / 60000)]), render: () => this.renderIslandPanel(island) };
-    if (target.kind !== 'building') return null;
+    if (target.kind !== 'building' || island.owned) return null;   // your own buildings use the home panel
     const project = this.projects().find(p => p.id === target.id);
     if (!project) return null;
     const here = this.view.agentsAt(project.id).map(a => [a.id, a.status, a.look]);
@@ -250,6 +276,18 @@ export class IslandMode {
   }
   renderIslandPanel(island) {
     const v = this.view;
+    if (island.owned) {
+      clear(v.panel,
+        v.panelHead(h('span.city-swatch.hq', icon('github')), `@${island.owner}`, `Your account · ${plural(this.projects().length, 'building')} · beside your main city`),
+        h('p.city-desc', `Repos of @${island.owner}. Cloned ones are buildings; the rest are lots with a Clone to build sign. To fold this account into your main city, open Projects, GitHub accounts.`),
+        h('div.city-island-repos', ...this.projects().map(p => h('button.city-link', { type: 'button', title: p.repo?.full_name || p.name, onclick: () => { v.select({ kind: 'building', id: p.id }); v.focusSelection(); } },
+          h('span.city-lang-dot', { style: { background: p.color } }), p.name))),
+        h('div.city-actions.wrap',
+          h('button.btn.small.primary', { type: 'button', onclick: () => v.open(`https://github.com/${island.owner}`) }, icon('github'), 'Account on GitHub'),
+          h('button.btn.small', { type: 'button', onclick: () => this.openMap() }, icon('route'), 'Island map'),
+          h('button.btn.small', { type: 'button', onclick: () => this.portal(null) }, icon('home'), 'Back home')));
+      return;
+    }
     clear(v.panel,
       v.panelHead(h('span.city-swatch.hq', icon('route')), `${island.owner} island`, `${island.ownerType === 'Organization' ? 'Organization' : 'Personal account'} · ${plural(island.repos.length, 'repo')}`),
       h('p.city-desc', `Repos ${island.owner} shares with you. Agents show up here while they work on one of them.`),
