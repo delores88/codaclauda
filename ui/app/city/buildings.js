@@ -254,7 +254,7 @@ export function downtownBasePlan(size, cell, unbuilt = false) {
   const halfX = riverSceneryClear(c.x, c.z, 5.55, 5.55) ? 5.5 : 5.17;
   const lawn = { w: halfX * 2, d: 11, z: -CZ, top: unbuilt ? PAD_TOP : GROUND_Y + 0.04 };
   const paving = unbuilt ? null : { w: Math.min(size.W + 1.8, halfX * 2 - 0.16), d: size.D + 1.8, z: 0, top: PAD_TOP };
-  const start = unbuilt ? size.D / 2 : paving.d / 2;
+  const start = unbuilt ? size.D / 2 - CZ : paving.d / 2;
   const end = LOT_HALF - CZ - 0.005; // float-safe inset at the sidewalk seam
   const entry = { w: 1.1, d: end - start, z: (end + start) / 2, top: PAD_TOP + (unbuilt ? 0.008 : 0) };
   const plants = [];
@@ -308,17 +308,17 @@ const easeIn = t => t * t * t;
 
 /** A quiet two-line ground sign: texture belongs to this repository's sign. */
 function unbuiltSignTexture(name) {
-  const canvas = document.createElement('canvas'); canvas.width = 768; canvas.height = 192;
+  const canvas = document.createElement('canvas'); canvas.width = 1024; canvas.height = 288;
   const context = canvas.getContext('2d');
-  context.fillStyle = '#fff5df'; context.fillRect(0, 0, 768, 192);
-  context.strokeStyle = '#b59a7e'; context.lineWidth = 6; context.strokeRect(3, 3, 762, 186);
+  context.fillStyle = '#fff5df'; context.fillRect(0, 0, 1024, 288);
+  context.strokeStyle = '#b59a7e'; context.lineWidth = 6; context.strokeRect(3, 3, 1018, 282);
   context.textAlign = 'center'; context.textBaseline = 'middle';
   const label = String(name || 'Repository').replace(/\s+/g, ' ').trim();
-  let fontSize = 48;
-  do { context.font = `600 ${fontSize}px "Segoe UI", system-ui, sans-serif`; fontSize -= 2; } while (context.measureText(label).width > 704 && fontSize > 22);
-  context.fillStyle = '#60513f'; context.fillText(label, 384, 66, 704);
-  context.font = '40px "Segoe UI", system-ui, sans-serif'; context.fillStyle = '#625343';
-  context.fillText('\u2193 Clone to build', 384, 132, 704);
+  let fontSize = 82;
+  do { context.font = `800 ${fontSize}px "Segoe UI", system-ui, sans-serif`; fontSize -= 2; } while (context.measureText(label).width > 944 && fontSize > 40);
+  context.fillStyle = '#332d25'; context.fillText(label, 512, 108, 944);
+  context.font = '38px "Segoe UI", system-ui, sans-serif'; context.fillStyle = '#625343';
+  context.fillText('\u2193 Clone to build', 512, 222, 944);
   const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
   return texture;
 }
@@ -361,7 +361,10 @@ export class Building {
     this.origin = this.riverPlan?.origin || { x: center.x, z: center.z + CZ };
     this.group.position.set(this.origin.x, 0, this.origin.z);
     const homePlan = district === 'suburbs' && !this.riverPlan ? suburbPlan(project, this.cell) : null;
-    const size = this.riverPlan || (homePlan ? { W: homePlan.W, D: homePlan.D, H: homePlan.H, floors: homePlan.floors, footprint: homePlan.footprint, variant: homePlan.variant, variantName: homePlan.variantName } : buildingSize(project));
+    const plannedSize = this.riverPlan || (homePlan ? { W: homePlan.W, D: homePlan.D, H: homePlan.H, floors: homePlan.floors, footprint: homePlan.footprint, variant: homePlan.variant, variantName: homePlan.variantName } : buildingSize(project));
+    // Reserve a small build footprint; project metrics only size the future building.
+    const plot = this.parcel?.rect, plotW = plot ? plot.x1 - plot.x0 : LOT_HALF * 2, plotD = plot ? plot.z1 - plot.z0 : LOT_HALF * 2;
+    const size = unbuilt ? { ...plannedSize, W: plotW * 0.52, D: plotD * 0.52, H: 2.3, floors: 1 } : plannedSize;
     const style = this.mirror ? sparkStyle(styleFor(project)) : styleFor(project, district);
     if (homePlan) style.body = homePlan.body;
     const m = project.metrics || {};
@@ -372,6 +375,7 @@ export class Building {
     const footprintChanged = !previous || previous.footprint !== size.footprint || this.district !== district || this.unbuilt !== unbuilt;
     this.sig = sig; this.size = size; this.style = style; this.litFrac = litFrac; this.district = district; this.unbuilt = unbuilt; this.suburbs = homePlan;
     this.clearTower();
+    this.tower.position.z = unbuilt && !this.parcel ? -CZ : 0;
     this.buildTower();
     if (footprintChanged) this.buildPad();
     if (this.active && !this.unbuilt) { if (homePlan) this.buildHomeActivity(); else this.buildScaffold(); }
@@ -594,21 +598,37 @@ export class Building {
       for (let k = 0; k < 4; k++) timber.add('#c89b66', placed(new THREE.BoxGeometry(1.2, 0.08, 0.22), { x, y: y + 0.17, z: z - 0.39 + k * 0.26 }));
     }
     timber.build(this.tower, { tag, outline: 0.015 });
+    const details = new Batch(), seams = new Batch();
+    for (const z of [-D / 2 + 0.125, D / 2 - 0.125]) details.add('#bdb6a5', placed(new THREE.BoxGeometry(W, 0.23, 0.25), { y: PAD_TOP + 0.115, z }));
+    for (const x of [-W / 2 + 0.125, W / 2 - 0.125]) details.add('#bdb6a5', placed(new THREE.BoxGeometry(0.25, 0.23, D - 0.5), { x, y: PAD_TOP + 0.115 }));
+    for (const fraction of [-1 / 6, 1 / 6]) {
+      seams.add('#c3bcad', placed(new THREE.BoxGeometry(0.025, 0.007, D - 0.5), { x: W * fraction, y: PAD_TOP + 0.154 }));
+      seams.add('#c3bcad', placed(new THREE.BoxGeometry(W - 0.5, 0.007, 0.025), { z: D * fraction, y: PAD_TOP + 0.154 }));
+    }
+    for (const x of [-W / 2 + 0.16, W / 2 - 0.16]) for (const z of [-D / 2 + 0.16, D / 2 - 0.16]) {
+      details.add('#896848', placed(new THREE.CylinderGeometry(0.025, 0.035, 0.72, 6), { x, y: PAD_TOP + 0.5, z }));
+      const flag = new THREE.Mesh(placed(new THREE.BoxGeometry(0.32, 0.22, 0.035), { x: x + Math.sign(-x) * 0.15, y: PAD_TOP + 0.75, z }), toonMaterial('#ff8b36'));
+      flag.name = 'clone-survey-flag'; flag.userData = { ...tag }; addOutline(flag, { thickness: 0.012 }); this.tower.add(flag);
+    }
+    for (const mesh of details.build(this.tower, { tag, outline: 0.015 })) mesh.name = 'clone-curb-and-stakes';
+    for (const mesh of seams.build(this.tower, { tag, outline: 0 })) mesh.name = 'clone-tile-seams';
     const sign = new THREE.Group(); sign.name = `unbuilt-sign:${this.id}`;
     sign.position.set(0, PAD_TOP, this.riverPlan ? this.riverPlan.streetZ : 5.15 - CZ);
     if (this.riverPlan?.side < 0) sign.rotation.y = Math.PI;
-    const plaqueW = Math.min(W * 0.65, 2.6), plaqueH = plaqueW / 4;
-    const posts = new THREE.Mesh(mergeParts([-plaqueW * 0.35, plaqueW * 0.35].map(x => placed(new THREE.BoxGeometry(0.1, 0.8, 0.1), { x, y: 0.4 }))), toonMaterial('#b58c62'));
+    const plaqueW = Math.min(5.2, W + 0.6), plaqueH = 1.35;
+    const posts = new THREE.Mesh(mergeParts([-plaqueW * 0.35, plaqueW * 0.35].map(x => placed(new THREE.BoxGeometry(0.12, 0.7, 0.12), { x, y: 0.35 }))), toonMaterial('#b58c62'));
     addOutline(posts, { thickness: 0.02 }); sign.add(posts);
     const backing = new THREE.Mesh(new THREE.BoxGeometry(plaqueW + 0.1, plaqueH + 0.1, 0.1), toonMaterial('#c5a17b'));
-    backing.position.y = 0.88; backing.userData = { ...tag }; addOutline(backing, { thickness: 0.02 }); sign.add(backing);
+    backing.position.y = 1.35; backing.userData = { ...tag }; addOutline(backing, { thickness: 0.02 }); sign.add(backing);
     const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueH), new THREE.MeshBasicMaterial({ map: unbuiltSignTexture(this.project.name) }));
-    plaque.position.set(0, 0.88, 0.056); plaque.userData = { ...tag };
-    sign.add(plaque); this.group.add(sign); this.unbuiltSign = sign;
+    plaque.position.set(0, 1.35, 0.056); plaque.userData = { ...tag };
+    const reverse = new THREE.Mesh(plaque.geometry.clone(), plaque.material.clone());
+    reverse.material.map = plaque.material.map.clone(); reverse.position.set(0, 1.35, -0.056); reverse.rotation.y = Math.PI; reverse.userData = { ...tag };
+    sign.add(plaque, reverse); this.pickables.push(reverse); this.group.add(sign); this.unbuiltSign = sign;
     this.pickables.push(backing, plaque); this.plaque = plaque;
     const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.12, 0.18), toonMaterial('#ffe3a3', { emissive: '#ffc766', emissiveIntensity: 0.1, cache: false }));
-    lamp.position.set(0, 1.35, 0.12); lamp.name = 'clone-sign-lamp'; sign.add(lamp); this.signLamp = lamp;
-    this.roofTop = this.roofSurface = PAD_TOP + 1.5;
+    lamp.position.set(0, 2.15, 0.12); lamp.name = 'clone-sign-lamp'; sign.add(lamp); this.signLamp = lamp;
+    this.roofTop = this.roofSurface = PAD_TOP + 2.3;
   }
 
   /* Access ticker: segments from ticker.js tickerSegments (null: none); paused: grey and still. */
@@ -723,7 +743,7 @@ export class Building {
     this.downtownBase = null;
     if (this.parcel) {
       this.pad = buildRiverLandscape(this.parcel, { origin: this.origin, building: this.riverPlan });
-      this.padGroup.add(this.pad); return;
+      this.padGroup.add(this.pad); if (this.unbuilt) this.buildCloneTrees(); return;
     }
     if (this.suburbs) {
       const yard = buildSuburbYard(this.suburbs, { baseY: PAD_TOP, tag: { buildingId: this.id }, centerZ: -CZ });
@@ -732,7 +752,7 @@ export class Building {
     if (this.district === 'downtown') {
       this.downtownBase = downtownBasePlan(this.size, this.cell, this.unbuilt);
       const landscape = buildDowntownBase(this.downtownBase, { tag: { buildingId: this.id } });
-      this.padGroup.add(landscape); this.pad = landscape; return;
+      this.padGroup.add(landscape); this.pad = landscape; if (this.unbuilt) this.buildCloneTrees(); return;
     }
     const { W, D } = this.size;
     const padMaterial = this.mirror ? SPARK_MATERIALS.pad : MATERIALS.pad;
@@ -741,6 +761,24 @@ export class Building {
     addOutline(pad, { thickness: 0.03 });
     this.padGroup.add(pad);
     this.pad = pad;
+  }
+
+  buildCloneTrees() {
+    const center = cellCenter(this.cell.i, this.cell.j);
+    const r = this.parcel?.rect || { x0: center.x - 5.5, x1: center.x + 5.5, z0: center.z - 5.5, z1: center.z + 5.5 };
+    const w = r.x1 - r.x0, d = r.z1 - r.z0, cx = (r.x0 + r.x1) / 2, cz = (r.z0 + r.z1) / 2;
+    const trees = new THREE.Group(); trees.name = 'clone-lot-trees'; trees.userData.count = 0;
+    const batch = new Batch();
+    for (const [dx, dz, tint] of [[-0.39, -0.18, '#6fcf7f'], [0.39, -0.18, '#8bd96b'], [-0.39, 0.25, '#4fbf8a']]) {
+      const x = cx + w * dx, z = cz + d * dz;
+      if (!riverSceneryClear(x, z, 0.66, 0.66)) continue;
+      const lx = x - this.origin.x, lz = z - this.origin.z;
+      batch.add('#b77c4e', placed(new THREE.CylinderGeometry(0.1, 0.14, 1.2, 7), { x: lx, y: PAD_TOP + 0.6, z: lz }));
+      batch.add(tint, placed(new THREE.IcosahedronGeometry(0.57, 1), { x: lx, y: PAD_TOP + 1.5, z: lz, sy: 1.15 }));
+      trees.userData.count++;
+    }
+    batch.build(trees, { outline: 0.025 });
+    trees.traverse(node => { if (node.isMesh) node.raycast = () => {}; }); this.padGroup.add(trees);
   }
 
   setActive(on) {

@@ -1,3 +1,4 @@
+import { CloneLotLabels } from '../city/clone-labels.js';
 import { riverLot, pointInParcel } from '../city/river-lots.js';
 /* City view: a playful 3D "project city". Every visible project is a building on a
  * floating island; agents walk between them as little people. HTML overlays (labels,
@@ -303,7 +304,8 @@ export class CityView {
     this.stage = h('div.city-stage', { tabindex: '0', role: 'application', 'aria-label': 'Project city. Click an agent to talk to them. Drag to orbit, use Pan or P to drag the view, right-drag to pan, scroll to zoom. With the Spark side on, drag up or down to turn the island over, or press V to flip it. W A S D pan, Q and E rotate, F focuses the selection, H resets the view, M finds your avatar, G starts street view (W and S walk, A and D turn, Escape exits).' });
     this.tag = h('div.city-tag', { hidden: true, 'aria-hidden': 'true' });
     this.bubble = h('div.city-bubble', { hidden: true, role: 'status' });
-    this.labelLayer = h('div.city-labels', { 'aria-label': 'People in the city' });
+    this.labelLayer = h('div.city-labels', { 'aria-label': 'City name labels' });
+    this.cloneLabels = new CloneLotLabels(this.labelLayer, id => this.onClick({ kind: 'building', id }), declutterLabels);
     this.chipLayer = h('div.city-chips');   // wheel over a chip still zooms: see bindWheel
     this.clusterPop = h('div.city-cluster-pop.card', { hidden: true, role: 'dialog', 'aria-label': 'Agents at this spot' });
     this.sparkTag = h('div.city-offline-tag', { hidden: true, 'aria-hidden': 'true' }, 'Offline');   // over the DGX SPARK emblem
@@ -634,6 +636,7 @@ export class CityView {
     this.syncRunnerLabels();
     this.renderMachines(machines, mode);
     this.syncLabels(agents);
+    this.cloneLabels?.sync(this.buildings.list);
     this.weather?.setHome(!this.islands?.current);   // contributor islands (city/portal.js) have no weather; IslandMode.apply syncs after each switch
     this.renderHud(projects, agents);
     this.renderEmpty(projects);
@@ -737,6 +740,7 @@ export class CityView {
     // 3. Every frame: shown labels and chips follow the heads (Spark runners stand upright too once their side is up).
     for (const label of this.runnerLabels.values()) this.placeLabel(label, 'translate(-50%, -100%)');
     for (const label of this.labels.values()) this.placeLabel(label, 'translate(-50%, -100%)');
+    this.cloneLabels?.update(world, pcUp && !this.talk && !this.street && !this.islands?.current, this.cloneLabelBlockers || []);
     this.placeChips();
     this.placeClusterPop();
     // Tags and bubbles sit just above a person's name label (offset in screen space) or above a roof,
@@ -799,6 +803,7 @@ export class CityView {
     });
     this.clusterOf = result.clusterOf;
     for (const [key, label] of labels) label.show = result.shown.has(key);
+    this.cloneLabelBlockers = [...blockers, ...items.filter(item => result.shown.has(item.key)).map(item => item.rect)];
     this.renderChips(result.chips);
   }
   placeLabel(label, shift) {
@@ -2576,6 +2581,7 @@ export class CityView {
     clearTimeout(this.checkTimer);
     this.offSessions?.();
     this.buildingSessions?.destroy();
+    this.cloneLabels?.dispose();
     this.ci?.dispose();
     this.river?.dispose();
     this.islands?.dispose();

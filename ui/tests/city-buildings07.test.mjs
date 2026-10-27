@@ -160,6 +160,28 @@ test('unbuilt construction, rebuilds and manager sync never mount a roof ticker;
   manager.dispose();
 });
 
+test('clone reservations keep a small centered pad, survey details and trees when project metrics grow', t => {
+  fakeCanvas(t);
+  for (const cell of [{ i: 0, j: -2 }, { i: 1, j: 0 }, { i: 3, j: -1 }]) {
+    const project = { id: 'gh:owner/reservation', name: 'Reservation', metrics: { floors: 2, footprint: 1 } };
+    const b = new Building(project, cell, { particles: { emit() {} }, reducedMotion: () => true, districts: true });
+    const r = b.parcel?.rect || { x0: cell.i * 16 - 5.7, x1: cell.i * 16 + 5.7, z0: cell.j * 16 - 5.7, z1: cell.j * 16 + 5.7 };
+    near(b.size.W / (r.x1 - r.x0), 0.52); near(b.size.D / (r.z1 - r.z0), 0.52);
+    b.group.updateMatrixWorld(true); b.body.geometry.computeBoundingBox();
+    const center = b.body.localToWorld(b.body.geometry.boundingBox.getCenter(new THREE.Vector3()));
+    near(center.x, (r.x0 + r.x1) / 2); near(center.z, (r.z0 + r.z1) / 2);
+    assert.equal(b.tower.children.filter(n => n.name === 'clone-survey-flag').length, 4);
+    assert.ok(b.tower.getObjectByName('clone-tile-seams'));
+    assert.ok(b.tower.getObjectByName('clone-curb-and-stakes'));
+    assert.equal(b.padGroup.getObjectByName('clone-lot-trees').userData.count, 3);
+    const before = [b.size.W, b.size.D, b.size.H];
+    b.apply({ ...project, metrics: { floors: 20, footprint: 3 } });
+    assert.deepEqual([b.size.W, b.size.D, b.size.H], before);
+    assert.equal(b.group.getObjectByName('clone-sign-lamp').material.transparent, false);
+    b.dispose();
+  }
+});
+
 test('unbuilt signs and ghost resources are released on rebuild and animated removal', t => {
   fakeCanvas(t);
   const parent = new THREE.Group(), particles = { emit() {}, enabled: false };

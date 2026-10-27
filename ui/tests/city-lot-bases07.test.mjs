@@ -197,8 +197,8 @@ test('initial metrics and reduced motion finish Downtown lawn arrival scale', t 
     assert.deepEqual(b.padGroup.scale.toArray(), [0.6, 0.6, 0.6]);
     if (!reduced) {
       b.apply({ ...initial, metrics: { ...initial.metrics, floors: 8 } });
-      assert.equal(b.anim.kind, 'grow');
-      assert.deepEqual(b.padGroup.scale.toArray(), [1, 1, 1], 'floor growth must not strand an arrival-scaled lawn');
+      assert.equal(b.anim.kind, local ? 'grow' : 'rise', 'metrics grow linked towers; reserved pads keep their small footprint');
+      if (local) assert.deepEqual(b.padGroup.scale.toArray(), [1, 1, 1], 'floor growth must not strand an arrival-scaled lawn');
     }
     b.update(2, 2, { reducedMotion: reduced, particles });
     assert.equal(b.anim, null);
