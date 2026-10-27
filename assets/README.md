@@ -7,16 +7,18 @@ Windows Segoe UI font. No font file is bundled or redistributed.
 
 The thumbnail is an illustration, not an application screenshot.
 
-marketplace-screenshot.png shows the actual CodaClauda 0.7.0 application
+marketplace-screenshot.png shows the actual CodaClauda 0.7.1 application
 running from the verified ordinary installation of the GUI and CLI
-from source 3e827cd5e7dec63cadbf360daeb18d9d66ea3683.
+from source 8d1ef37a865fb3a2dd5626128965cf50f87e0ccc.
 
-Observed view: Installed Settings Appearance & alerts and upper Agents at once controls.
-Data boundary: First-name Ben and aggregate interface badges, including the global 1 agent working badge, are visible. No topic URL, project name, host path, credential, balance or private conversation is visible.
+Observed view: Installed City overview on This PC, normal buildings, no conversation panel, Pan off.
+Data boundary: First-name Ben and avatar, approximate city Denver with local time/weather, aggregate interface counts and generic navigation/City controls are visible. No project/session name, transcript, topic URL, host path, credential or exact street address is visible.
 
 The native JPEG capture was encoded as PNG without changing decoded pixels.
 No cropping, retouching or synthetic application rendering was used. No
-provider session was started for the capture.
+additional provider session was started for final screenshot acquisition or
+encoding. The separate six-case native sequence intentionally created one
+managed session and one reply turn.
 
 This screenshot records application rendering with the data boundary above.
 Installation, board preservation and native workflow acceptance are separate
