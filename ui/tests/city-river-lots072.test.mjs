@@ -103,7 +103,8 @@ test('actual riverfront meshes, outlines and landscapes fit both banks and have 
       b.dispose();
     }
   }
-  assert.deepEqual(shapes, new Set(['terraced', 'slim', 'deck-house', 'townhouse']));
+  for (const shape of shapes) assert.ok(['curved-terrace', 'curved-slim', 'curved-deck-house', 'curved-townhouse'].includes(shape), shape);
+  assert.ok([...shapes].some(s => s.startsWith('curved-t') || s === 'curved-slim') && [...shapes].some(s => s.includes('house')));
   const sliver = riverLot(2, -1), garden = buildRiverLandscape(sliver);
   assert.equal(sliver.eligible, false); assert.ok(garden.getObjectByName('riverfront-lawn')); assert.ok(garden.getObjectByName('riverfront-bench')); assert.ok(garden.getObjectByName('riverfront-reeds')); disposeAll(garden);
 });

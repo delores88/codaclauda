@@ -1,61 +1,134 @@
-/* Opaque, district-coloured architecture and planted dry parcels. Original geometry. */
+/* Opaque, district-coloured architecture and planted dry parcels. Original geometry.
+ * Riverfront buildings take the shape of their plot: a straight street front and a
+ * water side that follows the bank curve (river-lots.js riverfrontFootprint). */
 import { THREE, toonMaterial, addOutline } from './toon.js';
 import { placed, mergeParts } from './fx.js';
-import { pointInParcel, riverfrontShape, clipPolygon, polygonArea } from './river-lots.js';
+import { pointInParcel, clipPolygon, polygonArea, riverfrontFootprintFor } from './river-lots.js';
+import { towerLook, floorsHeight, prismGeometry, offsetPolygon, stripPolygon, GF, FH } from './architecture.js';
+import { homeLook } from './suburbs.js';
+import { hash } from '../avatar/spec.js';
 
 const TOP = 0.24;
+const WOOD = '#c89b6d', PLANTER = '#76ac70';
 function box(group, w, h, d, x, y, z, material, name, outline = 0.025) {
   const mesh = new THREE.Mesh(placed(new THREE.BoxGeometry(w, h, d), { x, y, z }), typeof material === 'string' ? toonMaterial(material) : material);
   mesh.name = name; mesh.castShadow = true; mesh.receiveShadow = true;
   if (outline) addOutline(mesh, { thickness: outline });
   group.add(mesh); return mesh;
 }
+function bounds(points) {
+  const xs = points.map(p => p.x), zs = points.map(p => p.z);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), z0 = Math.min(...zs), z1 = Math.max(...zs);
+  return { x0, x1, z0, z1, x: (x0 + x1) / 2, z: (z0 + z1) / 2, w: x1 - x0, d: z1 - z0 };
+}
+/** Street edge then water edge, the order riverfrontFootprint produces. */
+function footprintPolygon(foot, front, back) {
+  const street = foot.side > 0 ? [{ x: foot.x1, z: front }, { x: foot.x0, z: front }] : [{ x: foot.x0, z: front }, { x: foot.x1, z: front }];
+  return [...street, ...(foot.side > 0 ? back : [...back].reverse())];
+}
 
 export function riverBuildingPlan(project, parcel, district) {
-  const r = parcel.rect, shape = riverfrontShape(r, district), side = parcel.side;
+  const r = parcel.rect, side = parcel.side;
   const origin = { x: (r.x0 + r.x1) / 2, z: (r.z0 + r.z1) / 2 };
-  const width = r.x1 - r.x0, depth = r.z1 - r.z0;
+  const local = p => ({ x: p.x - origin.x, z: p.z - origin.z });
   const tier = Math.max(1, Math.min(3, Math.round(project.metrics?.footprint || 1)));
-  const W = Math.min(width - 0.8, shape === 'slim' || shape === 'townhouse' ? 4 + tier * 0.65 : 6.8 + tier);
-  const D = Math.min(depth - 1.6, 4.6 + tier * 0.7);
   const sourceFloors = Math.max(1, Math.min(24, Math.round(project.metrics?.floors || 1)));
-  const H = district === 'downtown' ? Math.min(2.6 + (sourceFloors - 1) * 1.3, Math.min(W, D) * 2.4, 18) : shape === 'townhouse' ? 3.8 : 2.2;
-  const floors = district === 'downtown' ? Math.max(1, Math.floor((H - 2.6) / 1.3) + 1) : shape === 'townhouse' ? 2 : 1;
-  const blocks = shape === 'terraced' ? [0, 1, 2].map(n => ({ w: W, d: D * (1 - n * 0.22), h: H / 3, y: n * H / 3, z: side * D * n * 0.11 })) : [{ w: W, d: D, h: H, y: 0, z: 0 }];
-  return { W, D, H, floors, footprint: tier, shape, blocks, origin, side, streetZ: side * (depth / 2 - 0.3), parcel };
+  const lot = { i: parcel.i, j: parcel.j };
+  let foot = riverfrontFootprintFor(parcel, district);
+  if (!foot) {   // Defensive: an eligible parcel always has room for its frontage rectangle.
+    const front = side > 0 ? r.z1 - 1.3 : r.z0 + 1.3, backZ = front - side * Math.min(4, r.z1 - r.z0 - 1.6);
+    const back = [{ x: r.x0 + 0.6, z: backZ }, { x: r.x1 - 0.6, z: backZ }];
+    foot = { side, front, back, x0: r.x0 + 0.6, x1: r.x1 - 0.6, minDepth: Math.abs(front - backZ) };
+  }
+  const front = foot.front - origin.z, back = foot.back.map(local);
+  const footLocal = { side, x0: foot.x0 - origin.x, x1: foot.x1 - origin.x };
+  const points = footprintPolygon(footLocal, front, back);
+  const tiers = [];
+  let floors, H, shape, palette, storeys = 1;
+  if (district === 'downtown') {
+    const look = towerLook(project, lot); palette = look.palette;
+    floors = Math.min(sourceFloors, 13, Math.max(1, Math.floor((foot.minDepth * 3.4 - GF) / FH) + 1));
+    H = floorsHeight(floors);
+    const terrace = floors >= 4 && foot.minDepth >= 4.6;
+    if (terrace) {
+      const lower = Math.max(2, Math.round(floors * 0.6));
+      const back2 = back.map(p => ({ x: p.x, z: p.z + side * 1.6 }));
+      tiers.push({ points, back, floor0: 0, floors: lower, y: 0, h: floorsHeight(lower) });
+      tiers.push({ points: footprintPolygon(footLocal, front, back2), back: back2, floor0: lower, floors: floors - lower, y: floorsHeight(lower), h: H - floorsHeight(lower) });
+      shape = 'curved-terrace';
+    } else {
+      tiers.push({ points, back, floor0: 0, floors, y: 0, h: H });
+      shape = 'curved-slim';
+    }
+  } else {
+    const look = homeLook(project, lot); palette = { body: look.body, trim: look.roof, roof: look.roof, accent: look.door, door: look.door };
+    storeys = foot.x1 - foot.x0 < 7.5 ? 2 : 1;
+    H = storeys === 2 ? 3.8 : 2.3; floors = storeys;
+    tiers.push({ points, back, floor0: 0, floors: storeys, y: 0, h: H, storeys });
+    shape = storeys === 2 ? 'curved-townhouse' : 'curved-deck-house';
+  }
+  const blocks = tiers.map(t => { const b = bounds(t.points); return { w: b.w, d: b.d, h: t.h, y: t.y, x: b.x, z: b.z }; });
+  // The inscribed rectangle of the top tier carries the ticker and roof indicators.
+  const topTier = tiers.at(-1), topBack = topTier.back.map(p => p.z);
+  const coreBack = side > 0 ? Math.max(...topBack) : Math.min(...topBack);
+  const core = { x: (footLocal.x0 + footLocal.x1) / 2, w: footLocal.x1 - footLocal.x0, z: (front + coreBack) / 2, d: Math.abs(front - coreBack) };
+  const all = bounds(points), deck = district === 'suburbs' ? 0.85 : 0;
+  const bbox = { x0: origin.x + all.x0, x1: origin.x + all.x1, z0: origin.z + all.z0 - (side > 0 ? deck : 0), z1: origin.z + all.z1 + (side < 0 ? deck : 0) };
+  return { W: all.w, D: all.d, H, floors, storeys, footprint: tier, shape, tiers, blocks, core, palette, district,
+    origin, side, front, entryX: core.x, streetZ: side * ((r.z1 - r.z0) / 2 - 0.3), parcel, bbox, seed: hash(`river:${project.id}`) };
 }
 
 export function buildRiverBuilding(plan, material, district, tag, glass = {}) {
   const group = new THREE.Group(); group.name = `riverfront-${plan.shape}`;
-  const trim = district === 'downtown' ? '#d6e6ef' : '#3d4350';
-  for (const b of plan.blocks) {
-    box(group, b.w, b.h, b.d, 0, TOP + b.y + b.h / 2, b.z, material, 'riverfront-wall');
-    box(group, b.w + 0.08, 0.12, b.d + 0.08, 0, TOP + b.y + b.h, b.z, trim, 'riverfront-roof');
-    // Both banks get windows on the water and street facades.
-    for (const face of [-1, 1]) for (let x = -b.w / 2 + 0.65; x < b.w / 2 - 0.35; x += 1.655) {
-      const height = Math.max(0.5, b.h - 0.55);
-      box(group, 0.72, height, 0.05, x, TOP + b.y + b.h / 2, b.z + face * (b.d / 2 + 0.035), glass.lit || '#a9cddd', 'riverfront-window', 0.01);
-      if (district === 'downtown') for (let y = 1.25; y < height; y += 1.3) box(group, 0.74, 0.055, 0.06, x, TOP + b.y + 0.27 + y, b.z + face * (b.d / 2 + 0.04), trim, 'riverfront-mullion', 0);
+  const palette = plan.palette || {}, side = plan.side;
+  const trim = palette.trim || (district === 'downtown' ? '#d6e6ef' : '#3d4350');
+  const litFrac = glass.litFrac ?? 0.4;
+  const walls = [], caps = [], lit = [], dark = [], trims = [], planters = [], wood = [];
+  for (const t of plan.tiers) {
+    walls.push(prismGeometry(t.points, TOP + t.y, t.h));
+    caps.push(prismGeometry(offsetPolygon(t.points, 0.08), TOP + t.y + t.h - 0.02, 0.16));
+    if (district === 'downtown') {
+      for (let k = t.floor0; k < t.floor0 + t.floors; k++) {
+        const base = floorsHeight(k), y = k === 0 ? base + 0.95 : base + 0.28, h = k === 0 ? 1.15 : 0.74;
+        if (y + h > t.y + t.h - 0.05) continue;
+        ((hash(`${plan.seed}:${k}`) % 100) / 100 < litFrac ? lit : dark).push(prismGeometry(offsetPolygon(t.points, 0.04), TOP + y, h));
+        if (k > t.floor0) trims.push(prismGeometry(offsetPolygon(t.points, 0.06), TOP + base - 0.05, 0.1));
+      }
+    } else {
+      const storey = t.h / (t.storeys || 1);
+      for (let k = 0; k < (t.storeys || 1); k++) {
+        ((hash(`${plan.seed}:${k}`) % 100) / 100 < litFrac + 0.2 ? lit : dark).push(prismGeometry(offsetPolygon(t.points, 0.04), TOP + k * storey + 0.72, Math.min(0.9, storey - 1.0)));
+        if (k > 0) wood.push(prismGeometry(offsetPolygon(t.points, 0.06), TOP + k * storey - 0.06, 0.12));
+      }
     }
-    for (const face of [-1, 1]) for (let z = -b.d / 2 + 0.7; z < b.d / 2 - 0.35; z += 1.35) {
-      box(group, 0.05, Math.max(0.5, b.h - 0.65), 0.8, face * (b.w / 2 + 0.035), TOP + b.y + b.h / 2, b.z + z, glass.dark || '#7899b0', 'riverfront-side-window', 0.01);
-    }
-    if (plan.shape === 'townhouse') {
-      box(group, b.w + 0.08, 0.12, b.d + 0.08, 0, TOP + b.h / 2, b.z, '#c89b6d', 'townhouse-storey-band');
-      box(group, 0.22, 1.8, 0.12, 0.58, TOP + 0.9, plan.side * (b.d / 2 + 0.07), '#c89b6d', 'townhouse-entry-timber');
-    }
-    if (plan.shape === 'terraced' && b !== plan.blocks.at(-1)) {
-      const z = b.z - plan.side * (b.d / 2 - 0.16);
-      box(group, b.w * 0.65, 0.2, 0.25, 0, TOP + b.y + b.h + 0.15, z, '#76ac70', 'water-facing-terrace');
-    }
+    // Planted water-facing edge on each roof: the terrace and the rooftop deck.
+    if (district === 'downtown') planters.push(prismGeometry(stripPolygon(t.back, 0.45, { x: 0, z: side }), TOP + t.y + t.h + 0.14, 0.3));
   }
-  if (plan.shape === 'deck-house') {
-    const z = -plan.side * (plan.D / 2 + 0.33);
-    box(group, plan.W, 0.12, 0.6, 0, TOP + 0.06, z, '#c89b6d', 'water-facing-deck');
-    box(group, plan.W, 0.08, 0.08, 0, TOP + 0.72, z - plan.side * 0.23, '#c89b6d', 'deck-rail');
-    for (const x of [-plan.W / 2 + 0.08, 0, plan.W / 2 - 0.08]) box(group, 0.07, 0.65, 0.07, x, TOP + 0.36, z - plan.side * 0.23, '#c89b6d', 'deck-post');
+  if (district === 'suburbs') {
+    // A curved timber deck along the bank, with posts and a rail on its outer edge.
+    const tier0 = plan.tiers[0], outer = tier0.back.map(p => ({ x: p.x, z: p.z - side * 0.85 }));
+    wood.push(prismGeometry(stripPolygon(tier0.back, 0.85, { x: 0, z: -side }), TOP, 0.12));
+    wood.push(prismGeometry(stripPolygon(outer, 0.07, { x: 0, z: side }), TOP + 0.64, 0.07));
+    for (let n = 0; n < outer.length; n += 2) wood.push(placed(new THREE.BoxGeometry(0.07, 0.6, 0.07), { x: outer[n].x, y: TOP + 0.37, z: outer[n].z + side * 0.04 }));
   }
-  box(group, 0.85, 1.65, 0.09, 0, TOP + 0.825, plan.side * (plan.D / 2 + 0.06), '#314b61', 'riverfront-door');
+  const mesh = (list, mat, name, outline = 0.03) => {
+    if (!list.length) return null;
+    const geometry = mergeParts(list); geometry.clearGroups();
+    const m = new THREE.Mesh(geometry, typeof mat === 'string' ? toonMaterial(mat) : mat);
+    m.name = name; m.castShadow = true; m.receiveShadow = true;
+    if (outline) addOutline(m, { thickness: outline });
+    group.add(m); return m;
+  };
+  mesh(walls, material, 'riverfront-wall', 0.04);
+  mesh(caps, palette.roof || trim, 'riverfront-roof');
+  mesh(lit, glass.lit || '#a9cddd', 'riverfront-window', 0);
+  mesh(dark, glass.dark || '#7899b0', 'riverfront-window-dark', 0);
+  mesh(trims, trim, 'riverfront-floor-trim', 0);
+  mesh(planters, PLANTER, 'water-facing-terrace');
+  mesh(wood, WOOD, district === 'suburbs' ? 'water-facing-deck' : 'riverfront-timber');
+  const doorZ = plan.front + side * 0.06;
+  box(group, 0.85, 1.65, 0.09, plan.entryX, TOP + 0.825, doorZ, palette.door || '#314b61', 'riverfront-door');
+  if (district === 'downtown') box(group, 1.9, 0.09, 0.7, plan.entryX, TOP + 1.84, plan.front + side * 0.35, palette.accent || '#3f7fb5', 'riverfront-canopy');
   group.traverse(node => { if (node.isMesh) Object.assign(node.userData, tag); });
   return group;
 }
@@ -92,7 +165,8 @@ export function buildRiverLandscape(parcel, { origin = { x: 0, z: 0 }, building 
   for (let x = parcel.bounds.x0 + 0.65; x < parcel.bounds.x1 - 0.5; x += 1.65) {
     for (let z = parcel.bounds.z0 + 0.6; z < parcel.bounds.z1 - 0.5; z += 1.6) {
       if (!fits(x, z, 0.5, 0.4)) continue;
-      if (building && Math.abs(x - building.origin.x) < building.W / 2 + 0.75 && Math.abs(z - building.origin.z) < building.D / 2 + 0.9) continue;
+      if (building?.bbox && x > building.bbox.x0 - 0.75 && x < building.bbox.x1 + 0.75 && z > building.bbox.z0 - 0.9 && z < building.bbox.z1 + 0.9) continue;
+      if (building && !building.bbox && Math.abs(x - building.origin.x) < building.W / 2 + 0.75 && Math.abs(z - building.origin.z) < building.D / 2 + 0.9) continue;
       if (r && Math.abs(z - (parcel.side > 0 ? r.z1 : r.z0)) < 0.9) continue;
       const lx = x - origin.x, lz = z - origin.z;
       if (!bench) {

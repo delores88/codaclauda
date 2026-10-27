@@ -43,7 +43,7 @@ test('walking and zoom stop at offset home walls missed by the centered tower fo
 
 test('the L-shaped home leaves its actual open courtyard walkable', t => {
   canvas(t);
-  const building = home(t, 1), point = { x: building.origin.x + 0.25, z: building.origin.z + 0.7, y: 1.2 };
+  const building = home(t, 2), point = { x: building.origin.x + 0.25, z: building.origin.z + 0.7, y: 1.2 };
   assert.ok(Math.abs(point.x - building.origin.x) < building.size.W / 2 && Math.abs(point.z - building.origin.z) < building.size.D / 2);
   assert.equal(solid(building, point), false);
   const moved = streetMove(point.x, point.z, 0, 0.2, { boxes: buildingStreetBoxes(building, radius, GROUND_Y) });

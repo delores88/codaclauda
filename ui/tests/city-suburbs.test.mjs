@@ -11,7 +11,7 @@ import { bridgeSpan, riverZ } from '../app/city/river-path.js';
 const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-5, `${a} != ${b}`);
 const local = (floors = 1) => ({ id: 'local:home', path: 'C:/home', name: 'Garden Notes', primaryLanguage: 'Python', metrics: { floors, footprint: 1 } });
 const samples = new Map();
-for (let i = -8; i <= 8 && samples.size < 4; i++) for (let j = 1; j <= 4; j++) {
+for (let i = -8; i <= 8 && samples.size < 6; i++) for (let j = 1; j <= 4; j++) {
   const plan = suburbPlan(local(), { i, j }); if (!samples.has(plan.variantName)) samples.set(plan.variantName, { i, j });
 }
 function canvas(t) {
@@ -54,15 +54,25 @@ function watchOwned(roots) {
   return () => assert.equal(disposed.size, resources.size);
 }
 
-test('four modern home variants and body palettes depend on the lot rather than project growth or renaming', () => {
+test('six modern home variants and materials are stable per project and lot, never by growth or renaming', () => {
   assert.deepEqual(new Set(samples.keys()), new Set(HOME_VARIANTS));
   for (const [name, cell] of samples) {
-    const small = suburbPlan(local(1), cell), big = suburbPlan({ ...local(24), name: 'Renamed', id: 'local:other' }, cell);
+    const small = suburbPlan(local(1), cell), big = suburbPlan({ ...local(24), name: 'Renamed' }, cell);
     assert.equal(small.variantName, name); assert.equal(big.variantName, name);
     assert.equal(small.body, big.body); assert.ok(HOME_BODY_COLORS.includes(small.body));
+    assert.equal(small.doorColor, big.doorColor);
     assert.ok(small.floors >= 1 && small.floors <= 2); assert.equal(big.floors, small.floors);
     assert.equal(big.H, small.H); assert.ok(big.W > small.W && big.D > small.D);
     assert.ok(big.garage.w > small.garage.w);
+  }
+});
+
+test('edge-neighbouring lots never share a home shape', () => {
+  for (let n = 0; n < 40; n++) {
+    const a = { id: `local:a${n}`, metrics: { floors: 1, footprint: 1 } }, b = { id: `local:b${n}`, metrics: { floors: 1, footprint: 1 } };
+    for (const [ci, cj] of [[0, 1], [3, 2], [-2, 1]]) for (const [di, dj] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
+      assert.notEqual(suburbPlan(a, { i: ci, j: cj }).variantName, suburbPlan(b, { i: ci + di, j: cj + dj }).variantName);
+    }
   }
 });
 

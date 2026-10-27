@@ -107,6 +107,55 @@ export function inscribedRectangle(bounds, edge, side, obstacles = []) {
   return best;
 }
 
+/** Plot-shaped building footprint in island coordinates. The street edge stays
+ * straight; the water edge follows the bank curve, sampled every half unit and
+ * kept `clear` inside the dry parcel and back from bridge approaches. Depth is
+ * capped so deep plots keep a building-sized footprint. Returns the longest run
+ * that keeps at least `minDepth`, or null when it is narrower than `minWidth`. */
+export function riverfrontFootprint(parcel, { setback = 1.3, clear = 0.7, minDepth = 3, maxDepth = 10.5, minWidth = 4, edge = 0.4 } = {}) {
+  const r = parcel?.rect; if (!r) return null;
+  const side = parcel.side, front = side > 0 ? r.z1 - setback : r.z0 + setback;
+  const xa = r.x0 + 0.6, xb = r.x1 - 0.6;
+  if (xb - xa < minWidth) return null;
+  const xs = [];
+  for (let x = xa; x < xb - 1e-9; x += 0.5) xs.push(x);
+  xs.push(xb);
+  const backAt = x => {
+    const b = riverBoundsAtX(x, PARCEL_MARGIN + INSET + clear);
+    let z = side > 0 ? b.max : b.min;
+    for (const o of parcel.obstacles || []) if (x > o.x0 - 0.6 && x < o.x1 + 0.6) z = side > 0 ? Math.max(z, o.z1 + 0.6) : Math.min(z, o.z0 - 0.6);
+    // Never past the far edge of the lot itself (plots far from the water are full-depth).
+    z = side > 0 ? Math.max(z, parcel.bounds.z0 + edge) : Math.min(z, parcel.bounds.z1 - edge);
+    const depth = side > 0 ? front - z : z - front;
+    return depth > maxDepth ? front - side * maxDepth : z;
+  };
+  const samples = xs.map(x => { const z = backAt(x); return { x, z, depth: side > 0 ? front - z : z - front }; });
+  let best = null;
+  for (let a = 0; a < samples.length;) {
+    if (samples[a].depth < minDepth) { a++; continue; }
+    let b = a; while (b + 1 < samples.length && samples[b + 1].depth >= minDepth) b++;
+    if (!best || samples[b].x - samples[a].x > best.x1 - best.x0) best = { a, b, x0: samples[a].x, x1: samples[b].x };
+    a = b + 1;
+  }
+  if (!best || best.x1 - best.x0 < minWidth - EPS) return null;
+  const back = samples.slice(best.a, best.b + 1);
+  // Counter-clockwise in x/z: along the street edge, then back along the water edge.
+  const street = side > 0 ? [{ x: best.x1, z: front }, { x: best.x0, z: front }] : [{ x: best.x0, z: front }, { x: best.x1, z: front }];
+  const water = (side > 0 ? back : [...back].reverse()).map(({ x, z }) => ({ x, z }));
+  const points = [...street, ...water];
+  const minD = Math.min(...back.map(s => s.depth)), maxD = Math.max(...back.map(s => s.depth));
+  return { points, front, back: back.map(({ x, z }) => ({ x, z })), x0: best.x0, x1: best.x1, minDepth: minD, maxDepth: maxD, side };
+}
+
+/** District footprint: roomy setbacks first, then a tighter fit for shallow plots. */
+export function riverfrontFootprintFor(parcel, district) {
+  const suburbs = district === 'suburbs';
+  // Homes keep room for their water-side deck inside the lot.
+  const edge = suburbs ? 1.4 : 0.4;
+  return riverfrontFootprint(parcel, { clear: suburbs ? 1.1 : 0.7, edge })
+    || riverfrontFootprint(parcel, { setback: 0.8, clear: suburbs ? 0.9 : 0.5, minDepth: suburbs ? 2.2 : 2.4, edge });
+}
+
 export function riverLot(i, j) {
   if (!Number.isInteger(i) || !Number.isInteger(j) || (!i && !j) || riverCellUsable(i, j)) return null;
   const name = `${i},${j}`;
