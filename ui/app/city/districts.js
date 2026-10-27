@@ -1,5 +1,6 @@
 /* District rules and plot enumeration. Pure: shared by placement, scenery and tests. */
 import { riverZ, riverCellUsable, RIVER_GRID_PITCH } from './river-path.js';
+import { riverLot } from './river-lots.js';
 export const DOWNTOWN = 'downtown';
 export const SUBURBS = 'suburbs';
 export const DISTRICTS = [DOWNTOWN, SUBURBS];
@@ -43,9 +44,10 @@ export function isUnbuilt(project) {
 /** HQ and river corridor cells have no project plot. Coordinates are lot indices. */
 export function districtForCell(cell, banks) {
   if (!cell || !Number.isInteger(cell.i) || !Number.isInteger(cell.j) || (cell.i === 0 && cell.j === 0)) return null;
-  if (!riverCellUsable(cell.i, cell.j)) return null;
+  const parcel = riverLot(cell.i, cell.j);
+  if (!riverCellUsable(cell.i, cell.j) && !parcel?.eligible) return null;
   const configuration = banksOf(banks);
-  return cell.j * RIVER_GRID_PITCH < riverZ(cell.i * RIVER_GRID_PITCH) ? configuration.negativeZ : configuration.positiveZ;
+  return (parcel ? parcel.side < 0 : cell.j * RIVER_GRID_PITCH < riverZ(cell.i * RIVER_GRID_PITCH)) ? configuration.negativeZ : configuration.positiveZ;
 }
 
 // Enumeration is memoized separately for each immutable bank configuration.

@@ -340,9 +340,9 @@ export class NpcManager {
           const { point, slot } = workSpot(where);
           goal = { type: 'rest', key: `rest:${where.id}:${slot}`, point, face: { x: point.x + point.fx * 4, z: point.z + point.fz * 4 } };
         }
-      } else if (a.status === 'active') {
-        const { point, slot } = workSpot(where);
-        goal = { type: 'work', key: `work:${where.id}:${slot}`, point, face: { x: point.x + point.fx * 4, z: point.z + point.fz * 4 } };
+      } else if (a.status === 'active' || where.unbuilt) {
+        const { point, slot } = workSpot(where), type = where.unbuilt ? 'rest' : 'work';
+        goal = { type, key: `${type}:${where.id}:${slot}`, point, face: { x: point.x + point.fx * 4, z: point.z + point.fz * 4 } };
       } else {
         const cell = where.cell;
         const points = occupied(where), start = (hash(npc.id) % 400) / 100;

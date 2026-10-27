@@ -1,3 +1,4 @@
+import { riverLot } from '../app/city/river-lots.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SlotMap, cellKey } from '../app/city/layout.js';
@@ -15,7 +16,7 @@ function assertLayout(result, projects) {
   for (const project of projects) {
     const cell = result.cells.get(project.id);
     assert.equal(districtForCell(cell, result.banks), districtOf(project));
-    assert.ok(riverCellUsable(cell.i, cell.j));
+    assert.ok(riverCellUsable(cell.i, cell.j) || riverLot(cell.i, cell.j)?.eligible);
   }
   for (const district of DISTRICTS) {
     assert.ok(result.emptyPlots[district].length >= 3);
@@ -70,7 +71,7 @@ test('bank configurations are immutable and their plot caches remain independent
 });
 
 test('six-to-two, two-to-six and tied inventories start at the smallest ring with three spare plots', () => {
-  for (const [repos, folders, expectedRing, expectedFree] of [[6, 2, 2, [4, 3]], [2, 6, 2, [3, 4]], [2, 2, 2, [8, 3]], [4, 4, 3, [17, 10]]]) {
+  for (const [repos, folders, expectedRing, expectedFree] of [[6, 2, 2, [8, 3]], [2, 6, 2, [3, 8]], [2, 2, 2, [12, 3]], [4, 4, 3, [23, 12]]]) {
     const projects = inventory(repos, folders), banks = districtBanks(chooseLargerDistrict(projects));
     const result = new SlotMap({ banks }).assign(projects);
     assert.equal(result.banks, banks); assert.equal(result.rings, expectedRing);

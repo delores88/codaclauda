@@ -1,3 +1,4 @@
+import { riverLot } from '../app/city/river-lots.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SlotMap, cellKey, pinOf, slotCell } from '../app/city/layout.js';
@@ -15,7 +16,7 @@ function checkFree(result) {
     assert.ok(result.emptyPlots[district].length >= 3, `${district} has at least three free plots`);
     for (const c of result.emptyPlots[district]) {
       assert.equal(districtForCell(c), district);
-      assert.ok(riverCellUsable(c.i, c.j));
+      assert.ok(riverCellUsable(c.i, c.j) || riverLot(c.i, c.j)?.eligible);
       assert.ok(!occupied.has(cellKey(c.i, c.j)));
       assert.ok(!result.reserved.has(cellKey(c.i, c.j)));
     }
@@ -37,7 +38,7 @@ test('districts distinguish local-only, linked GitHub, and unbuilt GitHub projec
   assert.equal(districtForCell({ i: 1, j: 1 }), 'suburbs');
   assert.equal(districtForCell({ i: 2, j: -2 }), 'downtown');
   assert.equal(districtForCell({ i: 1, j: -1 }), null);
-  assert.equal(districtForCell({ i: 1, j: 0 }), null);
+  assert.equal(districtForCell({ i: 1, j: 0 }), 'suburbs');
 });
 
 test('the empty city has at least three safe free plots in each river district', () => {
@@ -45,13 +46,13 @@ test('the empty city has at least three safe free plots in each river district',
   assert.equal(result.rings, 2);
   checkFree(result);
   assert.equal(result.emptyPlots.downtown.length, 5);
-  assert.equal(result.emptyPlots.suburbs.length, 10);
+  assert.equal(result.emptyPlots.suburbs.length, 14);
 });
 
-test('gentle river districts stay within one plot row of equal area through rings three to seven', () => {
+test('gentle river districts stay within two plot rows of equal area including riverfront parcels through rings three to seven', () => {
   for (let ring = 3; ring <= 7; ring++) {
     const downtown = districtCells(ring, DOWNTOWN), suburbs = districtCells(ring, SUBURBS);
-    assert.ok(Math.abs(downtown.length - suburbs.length) <= ring * 2 + 1, `ring${ring} counts ${downtown.length}/${suburbs.length}`);
+    assert.ok(Math.abs(downtown.length - suburbs.length) <= ring * 4 + 1, `ring${ring} counts ${downtown.length}/${suburbs.length}`);
     for (const district of DISTRICTS) {
       const current = districtCells(ring, district), expanded = districtCells(ring + 1, district);
       assert.deepEqual(expanded.slice(0, current.length), current, 'growth appends new perimeter cells without shifting existing plots');
@@ -61,9 +62,9 @@ test('gentle river districts stay within one plot row of equal area through ring
 
 test('fresh one-project cities and the six-repo/two-local preview mix use the smallest sufficient ring', () => {
   const fixtures = [
-    { projects: [both('single-repo')], rings: 2, free: [4, 10] },
-    { projects: [local('single-folder')], rings: 2, free: [5, 9] },
-    { projects: [...Array.from({ length: 6 }, (_, n) => repo(`preview-${n}`)), local('garden-notes'), local('workshop')], rings: 3, free: [8, 19] },
+    { projects: [both('single-repo')], rings: 2, free: [4, 14] },
+    { projects: [local('single-folder')], rings: 2, free: [5, 13] },
+    { projects: [...Array.from({ length: 6 }, (_, n) => repo(`preview-${n}`)), local('garden-notes'), local('workshop')], rings: 3, free: [10, 25] },
   ];
   for (const fixture of fixtures) {
     const result = new SlotMap().assign(fixture.projects);
@@ -294,15 +295,15 @@ test('river migration relocates intersecting footprints once and preserves every
   // Existing standing cells can predate the river update, as can persisted pins.
   for (const project of projects) slots.memo.set(project.id, pins[project.id]);
   const first = slots.assign(projects, { pins });
-  assert.deepEqual(new Set(first.migrated.map(m => m.id)), new Set(projects.slice(0, 2).map(p => p.id)));
-  for (const project of projects.slice(2)) assert.deepEqual(coordinates(first.cells.get(project.id)), pins[project.id]);
-  for (const cell of first.cells.values()) assert.ok(riverCellUsable(cell.i, cell.j));
+  assert.deepEqual(new Set(first.migrated.map(m => m.id)), new Set([projects[0].id]));
+  for (const project of projects.slice(1)) assert.deepEqual(coordinates(first.cells.get(project.id)), pins[project.id]);
+  for (const cell of first.cells.values()) assert.ok(riverCellUsable(cell.i, cell.j) || riverLot(cell.i, cell.j)?.eligible);
   Object.assign(pins, savedPins(first));
   const expanded = [...projects, ...Array.from({ length: 220 }, (_, n) => n % 2 ? local(`river-expansion-${n}`) : both(`river-expansion-${n}`))];
   const next = slots.assign(expanded, { pins });
   assert.deepEqual(next.migrated, []);
   for (const [id, cell] of first.cells) assert.deepEqual(next.cells.get(id), cell);
-  for (const cell of next.cells.values()) assert.ok(riverCellUsable(cell.i, cell.j));
+  for (const cell of next.cells.values()) assert.ok(riverCellUsable(cell.i, cell.j) || riverLot(cell.i, cell.j)?.eligible);
   checkFree(next);
   Object.assign(pins, savedPins(next));
   const reopened = new SlotMap().assign(expanded, { pins });

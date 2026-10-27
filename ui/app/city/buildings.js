@@ -1,3 +1,5 @@
+import { riverLot, pointInParcel } from './river-lots.js';
+import { riverBuildingPlan, buildRiverBuilding, buildRiverLandscape } from './river-lot-meshes.js';
 /* Procedural project buildings. A building is a stack of floors whose height comes
  * from project.metrics.floors and footprint from metrics.footprint; its architecture
  * is keyed to the primary language. BuildingManager diffs by project.id so a store
@@ -174,7 +176,7 @@ function sparkSign(map, options = {}) {
 }
 const sparkShared = {};
 const sparkFlag = () => sparkShared.flag ||= sharedMat(sparkSign(githubFlagTexture(), { side: THREE.DoubleSide }));
-const sparkLock = () => sparkShared.lock ||= sharedMat(sparkSign(lockTexture(), { transparent: true }));
+const sparkLock = () => sparkShared.lock ||= sharedMat(sparkSign(lockTexture(), { alphaTest: 0.1 }));
 export const sparkIsOffline = () => sparkOffline;
 /** Breathing glow for busy Spark buildings and the day/night glow of the Spark side (shared
  * materials: one update per frame for the whole side). */
@@ -352,8 +354,14 @@ export class Building {
     this.project = project;
     const district = !this.mirror && this.env.districts ? districtOf(project) : null;
     const unbuilt = Boolean(district && isUnbuilt(project));
-    const homePlan = district === 'suburbs' ? suburbPlan(project, this.cell) : null;
-    const size = homePlan ? { W: homePlan.W, D: homePlan.D, H: homePlan.H, floors: homePlan.floors, footprint: homePlan.footprint, variant: homePlan.variant, variantName: homePlan.variantName } : buildingSize(project);
+    this.parcel = district ? riverLot(this.cell.i, this.cell.j) : null;
+    if (!this.parcel?.eligible) this.parcel = null;
+    this.riverPlan = this.parcel ? riverBuildingPlan(project, this.parcel, district) : null;
+    const center = cellCenter(this.cell.i, this.cell.j);
+    this.origin = this.riverPlan?.origin || { x: center.x, z: center.z + CZ };
+    this.group.position.set(this.origin.x, 0, this.origin.z);
+    const homePlan = district === 'suburbs' && !this.riverPlan ? suburbPlan(project, this.cell) : null;
+    const size = this.riverPlan || (homePlan ? { W: homePlan.W, D: homePlan.D, H: homePlan.H, floors: homePlan.floors, footprint: homePlan.footprint, variant: homePlan.variant, variantName: homePlan.variantName } : buildingSize(project));
     const style = this.mirror ? sparkStyle(styleFor(project)) : styleFor(project, district);
     if (homePlan) style.body = homePlan.body;
     const m = project.metrics || {};
@@ -403,6 +411,12 @@ export class Building {
 
   buildTower() {
     if (this.unbuilt) { this.buildUnbuilt(); return; }
+    if (this.riverPlan) {
+      this.bodyMaterial = toonMaterial(this.style.body, { cache: false });
+      const shell = buildRiverBuilding(this.riverPlan, this.bodyMaterial, this.district, { buildingId: this.id });
+      this.tower.add(shell); this.body = shell.children[0]; this.pickables.push(...shell.children);
+      this.roofTop = this.roofSurface = PAD_TOP + this.size.H + 0.15; this.mountTicker(); return;
+    }
     if (this.suburbs) { this.buildHome(); return; }
     const { W, D, H, floors } = this.size, s = this.style, mirror = this.mirror;
     const tag = mirror ? { sparkBuildingId: this.id } : { buildingId: this.id };
@@ -520,7 +534,7 @@ export class Building {
       roofTop = Math.max(roofTop, top + 2.3);
     }
     if (this.project.private) {
-      const sign = new THREE.Mesh(new THREE.CircleGeometry(0.38, 24), mirror ? sparkLock() : new THREE.MeshBasicMaterial({ map: lockTexture(), transparent: true }));
+      const sign = new THREE.Mesh(new THREE.CircleGeometry(0.38, 24), mirror ? sparkLock() : new THREE.MeshBasicMaterial({ map: lockTexture(), alphaTest: 0.1 }));
       sign.position.set(W / 2 - 0.55, top + 0.75, D / 2 - 0.1);
       batch.add('#7d6a5a', placed(new THREE.BoxGeometry(0.08, 0.5, 0.08), { x: W / 2 - 0.55, y: top + 0.25, z: D / 2 - 0.15 }));
       this.tower.add(sign);
@@ -533,8 +547,8 @@ export class Building {
     // Name plaque above the door (Spark: the same name on the Spark plaque style).
     const plaqueW = Math.min(W * 0.84, 3.4), plaqueH = plaqueW / 4;
     let plaqueMaterial;
-    if (mirror) { plaqueMaterial = sparkSign(plaqueTexture(this.project.name, { accent: SPARK_GREEN }), { transparent: true }); this.signs.push(plaqueMaterial); }
-    else plaqueMaterial = new THREE.MeshBasicMaterial({ map: plaqueTexture(this.project.name, { accent: this.project.color }), transparent: true });
+    if (mirror) { plaqueMaterial = sparkSign(plaqueTexture(this.project.name, { accent: SPARK_GREEN }), { alphaTest: 0.1 }); this.signs.push(plaqueMaterial); }
+    else plaqueMaterial = new THREE.MeshBasicMaterial({ map: plaqueTexture(this.project.name, { accent: this.project.color }), alphaTest: 0.1 });
     const plaque = new THREE.Mesh(new THREE.PlaneGeometry(plaqueW, plaqueH), plaqueMaterial);
     // One floor: the ticker band crosses the sign's top, so the sign stands just in front of it.
     plaque.position.set(0, PAD_TOP + (s.key === 'storefront' ? 2.32 : 2.18), D / 2 + (floors === 1 && this.tickerInfo ? TICKER.off + 0.05 : 0.07));
@@ -552,7 +566,7 @@ export class Building {
     this.tower.add(this.home.group); this.body = this.home.body; this.pickables.push(...this.home.meshes);
     this.roofTop = this.home.roofY + 0.15; this.roofSurface = this.home.roofY;
     const width = Math.min(1.65, this.suburbs.entry.w * 0.65);
-    const plaque = new THREE.Mesh(new THREE.PlaneGeometry(width, width / 4), new THREE.MeshBasicMaterial({ map: plaqueTexture(this.project.name, { accent: HOME_WOOD }), transparent: true }));
+    const plaque = new THREE.Mesh(new THREE.PlaneGeometry(width, width / 4), new THREE.MeshBasicMaterial({ map: plaqueTexture(this.project.name, { accent: HOME_WOOD }), alphaTest: 0.1 }));
     plaque.position.copy(this.home.plaque); plaque.userData = tag;
     this.tower.add(plaque); this.pickables.push(plaque); this.plaque = plaque;
     this.mountTicker();
@@ -581,7 +595,8 @@ export class Building {
     }
     timber.build(this.tower, { tag, outline: 0.015 });
     const sign = new THREE.Group(); sign.name = `unbuilt-sign:${this.id}`;
-    sign.position.set(0, PAD_TOP, 5.15 - CZ);
+    sign.position.set(0, PAD_TOP, this.riverPlan ? this.riverPlan.streetZ : 5.15 - CZ);
+    if (this.riverPlan?.side < 0) sign.rotation.y = Math.PI;
     const plaqueW = Math.min(W * 0.65, 2.6), plaqueH = plaqueW / 4;
     const posts = new THREE.Mesh(mergeParts([-plaqueW * 0.35, plaqueW * 0.35].map(x => placed(new THREE.BoxGeometry(0.1, 0.8, 0.1), { x, y: 0.4 }))), toonMaterial('#b58c62'));
     addOutline(posts, { thickness: 0.02 }); sign.add(posts);
@@ -705,6 +720,10 @@ export class Building {
   buildPad() {
     for (const child of [...this.padGroup.children]) { this.padGroup.remove(child); disposeObject(child); }
     this.downtownBase = null;
+    if (this.parcel) {
+      this.pad = buildRiverLandscape(this.parcel, { origin: this.origin, building: this.riverPlan });
+      this.padGroup.add(this.pad); return;
+    }
     if (this.suburbs) {
       const yard = buildSuburbYard(this.suburbs, { baseY: PAD_TOP, tag: { buildingId: this.id }, centerZ: -CZ });
       this.padGroup.add(yard); this.pad = yard; return;
@@ -737,6 +756,7 @@ export class Building {
     else if (this.scaffold) { this.tower.remove(this.scaffold); disposeObject(this.scaffold); this.scaffold = null; this.jib = null; this.rigTip = null; }
   }
   buildScaffold() {
+    if (this.riverPlan) return; // Keep construction props inside the fitted parcel.
     if (this.suburbs) { if (this.active) this.buildHomeActivity(); return; }
     if (this.mirror) { this.buildRig(); return; }
     if (this.scaffold) { this.tower.remove(this.scaffold); disposeObject(this.scaffold); }
@@ -799,20 +819,22 @@ export class Building {
     return new THREE.Vector3(-this.size.W * 0.25, this.roofSurface || PAD_TOP + this.size.H + 0.12, this.size.D * 0.2);
   }
   get center() { return { x: this.origin.x, z: this.origin.z }; }
-  get door() { return this.home ? { x: this.origin.x + this.home.door.x, z: this.origin.z + this.home.door.z + 0.2 } : { x: this.origin.x, z: this.origin.z + this.size.D / 2 + 0.3 }; }
+  get door() { if (this.riverPlan) return { x: this.origin.x, z: this.origin.z + this.riverPlan.side * (this.size.D / 2 + 0.2) }; return this.home ? { x: this.origin.x + this.home.door.x, z: this.origin.z + this.home.door.z + 0.2 } : { x: this.origin.x, z: this.origin.z + this.size.D / 2 + 0.3 }; }
   /** Work spot k in front of the facade, facing the building. */
   workSpot(k) {
-    if (this.unbuiltSign) return { x: this.origin.x + ((k % 5) - 2) * 0.48, z: this.origin.z + this.unbuiltSign.position.z + 0.42 + Math.floor(k / 5) * 0.45, fx: 0, fz: -1 };
+    if (this.unbuiltSign) return { x: this.origin.x + ((k % 5) - 2) * 0.48, z: this.origin.z + this.unbuiltSign.position.z + (this.riverPlan?.side || 1) * (0.42 + Math.floor(k / 5) * 0.45), fx: 0, fz: -(this.riverPlan?.side || 1) };
+    if (this.riverPlan) return { x: this.origin.x + ((k % 5) - 2) * 0.5, z: this.origin.z + this.riverPlan.streetZ + this.riverPlan.side * 0.45, fx: 0, fz: -this.riverPlan.side };
     if (this.home) return { x: this.door.x + ((k % 3) - 1) * 0.4, z: this.door.z + 0.6 + Math.floor(k / 3) * 0.5, fx: 0, fz: -1 };
     const offsets = [0, -1.3, 1.3, -2.6, 2.6, -0.65, 0.65, -1.95, 1.95];
     const limit = this.size.W / 2 - 0.25;
     const x = Math.max(-limit, Math.min(limit, offsets[k % offsets.length]));
     return { x: this.origin.x + x, z: this.origin.z + this.size.D / 2 + 0.95 + Math.floor(k / offsets.length) * 0.8, fx: 0, fz: -1 };
   }
-  get seats() { return this.suburbs ? [] : lotSeats(this.cell.i, this.cell.j); }
-  get lot() { return { i: this.cell.i, j: this.cell.j, padW: this.suburbs ? HOME_LOT_SIZE : this.size.W + 1.2, padD: this.suburbs ? HOME_LOT_SIZE : this.size.D + 1.2, cz: this.suburbs ? 0 : CZ, district: this.district, ...(this.suburbs ? { driveway: { ...this.suburbs.driveway } } : {}) }; }
+  get seats() { return this.unbuilt || this.suburbs || this.riverPlan ? [] : lotSeats(this.cell.i, this.cell.j); }
+  get lot() { if (this.riverPlan) return { i: this.cell.i, j: this.cell.j, riverfront: true, padW: this.size.W, padD: this.size.D, cz: this.origin.z - this.cell.j * 16, district: this.district }; return { i: this.cell.i, j: this.cell.j, padW: this.suburbs ? HOME_LOT_SIZE : this.size.W + 1.2, padD: this.suburbs ? HOME_LOT_SIZE : this.size.D + 1.2, cz: this.suburbs ? 0 : CZ, district: this.district, ...(this.suburbs ? { driveway: { ...this.suburbs.driveway } } : {}) }; }
   /** Surface height in island coordinates, including the animated yard scale. */
   groundAt(x, z) {
+    if (this.parcel) return pointInParcel({ x, z }, this.parcel) ? 0.2 : null;
     if ((!this.suburbs && !this.downtownBase) || !this.padGroup) return null;
     const scale = this.padGroup.scale;
     if (scale.x <= 0 || scale.z <= 0) return null;
@@ -834,6 +856,8 @@ export class Building {
   }
   /** Actual home wings in island coordinates for walking and wheel-zoom collision. */
   get collisionBoxes() {
+    if (this.unbuilt) return [];
+    if (this.riverPlan) return this.riverPlan.blocks.map(b => ({ x0: this.origin.x - b.w / 2 - 0.1, x1: this.origin.x + b.w / 2 + 0.1, z0: this.origin.z + b.z - b.d / 2 - 0.1, z1: this.origin.z + b.z + b.d / 2 + 0.1, y0: PAD_TOP + b.y, y1: PAD_TOP + b.y + b.h + 0.2 }));
     if (!this.suburbs) return null;
     const boxes = this.suburbs.blocks.map(b => ({ x0: this.origin.x + b.x - b.w / 2 - 0.14, x1: this.origin.x + b.x + b.w / 2 + 0.14,
       z0: this.origin.z + b.z - b.d / 2 - 0.14, z1: this.origin.z + b.z + b.d / 2 + 0.14, y0: PAD_TOP + b.bottom, y1: PAD_TOP + b.bottom + b.h + 0.2 }));

@@ -1,3 +1,4 @@
+import { riverLot } from '../app/city/river-lots.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { riverRoute, riverStep, riverWalkable, riverSegmentWalkable } from '../app/city/river-navigation.js';
@@ -22,7 +23,8 @@ function supported(from, route, bridges = crossings) {
 test('routes between districts preserve dry endpoints and cross the river on supported bridges', () => {
   const cells = DISTRICTS.flatMap(d => districtCells(4, d));
   for (let i = 0; i < cells.length; i += 4) for (let j = 1; j < cells.length; j += 7) {
-    const from = { x: cells[i].i * 16, z: cells[i].j * 16 + 5.8 }, to = { x: cells[j].i * 16, z: cells[j].j * 16 + 5.8 };
+    const doorstep = c => { const p = riverLot(c.i, c.j); return { x: c.i * 16, z: c.j * 16 + (p?.side || 1) * 5.8 }; };
+    const from = doorstep(cells[i]), to = doorstep(cells[j]);
     const route = riverRoute(from, planPath(from, to), crossings);
     assert.deepEqual(route.at(-1), to); supported(from, route);
   }

@@ -84,7 +84,7 @@ test('river clearings replace unsafe lots and every decor footprint clears water
     const lots = new Map();
     for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) if (riverCellUsable(i, j) && (i + j) % 3 === 0) lots.set(`${i},${j}`, { i, j, padW: 5.8, padD: 5.4, cz: -0.3 });
     const decor = buildDecor(rings, lots, islandHalf(rings), { districts: true, banks: districtBanks(larger) });
-    assert.ok(decor.getObjectByName('riparian-clearings'));
+    assert.ok(decor.getObjectByName('riverfront-landscape'));
     assert.ok(decor.getObjectByName('downtown-parks'));
     let pieces = 0;
     renderedBounds(decor, box => {
@@ -220,7 +220,7 @@ test('lot surfaces, district lamps and rim trees follow the saved bank choice', 
     const counts = { [DOWNTOWN]: 0, [SUBURBS]: 0 };
     for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
       const district = districtForCell({ i, j }, banks);
-      if (!district) continue;
+      if (!district || !riverCellUsable(i, j)) continue;
       vertical.ray.origin.set(i * 16, 10, j * 16);
       const hits = vertical.intersectObject(roads, true).sort((a, b) => a.distance - b.distance);
       assert.ok(hits.length, 'every eligible lot has a ground surface');

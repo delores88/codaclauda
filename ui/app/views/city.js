@@ -1,3 +1,4 @@
+import { riverLot, pointInParcel } from '../city/river-lots.js';
 /* City view: a playful 3D "project city". Every visible project is a building on a
  * floating island; agents walk between them as little people. HTML overlays (labels,
  * tags, bubbles, panels, toolbar) sit on top of the WebGL canvas. */
@@ -1135,6 +1136,8 @@ export class CityView {
     if ((!i && !j) || Math.max(Math.abs(i), Math.abs(j)) > this.rings) return null;
     const c = cellCenter(i, j);
     if (Math.abs(ground.x - c.x) > LOT_HALF - 0.15 || Math.abs(ground.z - c.z) > LOT_HALF - 0.15) return null;
+    const parcel = riverLot(i, j);
+    if (parcel && !pointInParcel(ground, parcel)) return null;
     const key = cellKey(i, j);
     if (this.occupied.has(key)) return null;
     const reservedBy = this.reserved.get(key);
@@ -1293,12 +1296,12 @@ export class CityView {
     this.renderToolbarState();
   }
   onClick(target) {
-    if (target?.kind === 'building' && !this.islands?.current && this.world.side === 'pc') {
+    // Talk mode: another agent switches the conversation; empty ground (or anything else but you) leaves it.
+    if (this.talk) { if (target?.kind === 'agent') this.enterTalk(target.id); else if (target?.kind !== 'owner') this.exitTalk(); return; }
+    if (target?.kind === 'building' && !this.islands?.current && this.world?.side === 'pc') {
       const project = this.buildings.get(target.id)?.project;
       if (project && isUnbuilt(project)) { this.cloneOutline(project); return; }
     }
-    // Talk mode: another agent switches the conversation; empty ground (or anything else but you) leaves it.
-    if (this.talk) { if (target?.kind === 'agent') this.enterTalk(target.id); else if (target?.kind !== 'owner') this.exitTalk(); return; }
     if (!target) { this.select(null); return; }
     if (target.kind === 'boat') { this.select(target); this.focusSelection(); return; }
     if (target.kind === 'bridge') { this.select(null); if (!this.street) this.npcs.walkOwner(target.x, target.z); return; }

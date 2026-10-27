@@ -1,3 +1,5 @@
+import { riverLot } from './river-lots.js';
+import { buildRiverLandscape } from './river-lot-meshes.js';
 /* Static-ish scenery for the project city: the floating island, road network,
  * lot lawns and sidewalks, trees/flowers/benches/lamps, the HQ plaza and the sky.
  * Builders return plain groups; world.js owns lifetime and lighting. */
@@ -304,7 +306,14 @@ export function buildDecor(rings, lots, half, { districts = false, banks } = {})
   for (let i = -rings; i <= rings; i++) for (let j = -rings; j <= rings; j++) {
     if (i === 0 && j === 0) continue;
     const c = cellCenter(i, j), r = seeded(`lot:${i},${j}`);
-    if (districts && !riverCellUsable(i, j)) { clearings.push(c); continue; }
+    if (districts && !riverCellUsable(i, j)) {
+      if (!occupied.has(`${i},${j}`)) {
+        const parcel = riverLot(i, j);
+        if (parcel?.polygons.length) group.add(buildRiverLandscape(parcel));
+        else clearings.push(c);
+      }
+      continue;
+    }
     // Vacant Downtown lots are formal green parks; occupied towers keep their bench.
     if (districts && districtForCell({ i, j }, banks) === DOWNTOWN) {
       if (occupied.has(`${i},${j}`)) benches.push([c.x + BENCH_OFFSET.x, c.z + BENCH_OFFSET.z, 0]);
@@ -630,7 +639,12 @@ export function buildPlotMarker() {
   for (const m of [ring, fill, curtain]) { m.raycast = () => {}; m.renderOrder = 3; m.userData.noOutline = true; group.add(m); }
   return {
     group,
-    show(i, j) { const c = cellCenter(i, j); group.position.set(c.x, 0, c.z); group.visible = true; },
+    show(i, j) {
+      const parcel = riverLot(i, j), r = parcel?.rect, c = cellCenter(i, j);
+      group.position.set(r ? (r.x0 + r.x1) / 2 : c.x, parcel ? 0.1 : 0, r ? (r.z0 + r.z1) / 2 : c.z);
+      group.scale.set(r ? (r.x1 - r.x0 - 0.15) / (half * 2) : 1, 1, r ? (r.z1 - r.z0 - 0.15) / (half * 2) : 1);
+      group.visible = true;
+    },
     hide() { group.visible = false; },
     update(elapsed, reduced) {
       if (!group.visible) return;

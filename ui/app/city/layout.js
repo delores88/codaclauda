@@ -8,6 +8,8 @@
 import { hash } from '../avatar/spec.js';
 import { DISTRICTS, MIN_EMPTY_PLOTS, districtBanks, districtOf, districtForCell, districtCells, districtSlot, projectIds } from './districts.js';
 
+import { riverLot } from './river-lots.js';
+
 export const PITCH = 16;            // distance between lot centres
 export const ASPHALT = 3.0;         // drivable width
 export const ROAD = 4.6;            // asphalt + both sidewalks
@@ -114,12 +116,17 @@ export class SlotMap {
       if (districtForCell(c, banks) === x.district) claim(x, c);
     }
     const rest = info.filter(x => !x.done && !(hold && !x.oldPin && !x.oldMem)).sort((a, b) => hash(a.p.id) - hash(b.p.id) || a.p.id.localeCompare(b.p.id));
+    // Fill full lots in the current district extent, then its riverfront parcels,
+    // before opening another ring. Explicit pins and standing buildings came first.
+    let allocationRings = Math.max(this.rings, ...info.filter(x => x.done).map(x => x.cell.ring));
     for (const x of rest) {
-      let firstRing = 1, initial = districtCells(firstRing, x.district, banks).length;
-      while (!initial) initial = districtCells(++firstRing, x.district, banks).length;
-      const start = hash(x.p.id) % initial;
-      let slot = 0;
-      while (!claim(x, districtSlot(slot < initial ? (slot + start) % initial : slot, x.district, banks))) slot++;
+      for (;;) {
+        const free = districtCells(allocationRings, x.district, banks).filter(c => !taken.has(cellKey(c.i, c.j)));
+        const full = free.filter(c => !riverLot(c.i, c.j));
+        const candidates = full.length ? full : free;
+        if (candidates.length) { claim(x, candidates[hash(x.p.id) % candidates.length]); break; }
+        allocationRings++;
+      }
     }
     let rings = this.rings;
     for (const c of cells.values()) rings = Math.max(rings, c.ring);

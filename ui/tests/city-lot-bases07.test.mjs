@@ -1,3 +1,4 @@
+import { riverLot } from '../app/city/river-lots.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { THREE } from '../app/city/toon.js';
@@ -29,7 +30,7 @@ function boundaryLots(banks) {
     const cells = [];
     for (let i = -rings; i <= rings; i++) {
       const candidates = [];
-      for (let j = -rings; j <= rings; j++) if (districtForCell({ i, j }, banks) === DOWNTOWN) candidates.push(j);
+      for (let j = -rings; j <= rings; j++) if (!riverLot(i, j) && districtForCell({ i, j }, banks) === DOWNTOWN) candidates.push(j);
       candidates.sort((a, b) => Math.abs(a * PITCH - riverZ(i * PITCH)) - Math.abs(b * PITCH - riverZ(i * PITCH)));
       if (!candidates.length) continue;
       const j = candidates[0];
