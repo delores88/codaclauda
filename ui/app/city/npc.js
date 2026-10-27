@@ -172,28 +172,43 @@ export class NpcManager {
   }
   ownerAction(action) { if (this.owner && this.owner.action !== action) { this.owner.action = action; this.owner.person.setAction(action); } }
 
-  /** Choose one clear arrival spot on a project's lot before its session exists.
-   * The reservation keeps later goal allocation from putting another person there. */
-  reserveTalkSpot(projectId) {
+  /** Safe alternative conversation anchors on this lot; observing them never reserves or moves anything. */
+  talkSpotCandidates(projectId, { excludeId = null, limit = 6, spread = false } = {}) {
+    if (!Number.isFinite(limit) || limit < 1) return [];
+    const count = Math.floor(limit);
     const id = this.resolveProjectId(projectId) || projectId;
     const building = this.buildings.get(id) || this.buildings.get(projectId);
-    if (!building) return null;
+    if (!building) return [];
     const planters = talkPlanterBoxes([building]);
     const center = cellCenter(building.cell.i, building.cell.j);
-    const points = [...this.npcs.values()].flatMap(npc => [npc.pos, ...(npc.path.length && npc.goal?.point ? [npc.goal.point] : [])]);
+    const points = [...this.npcs.values()].filter(npc => npc.id !== excludeId)
+      .flatMap(npc => [npc.pos, ...(npc.path.length && npc.goal?.point ? [npc.goal.point] : [])]);
     if (this.owner) points.push(this.owner.pos);
+    const candidates = [];
     const clear = point => point && Number.isFinite(point.x) && Number.isFinite(point.z)
       && Math.abs(point.x - center.x) <= WALK_HALF + 1e-8 && Math.abs(point.z - center.z) <= WALK_HALF + 1e-8
       && !planters.some(box => inTalkBox(point, box))
-      && points.every(p => Math.hypot(p.x - point.x, p.z - point.z) >= .8);
-    let point;
-    for (let slot = 0; slot < 64 && !point; slot++) { const candidate = building.workSpot(slot); if (clear(candidate)) point = candidate; }
-    for (let slot = 0; slot < 256 && !point; slot++) {
-      const candidate = perimeterPoint(building.cell.i, building.cell.j, (slot + .5) * 4 / 256);
-      if (clear(candidate)) point = candidate;
+      && points.every(p => Math.hypot(p.x - point.x, p.z - point.z) >= .8)
+      && candidates.every(p => Math.hypot(p.x - point.x, p.z - point.z) >= .8);
+    const consider = point => {
+      if (clear(point)) candidates.push({ x: point.x, z: point.z, projectId: building.id });
+    };
+    if (spread) for (const side of [.5, 1.5, 2.5, 3.5]) {
+      if (candidates.length >= count) break;
+      consider(perimeterPoint(building.cell.i, building.cell.j, side));
     }
+    for (let slot = 0; slot < 64 && candidates.length < count; slot++) consider(building.workSpot(slot));
+    for (let slot = 0; slot < 256 && candidates.length < count; slot++) {
+      consider(perimeterPoint(building.cell.i, building.cell.j, (slot + .5) * 4 / 256));
+    }
+    return candidates;
+  }
+  /** Choose one clear arrival spot on a project's lot before its session exists.
+   * The reservation keeps later goal allocation from putting another person there. */
+  reserveTalkSpot(projectId) {
+    const point = this.talkSpotCandidates(projectId, { limit: 1 })[0];
     if (!point) return null;
-    return this.talkReservation = { x: point.x, z: point.z, projectId: building.id };
+    return this.talkReservation = point;
   }
   /** A caller leaving/cancelling its pending start releases only its own reservation. */
   releaseTalkSpot(point) {

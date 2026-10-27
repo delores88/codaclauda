@@ -52,7 +52,7 @@ export function instancedOutline(mesh, thickness = 0.05) {
 }
 
 /* ---------- canvas textures ---------- */
-function canvasTexture(width, height, draw) {
+function canvasTexture(width, height, draw, cityText = false) {
   const canvas = document.createElement('canvas');
   canvas.width = width; canvas.height = height;
   const g = canvas.getContext('2d');
@@ -60,6 +60,7 @@ function canvasTexture(width, height, draw) {
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.anisotropy = 4;
+  if (cityText) texture.userData.cityText = true;
   return texture;
 }
 function roundRect(g, x, y, w, h, r) { g.beginPath(); g.roundRect ? g.roundRect(x, y, w, h, r) : g.rect(x, y, w, h); }
@@ -80,7 +81,7 @@ export function plaqueTexture(text, { accent = '#8b7bff', gradient = false } = {
       g.fillStyle = grad;
     } else g.fillStyle = INK;
     g.fillText(label, w / 2, h / 2 - 6);
-  });
+  }, true);
 }
 /** Little GitHub flag: dark cloth with the stroked mark (same path as the app icon). */
 export function githubFlagTexture() {
@@ -141,7 +142,7 @@ export function sideTexture(kind) {
     if (spark) g.fillStyle = '#76b900';
     else { const bar = g.createLinearGradient(168, 0, w - 40, 0); bar.addColorStop(0, '#ff7a4d'); bar.addColorStop(0.5, '#9a5cff'); bar.addColorStop(1, '#12b89a'); g.fillStyle = bar; }
     roundRect(g, 168, h - 36, w - 208, 9, 4.5); g.fill();
-  });
+  }, true);
 }
 /** Clock face for the HQ tower. */
 export function clockTexture() {

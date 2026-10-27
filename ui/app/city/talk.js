@@ -18,9 +18,10 @@ const inBox = (x, z, b) => x > b.x0 && x < b.x1 && z > b.z0 && z < b.z1;
 /** Where Ben stands to talk to an agent at a ({ x, z }, island space): `gap` from it on the side Ben
  * comes from (facing: a seated agent's yaw, so Ben stands in front of the bench), clear of every box
  * ({ x0, x1, z0, z1, low? }) and inside |x|, |z| <= limit, with room behind him for the camera (solid
- * boxes only; the camera pulls in when a wall is close). Returns { x, z, yaw, heading, back, side }: yaw
+ * boxes only; the camera pulls in when a wall is close). cameraClearance:false leaves camera clearance
+ * to a caller fitting a different shot, while retaining standing-position checks. Returns { x, z, yaw, heading, back, side }: yaw
  * points from the agent to Ben (forward is (sin, cos)); heading is Ben's facing (toward the agent). */
-export function talkSpot(a, from, { boxes = [], limit = Infinity, facing = null, gap = STAGE.gap, back = STAGE.back, side = STAGE.side } = {}) {
+export function talkSpot(a, from, { boxes = [], limit = Infinity, facing = null, gap = STAGE.gap, back = STAGE.back, side = STAGE.side, cameraClearance = true } = {}) {
   const out = (x, z, margin = 0) => Math.abs(x) > limit + margin || Math.abs(z) > limit + margin;
   const solid = boxes.filter(b => !b.low);
   const base = Number.isFinite(facing) ? facing : Math.atan2(from.x - a.x, from.z - a.z) || 0;
@@ -29,6 +30,7 @@ export function talkSpot(a, from, { boxes = [], limit = Infinity, facing = null,
     const yaw = base + turn, ux = Math.sin(yaw), uz = Math.cos(yaw);
     const x = a.x + ux * gap, z = a.z + uz * gap;
     if (out(x, z) || boxes.some(b => inBox(x, z, b))) continue;
+    if (!cameraClearance) return { x, z, yaw, heading: yaw + Math.PI, back, side };
     for (const k of [1, 0.75, 0.5]) {
       const cx = x + ux * back * k + uz * side, cz = z + uz * back * k - ux * side;   // behind Ben, off his right shoulder
       if (!out(cx, cz, 6) && !solid.some(b => inBox(cx, cz, b))) return { x, z, yaw, heading: yaw + Math.PI, back: back * k, side };

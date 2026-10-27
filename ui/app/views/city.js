@@ -15,7 +15,7 @@ import { SparkCity, FOUNDRY, DECK_Y, jobLabel } from '../city/spark.js';
 import { TalkPanel, talkSpot, sayLine, STAGE } from '../city/talk.js';
 import { fitTalkShot, talkFacingPoint, talkVisibleRect, talkFigureTargets, talkWallHits, talkSceneMeshes, talkSceneHits, cutawayTalkMeshes } from '../city/talk-frame.js';
 import { layoutTalkBubbles } from '../city/talk-bubbles.js';
-import { talkSignOverlap } from '../city/talk-signs.js';
+import { talkSignOverlap, talkTextBounds, betterTalkComposition } from '../city/talk-signs.js';
 import { talkOccludingPeople } from '../city/talk-occlusion.js';
 import { talkPlanterBoxes } from '../city/talk-placement.js';
 import { IslandMode } from '../city/portal.js';
@@ -2268,6 +2268,7 @@ export class CityView {
     if (agent?.kind !== 'session' || !this.npcs.position({ kind: 'agent', id: agent.id })) return false;
     if (t.pendingSpot && !this.npcs.stageTalkAgent(agent.id, t.pendingSpot)) return false;
     if (t.id !== agent.id) this.npcs.hold(t.id, false);
+    t.arrivalSpot = t.pendingSpot ? t.spot : null; // preserve the owner only when the NPC joins the exact reserved point
     t.id = agent.id; t.pending = null; t.phase = 'wait'; t.greeted = false;
     this.npcs.hold(t.id, true);
     this.setTalkMarkers(t, true);
@@ -2372,47 +2373,74 @@ export class CityView {
     t.restoreCutaway?.(); t.restoreCutaway = null;
     t.phase = 'on';
     this.npcs.hold(t.id, true);
-    const reduced = this.reduced(), boxes = [...this.streetBoxes(), ...talkPlanterBoxes(this.buildings.list || [])], limit = world.half - 2;
+    const reduced = this.reduced(), wallBoxes = this.streetBoxes();
+    const boxes = [...wallBoxes, ...talkPlanterBoxes(this.buildings.list || [])], limit = world.half - 2;
     const near = owner && Math.hypot(owner.pos.x - a.x, owner.pos.z - a.z) < 9;
     t.seated = this.npcs.seated(t.id);
     // A bottom sheet leaves a short strip of the view: stand the camera further back so the two still fit.
     const vis = this.talkFraming().vis, k = Math.min(1.6, Math.max(1, Math.sqrt(world.size.h / Math.max(1, vis.y1 - vis.y0))));
-    const from = near ? owner.pos : this.cameraLocal(), baseYaw = Math.atan2(from.x - a.x, from.z - a.z);
-    const ground = this.npcs.surfaceY(a.x, a.z);
+    const from = near ? owner.pos : this.cameraLocal();
     const frame = this.talkFraming();
-    const meshes = talkSceneMeshes(world.land, [owner.person.object, this.npcs.personOf(agentT)?.object]);
-    const signs = (this.buildings.list || []).filter(b => b.plaque?.visible)
-      .map(b => new THREE.Box3().setFromObject(b.plaque));
+    const meshes = talkSceneMeshes(world.land, [owner.person.object, this.npcs.personOf(agentT)?.object,
+      this.npcs.personOf({ kind: 'agent', id: t.expectedId })?.object]);
+    const textOccluders = talkSceneMeshes(world.land, [owner.person.object,
+      ...[...(this.npcs.npcs?.values() || [])].map(npc => npc.person.object)]);
+    const signs = talkTextBounds(world.land);
     const toWorld = p => world.toWorld(new THREE.Vector3(p.x, p.y, p.z), { atRest: true });
-    let spot, bestScore = Infinity, obscures = new Set();
+    let spot, anchor = a, bestScore = null, obscures = new Set();
     // Narrow sheets need a longer shot. Choose a clear street direction using the
     // final fitted eye, so pulling back cannot silently place it inside a neighbour.
-    for (const turn of [0, .5, -.5, 1, -1, 1.5, -1.5, 2, -2, 2.5, -2.5, Math.PI]) {
-      const candidate = talkSpot(a, { x: a.x + Math.sin(baseYaw + turn) * 5, z: a.z + Math.cos(baseYaw + turn) * 5 },
-        { boxes, limit, facing: t.seated ? this.npcs.yaw(agentT) : null, back: STAGE.back * k, side: STAGE.side * k });
-      const shot = this.makeTalkShot(candidate, { ...a, y: ground }, frame);
-      const targets = [
-        ...talkFigureTargets(shot.eye, { ...a, y: ground }, this.npcs.faceHeight(agentT)),
-        ...talkFigureTargets(shot.eye, { ...candidate, y: this.npcs.surfaceY(candidate.x, candidate.z) }, this.npcs.faceHeight(OWNER_TARGET)),
-      ];
-      const walls = talkWallHits(shot.eye, targets, boxes);
-      if (walls * 10000 > bestScore) continue;
-      const hits = talkSceneHits(meshes, toWorld(shot.eye), targets.map(toWorld));
-      const heads = [toWorld({ ...a, y: ground + this.npcs.faceHeight(agentT) }),
-        toWorld({ ...candidate, y: this.npcs.surfaceY(candidate.x, candidate.z) + this.npcs.faceHeight(OWNER_TARGET) })];
-      const signOverlap = talkSignOverlap({ eye: toWorld(shot.eye), look: toWorld(shot.look) }, heads, signs,
-        { vfov: world.camera.fov, aspect: world.size.w / world.size.h });
-      const occupied = boxes.some(b => candidate.x > b.x0 && candidate.x < b.x1 && candidate.z > b.z0 && candidate.z < b.z1);
-      const score = Number(occupied) * 1000000 + walls * 10000 + hits.size * 100 + signOverlap;
-      if (score < bestScore) { spot = candidate; bestScore = score; obscures = hits; }
-      if (!score) break;
+    const consider = at => {
+      const ground = this.npcs.surfaceY(at.x, at.z), baseYaw = Math.atan2(from.x - at.x, from.z - at.z);
+      for (const turn of t.arrivalSpot ? [0] : [0, .5, -.5, 1, -1, 1.5, -1.5, 2, -2, 2.5, -2.5, Math.PI]) {
+        const candidate = t.arrivalSpot || talkSpot(at, { x: at.x + Math.sin(baseYaw + turn) * 5, z: at.z + Math.cos(baseYaw + turn) * 5 },
+          { boxes, limit, facing: t.seated ? this.npcs.yaw(agentT) : null, back: STAGE.back * k, side: STAGE.side * k, cameraClearance: false });
+        const shot = this.makeTalkShot(candidate, { ...at, y: ground }, frame);
+        const targets = [
+          ...talkFigureTargets(shot.eye, { ...at, y: ground }, this.npcs.faceHeight(agentT)),
+          ...talkFigureTargets(shot.eye, { ...candidate, y: this.npcs.surfaceY(candidate.x, candidate.z) }, this.npcs.faceHeight(OWNER_TARGET)),
+        ];
+        const walls = talkWallHits(shot.eye, targets, wallBoxes);
+        const occupied = Number(boxes.some(b => candidate.x > b.x0 && candidate.x < b.x1 && candidate.z > b.z0 && candidate.z < b.z1));
+        if (bestScore && (occupied > bestScore[0] || (occupied === bestScore[0] && walls > bestScore[1]))) continue;
+        const hits = talkSceneHits(meshes, toWorld(shot.eye), targets.map(toWorld));
+        const heads = [toWorld({ ...at, y: ground + this.npcs.faceHeight(agentT) }),
+          toWorld({ ...candidate, y: this.npcs.surfaceY(candidate.x, candidate.z) + this.npcs.faceHeight(OWNER_TARGET) })];
+        const tops = [toWorld({ ...at, y: ground + this.npcs.topHeight(agentT) }),
+          toWorld({ ...candidate, y: this.npcs.surfaceY(candidate.x, candidate.z) + this.npcs.topHeight(OWNER_TARGET) })];
+        const signOverlap = talkSignOverlap({ eye: toWorld(shot.eye), look: toWorld(shot.look) }, heads, signs,
+          { vfov: world.camera.fov, aspect: world.size.w / world.size.h, width: world.size.w, height: world.size.h, vis: frame.vis, tops,
+            occluders: textOccluders.filter(mesh => !hits.has(mesh)) });
+        const score = [occupied, walls, signOverlap, hits.size];
+        if (betterTalkComposition(score, bestScore)) { spot = candidate; anchor = at; bestScore = score; obscures = hits; }
+        if (score.every(value => value === 0)) break;
+      }
+    };
+    consider(a);
+    // Choose a quiet frontage once, before the owner's arrival. A pending
+    // reservation keeps that exact anchor when its admitted session appears.
+    if (!t.anchorChosen && !t.failed && (!t.pending || t.pendingSpot) && !t.seated && bestScore?.[2] > 0) {
+      const projectId = t.pending?.projectId || this.agentById(t.id)?.cityProjectId;
+      const alternatives = projectId && this.npcs.talkSpotCandidates?.(projectId, { excludeId: t.expectedId || t.id, limit: 6, spread: true });
+      for (const point of alternatives || []) {
+        if (Math.hypot(point.x - a.x, point.z - a.z) < .1 || boxes.some(b => point.x > b.x0 && point.x < b.x1 && point.z > b.z0 && point.z < b.z1)) continue;
+        consider(point);
+        if (bestScore.every(value => value === 0)) break;
+      }
     }
+    if (anchor !== a) {
+      if (t.pendingSpot && t.pending) Object.assign(t.pendingSpot, { x: anchor.x, z: anchor.z });
+      else this.npcs.stageTalkAgent(t.id, anchor);
+      a = anchor;
+    }
+    t.anchorChosen = true;
     t.spot = spot; t.a = { x: a.x, y: this.npcs.surfaceY(a.x, a.z), z: a.z };
     if (obscures.size) t.restoreCutaway = cutawayTalkMeshes(obscures);
     if (t.ownerDropped) this.npcs.driveOwner(spot.x, spot.z, spot.heading, false);
     else { this.npcs.dropOwner(spot.x, spot.z, spot.heading); t.ownerDropped = true; }
     this.arriveTalk(t);
     this.aimTalk(t, reduced ? 0 : 0.85);
+    t.arrivalSpot = null;
   }
   /** Ben is in place: open the pair's stance toward each other and the side camera. */
   arriveTalk(t) {

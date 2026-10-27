@@ -88,6 +88,23 @@ test('talk spot avoids occupied walls and remains inside the island', () => {
   assert.ok(!boxes.some(b => spot.x > b.x0 && spot.x < b.x1 && spot.z > b.z0 && spot.z < b.z1));
 });
 
+test('side-shot staging skips only the legacy shoulder-camera clearance, retaining safe standing spots', () => {
+  const agent = { x: 0, z: 0 }, from = { x: 0, z: 5 };
+  const boxes = [{ x0: 1.1, x1: 1.9, z0: 3, z1: 4.8, y0: 0, y1: 3 }];
+  assert.equal(talkSpot(agent, from, { boxes, limit: 20 }).yaw, .45, 'legacy callers still avoid their shoulder-eye obstacle');
+  const spot = talkSpot(agent, from, { boxes, limit: 20, cameraClearance: false });
+  assert.equal(spot.yaw, 0, 'the side shot retains the requested clear standing position');
+  const shot = fitTalkShot(spot, { ...agent, y: 1.4 }, { width: 1524, height: 944,
+    vis: { x0: 12, y0: 56, x1: 1112, y1: 932 } });
+  const targets = [...talkFigureTargets(shot.eye, agent, 1.4), ...talkFigureTargets(shot.eye, spot, 1.4)];
+  assert.equal(talkWallHits(shot.eye, targets, boxes), 0, 'the fitted side camera and full-body sightlines are clear');
+  const occupied = { x0: -.5, x1: .5, z0: 2, z1: 2.8 };
+  const alternate = talkSpot(agent, from, { boxes: [occupied], limit: 2.2, cameraClearance: false });
+  assert.ok(Math.abs(alternate.x) <= 2.2 && Math.abs(alternate.z) <= 2.2);
+  assert.ok(!(alternate.x > occupied.x0 && alternate.x < occupied.x1 && alternate.z > occupied.z0 && alternate.z < occupied.z1),
+    'opting out of shoulder clearance still rejects occupied ground');
+});
+
 test('final camera and sightline collision detect a wall even when the short staging spot was clear', () => {
   const boxes = [{ x0: -2, x1: 2, y0: 0, y1: 8, z0: 3, z1: 6 }];
   const head = { x: 0, y: 1.5, z: 0 };

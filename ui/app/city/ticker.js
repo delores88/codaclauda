@@ -90,6 +90,7 @@ function drawTile(segments, grey, anisotropy) {
     x += bullet + GAP;
   }
   const texture = new THREE.CanvasTexture(canvas);
+  texture.userData.cityText = true;
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.wrapS = THREE.RepeatWrapping; texture.wrapT = THREE.ClampToEdgeWrapping;
   texture.anisotropy = anisotropy;

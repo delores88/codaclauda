@@ -318,6 +318,7 @@ function unbuiltSignTexture(name) {
   context.font = '40px "Segoe UI", system-ui, sans-serif'; context.fillStyle = '#625343';
   context.fillText('Clone to build', 384, 132, 704);
   const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
+  texture.userData.cityText = true;
   return texture;
 }
 

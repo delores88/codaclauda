@@ -4,6 +4,7 @@ import { THREE } from '../app/city/toon.js';
 import { NpcManager } from '../app/city/npc.js';
 import { Building, buildingSize, downtownBasePlan } from '../app/city/buildings.js';
 import { talkPlanterBoxes } from '../app/city/talk-placement.js';
+import { cellCenter, perimeterPoint, WALK_HALF } from '../app/city/layout.js';
 
 const project = { id: 'local:alpha', cell: { i: 2, j: 1 }, origin: { x: 32, z: 15.7 }, size: { W: 2.6, D: 3 },
   door: { x: 30, z: 18 }, seats: [], workSpot: Building.prototype.workSpot };
@@ -231,4 +232,65 @@ test('hidden bystanders and their clipboard props cannot steal picking from visi
   assert.equal(people.pickables().includes(people.owner.person.pickable[0]), false);
   hidden.person.object.visible = true; people.owner.person.object.visible = true;
   assert.deepEqual(people.pickables(), before, 'restoring the figures restores their exact pick targets');
+});
+
+test('talk spot candidates are distinct safe canonical lot positions without changing reservation or people', t => {
+  const { people } = manager(t), size = buildingSize({ metrics: { footprint: 3 } });
+  const planted = { ...project, size, downtownBase: downtownBasePlan(size, project.cell) };
+  people.buildings.set(project.id, planted); people.resolveProjectId = id => id === 'alias:alpha' ? project.id : id;
+  people.sync([agent('here'), agent('also-here')]);
+  const reserved = people.reserveTalkSpot(project.id), before = people.entries().map(n => ({ id: n.id, pos: n.pos.clone(), goal: n.goal, action: n.action }));
+  const candidates = people.talkSpotCandidates('alias:alpha'), center = cellCenter(project.cell.i, project.cell.j), boxes = talkPlanterBoxes([planted]);
+  assert.equal(candidates.length, 6); assert.equal(people.talkReservation, reserved);
+  assert.deepEqual(candidates[0], reserved, 'limit-one reservation preserves the original first-safe-spot behavior');
+  for (const [i, point] of candidates.entries()) {
+    assert.equal(point.projectId, project.id);
+    assert.ok(Math.abs(point.x - center.x) <= WALK_HALF && Math.abs(point.z - center.z) <= WALK_HALF);
+    assert.equal(boxes.some(b => point.x > b.x0 && point.x < b.x1 && point.z > b.z0 && point.z < b.z1), false);
+    for (const npc of people.entries()) assert.ok(Math.hypot(point.x - npc.pos.x, point.z - npc.pos.z) >= .8);
+    for (const previous of candidates.slice(0, i)) assert.ok(Math.hypot(point.x - previous.x, point.z - previous.z) >= .8);
+  }
+  assert.deepEqual(people.entries().map(n => ({ id: n.id, pos: n.pos.clone(), goal: n.goal, action: n.action })), before);
+  assert.deepEqual(people.talkSpotCandidates('missing'), []); assert.equal(people.talkReservation, reserved);
+});
+
+test('talk spot candidates exclude only the exact requested NPC, retaining other people and owner clearance', t => {
+  const { people } = manager(t);
+  people.sync([agent('speaker'), agent('speaker-copy')]);
+  const first = project.workSpot(0), other = project.workSpot(1);
+  people.npcs.get('speaker').place(first.x, first.z); people.npcs.get('speaker-copy').place(other.x, other.z);
+  const same = (a, b) => Math.hypot(a.x - b.x, a.z - b.z) < 1e-9;
+  assert.equal(people.talkSpotCandidates(project.id).some(p => same(p, first)), false);
+  const excluded = people.talkSpotCandidates(project.id, { excludeId: 'speaker' });
+  assert.ok(same(excluded[0], first));
+  assert.ok(excluded.every(p => Math.hypot(p.x - other.x, p.z - other.z) >= .8));
+  people.owner.pos.set(first.x, people.surfaceY(first.x, first.z), first.z);
+  assert.equal(people.talkSpotCandidates(project.id, { excludeId: 'speaker' }).some(p => same(p, first)), false, 'excluding an NPC never excludes the owner');
+  assert.equal(people.talkSpotCandidates(project.id, { limit: 1 }).length, 1);
+});
+
+test('duplicate facade work spots fall back to distinct positions on the same lot perimeter', t => {
+  const { people } = manager(t), center = cellCenter(project.cell.i, project.cell.j);
+  const facade = { x: project.origin.x, z: project.origin.z + 2 };
+  people.buildings.set(project.id, { ...project, workSpot: () => facade }); people.sync([]);
+  const candidates = people.talkSpotCandidates(project.id);
+  assert.equal(candidates.length, 6); assert.deepEqual(candidates[0], { ...facade, projectId: project.id });
+  for (const point of candidates.slice(1)) assert.ok(Math.abs(Math.max(Math.abs(point.x - center.x), Math.abs(point.z - center.z)) - WALK_HALF) < 1e-8);
+  assert.equal(new Set(candidates.map(p => `${p.x},${p.z}`)).size, 6);
+});
+
+test('spread candidates sample four lot edges without moving people or changing the pending reservation', t => {
+  const { people } = manager(t); people.sync([]);
+  const reserved = people.reserveTalkSpot(project.id), ownerPosition = people.owner.pos.clone();
+  const candidates = people.talkSpotCandidates(project.id, { spread: true });
+  assert.equal(candidates.length, 6);
+  const expected = [.5, 1.5, 2.5, 3.5].map(side => ({ ...perimeterPoint(project.cell.i, project.cell.j, side), projectId: project.id }));
+  assert.deepEqual(candidates.slice(0, 4), expected);
+  assert.equal(people.talkReservation, reserved); assert.deepEqual(people.owner.pos, ownerPosition);
+  assert.deepEqual(people.talkSpotCandidates(project.id, { limit: 1 })[0], reserved, 'ordinary reservations still prefer the original facade spot');
+  people.owner.pos.set(expected[0].x, people.surfaceY(expected[0].x, expected[0].z), expected[0].z);
+  const blockedSide = people.talkSpotCandidates(project.id, { spread: true });
+  assert.ok(blockedSide.every(p => Math.hypot(p.x - expected[0].x, p.z - expected[0].z) >= .8), 'spread retains owner clearance');
+  assert.deepEqual(blockedSide[0], expected[1]);
+  assert.equal(people.talkReservation, reserved);
 });

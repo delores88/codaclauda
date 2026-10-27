@@ -74,3 +74,31 @@ Required captures: `talk-fresh-claude.png`, `talk-fresh-codex.png`,
 The browser receipt checks actual building buttons, exact session reuse, pending
 and Retry states, both faces and body bounds, marker restoration and the 300px
 header. Installed/native/provider acceptance has not been run by this change.
+
+## Signboard composition follow-up
+
+The signboard check now reserves both complete head silhouettes and the maximum
+speech-bubble band, using the same bubble layout and exact speaker anchors.
+Explicit text metadata covers building/HQ plaques, side signs, unbuilt project
+boards and tickers; mounted label meshes are also considered. Nontext canvas
+textures are excluded. Visibility probes ignore distant text hidden by walls,
+moving people and scenery that the selected shot will fade.
+
+Safe standing positions and solid-wall clearance retain first priority, followed
+by visible text overlap and then temporary scenery cutaways. Planter placement
+margins no longer masquerade as solid camera walls; full-body geometry checks
+still include the actual planters. The final side-camera checks replace the
+obsolete shoulder-camera clearance when choosing an owner's talk spot.
+
+When the initial project position has no quiet background, staging checks at most
+six clear alternatives spread across the same lot. This runs once before arrival.
+For a pending start, it updates the existing reservation in place before Ben drops
+in; the exact admitted session joins that point, and Ben retains his arrival spot.
+Reframing can adjust the shot without selecting another NPC anchor. A failed start
+or missing reservation cannot move a synthetic pending agent. Existing placement,
+project aliases, body clearance and bench-return behavior remain intact.
+
+Follow-up evidence is separate at `local/talk-072-signs-evidence/` in the main
+checkout. The requested `talk-fresh-claude.png` and `talk-history.png` use the same
+mock bridge, sanitized project fixture and custom owner avatar. Earlier accepted
+evidence under `local/talk-072-evidence/` is preserved.
