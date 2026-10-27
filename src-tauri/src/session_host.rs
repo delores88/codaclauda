@@ -3581,6 +3581,9 @@ fn discover(provider: Provider) -> Result<PathBuf, String> {
                         );
                     }
                 }
+                for root in adapters::claude_data_roots(&local) {
+                    scan(&root, provider.exe(), 3, &mut found);
+                }
             }
             if let Some(profile) = var("USERPROFILE") {
                 scan(
@@ -3610,6 +3613,15 @@ fn discover(provider: Provider) -> Result<PathBuf, String> {
             }
         }
     }
+    newest_discovered(found).ok_or_else(|| {
+        format!(
+            "{} could not be found. Install its desktop app or CLI, then try again.",
+            provider.label()
+        )
+    })
+}
+
+fn newest_discovered(mut found: Vec<PathBuf>) -> Option<PathBuf> {
     // Newest bundle first; identical versions (MSIX mirror of the same bundle) once.
     let mut seen = std::collections::BTreeSet::new();
     found.retain(|p| {
@@ -3622,12 +3634,7 @@ fn discover(provider: Provider) -> Result<PathBuf, String> {
         seen.insert(key)
     });
     found.sort_by_key(|p| std::cmp::Reverse(path_version(p)));
-    found.into_iter().next().ok_or_else(|| {
-        format!(
-            "{} could not be found. Install its desktop app or CLI, then try again.",
-            provider.label()
-        )
-    })
+    found.into_iter().next()
 }
 
 // ----------------------------------------------------------------- commands
@@ -3736,6 +3743,46 @@ pub(crate) async fn session_compact(app: tauri::AppHandle, id: String) -> Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_data_discovery_finds_current_cli_and_preserves_newest_bundle_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_root = dir.path().join("Roaming/Claude/claude-code");
+        let old_cli = old_root.join("2.1.299/old/claude.exe");
+        let family = dir.path().join("Claude-Data/anthropicpbc.claude_fixture");
+        let cli = family.join("claude-code/2.1.308/current/claude.exe");
+        let gui = family.join("app/claude.exe");
+        for file in [&old_cli, &cli, &gui] {
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, b"synthetic executable name; never executed").unwrap();
+        }
+        let mut found = Vec::new();
+        scan(&old_root, Provider::Claude.exe(), 3, &mut found);
+        for root in adapters::claude_data_roots(dir.path()) {
+            scan(&root, Provider::Claude.exe(), 3, &mut found);
+        }
+        assert_eq!(found.len(), 2);
+        assert!(found.contains(&old_cli));
+        assert!(found.contains(&cli));
+        assert!(!found.contains(&gui));
+        assert_eq!(newest_discovered(found), Some(cli));
+    }
+
+    #[test]
+    fn claude_data_discovery_keeps_numeric_order_and_existing_same_version_precedence() {
+        let old = PathBuf::from("old/claude-code/2.1.99/hash/claude.exe");
+        let first = PathBuf::from("roaming/claude-code/2.1.308/hash/claude.exe");
+        let mirrored = PathBuf::from(
+            "Claude-Data/anthropicpbc.claude_fixture/claude-code/2.1.308/hash/claude.exe",
+        );
+        let path_cli = PathBuf::from("bin/claude.exe");
+        assert_eq!(
+            newest_discovered(vec![old, first.clone(), mirrored, path_cli.clone()]),
+            Some(first)
+        );
+        assert_eq!(newest_discovered(vec![path_cli.clone()]), Some(path_cli));
+        assert_eq!(newest_discovered(Vec::new()), None);
+    }
 
     fn record(provider: &str, access: &str) -> Record {
         Record {

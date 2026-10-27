@@ -392,6 +392,38 @@ pub fn probe(agent: &str, executable: &Path) -> Result<Value> {
     )
 }
 
+/// Current Claude desktop CLI roots, found from directory metadata only.
+/// Restrict the search to Anthropic package families and their `claude-code`
+/// child; the desktop GUI and browser native host are not Code executables.
+pub fn claude_data_roots(local: &Path) -> Vec<PathBuf> {
+    let root = local.join("Claude-Data");
+    let plain_dir = |path: &Path| {
+        fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+    };
+    if !local.is_absolute() || !plain_dir(&root) {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    entries
+        .take(128)
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            let family = name
+                .strip_prefix("anthropicpbc.claude_")
+                .is_some_and(|suffix| !suffix.is_empty());
+            let kind = entry.file_type().ok()?;
+            if !family || !kind.is_dir() || kind.is_symlink() {
+                return None;
+            }
+            let cli = entry.path().join("claude-code");
+            plain_dir(&cli).then_some(cli)
+        })
+        .collect()
+}
+
 /// Locate binary distributions and probe at most two candidates per agent.
 /// Does not inspect profile/session files or credential values.
 pub fn discover() -> Value {
@@ -467,6 +499,11 @@ pub fn discover() -> Value {
                     &mut claude,
                 );
             }
+        }
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        for root in claude_data_roots(Path::new(&local)) {
+            collect(&root, "claude.exe", 4, &mut claude);
         }
     }
     fn endpoint(agent: &str, candidates: &mut Vec<PathBuf>) -> Value {
@@ -1716,6 +1753,71 @@ impl OwnedProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_data_roots_accept_package_family_case_and_exclude_other_layouts() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("Claude-Data");
+        let lower = data.join("anthropicpbc.claude_fixture/claude-code");
+        let mixed = data.join("AnthropicPBC.Claude_Second/claude-code");
+        for path in [
+            &lower,
+            &mixed,
+            &data.join("unrelated.claude_fixture/claude-code"),
+            &data.join("anthropicpbc.claude_/claude-code"),
+            &data.join("anthropicpbc.claude_gui/app"),
+            &data.join("Claude-NativeHost/3.6556.2"),
+        ] {
+            fs::create_dir_all(path).unwrap();
+        }
+        fs::write(
+            data.join("anthropicpbc.claude_gui/app/claude.exe"),
+            b"GUI fixture",
+        )
+        .unwrap();
+        let mut roots = claude_data_roots(dir.path());
+        roots.sort();
+        let mut expected = vec![lower, mixed];
+        expected.sort();
+        assert_eq!(roots, expected);
+    }
+
+    #[test]
+    fn claude_data_roots_refuse_missing_relative_and_non_directory_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(claude_data_roots(dir.path()).is_empty());
+        assert!(claude_data_roots(Path::new("relative")).is_empty());
+        fs::write(dir.path().join("Claude-Data"), b"not a directory").unwrap();
+        assert!(claude_data_roots(dir.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_data_roots_do_not_follow_root_family_or_cli_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("local");
+        let elsewhere = dir.path().join("elsewhere");
+        fs::create_dir_all(&local).unwrap();
+        fs::create_dir_all(elsewhere.join("anthropicpbc.claude_fixture/claude-code")).unwrap();
+        symlink(&elsewhere, local.join("Claude-Data")).unwrap();
+        assert!(claude_data_roots(&local).is_empty());
+        fs::remove_file(local.join("Claude-Data")).unwrap();
+        fs::create_dir(local.join("Claude-Data")).unwrap();
+        symlink(
+            elsewhere.join("anthropicpbc.claude_fixture"),
+            local.join("Claude-Data/anthropicpbc.claude_family"),
+        )
+        .unwrap();
+        fs::create_dir(local.join("Claude-Data/anthropicpbc.claude_child")).unwrap();
+        symlink(
+            elsewhere.join("anthropicpbc.claude_fixture/claude-code"),
+            local.join("Claude-Data/anthropicpbc.claude_child/claude-code"),
+        )
+        .unwrap();
+        assert!(claude_data_roots(&local).is_empty());
+    }
+
     #[test]
     fn provider_receipts_require_actual_session_and_terminal_event() {
         let mut parsed = Parsed::default();

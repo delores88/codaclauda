@@ -5,6 +5,11 @@ artifacts and the existing City conversation interface.
 
 - Local building menus offer Claude and Codex through the managed session
   engine. Legacy board discovery no longer incorrectly disables Claude.
+- Managed sessions and board discovery recognize the current Windows Claude
+  Code bundle under `LocalAppData/Claude-Data/<Anthropic package family>/claude-code`.
+  This metadata-only lookup retains older bundle locations and does not treat
+  the Claude desktop GUI or browser native host as the Code CLI. Finding an
+  executable does not establish authentication, available usage or a model reply.
 - Selecting a provider starts one blank session and opens the existing City
   TalkPanel. Write the first message in that panel, beside the owner's avatar
   and the new agent. The building menu has no prompt or send control.
@@ -21,5 +26,5 @@ do not manufacture project activity or retry ambiguous turns.
 
 Use the unchanged shared Cargo gate and a target inside this C: project. Retain
 MIT licensing, third-party notices, unsigned-package disclosure and any actual
-scanner findings. This UI correction does not change Spark transport or prove
+scanner findings. These launcher corrections do not change Spark transport or prove
 new Spark workload execution.
