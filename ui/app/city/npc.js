@@ -620,10 +620,11 @@ export function createStandIn(specInput, { role = 'agent' } = {}) {
   const gem = new THREE.Mesh(new THREE.OctahedronGeometry(0.14, 0), toonMaterial('#3ccf8e', { emissive: '#3ccf8e', emissiveIntensity: 0.6, cache: false }));
   gem.position.y = 1.95; object.add(gem);
   const pickable = [legs, body, head, hair];
-  let status = role === 'owner' ? null : 'idle', action = 'stand', yaw = 0, targetYaw = 0, t = 0;
+  let status = role === 'owner' ? null : 'idle', action = 'stand', yaw = 0, targetYaw = 0, t = 0, inConversation = false;
   const person = {
     object, pickable,
-    setStatus(next) { status = next; gem.visible = !!next; if (next) { gem.material.color.set(GEM[next] || GEM.idle); gem.material.emissive.set(GEM[next] || GEM.idle); gem.material.emissiveIntensity = next === 'offline' ? 0.1 : 0.6; } },
+    setStatus(next) { status = next; gem.visible = !!next && !inConversation; if (next) { gem.material.color.set(GEM[next] || GEM.idle); gem.material.emissive.set(GEM[next] || GEM.idle); gem.material.emissiveIntensity = next === 'offline' ? 0.1 : 0.6; } },
+    setConversation(on) { inConversation = Boolean(on); gem.visible = Boolean(status) && !inConversation; },
     setAction(next) { action = next; },
     setHighlight(on) { bodyMat.emissive.set(on ? '#6c5cf0' : '#000000'); bodyMat.emissiveIntensity = on ? 0.5 : 1; },
     lookAt(x, z) { targetYaw = Math.atan2(x - object.position.x, z - object.position.z); },

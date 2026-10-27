@@ -91,7 +91,8 @@ test('board send retries preserve the exact mailbox post id and use one uniform 
   const posts = calls.filter(c => c[0] === 'post').map(c => c[1]);
   assert.equal(posts.length, 2); assert.deepEqual(posts[0], posts[1]); assert.equal(posts[0].to, 'codex-board');
   assert.equal(panel.mode.hidden, true);
-  assert.equal(find(panel.head, 'city-talk-routing').attrs.title, 'Message board: it replies when it next checks the board.');
+  assert.equal(find(panel.head, 'city-talk-presence').attrs.title, 'Message board: it replies when it next checks the board.');
+  assert.equal(find(panel.head, 'city-talk-routing'), undefined, 'routing has no separate visual control');
   assert.equal(panel.draft().text, '');
 });
 
@@ -100,13 +101,82 @@ test('pending starts keep a draft, transition explicitly to the exact live sessi
   const ghost = { id: 'starting', name: 'Builder', provider: 'codex', currentProjectId: 'gh:owner/demo' };
   panel.open(ghost, { pending: { provider: 'codex', projectId: project.id, label: 'Builder' } });
   assert.match(panel.status.textContent, /Starting Codex in Demo/); assert.equal(panel.sendBtn.disabled, true);
+  assert.equal(panel.input.disabled, true); assert.ok(find(panel.status, 'spinner'));
   panel.input.value = 'Keep this draft'; panel.onInput();
   assert.equal(panel.resolvePending(managed), true);
   assert.equal(panel.pendingStart, null); assert.equal(panel.thread.sessionId, 'managed'); assert.equal(panel.input.value, 'Keep this draft');
+  assert.equal(panel.input.disabled, false);
   assert.ok(client.viewing.has('managed'));
   panel.open(ghost, { pending: { provider: 'codex', projectId: project.id } });
   panel.failPending(new Error('Provider unavailable'));
   assert.match(panel.status.textContent, /Provider unavailable/); assert.equal(panel.status.attrs.role, 'alert'); assert.equal(panel.sendBtn.disabled, true);
+});
+
+test('header keeps provider and canonical project together with status and icon-only actions', t => {
+  const { panel, managed } = fixture(t, { onNewSessionHere() {} });
+  panel.open(managed);
+  assert.equal(panel.head.children.length, 3, 'one avatar, one title/status stack and one action row');
+  const title = find(panel.head, 'city-talk-title');
+  assert.equal(title.children[0].textContent, 'Codex · Demo');
+  assert.equal(find(panel.head, 'city-talk-presence').textContent, 'Ready');
+  const actions = find(panel.head, 'city-talk-actions').children;
+  assert.deepEqual(actions.map(b => b.attrs['aria-label']), ['New session here', 'Open in Chat', 'Leave conversation (Esc)']);
+  assert.ok(actions.every(b => !b.textContent), 'action labels live in accessible tooltips, not wrapped header text');
+});
+
+for (const provider of ['claude', 'codex']) test(`fresh building ${provider} session has project starters and its actual access`, t => {
+  const { panel, managed, registry, transcripts, calls } = fixture(t);
+  registry[0].provider = provider; registry[0].access = 'full';
+  const agent = { ...managed, provider };
+  panel.open({ id: 'starting', provider, currentProjectId: project.id }, { pending: { provider, projectId: project.id, fresh: true } });
+  panel.resolvePending(agent);
+  assert.match(panel.log.textContent, new RegExp(`${provider === 'claude' ? 'Claude' : 'Codex'} is ready in Demo`));
+  assert.equal(find(panel.log, 'city-talk-access').textContent, 'Full access');
+  const starters = find(panel.log, 'city-talk-chips').children;
+  assert.deepEqual(starters.map(c => c.textContent), [
+    'Review this project and suggest the next task', 'Run the tests and tell me what fails', 'Explain how this project is organized',
+  ]);
+  starters[0].events.click();
+  assert.equal(panel.draft().text, starters[0].textContent); assert.equal(calls.some(c => c[0] === 'send'), false);
+  panel.close(); panel.open(agent);
+  assert.ok(find(panel.log, 'city-talk-ready'), 'reopening the same fresh session preserves the starter state');
+  registry[0].access = 'read'; panel.refresh();
+  assert.equal(find(panel.log, 'city-talk-access').textContent, 'Read only', 'the session receipt determines the displayed access');
+  transcripts.set('managed', [{ key: 'first', kind: 'owner', text: 'Existing history' }]); panel.refresh();
+  assert.equal(panel.log.textContent, 'Existing history'); assert.equal(find(panel.log, 'city-talk-ready'), undefined);
+  transcripts.delete('managed'); panel.refresh();
+  assert.equal(find(panel.log, 'city-talk-chips').children[0].textContent, 'What are you working on right now?', 'history cannot revert to a new-session claim');
+});
+
+test('start Retry is explicit, once per click, and stale pending controls cannot reopen another conversation', async t => {
+  const { panel, managed } = fixture(t); let retries = 0, finish;
+  const retry = () => { retries++; return new Promise(resolve => { finish = resolve; }); };
+  panel.open({ id: 'starting', provider: 'claude', currentProjectId: project.id }, { pending: { projectId: project.id, retry } });
+  panel.failPending(new Error('Provider start rejected'));
+  assert.equal(retries, 0); assert.equal(find(panel.status, 'spinner'), undefined);
+  assert.match(panel.status.textContent, /Provider start rejectedRetry/);
+  const button = find(panel.status, 'city-talk-retry'), action = button.events.click();
+  assert.equal(retries, 1); assert.equal(find(panel.status, 'city-talk-retry').disabled, true);
+  assert.equal(await button.events.click(), false); assert.equal(retries, 1);
+  panel.open(managed);
+  assert.equal(await button.events.click(), false);
+  finish(); await action;
+  assert.equal(panel.agent.id, managed.id); assert.equal(panel.pendingStart, null); assert.equal(retries, 1);
+});
+
+test('working bubbles keep typing until the final line replaces it after completion', t => {
+  const events = [], { panel, managed, registry, transcripts } = fixture(t, {
+    onThinking: on => events.push(['thinking', on]), onAgentLine: text => events.push(['line', text]),
+  });
+  registry[0].status = 'running';
+  transcripts.set('managed', [{ key: 'answer', kind: 'agent', text: 'Streaming', streaming: true }]);
+  panel.open(managed); assert.deepEqual(events, [['thinking', true]]);
+  transcripts.set('managed', [{ key: 'answer', kind: 'agent', text: 'Streaming more', streaming: true }]);
+  panel.refresh(); assert.deepEqual(events, [['thinking', true]]);
+  registry[0].status = 'idle';
+  transcripts.set('managed', [{ key: 'answer', kind: 'agent', text: 'Final answer', streaming: false }]);
+  panel.refresh(); panel.refresh();
+  assert.deepEqual(events, [['thinking', true], ['thinking', false], ['line', 'Final answer']]);
 });
 
 test('optional New session here calls the canonical observed City project and otherwise stays hidden', t => {

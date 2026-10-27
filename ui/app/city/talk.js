@@ -7,6 +7,7 @@ import { agentAvatar } from '../avatar/spec.js';
 import { sessions } from '../sessions.js';
 import { call as callFeature } from '../features.js';
 import { talkRoute, talkProject, talkMessages, sendTalkSession, continueTalkCopy } from './talk-model.js';
+import { levelInfo, normalizeLevel } from '../access.js';
 
 /* TALK-STAGE-BEGIN (pure: checked headless) */
 /** Staging (island units): Ben stands `gap` in front of the agent; the camera sits `back` behind him
@@ -55,6 +56,7 @@ const BODY_LIMIT = 30 * 1000;   // the board caps bodies at 32 KiB; stay below 3
 const SHOWN = 60;               // most recent messages in the panel; Chat has the rest
 const PROVIDER_NAME = { claude: 'Claude', codex: 'Codex' };
 const MAIL_STARTERS = ['What are you working on right now?', 'Is anything blocked that I can help with?', "Give me a short summary of today's progress."];
+const FRESH_STARTERS = ['Review this project and suggest the next task', 'Run the tests and tell me what fails', 'Explain how this project is organized'];
 const providerName = provider => PROVIDER_NAME[provider] || 'Agent';
 const copySourceKey = agent => JSON.stringify([agent.id, agent.provider, agent.providerSessionId, agent.cwd]);
 const providerOfName = name => (/^claude/i.test(name) ? 'claude' : /^codex/i.test(name) ? 'codex' : 'other');
@@ -81,7 +83,7 @@ export class TalkPanel {
     Object.assign(this, { store, navigate, onLeave, onSent, onAgentLine, onThinking, onAgentChanged, onNewSessionHere,
       canNewSessionHere, sessions: sessionClient, featureCall });
     this.agent = null;
-    this.drafts = new Map(); this.cache = new Map(); this.heard = new Map();
+    this.drafts = new Map(); this.cache = new Map(); this.heard = new Map(); this.freshSessions = new Set();
     this.head = h('header.city-talk-head');
     this.mode = h('div.city-talk-mode', { hidden: true });
     this.log = h('div.city-talk-log');
@@ -117,6 +119,7 @@ export class TalkPanel {
   }
   resolvePending(agent) {
     if (!this.pendingStart || !agent) return false;
+    if (this.pendingStart.fresh) this.freshSessions.add(agent.id);
     this.drafts.set(agent.id, this.draft()); this.open(agent); return true;
   }
   failPending(error) {
@@ -166,40 +169,41 @@ export class TalkPanel {
     this.forceBottom = false; this.listen(info, msgs); this.scheduleAck(info);
   }
   renderHead(info) {
-    const status = STATUS_LABEL[info.status] || (info.status === 'error' ? 'Needs attention' : 'Powered down');
-    const sub = this.pendingStart
-      ? (this.pendingStart.error ? 'Could not start ' : 'Starting ') + providerName(info.provider) + (info.project ? ' in ' + info.project.name : '') + (this.pendingStart.error ? '' : '...')
-      : info.kind === 'external' ? info.project?.name || 'Project unknown'
-      : status + (info.project ? ' - ' + info.project.name : '');
+    const title = providerName(info.provider) + (info.project ? ' · ' + info.project.name : ' · ' + info.name);
+    const status = this.pendingStart ? (this.pendingStart.error ? 'Could not start' : 'Starting')
+      : info.kind === 'session' && info.status === 'idle' ? 'Ready'
+      : STATUS_LABEL[info.status] || (info.status === 'error' ? 'Needs attention' : 'Powered down');
     const activity = info.kind === 'external' ? 'Last activity: ' + (info.agent.lastSeenAt ? timeAgo(info.agent.lastSeenAt) : 'unknown') : '';
     const newSessionHere = Boolean(this.onNewSessionHere && info.project && this.canNewSessionHere(info.project, info.agent));
-    const sig = JSON.stringify([info.name, info.provider, status, sub, activity, info.agent.lastSeenAt, info.look, info.id, info.kind, info.project?.id, newSessionHere]);
+    const sig = JSON.stringify([title, info.name, info.provider, status, activity, info.agent.lastSeenAt, info.look, info.id, info.kind, info.project?.id, newSessionHere]);
     if (sig === this.sigs.head) return;
     this.sigs.head = sig;
     const chatParams = info.kind === 'session' ? { thread: info.session?.sharedId ? 'pair:' + info.session.sharedId : info.id }
       : info.kind === 'mailbox' || info.kind === 'live' ? { thread: info.id } : info.project ? { project: info.project.id } : {};
-    const chat = h('button.btn.small.city-talk-open', { type: 'button', title: 'Open this conversation in Chat', onclick: () => this.navigate('chat', chatParams) }, icon('chat'), 'Open in Chat');
+    const chat = iconButton('chat', 'Open in Chat', () => this.navigate('chat', chatParams), 'city-talk-open');
     const routeNote = info.kind === 'mailbox' ? 'Message board: it replies when it next checks the board.'
       : info.kind === 'session' ? 'Messages go to this CodaClauda session.'
-      : info.kind === 'pending' ? 'The session is starting.'
+      : info.kind === 'pending' ? (this.pendingStart?.error ? 'The session did not start.' : 'The session is starting.')
       : 'Continue as a labelled copy to send messages in a new CodaClauda session.';
-    const detail = h('span.city-talk-routing', { tabindex: '0', title: routeNote, 'aria-label': routeNote }, 'i');
-    const newHere = newSessionHere ? h('button.btn.small.city-talk-new', {
-      // Keep the original scalar first argument; newer callers may use the second details argument.
-      type: 'button', onclick: () => this.onNewSessionHere(info.project.id, {
+    const statusTooltip = [routeNote, activity, info.kind === 'external' && info.agent.lastSeenAt
+      ? 'Session file modified ' + fullTime(info.agent.lastSeenAt) : ''].filter(Boolean).join('\n');
+    const detail = h('p.city-talk-presence', { tabindex: '0', title: statusTooltip, 'aria-label': status + '. ' + statusTooltip },
+      h(`span.city-gem.${this.pendingStart?.error ? 'error' : info.status}`, { 'aria-hidden': 'true' }), h('span', status));
+    // Keep the original scalar first argument; newer callers may use the second details argument.
+    const newHere = newSessionHere ? iconButton('plus', 'New session here', () => this.onNewSessionHere(info.project.id, {
         projectId: info.project.id, provider: info.provider, agentId: info.agent.id,
-      }),
-    }, icon('plus'), 'New session here') : null;
-    this.head.replaceChildren(portrait(info.look, { size: 46, provider: info.provider, status: info.status }),
-      h('div.city-talk-title', h('h2', { title: info.agent.label || info.name }, info.name), h('p', sub),
-        activity ? h('p', { title: info.agent.lastSeenAt ? 'Session file modified ' + fullTime(info.agent.lastSeenAt) : 'No activity timestamp available' }, activity) : null),
-      h('div.city-talk-actions', detail, newHere, chat, iconButton('close', 'Leave conversation (Esc)', () => this.onLeave?.())));
+      }), 'city-talk-new') : null;
+    this.head.replaceChildren(portrait(info.look, { size: 38, provider: info.provider }),
+      h('div.city-talk-title', h('h2', { title: title + '\n' + (info.agent.label || info.name) }, title), detail),
+      h('div.city-talk-actions', newHere, chat, iconButton('close', 'Leave conversation (Esc)', () => this.onLeave?.())));
   }
   renderMessages(info, all) {
     const msgs = all.slice(-SHOWN), keep = new Set(), nodes = [];
     const lookSig = JSON.stringify(info.look);
     if (all.length > msgs.length) nodes.push(this.cached('more', String(all.length), () => h('button.city-talk-more', { type: 'button', onclick: () => this.navigate('chat', { thread: info.id }) }, (all.length - msgs.length) + ' earlier messages - open in Chat'), keep));
-    if (!all.length && info.kind !== 'pending') nodes.push(this.cached('intro', info.kind + '|' + info.name, () => this.buildIntro(info), keep));
+    if (all.length) this.freshSessions.delete(info.agent.id);
+    if (!all.length && info.kind !== 'pending') nodes.push(this.cached('intro', JSON.stringify([info.kind, info.name,
+      info.provider, info.project?.name, info.session?.access, info.agent.access, this.freshSessions.has(info.agent.id)]), () => this.buildIntro(info), keep));
     for (const m of msgs) {
       const sig = JSON.stringify([m.role, m.text, m.status, m.state, m.kind, m.at, m.queued, info.name, m.role === 'agent' ? lookSig : '']);
       nodes.push(this.cached('m:' + m.id, sig, () => this.buildMessage(m, info), keep));
@@ -213,8 +217,14 @@ export class TalkPanel {
     return entry.node;
   }
   buildIntro(info) {
-    return h('div.city-talk-intro', h('p', 'Talk with ' + info.name + ' about this project.'),
-      h('div.city-talk-chips', MAIL_STARTERS.map(text => h('button.city-talk-chip', { type: 'button', onclick: () => this.prefill(text) }, text))));
+    const fresh = info.kind === 'session' && this.freshSessions.has(info.agent.id);
+    const level = normalizeLevel(info.session?.access || info.agent.access);
+    const intro = fresh ? h('div.city-talk-ready',
+      h('h3', providerName(info.provider) + ' is ready' + (info.project ? ' in ' + info.project.name : '')),
+      h('p.city-talk-access', level ? levelInfo(level).long : 'Access level unavailable'))
+      : h('p', 'Talk with ' + info.name + ' about this project.');
+    return h('div.city-talk-intro', intro,
+      h('div.city-talk-chips', (fresh ? FRESH_STARTERS : MAIL_STARTERS).map(text => h('button.city-talk-chip', { type: 'button', onclick: () => this.prefill(text) }, text))));
   }
   buildMessage(m, info) {
     if (m.role === 'system') return h('div.city-talk-system', plainText(m.text, 800));
@@ -238,15 +248,29 @@ export class TalkPanel {
       : running ? info.name + ' is working...'
       : info.kind === 'external' && !msgs.length ? `This conversation lives in the ${info.provider === 'codex' ? 'Codex' : info.provider === 'claude' ? 'Claude' : 'desktop'} app. Send to continue it here as a new session.`
       : info.kind === 'mailbox' && last?.role === 'owner' ? (last.status === 'seen' ? 'Seen. Waiting for a reply...' : 'Sent. Waiting for a reply...') : '';
-    const sig = message + '|' + Boolean(this.pendingStart?.error);
+    const pending = this.pendingStart, canRetry = Boolean(pending?.error && typeof pending.retry === 'function');
+    const sig = message + '|' + Boolean(pending?.error) + '|' + canRetry + '|' + Boolean(pending?.retrying);
     if (sig === this.sigs.status) return;
     this.sigs.status = sig; this.status.setAttribute('role', this.pendingStart?.error ? 'alert' : 'status');
-    this.status.replaceChildren(...(message ? [h('div.city-talk-wait' + (this.pendingStart?.error ? '.danger' : ''), icon(this.pendingStart?.error ? 'alert' : 'clock'), h('p', message))] : []));
+    const retry = canRetry ? h('button.btn.small.city-talk-retry', {
+      type: 'button', disabled: Boolean(pending.retrying), onclick: () => this.retryPending(pending),
+    }, 'Retry') : null;
+    const indicator = pending && !pending.error ? h('span.spinner', { 'aria-hidden': 'true' }) : icon(pending?.error ? 'alert' : 'clock');
+    this.status.replaceChildren(...(message ? [h('div.city-talk-wait' + (pending?.error ? '.danger' : ''), indicator, h('p', message), retry)] : []));
+  }
+  async retryPending(pending = this.pendingStart) {
+    if (!this.isOpen || this.pendingStart !== pending || !pending?.error || pending.retrying || typeof pending.retry !== 'function') return false;
+    pending.retrying = true; this.refresh();
+    try { await pending.retry(); }
+    catch (error) { if (this.pendingStart === pending) pending.error = String(error?.message || error); }
+    finally { if (this.pendingStart === pending) { pending.retrying = false; this.refresh(); } }
+    return true;
   }
   renderComposer(info) {
     const d = this.draft(), running = info.kind === 'session' && this.sessions.running(info.sessionId);
     const sending = Boolean(d.sending), pending = Boolean(this.pendingStart);
-    this.input.placeholder = 'Message ' + info.name + '...'; this.input.readOnly = sending;
+    this.input.placeholder = pending ? 'Waiting for the session...' : 'Message ' + info.name + '...';
+    this.input.readOnly = sending || pending; this.input.disabled = pending;
     this.sendBtn.hidden = false; this.stopBtn.hidden = !running; this.stopBtn.disabled = false;
     this.sendBtn.disabled = sending || pending || !d.text.trim();
     const mode = sending ? 'sending' : 'idle';
@@ -254,7 +278,8 @@ export class TalkPanel {
       this.sendBtn.dataset.mode = mode; this.sendBtn.replaceChildren(sending ? h('span.spinner') : icon('send'));
       this.sendBtn.setAttribute('aria-label', sending ? 'Sending...' : 'Send message');
     }
-    const note = info.kind === 'external' || info.kind === 'live' ? 'Sending offers Continue in a new session.'
+    const note = pending ? (this.pendingStart.error ? 'Retry to start this session.' : 'You can write when the session is ready.')
+      : info.kind === 'external' || info.kind === 'live' ? 'Sending offers Continue in a new session.'
       : running ? 'Your next message waits until this reply finishes.' : 'Enter to send - Shift+Enter for a new line';
     if (note !== this.sigs.note) { this.sigs.note = note; this.note.textContent = note; }
     this.error.hidden = !d.error;
@@ -267,9 +292,9 @@ export class TalkPanel {
   }
   listen(info, msgs) {
     const latest = msgs.filter(m => m.role === 'agent' && m.text?.trim()).at(-1);
-    if (latest && this.heard.get(latest.id) !== latest.text) { this.heard.set(latest.id, latest.text); this.onAgentLine?.(sayLine(latest.text)); }
     const thinking = info.kind === 'session' ? this.sessions.running(info.sessionId) : info.status === 'active';
     if (thinking !== this.thinking) { this.thinking = thinking; this.onThinking?.(thinking); }
+    if (!thinking && latest && this.heard.get(latest.id) !== latest.text) { this.heard.set(latest.id, latest.text); this.onAgentLine?.(sayLine(latest.text)); }
   }
   scheduleAck(info) {
     clearTimeout(this.ackTimer);

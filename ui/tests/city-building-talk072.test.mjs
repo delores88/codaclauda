@@ -63,7 +63,8 @@ test('building start enters pending talk before native start and resolves only t
   const operation = f.launch.start('codex', project);
   const pending = f.view.talk;
   assert.ok(f.launch.pending);
-  assert.deepEqual(pending.pending, { provider: 'codex', projectId: project.id, label: 'New session' });
+  assert.deepEqual({ ...pending.pending, retry: undefined }, { provider: 'codex', projectId: project.id, label: 'New session', fresh: true, retry: undefined });
+  assert.equal(typeof pending.pending.retry, 'function');
   assert.ok(f.events.findIndex(e => e[0] === 'open') < f.events.findIndex(e => e[0] === 'native'));
   assert.equal(f.launch.start('claude', project), operation);
   assert.equal(f.starts.length, 1);
@@ -107,6 +108,42 @@ test('a blank building session opens existing City talk only at its admitted id,
   assert.equal(f.view.resolvePendingTalk(), true);
   assert.deepEqual(f.resolved, [expected]);
   assert.equal(f.sends.length, 0, 'opening the conversation starts no turn');
+});
+
+test('failed building start retries only on an explicit current-generation action through existing controls', async () => {
+  const f = fixture(), next = deferred(), selected = [];
+  f.view.buildingSessions.setProject = (p, context) => selected.push([p, context]);
+  f.view.buildingSessions.start = provider => f.launch.start(provider, selected.at(-1)[0]);
+  const first = f.launch.start('claude', project), retry = f.view.talk.pending.retry;
+  assert.equal(retry(), undefined, 'retry is unavailable before a creation failure');
+  f.native.reject(new Error('Preview creation rejected'));
+  await assert.rejects(first, /creation rejected/);
+  assert.equal(f.starts.length, 1, 'creation failure never launches a retry on its own');
+  f.client.start = options => { f.starts.push(options); return next.promise; };
+  const second = retry();
+  assert.equal(f.starts.length, 2);
+  assert.equal(f.starts[1].provider, 'claude');
+  assert.equal(f.starts[1].projectId, project.id);
+  assert.equal(f.starts[1].access, 'read');
+  assert.deepEqual(selected, [[project, { side: 'pc', remote: false }]]);
+  assert.equal(retry(), undefined, 'the old Retry button cannot launch again after replacement');
+  next.resolve({ id: 'retry-admitted' }); await second;
+  assert.equal(f.view.talk.expectedId, 'sess:retry-admitted');
+  assert.deepEqual(f.sends, [], 'retry still creates a blank conversation');
+});
+
+test('Retry cannot reopen a dismissed pending conversation or start for an ineligible scene', async () => {
+  for (const state of ['closed', 'hidden', 'spark', 'remote', 'removed']) {
+    const f = fixture(), first = f.launch.start('codex', project), retry = f.view.talk.pending.retry;
+    f.native.reject(new Error('Rejected')); await assert.rejects(first);
+    if (state === 'closed') f.view.exitTalk({ instant: true });
+    if (state === 'hidden') f.view.visible = false;
+    if (state === 'spark') f.view.world.restSide = 'spark';
+    if (state === 'remote') f.view.islands.current = 'remote';
+    if (state === 'removed') f.store.project = () => null;
+    assert.equal(retry(), undefined, state);
+    assert.equal(f.starts.length, 1, state);
+  }
 });
 
 for (const action of ['close', 'switch', 'hide', 'graphics-failure']) {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { THREE } from '../app/city/toon.js';
 globalThis.window = {};
 globalThis.localStorage = { getItem: () => null };
-const { fitTalkShot, talkVisibleRect, talkWallHits, talkFigureTargets, talkSceneMeshes, talkSceneHits, cutawayTalkMeshes } = await import('../app/city/talk-frame.js');
+const { fitTalkShot, talkVisibleRect, talkFacingPoint, talkWallHits, talkFigureTargets, talkSceneMeshes, talkSceneHits, cutawayTalkMeshes } = await import('../app/city/talk-frame.js');
 const { talkSpot } = await import('../app/city/talk.js');
 
 test('both full figures fit left of desktop chat and above the visible phone sheet', () => {
@@ -28,13 +28,13 @@ test('both full figures fit left of desktop chat and above the visible phone she
   }
 });
 
-test('wider shoulder shot separates both head silhouettes and reserves space for bubbles', () => {
+test('RPG two-shot puts full bodies in their thirds at comparable size from chest height', () => {
   for (const [width, height, visibleWidth, panel] of [
     [1524, 944, 1524, { left: 1124, top: 0, width: 400, height: 944 }],
     [1280, 800, 1280, { left: 880, top: 0, width: 400, height: 800 }],
     [640, 788, 314, { left: 0, top: 347, width: 314, height: 441 }],
     [640, 760, 320, { left: 0, top: 334, width: 320, height: 426 }],
-  ]) for (const [ownerHeight, agentHeight] of [[1.74, 1.98], [2.1, 1.9], [1.8, 2.4]]) for (const yaw of [0, .7, -1.9]) {
+  ]) for (const [ownerHeight, agentHeight] of [[1.9, 1.9], [2.1, 1.9]]) for (const yaw of [0, .7, -1.9]) {
     const agent = { x: 12, z: 22 }, ground = .24;
     const spot = talkSpot(agent, { x: agent.x + Math.sin(yaw) * 4, z: agent.z + Math.cos(yaw) * 4 });
     const face = { ...agent, y: ground + agentHeight * .72 };
@@ -42,21 +42,41 @@ test('wider shoulder shot separates both head silhouettes and reserves space for
     const shot = fitTalkShot(spot, face, { width, height, vis, ownerHeight, agentHeight, ownerY: ground, agentY: ground });
     const camera = new THREE.PerspectiveCamera(40, width / height, .05, 10000);
     camera.position.set(shot.eye.x, shot.eye.y, shot.eye.z); camera.lookAt(shot.look.x, shot.look.y, shot.look.z); camera.updateMatrixWorld(true);
-    const heads = [[spot, ownerHeight], [agent, agentHeight]].map(([p, top]) => {
+    const figures = [[spot, ownerHeight], [agent, agentHeight]].map(([p, top]) => {
       const pixels = [];
-      for (const dx of [-.5, .5]) for (const dz of [-.5, .5]) for (const dy of [top * .6, top]) {
+      for (const dx of [-.5, .5]) for (const dz of [-.4, .4]) for (const dy of [0, top]) {
         const n = new THREE.Vector3(p.x + dx, ground + dy, p.z + dz).project(camera);
         pixels.push({ x: (n.x + 1) * width / 2, y: (1 - n.y) * height / 2 });
       }
-      return { left: Math.min(...pixels.map(p => p.x)), right: Math.max(...pixels.map(p => p.x)), top: Math.min(...pixels.map(p => p.y)) };
+      return { left: Math.min(...pixels.map(p => p.x)), right: Math.max(...pixels.map(p => p.x)), top: Math.min(...pixels.map(p => p.y)), bottom: Math.max(...pixels.map(p => p.y)) };
     });
-    const [owner, npc] = heads, roomW = vis.x1 - vis.x0, roomH = vis.y1 - vis.y0;
-    assert.ok(owner.right + 8 < npc.left, 'the owner head must not cover the agent face or upper body');
-    assert.ok((owner.left + owner.right) / 2 < vis.x0 + roomW * .46, 'owner stays in the left part of the free view');
-    assert.ok((npc.left + npc.right) / 2 > vis.x0 + roomW * .6, 'agent stays centre-right');
-    assert.ok(Math.min(owner.top, npc.top) >= vis.y0 + Math.min(roomW < 450 ? 90 : 80, roomH * (roomW < 450 ? .4 : .3)), 'space above both heads is reserved for bubbles');
-    assert.ok(shot.eye.y > ground + ownerHeight, 'camera looks down slightly from above the owner');
+    const [owner, npc] = figures, roomW = vis.x1 - vis.x0, roomH = vis.y1 - vis.y0;
+    assert.ok(owner.right + 8 < npc.left, 'the owner must not cover the agent');
+    assert.ok((owner.left + owner.right) / 2 < vis.x0 + roomW / 3, 'owner stays in the left third');
+    assert.ok((npc.left + npc.right) / 2 > vis.x0 + roomW * 2 / 3, 'agent stays in the right third');
+    for (const figure of figures) assert.ok((figure.bottom - figure.top) / roomH >= .45 && (figure.bottom - figure.top) / roomH <= .55,
+      `full body occupies 45-55% of the free view: ${(figure.bottom - figure.top) / roomH}`);
+    assert.ok(Math.min(owner.top, npc.top) >= vis.y0 + Math.min(90, roomH * .30), 'speech has head clearance');
+    assert.ok(shot.eye.y > ground + Math.min(ownerHeight, agentHeight) * .5 && shot.eye.y < ground + Math.max(ownerHeight, agentHeight) * .75, 'camera remains at chest height');
+    const midpoint = new THREE.Vector2((spot.x + agent.x) / 2, (spot.z + agent.z) / 2);
+    const line = new THREE.Vector2(spot.x - agent.x, spot.z - agent.z).normalize();
+    const toCamera = new THREE.Vector2(shot.eye.x, shot.eye.z).sub(midpoint).normalize();
+    assert.ok(Math.abs(toCamera.dot(line) + Math.sin(25 * Math.PI / 180)) < 1e-8, 'side camera has a 25-degree front bias');
+    for (const [position, partner] of [[spot, agent], [agent, spot]]) {
+      const facing = talkFacingPoint(position, partner, shot.eye);
+      const forward = new THREE.Vector2(facing.x - position.x, facing.z - position.z).normalize();
+      const other = new THREE.Vector2(partner.x - position.x, partner.z - position.z).normalize();
+      const cameraDirection = new THREE.Vector2(shot.eye.x - position.x, shot.eye.z - position.z).normalize();
+      assert.ok(forward.dot(other) > .4 && forward.dot(cameraDirection) > .4, 'open stance shows both faces while still facing the partner');
+    }
   }
+});
+
+test('talk free rectangle removes letterbox reservations while keeping Leave and panel clear', () => {
+  assert.deepEqual(talkVisibleRect({ width: 1524, height: 944, panel: { left: 1124, top: 0, width: 400, height: 944 } }),
+    { x0: 12, y0: 56, x1: 1112, y1: 932 });
+  assert.deepEqual(talkVisibleRect({ width: 640, height: 788, visibleWidth: 314, panel: { left: 0, top: 347, width: 314, height: 441 } }),
+    { x0: 12, y0: 56, x1: 302, y1: 335 });
 });
 
 test('talk spot avoids occupied walls and remains inside the island', () => {
