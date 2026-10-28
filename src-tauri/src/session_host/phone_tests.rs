@@ -88,8 +88,10 @@ fn apply_fixture(book: &mut Book, path: &Path, store: &Store, event: &PollEvent)
             if pending {
                 let id = receipt_id(book, &item.id);
                 let namespace = book.topic_digest.as_deref().unwrap();
-                mailbox::post_reserved(store, &post_args(namespace, item, &book.inbound[&id]))
-                    .map_err(|_| failure("PHONE_BOARD_FAILED", "fixture board post failed"))?;
+                if book.inbound[&id].to.is_some() {
+                    mailbox::post_reserved(store, &post_args(namespace, item, &book.inbound[&id]))
+                        .map_err(|_| failure("PHONE_BOARD_FAILED", "fixture board post failed"))?;
+                }
                 book.inbound.get_mut(&id).unwrap().done = true;
                 book.advance_cursor(&item.id);
             }
@@ -616,8 +618,56 @@ fn an_answer_is_never_routed_as_an_ordinary_phone_message() {
     for answer in ["approve K7Q2-MX4P", "deny K7Q2MX4P not now", "Yes k7q2-mx4p"] {
         assert!(phone_approvals::parse_decision(answer).is_some(), "{answer}");
     }
-    for message in ["@Reviewer approve K7Q2-MX4P", "approve the release", "What passed?"] {
+    for message in ["@Reviewer approve K7Q2-MX4P", "What passed?"] {
         assert!(phone_approvals::parse_decision(message).is_none(), "{message}");
+    }
+}
+
+#[test]
+fn malformed_approval_commands_are_receipted_without_mail_or_wake_after_restart() {
+    let (dir, store, mut book) = fixture();
+    let path = dir.path().join(FILE);
+    book.last_recipient = Some("claude-codaclauda".into());
+    book.approval_ledger = serde_json::from_value(json!({"wrong":1})).unwrap();
+    let before_ledger = serde_json::to_value(&book.approval_ledger).unwrap();
+    let commands = ["Approve", "Approve", "Approve", "Approve", "Approved!", "deny", "denied short", "approve K7Q2-MX40", "approve:K7Q2-MX4P"];
+    for (index, command) in commands.into_iter().enumerate() {
+        let item = incoming(&format!("malformed{index}"), command);
+        assert!(phone_approvals::parse_decision(command).is_none(), "no checked decision can run");
+        // The actual ordinary routing path must refuse even with a known last recipient.
+        assert!(route(command, book.last_recipient.as_deref(), &choices()).is_err());
+        apply_fixture(&mut book, &path, &store, &PollEvent::Message(item.clone())).unwrap();
+        book = read_book(&path).unwrap();
+        let receipt = &book.inbound[&receipt_id(&book, &item.id)];
+        assert!(receipt.to.is_none(), "no destination for a board notice or managed wake");
+        assert!(receipt.done);
+        assert_eq!(receipt.feedback.as_deref(), phone_approvals::malformed_decision_feedback(command));
+        let before_repeat = serde_json::to_value(&book).unwrap();
+        apply_fixture(&mut book, &path, &store, &PollEvent::Message(item)).unwrap();
+        assert_eq!(serde_json::to_value(&book).unwrap(), before_repeat, "poll replay is inert");
+        assert_eq!(serde_json::to_value(&book.approval_ledger).unwrap(), before_ledger, "no code attempt or decision recorded");
+    }
+    assert_eq!(book.last_recipient.as_deref(), Some("claude-codaclauda"));
+    for address in ["claude-codaclauda", "codex-claudacoda"] {
+        assert!(mailbox::api(&store, "inbox", &json!({"addr":address})).unwrap()["messages"].as_array().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn conversational_yes_no_keeps_ordinary_routing_and_format_refusal_ignores_approval_toggle() {
+    let (_dir, _store, mut book) = fixture();
+    book.last_recipient = Some("claude-codaclauda".into());
+    for (index, message) in ["yes", "no", "Yes please", "No thanks", "please approve the release"].into_iter().enumerate() {
+        assert!(phone_approvals::parse_decision(message).is_none());
+        let item = incoming(&format!("conversation{index}"), message);
+        assert!(prepare(&mut book, &item, &choices(), |_| None).unwrap());
+        assert_eq!(book.inbound[&receipt_id(&book, &item.id)].to.as_deref(), Some("claude-codaclauda"));
+    }
+    for (index, enabled) in [true, false].into_iter().enumerate() {
+        book.approvals = enabled;
+        let item = incoming(&format!("formatrefusal{index}"), "Approve");
+        assert!(prepare(&mut book, &item, &choices(), |_| panic!("malformed decision reached a recipient")).unwrap());
+        assert!(book.inbound[&receipt_id(&book, &item.id)].to.is_none());
     }
 }
 

@@ -312,6 +312,7 @@ fn prefix_match(rest: &str, name: &str) -> Option<usize> {
 fn route(body: &str, last: Option<&str>, choices: &[Recipient]) -> Result<(String, usize), String> {
     if mailbox_credential(body) { return Err(SCAN_REFUSAL.into()); }
     if body.len() > MESSAGE_BYTES || body.contains('\0') { return Err("Message not forwarded: it is too large or contains invalid text.".into()); }
+    if let Some(feedback) = phone_approvals::malformed_decision_feedback(body) { return Err(feedback.into()); }
     let trimmed = body.trim_start();
     let leading = body.len() - trimmed.len();
     let (to, start) = if let Some(rest) = trimmed.strip_prefix('@') {

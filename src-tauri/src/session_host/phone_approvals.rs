@@ -24,6 +24,7 @@ const OWNER: &str = "owner";
 const PHONE: &str = "owner-phone";
 const LOCKED: &str = "Phone approvals are locked after repeated wrong codes. Unlock them in CodaClauda: Settings > Phone.";
 const WRONG: &str = "That approval code is not valid. Check the code in the request notification and try again.";
+const INVALID_FORMAT: &str = "Not sent to any agent. Copy the complete approve or deny line, including its code, from the request notification into your Shortcut.";
 const EXPIRED: &str = "That approval code has expired. Answer the request in CodaClauda, or ask the agent to send it again.";
 
 /// In memory only: a restart forgets every code and re-sends open requests with new ones.
@@ -62,8 +63,8 @@ fn normalize(raw: &str) -> Option<String> {
 pub(super) fn display(code: &str) -> String {
     format!("{}-{}", &code[..4], &code[4..])
 }
-/// "approve K7Q2-MX4P", "Deny k7q2mx4p too risky", "yes K7Q2MX4P". None: not an approval answer
-/// (then it is an ordinary phone message, routed as before).
+/// "approve K7Q2-MX4P", "Deny k7q2mx4p too risky", "yes K7Q2MX4P".
+/// None means no coded answer; malformed explicit decisions are refused by routing.
 pub(super) fn parse_decision(text: &str) -> Option<(Decision, String, String)> {
     let text = text.trim();
     let (word, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
@@ -76,6 +77,14 @@ pub(super) fn parse_decision(text: &str) -> Option<(Decision, String, String)> {
     let (code, note) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
     let code = normalize(code.trim_end_matches([':', ',', '.', '!']))?;
     Some((decision, code, note.trim().to_owned()))
+}
+/// Reserve explicit decision commands even when their code/spacing is malformed.
+/// Conversational yes/no stays ordinary unless parse_decision accepts a code.
+/// This is a format refusal, not a checked code attempt or an approval mutation.
+pub(super) fn malformed_decision_feedback(text: &str) -> Option<&'static str> {
+    let word = text.trim_start().split(|c: char| c.is_whitespace() || c.is_ascii_punctuation()).next().unwrap_or("");
+    (matches!(word.to_ascii_lowercase().as_str(), "approve" | "approved" | "deny" | "denied")
+        && parse_decision(text).is_none()).then_some(INVALID_FORMAT)
 }
 /// A fresh code from the OS random source; None if it is unavailable (no weak fallback).
 fn new_code() -> Option<String> {
@@ -407,8 +416,23 @@ mod tests {
         assert_eq!(parse_decision("approve K7Q2-MX4P"), Some((Decision::Approve, "K7Q2MX4P".into(), String::new())));
         assert_eq!(parse_decision("  Deny: k7q2mx4p too risky today "), Some((Decision::Deny, "K7Q2MX4P".into(), "too risky today".into())));
         assert_eq!(parse_decision("yes K7Q2-MX4P, staging only"), Some((Decision::Approve, "K7Q2MX4P".into(), "staging only".into())));
-        for ordinary in ["approve", "approve the PR", "@Reviewer approve K7Q2-MX4P", "deny K7Q2-MX4", "approve K7Q2-MX4PX", "approve K7Q2-MX40", "please approve K7Q2-MX4P"] {
-            assert_eq!(parse_decision(ordinary), None, "{ordinary}");
+        assert_eq!(parse_decision("no K7Q2-MX4P! not now"), Some((Decision::Deny, "K7Q2MX4P".into(), "not now".into())));
+        for uncoded in ["approve", "approve the PR", "@Reviewer approve K7Q2-MX4P", "deny K7Q2-MX4", "approve K7Q2-MX4PX", "approve K7Q2-MX40", "please approve K7Q2-MX4P"] {
+            assert_eq!(parse_decision(uncoded), None, "{uncoded}");
+        }
+    }
+
+    #[test]
+    fn explicit_malformed_decisions_get_feedback_without_reclassifying_conversation() {
+        for malformed in ["Approve", " approved! ", "DENY", "denied.", "approve the release", "deny K7Q2-MX4", "approve K7Q2-MX4PX", "approve K7Q2-MX40", "approve:K7Q2-MX4P", "deny=K7Q2MX4P", "approved(K7Q2MX4P)"] {
+            assert_eq!(malformed_decision_feedback(malformed), Some(INVALID_FORMAT), "{malformed}");
+        }
+        for ordinary in ["yes", "no", "yes please", "no thanks", "yes short", "no K7Q2-MX40", "approval needed", "denying this", "@Reviewer approve K7Q2-MX4P", "please approve the release"] {
+            assert_eq!(malformed_decision_feedback(ordinary), None, "{ordinary}");
+        }
+        for coded in ["approve K7Q2-MX4P", "approved k7q2mx4p", "Deny: K7Q2MX4P not now", "denied K7Q2-MX4P", "yes K7Q2-MX4P", "no K7Q2MX4P"] {
+            assert!(parse_decision(coded).is_some(), "{coded}");
+            assert_eq!(malformed_decision_feedback(coded), None, "{coded}");
         }
     }
 
