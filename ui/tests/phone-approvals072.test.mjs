@@ -71,7 +71,10 @@ test('an older build without phone approvals hides the section', async t => {
 });
 
 test('the copy names what the phone can reach and what it cannot, and that codes are one-time', () => {
-  assert.match(PHONE_COPY.approvalsIntro, /approve K7Q2-MX4P/);
+  assert.match(PHONE_COPY.approvalsIntro, /says which chat it is for/);
+  assert.match(PHONE_COPY.approvalsIntro, /Copy the whole line/);
+  assert.match(PHONE_COPY.approvalsNotSent, /not sent to any agent/);
+  for (const text of Object.values(PHONE_COPY)) assert.doesNotMatch(text, /[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}/, 'no example code Ben could paste literally');
   assert.match(PHONE_COPY.approvalsIntro, /Codex chats set to Wake by mail/);
   assert.match(PHONE_COPY.approvalsIntro, /Remote Control/);
   assert.match(PHONE_COPY.approvalsTrust, /works once, expires after 24 hours/);

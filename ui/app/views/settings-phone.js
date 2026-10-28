@@ -10,7 +10,8 @@ export const PHONE_COPY = {
   privacy: 'Keep the topic URL private and use a long random topic. Never send credentials or private transcripts. Recognized credentials are refused in both directions; the filter cannot detect every secret. Message bodies are not written to diagnostic logs, but delivered messages stay on the board and may enter the agent conversation.',
   availability: 'Keep CodaClauda open and this PC online. Wake on mail and the recipient\'s existing access still apply. ntfy keeps only a limited cache, so messages sent while this PC is offline may expire. Saving a setting or message does not prove an agent acted or a phone received it.',
   approvalsTitle: 'Approve from your phone',
-  approvalsIntro: 'When an agent sends you an APPROVAL REQUEST, your phone gets it with Approve and Deny buttons and a one-time code. You can also reply approve K7Q2-MX4P, or deny K7Q2-MX4P and a reason. Your answer goes into that agent\'s own chat as your words: CodaClauda chats, and Codex chats set to Wake by mail in Running. For Claude Code desktop chats, use Remote Control in the Claude app.',
+  approvalsIntro: 'When an agent sends you an APPROVAL REQUEST, your phone gets it with a one-time code, says which chat it is for (provider, project and chat) and shows the two lines you can send: approve or deny, each followed by that request\'s code. Copy the whole line into the topic or your Shortcut; words after the code reach the agent too. Approve and Deny buttons appear where your phone supports them. Your answer goes into that same chat as your words: CodaClauda chats, and Codex chats set to Wake by mail in Running. For Claude Code desktop chats, use Remote Control in the Claude app.',
+  approvalsNotSent: 'A reply that is not a whole approve or deny line with a valid code is not sent to any agent; your phone gets a note saying so.',
   approvalsTrust: 'Each code works once, expires after 24 hours and lives only in CodaClauda\'s memory; after a restart, open requests are sent again with new codes. Five wrong codes lock phone approvals until you unlock them here. Anyone who can read your topic could approve, so keep it private.',
 };
 
@@ -70,7 +71,7 @@ export function phoneSettings({ ui }) {
   const unlock = h('button.btn.small', { type: 'button', hidden: true, onclick: () => unlockApprovals() }, icon('lock'), 'Unlock phone approvals');
   const approvals = h('div.phone-approvals', { hidden: true },
     h('div.setting-row', h('div.setting-text', h('h3.panel-title', PHONE_COPY.approvalsTitle), h('span.field-hint', PHONE_COPY.approvalsIntro)), h('label.switch', approvalsInput, h('span'))),
-    approvalsStatus, unlock, h('p.field-hint', PHONE_COPY.approvalsTrust));
+    approvalsStatus, unlock, h('p.field-hint', PHONE_COPY.approvalsNotSent), h('p.field-hint', PHONE_COPY.approvalsTrust));
   const node = h('div.phone-messages',
     h('div.setting-row', h('div.setting-text', h('h3.panel-title', PHONE_COPY.title), h('span.field-hint', PHONE_COPY.intro)), h('label.switch', onInput, h('span'))),
     status, failure, h('p.field-hint', PHONE_COPY.send), thread,

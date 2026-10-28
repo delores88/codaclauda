@@ -59,11 +59,20 @@ settings; no separate inbound topic or recipient picker is needed.
 ## Approve from your phone (0.7.2)
 
 When an agent posts a board message to `owner` whose subject starts with
-`APPROVAL REQUEST`, CodaClauda sends it to the same topic with **Approve** and
-**Deny** buttons and a one-time code. Tap a button, or publish
-`approve K7Q2-MX4P` or `deny K7Q2-MX4P` followed by a reason. Words after the
-code reach the agent as "Ben added: ...". The switch is **Approve from your
-phone** in **Settings > Phone**; it is on by default and needs phone messages on.
+`APPROVAL REQUEST`, CodaClauda sends it to the same topic with a one-time code.
+The notification title names the provider and project ("Approval needed: Claude
+Code in MyCast"), a **For:** line names the exact existing chat the answer goes
+to, and the body shows the two complete lines you can send: `approve` and
+`deny`, each followed by that request's real code. Copy a whole line into the
+topic or your Shortcut; words after the code reach the agent as "Ben added:
+...". **Approve** and **Deny** buttons appear where the phone's ntfy app supports
+them. The switch is **Approve from your phone** in **Settings > Phone**; it is
+on by default and needs phone messages on.
+
+A reply that starts with approve or deny but has no code, or a malformed one, is
+not sent to any agent: the phone gets a note saying so and how to send the whole
+line. Every result that did not reach a chat starts with "Not sent to any
+agent".
 
 CodaClauda checks the code, then puts your answer into that agent's own chat as
 your words:

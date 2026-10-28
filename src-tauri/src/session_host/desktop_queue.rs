@@ -882,6 +882,8 @@ pub(super) struct OwnerAnswerBinding {
     bound_at: u64,
 }
 impl OwnerAnswerBinding {
+    /// The bound chat's folder, for naming it on the phone (read only).
+    pub(super) fn cwd(&self) -> &str { &self.cwd }
     fn from_binding(b: &Binding) -> Self {
         Self { address: b.address.clone(), thread_id: b.thread_id.clone(), cwd: b.cwd.clone(),
             project_id: b.project_id.clone(), project_root: b.project_root.clone(), bound_at: b.bound_at }

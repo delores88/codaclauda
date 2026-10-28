@@ -487,6 +487,34 @@ a.code-path { color: var(--accent-2); }
 .newchat-check-text strong { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
 .newchat-check-text strong .icon { width: 14px; height: 14px; color: var(--accent-2); }
 
+/* ---------- Main pane containment (0.7.2) ----------
+   With the chat list and Connected resources open, the conversation can be narrow on a wide
+   window. Its one column never grows past its grid track (a wide header or token used to push the
+   transcript and composer under Connected resources), and the header and composer compact by the
+   pane's own width, not the window's. Nothing is hidden that isn't also in Connected resources. */
+.chat-main { grid-template-columns: minmax(0, 1fr); container: chat-main / inline-size; }
+.chat-main > * { min-width: 0; }
+.msg-content { overflow-wrap: anywhere; }   /* long ids, hashes and paths wrap; code blocks still scroll */
+.chat-head .head-text { flex: 1 1 160px; min-width: 120px; }
+.chat-head .mode-pill, .chat-head .meter-chip { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chat-head .head-meters { flex: 0 1 auto; min-width: 0; }
+@container chat-main (max-width: 900px) {
+  .composer-keys, .chat-head .mode-detail { display: none; }
+  .chat-head .meter-chip > span:last-child { display: none; }
+}
+@container chat-main (max-width: 640px) {
+  .chat-head .head-branch { display: none; }
+  .chat-column { padding: 8px 16px 24px; }
+  .composer-wrap { padding: 0 12px 12px; }
+}
+@container chat-main (max-width: 520px) {
+  .chat-head .head-meters { display: none; }   /* usage stays in Connected resources */
+}
+@container chat-main (max-width: 460px) {
+  .chat-head .mode-pill b { display: none; }
+  .chat-head { gap: 8px; padding-right: 10px; }
+}
+
 /* ---------- Responsive ---------- */
 @media (max-width: 1240px) {
   .composer-keys, .mode-detail { display: none; }

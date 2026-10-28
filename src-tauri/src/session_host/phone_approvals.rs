@@ -22,10 +22,10 @@ const LOOKBACK: u64 = 24 * 60 * 60;
 pub(super) const WRONG_LIMIT: u32 = 5;
 const OWNER: &str = "owner";
 const PHONE: &str = "owner-phone";
-const LOCKED: &str = "Phone approvals are locked after repeated wrong codes. Unlock them in CodaClauda: Settings > Phone.";
-const WRONG: &str = "That approval code is not valid. Check the code in the request notification and try again.";
-const INVALID_FORMAT: &str = "Not sent to any agent. Copy the complete approve or deny line, including its code, from the request notification into your Shortcut.";
-const EXPIRED: &str = "That approval code has expired. Answer the request in CodaClauda, or ask the agent to send it again.";
+const LOCKED: &str = "Not sent to any agent: phone approvals are locked after five wrong codes. Unlock them in CodaClauda: Settings > Phone.";
+const WRONG: &str = "Not sent to any agent: that approval code is not valid. Copy the whole approve or deny line from the request notification.";
+const INVALID_FORMAT: &str = "Not sent to any agent: an approve or deny reply needs that request's code. Copy the whole approve or deny line, including its code, from the request notification into the topic or your Shortcut.";
+const EXPIRED: &str = "Not sent to any agent: that approval code has expired. Answer the request in CodaClauda, or ask the agent to send it again.";
 
 /// In memory only: a restart forgets every code and re-sends open requests with new ones.
 #[derive(Default)]
@@ -131,7 +131,9 @@ pub(super) fn chat_text(decision: Decision, title: &str, request: &str, note: &s
     text.push_str(&format!("\n\n(Board request {request}.)"));
     text
 }
-fn push_body(title: &str, body: &str, code: &str) -> String {
+/// The request notification: what is asked, which chat the answer goes to, and the exact lines to
+/// send (the real code; an iPhone Shortcut can send a whole line as it is).
+fn push_body(title: &str, body: &str, code: &str, destination: &str) -> String {
     let details = if mailbox_credential(title) || mailbox_credential(body) {
         "The request's text is withheld here because it may contain a credential. Read it in CodaClauda > Approvals.".to_owned()
     } else {
@@ -139,7 +141,42 @@ fn push_body(title: &str, body: &str, code: &str) -> String {
         format!("{title}\n\n{excerpt}")
     };
     let code = display(code);
-    format!("{details}\n\nTap Approve or Deny, or reply: approve {code} (or: deny {code} and a reason). One use, expires in 24 hours.")
+    format!("{details}\n\nFor: {destination}\n\nTo answer, send exactly one of these lines (copy the whole line):\napprove {code}\ndeny {code}\nWords after the code reach the agent too. Or tap Approve or Deny if your phone shows buttons. One use; expires in 24 hours.")
+}
+/// "Claude Code" / "Codex" for people.
+fn provider_label(provider: &str) -> &'static str {
+    match provider { "claude" => "Claude Code", "codex" => "Codex", _ => "Agent" }
+}
+/// The last folder of a path, for people ("MyCast"); never a credential-looking value.
+fn folder_name(path: &str) -> String {
+    let name = path.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or("").trim();
+    if name.is_empty() || mailbox_credential(name) { "its project".into() } else { name.chars().filter(|c| !c.is_control()).take(60).collect() }
+}
+/// Where an answer goes, in words: shown on the phone only, never used for routing.
+pub(super) struct Destination {
+    /// For the notification title (ASCII survives there): "Claude Code in MyCast".
+    pub(super) short: String,
+    /// The exact existing chat: "Claude Code chat \"Release\" in MyCast, a CodaClauda chat (@claude-x)".
+    pub(super) chat: String,
+    /// For the notification body: the chat and how the answer reaches it.
+    pub(super) long: String,
+}
+fn destination_text(from: &str, route: &Route, chat_title: Option<&str>) -> Destination {
+    match route {
+        Route::Managed(m) => {
+            let (who, project) = (provider_label(&m.provider), folder_name(&m.cwd));
+            let chat = chat_title.map_or_else(|| format!("{who} chat"), |t| format!("{who} chat \"{t}\""));
+            let chat = format!("{chat} in {project}, a CodaClauda chat (@{from})");
+            Destination { short: format!("{who} in {project}"), long: format!("{chat}. Your answer goes into that chat as your words."), chat }
+        }
+        Route::Desktop(b) => {
+            let project = folder_name(b.cwd());
+            let chat = format!("the Codex desktop chat in {project} set to Wake by mail (@{from})");
+            Destination { short: format!("Codex in {project}"), long: format!("{chat}. Your answer is queued into that chat as your words."), chat }
+        }
+        Route::BoardOnly => Destination { short: format!("@{from}"), chat: format!("@{from}"),
+            long: format!("@{from}. CodaClauda cannot type into that chat, so your answer is only recorded on the board; answer it in its own app too.") },
+    }
 }
 /// ntfy action buttons: each publishes the answer to this same topic from the phone.
 fn actions(url: &str, code: &str) -> String {
@@ -234,6 +271,15 @@ impl Inner {
         drop(state);
         desktop_queue::owner_answer_binding(&self.dir, address).ok().flatten().map(Route::Desktop).unwrap_or(Route::BoardOnly)
     }
+    /// Words for where an answer goes (the chat's current title, read only).
+    fn phone_destination(&self, from: &str, route: &Route) -> Destination {
+        let title = match route {
+            Route::Managed(m) => lock(&self.state).records.iter().find(|r| r.id == m.id).map(|r| r.title.trim().chars().take(80).collect::<String>())
+                .filter(|t| !t.is_empty() && !t.chars().any(char::is_control) && !mailbox_credential(t)),
+            _ => None,
+        };
+        destination_text(from, route, title.as_deref())
+    }
     fn phone_approval_route_current(&self, address: &str, route: &Route) -> bool {
         if !self.wake_enabled() { return false; }
         match route {
@@ -267,8 +313,9 @@ impl Inner {
                 };
                 let from = m["from"].as_str().unwrap_or("an agent").to_owned();
                 let title = request_title(m["subject"].as_str().unwrap_or(""));
-                let body = push_body(&title, m["body"].as_str().unwrap_or(""), &code);
                 let route = self.phone_approval_route(&from);
+                let destination = self.phone_destination(&from, &route);
+                let body = push_body(&title, m["body"].as_str().unwrap_or(""), &code, &destination.long);
                 let _gate = self.phone_gate.lock().await;
                 if !self.phone_approval_current(revision) { return Ok(()); }
                 let Some(url) = self.phone_reply_url() else { return Ok(()) };
@@ -280,7 +327,7 @@ impl Inner {
                     approvals.codes.insert(code.clone(), Pending { request: id.into(), from: from.clone(), title, expires: coord_core::now() + CODE_TTL, revision, route });
                     approvals.run.clone()
                 };
-                let publication = Publication { id: format!("approval:{run}:{id}"), title: format!("Approval needed: {from}"), subject: String::new(), body, limit: 1500, tag: "raised_hand", recipient: None };
+                let publication = Publication { id: format!("approval:{run}:{id}"), title: format!("Approval needed: {}", destination.short), subject: String::new(), body, limit: 1800, tag: "raised_hand", recipient: None };
                 self.phone_publish_actions_locked(&url, publication, Some(&actions(&url, &code))).await?;
             }
             let _gate = self.phone_gate.lock().await;
@@ -296,23 +343,24 @@ impl Inner {
     /// is possible without both durable records. Restart never reissues a code
     /// for a reserved/unknown decision.
     pub(super) fn phone_decide(&self, decision: Decision, code: &str, note: &str, store: &Store) -> String {
-        if !self.phone_approvals_on() { return "Phone approvals are off. Nothing was approved or sent.".into(); }
+        if !self.phone_approvals_on() { return "Not sent to any agent: phone approvals are off in CodaClauda Settings > Phone.".into(); }
         if lock(&self.phone).approval_ledger.wrong >= WRONG_LIMIT { return LOCKED.into(); }
         let pending = lock(&self.phone_approvals).codes.remove(code);
         let Some(pending) = pending else {
             return match self.change_phone(|b| { b.approval_ledger.wrong = (b.approval_ledger.wrong + 1).min(WRONG_LIMIT); Ok(b.approval_ledger.wrong) }) {
                 Ok(wrong) if wrong >= WRONG_LIMIT => LOCKED.into(),
-                Ok(_) => WRONG.into(), Err(_) => "Phone approval storage failed. Nothing was sent.".into(),
+                Ok(_) => WRONG.into(), Err(_) => "Not sent to any agent: phone approval storage failed.".into(),
             };
         };
-        if !self.phone_approval_current(pending.revision) { return "That approval was revoked by changed phone settings. Nothing was sent.".into(); }
+        if !self.phone_approval_current(pending.revision) { return "Not sent to any agent: that approval was revoked when phone settings changed.".into(); }
         if pending.expires <= coord_core::now() { return EXPIRED.into(); }
         match answered(store, &pending.request) {
-            Ok(true) => return "That request was already answered in CodaClauda. Nothing changed.".into(),
-            Err(_) => return "The owner decision could not be checked. Nothing was sent.".into(),
+            Ok(true) => return "Not sent to any agent: that request was already answered in CodaClauda. Nothing changed.".into(),
+            Err(_) => return "Not sent to any agent: the board could not be checked, so nothing was approved. Answer it in CodaClauda.".into(),
             Ok(false) => {}
         }
         let verb = if decision == Decision::Approve { "Approved" } else { "Denied" };
+        let destination = self.phone_destination(&pending.from, &pending.route);
         let text = chat_text(decision, &pending.title, &pending.request, note);
         let id = answer_id(&pending.request);
         let applied = Applied { request: pending.request.clone(), address: pending.from.clone(), message: id.clone(),
@@ -324,34 +372,34 @@ impl Inner {
             b.approval_ledger.wrong = 0;
             b.approval_ledger.decisions.insert(pending.request.clone(), applied); Ok(())
         });
-        if reserved.is_err() { return "The decision could not be reserved. Nothing was sent.".into(); }
+        if reserved.is_err() { return "Not sent to any agent: the decision could not be saved, so nothing was approved. Answer it in CodaClauda.".into(); }
         let reply = json!({"id": id, "from": OWNER, "to": pending.from, "kind": "reply",
             "reply_to": pending.request, "subject": format!("{verb} from Ben's phone"), "body": text});
         match mailbox::post_first_owner_reply(store, &reply) {
             Ok(saved) if saved["recorded"] == true => {},
-            Ok(_) => { let _ = self.phone_approval_outcome(&pending.request, "superseded"); return "That request was already answered on the PC. Nothing was sent.".into(); }
-            Err(_) => { let _ = self.phone_approval_outcome(&pending.request, "board-failed"); return "The board decision could not be confirmed. Nothing was dispatched; reconcile the request before any further action.".into(); }
+            Ok(_) => { let _ = self.phone_approval_outcome(&pending.request, "superseded"); return "Not sent to any agent: that request was already answered on the PC.".into(); }
+            Err(_) => { let _ = self.phone_approval_outcome(&pending.request, "board-failed"); return "Not sent to any agent: the board did not confirm your answer, so nothing was dispatched. Check the request in CodaClauda before answering again.".into(); }
         }
         if !self.phone_approval_route_current(&pending.from, &pending.route) {
             let _ = self.phone_approval_outcome(&pending.request, "board-only");
-            return format!("{verb} on the board only. The original chat route or Wake setting is unavailable; no replacement chat was used.");
+            return format!("{verb} on the board only: \"{}\". Not sent to any agent: the original chat for @{} closed or Wake on mail is off, and no other chat was used.", pending.title, pending.from);
         }
         match pending.route {
             Route::Managed(_) => {
-                if self.phone_approval_outcome(&pending.request, "managed").is_err() { return "The decision is on the board, but delivery storage failed. No turn was started.".into(); }
+                if self.phone_approval_outcome(&pending.request, "managed").is_err() { return "Recorded on the board but not sent to any agent: delivery storage failed, so no turn was started.".into(); }
                 // The existing wake route is the only managed-session writer.
-                format!("{verb} on the board. Waiting for the original CodaClauda chat's normal Wake on mail admission; execution is not yet confirmed.")
+                format!("{verb}: \"{}\". Going to {} through Wake on mail; its reply comes here when it runs (not confirmed yet).", pending.title, destination.chat)
             }
             Route::Desktop(binding) => {
-                if self.phone_approval_outcome(&pending.request, "desktop-sending").is_err() { return "The decision is on the board, but queue reservation failed. Nothing was queued.".into(); }
-                let Some(inner) = self.me.upgrade() else { let _ = self.phone_approval_outcome(&pending.request, "not-started"); return "The chat host is unavailable; no queue command started.".into() };
+                if self.phone_approval_outcome(&pending.request, "desktop-sending").is_err() { return "Recorded on the board but not sent to any agent: the queue could not be reserved.".into(); }
+                let Some(inner) = self.me.upgrade() else { let _ = self.phone_approval_outcome(&pending.request, "not-started"); return "Recorded on the board but not sent to any agent: the chat host is unavailable.".into() };
                 let request = pending.request.clone();
                 tauri::async_runtime::spawn(async move {
                     let result = desktop_queue::queue_owner_answer(&inner, binding, request.clone(), pending.revision, text).await;
                     let _ = inner.phone_approval_outcome(&request, result.state);
                     inner.phone_notification(Publication { id: format!("approval-delivery:{}", super::random_hex(8)), title: "CodaClauda".into(), subject: String::new(), body: result.detail, limit: 500, tag: "", recipient: None });
                 });
-                format!("{verb} on the board. A single queue attempt is reserved for the original Codex binding; recipient delivery is not yet confirmed.")
+                format!("{verb}: \"{}\". Queuing it once into {}; you get a note here when it lands or fails.", pending.title, destination.chat)
             }
             Route::BoardOnly => unreachable!("unavailable routes handled above"),
         }
@@ -444,7 +492,7 @@ mod tests {
             assert_eq!(code.len(), CODE_LEN);
             assert!(code.bytes().all(|b| ALPHABET.contains(&b)), "{code}");
             assert_eq!(normalize(&display(&code).to_lowercase()), Some(code.clone()));
-            let body = push_body("Ship 0.7.2", "Publish the installer.", &code);
+            let body = push_body("Ship 0.7.2", "Publish the installer.", &code, "Claude Code chat \"Release\" in CodaClauda, a CodaClauda chat (@claude-x).");
             assert!(!mailbox_credential(&body), "{body}");
             assert!(!mailbox_credential(&actions("https://ntfy.sh/a-long-private-topic", &code)));
             seen.insert(code);
@@ -469,7 +517,7 @@ mod tests {
 
     #[test]
     fn a_request_carrying_a_credential_is_withheld_from_the_phone() {
-        let body = push_body("Use key", "password: Hunter2Hunter2", "K7Q2MX4P");
+        let body = push_body("Use key", "password: Hunter2Hunter2", "K7Q2MX4P", "@claude-x.");
         assert!(body.contains("withheld") && !body.contains("Hunter2"));
         assert!(body.contains("approve K7Q2-MX4P"));
     }
@@ -480,6 +528,36 @@ mod tests {
         assert!(yes.contains("Ben approved") && yes.contains("exactly what the request described") && yes.contains("Ben added: staging first") && yes.contains("req-1"));
         let no = chat_text(Decision::Deny, "Ship 0.7.2", "req-1", "");
         assert!(no.contains("Do not go ahead") && !no.contains("Ben added"));
+    }
+
+    #[test]
+    fn the_request_names_its_chat_and_the_exact_lines_to_send() {
+        let managed = Route::Managed(ManagedRoute { id: "s_1".into(), provider: "claude".into(), project: "local:c:/work/mycast".into(),
+            cwd: r"C:\Users\Ben\Desktop\MyCast".into(), address: Some("claude-mycast-1a2b".into()), thread: None, provider_session: None });
+        let here = destination_text("claude-mycast-1a2b", &managed, Some("Release"));
+        assert_eq!(here.short, "Claude Code in MyCast");
+        assert_eq!(here.chat, "Claude Code chat \"Release\" in MyCast, a CodaClauda chat (@claude-mycast-1a2b)");
+        assert!(here.long.ends_with("Your answer goes into that chat as your words."));
+        assert!(destination_text("claude-mycast-1a2b", &managed, None).chat.starts_with("Claude Code chat in MyCast"));
+        let elsewhere = destination_text("claude-desktop", &Route::BoardOnly, None);
+        assert!(elsewhere.long.contains("only recorded on the board") && elsewhere.short == "@claude-desktop");
+
+        let body = push_body("Ship 0.7.2", "Publish the installer.", "K7Q2MX4P", &here.long);
+        assert!(body.contains("For: Claude Code chat \"Release\" in MyCast"), "{body}");
+        let lines: Vec<&str> = body.lines().collect();
+        assert!(lines.contains(&"approve K7Q2-MX4P") && lines.contains(&"deny K7Q2-MX4P"), "each answer is a whole line to copy: {body}");
+        assert!(!mailbox_credential(&body));
+        for (path, name) in [(r"C:\Users\Ben\Desktop\MyCast\", "MyCast"), ("/home/ben/app", "app"), ("", "its project")] {
+            assert_eq!(folder_name(path), name);
+        }
+    }
+
+    #[test]
+    fn every_refusal_says_nothing_reached_an_agent() {
+        for text in [LOCKED, WRONG, INVALID_FORMAT, EXPIRED] {
+            assert!(text.starts_with("Not sent to any agent"), "{text}");
+            assert!(!text.chars().any(|c| c.is_ascii_digit()), "no example code a Shortcut could send: {text}");
+        }
     }
     fn decision_fixture() -> (super::super::phone::Book, Record, Value) {
         let record: Record = serde_json::from_value(json!({"id":"s_0123456789abcdef","provider":"codex","projectId":"local:fixture","cwd":"C:/fixture","title":"Fixture","access":"full","threadId":null,"providerSessionId":null,"status":"idle","createdAt":1,"lastActivityAt":1,"shared":false,"sharedId":null,"wake":true,"mailboxAddress":"codex-fixture"})).unwrap();
