@@ -318,6 +318,7 @@ pub fn owner_api(store: &Store, op: &str, a: &Value, cli: &Path) -> Result<Value
             })
         }
         "status" => {
+            spark::autoconfigure(store)?;
             let policy = policy::read(&store.root)?;
             let s = store.read()?;
             let counts = scheduler::counts(&s);

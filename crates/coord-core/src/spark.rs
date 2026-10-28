@@ -109,6 +109,61 @@ pub(crate) fn configured_executable(requested: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
+/// Only the owner board load discovers installations. Passive mailbox/MCP reads
+/// never configure a bridge, and discovery never launches it or probes a Spark.
+pub(crate) fn autoconfigure(store: &crate::store::Store) -> Result<()> {
+    #[cfg(windows)]
+    autoconfigure_with(store, || {
+        installed_executable(&crate::store::local_app_data().ok()?)
+    })?;
+    #[cfg(not(windows))]
+    let _ = store;
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn autoconfigure_with(
+    store: &crate::store::Store,
+    discover: impl FnOnce() -> Option<PathBuf>,
+) -> Result<()> {
+    if store.read()?.spark.is_some() {
+        return Ok(());
+    }
+    let Some(path) = discover() else {
+        return Ok(());
+    };
+    store.compatible_transaction(|s| {
+        // A manual Save may have won while discovery was examining the files.
+        if s.spark.is_none() {
+            s.spark = Some(path.to_string_lossy().into_owned());
+        }
+        Ok(())
+    })
+}
+
+#[cfg(any(windows, test))]
+fn installed_executable(local_app_data: &Path) -> Option<PathBuf> {
+    let mut candidate = None;
+    for product in ["DGXBridge", "RTXBridge"] {
+        let path = local_app_data.join(product).join("bin").join("sparkdev.exe");
+        // Count present entries before validating; an invalid second entry is
+        // still ambiguous. Probe errors and broken links do not select a fallback.
+        match fs::symlink_metadata(&path) {
+            Ok(_) if candidate.is_none() => candidate = Some(path),
+            Ok(_) => return None,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+    let candidate = candidate?;
+    let resolved = configured_executable(&candidate).ok()?;
+    #[cfg(windows)]
+    if package_cache_path(&candidate) || package_cache_path(&resolved) {
+        return None;
+    }
+    Some(resolved)
+}
+
 struct Prepared {
     argv: Vec<OsString>,
     workload: Option<Vec<String>>,
@@ -514,6 +569,87 @@ pub fn invoke(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    mod autodetect {
+        use super::*;
+        use crate::store::Store;
+
+        fn install(base: &Path, product: &str) -> PathBuf {
+            let path = base.join(product).join("bin").join("sparkdev.exe");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            // Not an executable: detection must work without launching anything.
+            fs::write(&path, b"discovery fixture").unwrap();
+            path.canonicalize().unwrap()
+        }
+
+        #[test]
+        fn each_standard_install_is_saved_without_running_it() {
+            for product in ["DGXBridge", "RTXBridge"] {
+                let temp = tempfile::tempdir().unwrap();
+                let base = temp.path().join("Local");
+                let expected = install(&base, product);
+                let store = Store::new(Some(temp.path().join("board"))).unwrap();
+                autoconfigure_with(&store, || installed_executable(&base)).unwrap();
+                assert_eq!(store.read().unwrap().spark, Some(expected.to_string_lossy().into()));
+            }
+        }
+
+        #[test]
+        fn missing_or_ambiguous_installations_do_not_write_board() {
+            let temp = tempfile::tempdir().unwrap();
+            let base = temp.path().join("Local");
+            let store = Store::new(Some(temp.path().join("board"))).unwrap();
+            autoconfigure_with(&store, || installed_executable(&base)).unwrap();
+            assert!(!store.root.join("state.json").exists());
+            install(&base, "DGXBridge");
+            let second = base.join("RTXBridge/bin/sparkdev.exe");
+            // Even an invalid second candidate must not pick the first one.
+            fs::create_dir_all(&second).unwrap();
+            autoconfigure_with(&store, || installed_executable(&base)).unwrap();
+            assert!(!store.root.join("state.json").exists());
+            fs::remove_dir(&second).unwrap();
+            install(&base, "RTXBridge");
+            autoconfigure_with(&store, || installed_executable(&base)).unwrap();
+            assert!(!store.root.join("state.json").exists());
+        }
+
+        #[test]
+        fn existing_binding_is_preserved_without_discovery_or_rewrite() {
+            let temp = tempfile::tempdir().unwrap();
+            let store = Store::new(Some(temp.path().join("board"))).unwrap();
+            store.compatible_transaction(|s| {
+                s.spark = Some("missing-owner-selected.exe".into());
+                Ok(())
+            }).unwrap();
+            let before = fs::read(store.root.join("state.json")).unwrap();
+            autoconfigure_with(&store, || panic!("existing binding must skip discovery")).unwrap();
+            assert_eq!(fs::read(store.root.join("state.json")).unwrap(), before);
+        }
+
+        #[test]
+        fn manual_save_during_discovery_wins() {
+            let temp = tempfile::tempdir().unwrap();
+            let store = Store::new(Some(temp.path().join("board"))).unwrap();
+            autoconfigure_with(&store, || {
+                let candidate = install(temp.path(), "DGXBridge");
+                store.compatible_transaction(|s| {
+                    s.spark = Some("manual-choice.exe".into());
+                    Ok(())
+                }).unwrap();
+                Some(candidate)
+            }).unwrap();
+            assert_eq!(store.read().unwrap().spark.as_deref(), Some("manual-choice.exe"));
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn package_cache_installation_is_not_auto_selected() {
+            let temp = tempfile::tempdir().unwrap();
+            let base = temp.path().join("AppData/Local/Packages/Host/LocalCache/Local");
+            install(&base, "DGXBridge");
+            assert!(installed_executable(&base).is_none());
+        }
+    }
 
     #[cfg(windows)]
     mod windows_targets {

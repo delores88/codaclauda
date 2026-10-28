@@ -240,6 +240,22 @@ fn check_schema(state: &State) -> Result<()> {
 
 pub fn default_root() -> Result<PathBuf> {
     #[cfg(windows)]
+    {
+        Ok(local_app_data()?.join("DeloresAI").join("CodaClauda"))
+    }
+    #[cfg(not(windows))]
+    {
+        let base = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+            .context("User state directory unavailable")?;
+        Ok(base.join("codaclauda"))
+    }
+}
+
+/// Ordinary user install location, independent of a packaged host's environment.
+#[cfg(windows)]
+pub(crate) fn local_app_data() -> Result<PathBuf> {
     unsafe {
         use std::os::windows::ffi::OsStringExt;
         use windows_sys::Win32::{
@@ -272,14 +288,6 @@ pub fn default_root() -> Result<PathBuf> {
         if !path.is_absolute() {
             bail!("Windows LocalAppData path is not absolute")
         }
-        Ok(path.join("DeloresAI").join("CodaClauda"))
-    }
-    #[cfg(not(windows))]
-    {
-        let base = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-            .context("User state directory unavailable")?;
-        Ok(base.join("codaclauda"))
+        Ok(path)
     }
 }

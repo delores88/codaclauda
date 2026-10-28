@@ -579,7 +579,13 @@ outside CodaClauda or expose requests from another grant.
 DGXBridge must first have its own supported installed executable and
 configured projects/runtimes. Its real cross-agent acceptance remains pending
 until an agent submits a job and the other retrieves the same job result/logs.
-Configure the chosen executable through the owner API:
+On Windows, owner board status loads automatically save the executable when no
+binding exists and exactly one standard DGXBridge or RTXBridge installation is
+found in ordinary LocalAppData. Discovery never launches the bridge, overwrites
+an existing binding or selects an ambiguous or package-cache-redirected path.
+An offline Spark does not prevent configuration. Passive mailbox/MCP reads do
+not perform discovery. To select a different installation, configure the chosen
+executable through the owner API:
 
 ```powershell
 @{ executable = 'C:\Path\To\Installed\sparkdev.exe' } |
