@@ -72,8 +72,9 @@ on by default and needs phone messages on.
 A reply that starts with approve, approved, deny or denied but has no code, or a
 malformed one, is not sent to any agent: the phone gets a note saying so and how
 to send the whole line. Other phone messages, including a plain yes or no, still
-go to the agent as usual. Every approval result that did not reach a chat starts
-with "Not sent to any agent".
+go to the agent as usual. When an approval answer did not reach any agent, the
+note on your phone says so plainly ("not sent to any agent"), including when it
+was recorded on the board only.
 
 CodaClauda checks the code, then puts your answer into that agent's own chat as
 your words:
