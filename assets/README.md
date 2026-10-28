@@ -7,18 +7,18 @@ Windows Segoe UI font. No font file is bundled or redistributed.
 
 The thumbnail is an illustration, not an application screenshot.
 
-marketplace-screenshot.png shows the actual CodaClauda 0.7.1 application
+marketplace-screenshot.png shows the actual CodaClauda 0.7.2 application
 running from the verified ordinary installation of the GUI and CLI
-from source 8d1ef37a865fb3a2dd5626128965cf50f87e0ccc.
+from source 7b013d66e516058fb690bbdd86a504dc32769fd2.
 
-Observed view: Installed City overview on This PC, normal buildings, no conversation panel, Pan off.
-Data boundary: First-name Ben and avatar, approximate city Denver with local time/weather, aggregate interface counts and generic navigation/City controls are visible. No project/session name, transcript, topic URL, host path, credential or exact street address is visible.
+Observed view: Installed City overview and machine connection/status panel.
+Data boundary: Owner first name and avatar, coarse Denver weather/time, aggregate activity, project labels PraedictaAI, spark-link, azuredatabricksdeployment and DeloresAI Business Monitor are visible. No private transcript, topic, filesystem path, credential or exact address is visible.
 
 The native JPEG capture was encoded as PNG without changing decoded pixels.
 No cropping, retouching or synthetic application rendering was used. No
 additional provider session was started for final screenshot acquisition or
-encoding. The separate six-case native sequence intentionally created one
-managed session and one reply turn.
+encoding. The separate expanded native acceptance sequence is recorded in
+independently reviewed evidence.
 
 This screenshot records application rendering with the data boundary above.
 Installation, board preservation and native workflow acceptance are separate
