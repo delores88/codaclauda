@@ -11,7 +11,7 @@ export const PHONE_COPY = {
   availability: 'Keep CodaClauda open and this PC online. Wake on mail and the recipient\'s existing access still apply. ntfy keeps only a limited cache, so messages sent while this PC is offline may expire. Saving a setting or message does not prove an agent acted or a phone received it.',
   approvalsTitle: 'Approve from your phone',
   approvalsIntro: 'When an agent sends you an APPROVAL REQUEST, your phone gets it with a one-time code, says which chat it is for (provider, project and chat) and shows the two lines you can send: approve or deny, each followed by that request\'s code. Copy the whole line into the topic or your Shortcut; words after the code reach the agent too. Approve and Deny buttons appear where your phone supports them. Your answer goes into that same chat as your words: CodaClauda chats, and Codex chats set to Wake by mail in Running. For Claude Code desktop chats, use Remote Control in the Claude app.',
-  approvalsNotSent: 'A reply that is not a whole approve or deny line with a valid code is not sent to any agent; your phone gets a note saying so.',
+  approvalsNotSent: 'A reply that starts with approve, approved, deny or denied but has a missing or malformed code is not sent to any agent; your phone gets a note saying so. Other messages, including a plain yes or no, still go to the agent as usual.',
   approvalsTrust: 'Each code works once, expires after 24 hours and lives only in CodaClauda\'s memory; after a restart, open requests are sent again with new codes. Five wrong codes lock phone approvals until you unlock them here. Anyone who can read your topic could approve, so keep it private.',
 };
 

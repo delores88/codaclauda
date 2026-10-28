@@ -69,10 +69,11 @@ topic or your Shortcut; words after the code reach the agent as "Ben added:
 them. The switch is **Approve from your phone** in **Settings > Phone**; it is
 on by default and needs phone messages on.
 
-A reply that starts with approve or deny but has no code, or a malformed one, is
-not sent to any agent: the phone gets a note saying so and how to send the whole
-line. Every result that did not reach a chat starts with "Not sent to any
-agent".
+A reply that starts with approve, approved, deny or denied but has no code, or a
+malformed one, is not sent to any agent: the phone gets a note saying so and how
+to send the whole line. Other phone messages, including a plain yes or no, still
+go to the agent as usual. Every approval result that did not reach a chat starts
+with "Not sent to any agent".
 
 CodaClauda checks the code, then puts your answer into that agent's own chat as
 your words:
